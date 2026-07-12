@@ -1,0 +1,371 @@
+name: qa-driven
+version: 1
+description: QA-driven workflow — proposal → specs → design → test-plan → tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Initial proposal document outlining the change
+    template: proposal.md
+    instruction: >
+      Create the proposal document that establishes WHY this change is needed.
+
+
+      Sections:
+
+      - **Why**: 1-2 sentences on the problem or opportunity. What problem does
+      this solve? Why now?
+
+      - **What Changes**: Bullet list of changes. Be specific about new
+      capabilities, modifications, or removals. Mark breaking changes with
+      **BREAKING**.
+
+      - **Capabilities**: Identify which specs will be created or modified:
+        - **New Capabilities**: List capabilities being introduced. Each becomes a new `specs/<name>/spec.md`. Use kebab-case names (e.g., `user-auth`, `data-export`).
+        - **Modified Capabilities**: List existing capabilities whose REQUIREMENTS are changing. Only include if spec-level behavior changes (not just implementation details). Each needs a delta spec file. Check `openspec/specs/` for existing spec names. Leave empty if no requirement changes.
+      - **Impact**: Affected code, APIs, dependencies, or systems.
+
+
+      IMPORTANT: The Capabilities section is critical. It creates the contract
+      between proposal and specs phases. Research existing specs before filling
+      this in. Each capability listed here will need a corresponding spec file.
+
+
+      Keep it concise (1-2 pages). Focus on the "why" not the "how" —
+      implementation details belong in design.md.
+
+      This is the foundation — specs, design, and tasks all build on this.
+    requires: []
+  - id: specs
+    generates: specs/**/*.md
+    description: Detailed specifications for the change
+    template: spec.md
+    instruction: >
+      Create specification files that define WHAT the system should do.
+
+
+      Create one spec file per capability listed in the proposal's Capabilities
+      section.
+
+      - New capabilities: use the exact kebab-case name from the proposal
+      (specs/<capability>/spec.md).
+
+      - Modified capabilities: use the existing spec folder name from
+      openspec/specs/<capability>/ when creating the delta spec at
+      specs/<capability>/spec.md.
+
+
+      Delta operations (use ## headers):
+
+      - **ADDED Requirements**: New capabilities
+
+      - **MODIFIED Requirements**: Changed behavior - MUST include full updated
+      content
+
+      - **REMOVED Requirements**: Deprecated features - MUST include **Reason**
+      and **Migration**
+
+      - **RENAMED Requirements**: Name changes only - use FROM:/TO: format
+
+
+      Format requirements:
+
+      - Each requirement: `### Requirement: <name>` followed by description
+
+      - Use SHALL/MUST for normative requirements (avoid should/may)
+
+      - Each scenario: `#### Scenario: <name>` with WHEN/THEN format
+
+      - **CRITICAL**: Scenarios MUST use exactly 4 hashtags (`####`). Using 3
+      hashtags or bullets will fail silently.
+
+      - Every requirement MUST have at least one scenario.
+
+
+      MODIFIED requirements workflow:
+
+      1. Locate the existing requirement in openspec/specs/<capability>/spec.md
+
+      2. Copy the ENTIRE requirement block (from `### Requirement:` through all
+      scenarios)
+
+      3. Paste under `## MODIFIED Requirements` and edit to reflect new behavior
+
+      4. Ensure header text matches exactly (whitespace-insensitive)
+
+
+      Common pitfall: Using MODIFIED with partial content loses detail at
+      archive time. If adding new concerns without changing existing behavior,
+      use ADDED instead.
+
+
+      Example:
+
+      ```
+
+      ## ADDED Requirements
+
+
+      ### Requirement: User can export data
+
+      The system SHALL allow users to export their data in CSV format.
+
+
+      #### Scenario: Successful export
+
+      - **WHEN** user clicks "Export" button
+
+      - **THEN** system downloads a CSV file with all user data
+
+
+      ## REMOVED Requirements
+
+
+      ### Requirement: Legacy export
+
+      **Reason**: Replaced by new export system
+
+      **Migration**: Use new export endpoint at /api/v2/export
+
+      ```
+
+
+      Specs should be testable - each scenario is a potential test case.
+    requires:
+      - proposal
+  - id: design
+    generates: design.md
+    description: Technical design document with implementation details
+    template: design.md
+    instruction: >
+      Create the design document that explains HOW to implement the change.
+
+
+      When to include design.md (create only if any apply):
+
+      - Cross-cutting change (multiple services/modules) or new architectural
+      pattern
+
+      - New external dependency or significant data model changes
+
+      - Security, performance, or migration complexity
+
+      - Ambiguity that benefits from technical decisions before coding
+
+
+      Sections:
+
+      - **Context**: Background, current state, constraints, stakeholders
+
+      - **Goals / Non-Goals**: What this design achieves and explicitly excludes
+
+      - **Decisions**: Key technical choices with rationale (why X over Y?).
+      Include alternatives considered for each decision.
+
+      - **Risks / Trade-offs**: Known limitations, things that could go wrong.
+      Format: [Risk] → Mitigation
+
+      - **Migration Plan**: Steps to deploy, rollback strategy (if applicable)
+
+      - **Open Questions**: Outstanding decisions or unknowns to resolve
+
+
+      Focus on architecture and approach, not line-by-line implementation.
+      Reference the proposal for motivation and specs for requirements.
+
+
+      Good design docs explain the "why" behind technical decisions.
+    requires:
+      - proposal
+  - id: test-plan
+    generates: test-plan.md
+    description: QA strategy with spec-to-test traceability and parallel delegation groups
+    template: test-plan.md
+    instruction: >
+      Create the QA strategy that maps every spec scenario to a concrete test
+      and groups tests for parallel execution.
+
+
+      **DELEGATION REQUIRED — You are the Orchestrator. DO NOT write the test
+      plan content yourself.**
+
+
+      1. **Read dependencies**: Read ALL spec files under
+      `openspec/changes/<change-name>/specs/` and
+      `openspec/changes/<change-name>/design.md`.
+
+
+      2. **Invoke @Mr.Tester sub-agent** with the following task:
+
+         "Read the spec files under `openspec/changes/<change-name>/specs/` and `openspec/changes/<change-name>/design.md`.
+
+         Your task: create a test plan with full spec-to-test traceability.
+
+         ### Step 1: Build Coverage Map
+         For EVERY `#### Scenario:` in EVERY spec file, create a row in the Coverage Map table:
+         - Spec Capability: the spec folder name (e.g., `user-auth`)
+         - Requirement: the `### Requirement:` header text
+         - Scenario: the `#### Scenario:` header text
+         - Test File: the concrete file path where this test should live (e.g., `test/unit/auth/login.test.ts`)
+         - Test Name: the test function name (e.g., `should return JWT on valid credentials`)
+         - Group: assign to a delegation group (see Step 2)
+
+         ### Step 2: Define Delegation Groups
+         Group the coverage map rows into non-overlapping groups for parallel execution.
+
+         Rules:
+         - A test FILE belongs to EXACTLY ONE group — no overlap allowed
+         - Groups are based on logical separation: by spec area, by source module, or by test type (unit vs integration)
+         - Each group gets a kebab-case name (e.g., `auth-unit`, `export-integration`)
+         - Each group's Scope lists its directory or files
+         - Each group has a table of Test File / Scenarios count / Action (NEW or MODIFY)
+
+         ### Step 3: Identify Test Modifications
+         For tests that already exist but need changing:
+         - List the file, the change, and the reason (reference the spec scenario or design decision)
+
+         ### Step 4: Extract Risks
+         From design.md Risks section, identify edge cases that need dedicated test coverage.
+
+         Fill in the template at `openspec/changes/<change-name>/test-plan.md` with all four sections fully populated. Do NOT leave placeholder comments — replace them with real data."
+
+      3. **Save output**: Write the sub-agent's response verbatim into
+      `openspec/changes/<change-name>/test-plan.md`.
+
+
+      4. **Verify**: Confirm:
+         - Every spec scenario has at least one row in Coverage Map
+         - Delegation Groups have no overlapping files
+         - All groups have kebab-case names
+         - Test Modifications reference spec scenarios or design decisions
+    requires:
+      - specs
+      - design
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with git workflow and test delegation
+    template: tasks.md
+    instruction: >
+      Create the task list that breaks down the implementation work. The apply
+      phase parses checkbox format to track progress. Tasks not using `- [ ]`
+      will not be tracked.
+
+
+      **IMPORTANT: All code, comments, and documentation written during
+      implementation MUST be in English. No Cyrillic characters in source
+      files.**
+
+
+      Guidelines:
+
+      - Group related tasks under ## numbered headings
+
+      - Each task MUST be a checkbox: `- [ ] X.Y Task description`
+
+      - Tasks should be small enough to complete in one session
+
+      - Order tasks by dependency (what must be done first?)
+
+
+      Required first section — always include exactly this:
+
+
+      ```
+
+      ## 1. Git & Environment
+
+
+      - [ ] 1.1 Create a new git branch for this change: `git checkout -b
+      <branch-name>`
+
+      - [ ] 1.2 Verify all existing tests pass before starting: run the full
+      test suite
+
+      ```
+
+
+      Include implementation tasks referencing specs and design. Each task
+      should be verifiable.
+
+
+      **CRITICAL — Test tasks section:** Read `test-plan.md` Delegation Groups
+      section. Create ONE task per group, naming the group explicitly. Also
+      include review and verification tasks.
+
+
+      Example:
+
+      ```
+
+      ## 3. Testing
+
+
+      - [ ] 3.1 Read test-plan.md Delegation Groups section
+
+      - [ ] 3.2 Delegate group `auth-unit` to @Mr.Tester (scope:
+      test/unit/auth/*.ts)
+
+      - [ ] 3.3 Delegate group `export-integration` to @Mr.Tester (scope:
+      test/integration/export/*.ts)
+
+      - [ ] 3.4 Review @Mr.Tester reports and fix any source-level bugs
+
+      - [ ] 3.5 Re-delegate any groups affected by source fixes
+
+      - [ ] 3.6 Verify all groups pass and coverage matches test-plan.md
+
+      ```
+
+
+      Reference specs for what needs to be built, design for how, test-plan for
+      what to verify.
+    requires:
+      - specs
+      - design
+      - test-plan
+apply:
+  requires:
+    - tasks
+    - test-plan
+  tracks: tasks.md
+  instruction: >
+    Read context files (proposal, specs, design, test-plan, tasks).
+
+    Work through pending tasks, mark complete as you go.
+
+
+    BEFORE writing any code:
+
+    - Create a new git branch as specified in tasks section 1.
+
+    - Ensure all existing tests pass as baseline.
+
+
+    WHEN reaching test tasks:
+
+    - Read `test-plan.md` Delegation Groups section.
+
+    - For EACH group listed, launch one `@Mr.Tester` subagent with the group's
+    scope and its scenarios from the Coverage Map.
+
+    - Launch ALL groups IN PARALLEL (single message). Do NOT run them
+    sequentially.
+
+    - Each @Mr.Tester receives: the group name, file scope, and exact scenario
+    list.
+
+    - @Mr.Tester writes or modifies ONLY the test files in its group. It must
+    NOT touch source code.
+
+    - If a tester reports a source-level bug, fix the source code yourself, then
+    re-delegate the affected group.
+
+    - Repeat until all groups pass and coverage matches test-plan.md.
+
+
+    Never write test code yourself — always delegate to @Mr.Tester.
+
+
+    All code, comments, and documentation MUST be in English.
+
+
+    Pause if you hit blockers or need clarification.

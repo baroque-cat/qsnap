@@ -1,0 +1,19 @@
+# Multi-VM config — two VMs
+
+[[vm]]
+name = "vm1"
+base_image = "/var/lib/libvirt/images/vm1.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm1"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm1"
+  incremental = true
+
+[[vm]]
+name = "vm2"
+base_image = "/var/lib/libvirt/images/vm2.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm2"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm2"
+  incremental = true

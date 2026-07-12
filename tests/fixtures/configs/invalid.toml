@@ -1,0 +1,6 @@
+# Invalid TOML — malformed syntax (unclosed string)
+# This file is intentionally invalid for testing error handling.
+
+name = "testvm
+base_image = "/var/lib/libvirt/images/testvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"

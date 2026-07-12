@@ -1,0 +1,42 @@
+# Local config
+.opencode/*
+.env
+examples/*
+plan*
+problem*
+bug.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Build & packaging
+dist/
+*.egg-info/
+build/
+
+# Linters & type checkers
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
