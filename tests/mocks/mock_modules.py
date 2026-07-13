@@ -99,6 +99,7 @@ class MockRetentionEngine(IRetentionEngine):
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
+        preserve_day_of_week: str = "monday",
     ) -> RetentionResult:
         keep = [item.name for item in items]
         return RetentionResult(keep=keep, remove=[])

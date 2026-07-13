@@ -20,6 +20,16 @@ _UNIT_TO_DELTA: dict[str, timedelta] = {
     "y": timedelta(days=365),
 }
 
+_WEEKDAY_MAP: dict[str, int] = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
 
 def _parse_duration(text: str) -> timedelta:
     """Parse a duration string like ``"6h"``, ``"2d"`` into a ``timedelta``.
@@ -36,15 +46,25 @@ def _parse_duration(text: str) -> timedelta:
     return count * _UNIT_TO_DELTA[unit]
 
 
-def _bucket_key(ts: datetime, bucket: str) -> tuple[int, ...]:
-    """Return the grouping key for *ts* under the given *bucket*."""
+def _bucket_key(
+    ts: datetime,
+    bucket: str,
+    preserve_day_of_week: str = "monday",
+) -> tuple[int, ...]:
+    """Return the grouping key for *ts* under the given *bucket*.
+
+    For the ``weekly`` bucket, the week boundary is determined by
+    *preserve_day_of_week* (case-insensitive, ``"monday"`` … ``"sunday"``).
+    """
     if bucket == "hourly":
         return (ts.year, ts.month, ts.day, ts.hour)
     if bucket == "daily":
         return (ts.year, ts.month, ts.day)
     if bucket == "weekly":
-        iso = ts.isocalendar()
-        return (iso.year, iso.week)
+        target_dow = _WEEKDAY_MAP[preserve_day_of_week.lower()]
+        delta = (ts.weekday() - target_dow) % 7
+        week_start = ts.date() - timedelta(days=delta)
+        return (week_start.year, week_start.month, week_start.day)
     if bucket == "monthly":
         return (ts.year, ts.month)
     if bucket == "yearly":
@@ -67,6 +87,7 @@ class TimeBasedRetention(IRetentionEngine):
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
+        preserve_day_of_week: str = "monday",
     ) -> RetentionResult:
         if not items:
             return RetentionResult(keep=[], remove=[])
@@ -95,7 +116,7 @@ class TimeBasedRetention(IRetentionEngine):
         for bucket_name, count in buckets:
             if count <= 0:
                 continue
-            kept = self._select_by_bucket(sorted_items, bucket_name, count)
+            kept = self._select_by_bucket(sorted_items, bucket_name, count, preserve_day_of_week)
             keep_names.update(it.name for it in kept)
 
         # Build ordered keep / remove lists (oldest first).
@@ -108,12 +129,13 @@ class TimeBasedRetention(IRetentionEngine):
         items: list[RetentionItem],
         bucket: str,
         count: int,
+        preserve_day_of_week: str = "monday",
     ) -> list[RetentionItem]:
         """Select the earliest item per bucket, keeping the *count* most recent buckets."""
         # Group items by bucket key; keep the first (earliest) item per group.
         groups: dict[tuple[int, ...], RetentionItem] = {}
         for item in items:
-            key = _bucket_key(item.timestamp, bucket)
+            key = _bucket_key(item.timestamp, bucket, preserve_day_of_week)
             if key not in groups:
                 groups[key] = item  # items are sorted ascending → first is earliest
 

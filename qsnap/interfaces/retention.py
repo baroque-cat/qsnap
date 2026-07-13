@@ -27,6 +27,7 @@ class IRetentionEngine(ABC):
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
+        preserve_day_of_week: str = "monday",
     ) -> RetentionResult:
         """Determine which items to keep and which to remove.
 
@@ -35,6 +36,8 @@ class IRetentionEngine(ABC):
             policy: Retention policy (hourly/daily/weekly/monthly/yearly
                     counts plus ``preserve_min``).
             now: Current datetime for ``preserve_min`` evaluation.
+            preserve_day_of_week: Day on which the weekly bucket boundary
+                    falls (``"monday"`` … ``"sunday"``, case-insensitive).
 
         Returns:
             ``RetentionResult`` with ``keep`` and ``remove`` name lists.

@@ -9,6 +9,9 @@ readme = "README.md"
 requires-python = "<4.0,>=3.11"
 dependencies = []
 
+[project.scripts]
+qsnap = "qsnap.cli.app:main"
+
 [tool.poetry]
 package-mode = false
 

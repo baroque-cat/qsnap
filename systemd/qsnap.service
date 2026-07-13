@@ -1,0 +1,8 @@
+[Unit]
+Description=qsnap — QEMU/KVM snapshot and backup orchestration
+After=network.target libvirtd.service
+Requires=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/qsnap -c /etc/qsnap/qsnap.toml run

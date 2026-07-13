@@ -125,3 +125,21 @@ class RetentionResult:
 
     keep: list[str] = field(default_factory=list)
     remove: list[str] = field(default_factory=list)
+
+
+# ── Check (backing-chain integrity) ───────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """Outcome of a backing-chain integrity check for a single VM.
+
+    ``status`` is ``"ok"`` when the chain is intact, ``"broken"`` when one
+    or more snapshots in the chain are missing or corrupt.
+    ``broken_snapshots`` lists the names of problematic snapshots (empty
+    when ``status`` is ``"ok"``).
+    """
+
+    vm_name: str
+    status: str
+    broken_snapshots: list[str] = field(default_factory=list)

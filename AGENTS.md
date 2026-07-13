@@ -6,7 +6,7 @@
 
 ---
 
-## Paradigm: Strict Polymorphic Hierarchy
+## Paradigm: Dependency Injection with ABC Interfaces
 
 ### Core Rule
 
@@ -15,29 +15,50 @@ IConfigFacade (ABC, read-only config API)
        ▲
        │ single inheritance
        │
-ConfigFacade (parses .conf, resolves option inheritance)
-       ▲
-       │ single inheritance — and NOTHING else inherits from ConfigFacade
+ConfigFacade (parses TOML, resolves option inheritance)
        │
-    Core (orchestrator, factory host, pipeline runner)
+       │ injected via DI (no Python inheritance)
+       ▼
+     Core (orchestrator, factory host, pipeline runner)
+       │
+       │ Core coordinates modules via IVMModuleFactory (DI, no inheritance)
+       │
+       ▼
+ ┌─────────────────┬──────────┬──────────┬──────────┐
+ │                 │          │          │          │
+ISnapshot        IBackup   IChange   ILifecycle
+Provider         Provider  Detector  Manager
+       ▲              ▲         ▲         ▲
+       │ implements   │         │         │
+       │ (no Core     │         │         │
+       │  inheritance)│         │         │
+ ┌─────┴──────┐  ┌───┴──────┐  ┌┴──────┐  ┌┴──────────┐
+ │External    │  │FileCopy  │  │Alloc  │  │BlockCommit │
+ │Snapshot    │  │Backup    │  │Size   │  │Manager     │
+ │Provider    │  │Provider  │  │Detect │  │            │
+ └────────────┘  └──────────┘  └───────┘  └────────────┘
+
+IRetentionEngine  ← pure function, no Core inheritance, no I/O
        ▲
-       │ multiple inheritance — ALL domain modules inherit ONLY from Core
- ┌─────┼─────────┬──────────┬──────────┐
- │     │         │          │          │
-Snapshot  Backup  Retention  ChangeDetector ...
+       │ implements
+ ┌─────┴──────────┐
+ │TimeBased       │
+ │Retention       │
+ └────────────────┘
 ```
 
-- **ConfigFacade is the root of truth.** No module reads the config file or accesses raw config objects. Every module receives a fully resolved, immutable config dataclass from Core.
-- **Core is the only coordinator.** Modules do not call each other. Core invokes them in sequence via their ABC interfaces.
-- **Modules are stateless workers.** State lives in `IStateManager`, injected by Core. Modules do not hold cross-run state.
+- **ConfigFacade is the root of truth** (implements `IConfigFacade`). No module reads the config file or accesses raw config objects. Every module receives a fully resolved, immutable config dataclass as a method parameter.
+- **Core is the only coordinator** — receives `IConfigFacade`, `IVMModuleFactory`, `IStateManager`, `IShell` via constructor DI. Modules do not call each other. Core invokes them in sequence via their ABC interfaces.
+- **Modules are stateless workers** — they implement their ABC interface directly, do NOT inherit from Core (design D1). State lives in `IStateManager`, injected by Core or the factory. Modules do not hold cross-run state.
+- **IRetentionEngine is a pure function** — no Core inheritance, no I/O, no side effects. Deterministic given the same inputs.
 
 ### Module Contract
 
 Every domain module MUST:
 
-1. Extend `Core` (directly or via a module-specific base like `SnapshotModule(Core)`)
-2. Implement exactly one ABC interface (e.g. `ISnapshotProvider`)
-3. Accept all dependencies as constructor parameters (no hidden imports, no global state)
+1. Implement exactly one ABC interface (e.g. `ISnapshotProvider`) — do NOT inherit from Core
+2. Accept all dependencies as constructor parameters (typically `IShell`, optionally `IStateManager` — no hidden imports, no global state)
+3. Receive config as immutable dataclasses in method parameters (`VMConfig`, `TargetConfig`), not stored as instance state
 4. Return result objects (dataclasses or `Result` monads) — never raise exceptions for expected failures
 
 ---
@@ -114,20 +135,25 @@ All `virsh`, `qemu-img`, and filesystem calls go through `IShell` (thin wrapper 
 
 ### ❌ Modules importing other modules
 
-`SnapshotModule` must never `from modules.backup import ...`. If two modules need to coordinate, Core mediates.
+`ExternalSnapshotProvider` must never `from qsnap.modules.backup import ...`. If two modules need to coordinate, Core mediates.
 
 ### ❌ Modules accessing config directly
 
 ```python
 # WRONG
-class SnapshotModule:
-    def create(self):
-        path = self.config.get("snapshot_dir")  # no! Core owns config
+class ExternalSnapshotProvider:
+    def __init__(self, config: IConfigFacade):  # hidden dependency
+        self._config = config
+    def create(self, vm_config: VMConfig):
+        path = self._config.get_vm("...")  # no! Core owns config routing
 
 # CORRECT
-class SnapshotModule(Core):
-    def __init__(self, vm_config: VMConfig, ...):  # immutable dataclass
-        self._cfg = vm_config
+class ExternalSnapshotProvider(ISnapshotProvider):
+    def __init__(self, shell: IShell):  # only infrastructure deps
+        self._shell = shell
+    def create(self, vm_config: VMConfig, ...) -> SnapshotResult:
+        # vm_config passed as method parameter, not stored
+        pass
 ```
 
 ### ❌ Catching broad exceptions in modules
@@ -166,6 +192,8 @@ Core → ExternalSnapshot   ← acceptable
 
 If you need a third level, extract the variation into a **strategy** that is composed, not inherited.
 
+Note: domain modules (`ExternalSnapshotProvider`, `FileCopyBackupProvider`, etc.) do NOT inherit Core at all (design D1). They implement their ABC directly. The "2 levels from Core" rule applies if a hierarchy of *module base classes* is ever introduced — in that case, keep it ≤2 deep.
+
 ### ❌ Skipping the factory
 
 ```python
@@ -190,8 +218,6 @@ Every module instantiation goes through the factory. This is non-negotiable — 
 | Private Core methods | `_` prefix | `Core._execute_pipeline()` |
 | Module base classes | `*Module(Core)` | `SnapshotModule(Core)` |
 
----
-
 ## Testing
 
 See **[TESTING.md](TESTING.md)** for the full test architecture, categories, and rules.
@@ -201,5 +227,5 @@ Summary:
 1. Every ABC interface gets at least one mock implementation in `tests/mocks/`.
 2. Core is tested with `MockFactory` — zero real virsh/qemu-img calls.
 3. Each concrete module is tested in isolation with mocked `IShell`.
-4. Config parsing is tested with fixture `.conf` files.
+4. Config parsing is tested with fixture `.toml` files.
 5. Retention engine is tested with fixed timestamp sets (pure logic, no I/O).

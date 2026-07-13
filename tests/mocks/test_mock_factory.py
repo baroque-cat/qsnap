@@ -8,6 +8,7 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
+from qsnap.models.results import RetentionItem, RetentionResult
 from tests.mocks.mock_factory import MockVMModuleFactory
 
 
@@ -30,3 +31,19 @@ def test_mock_factory_returns_interface_types(make_vm_config, make_target):
 
     lifecycle_manager = factory.create_lifecycle_manager()
     assert isinstance(lifecycle_manager, ILifecycleManager)
+
+
+def test_mock_retention_engine_accepts_preserve_day_of_week(make_vm_config):
+    """MockRetentionEngine.evaluate accepts preserve_day_of_week kwarg."""
+    from datetime import datetime
+
+    factory = MockVMModuleFactory()
+    engine = factory.create_retention_engine(RetentionPolicy())
+    items = [RetentionItem(name="snap1", timestamp=datetime(2025, 1, 6, 12, 0))]
+    result = engine.evaluate(
+        items,
+        RetentionPolicy(),
+        now=datetime(2025, 1, 6, 12, 0),
+        preserve_day_of_week="wednesday",
+    )
+    assert isinstance(result, RetentionResult)

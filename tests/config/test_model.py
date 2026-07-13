@@ -33,7 +33,7 @@ def test_global_config_immutable():
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
     cfg = GlobalConfig()
-    assert cfg.timestamp_format == "short"
+    assert cfg.timestamp_format == "long"
     assert cfg.preserve_day_of_week == "monday"
     assert cfg.state_dir == "/var/lib/qsnap/state"
     assert cfg.lockfile is None

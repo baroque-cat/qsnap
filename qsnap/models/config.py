@@ -36,7 +36,7 @@ class GlobalConfig:
     ``"24h 2d"``) resolved by ``ConfigFacade`` via option inheritance.
     """
 
-    timestamp_format: str = "short"
+    timestamp_format: str = "long"
     preserve_day_of_week: str = "monday"
     state_dir: str = "/var/lib/qsnap/state"
     lockfile: str | None = None

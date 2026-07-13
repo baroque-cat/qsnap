@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -372,14 +373,17 @@ def test_dry_run_logs_no_mutation(
     mock_factory,
     mock_state,
     mock_shell,
+    caplog,
 ):
     """In dry-run mode, no mutation occurs: no state writes, no shell calls,
-    no snapshot creation.
+    no snapshot creation.  Planned actions are logged at INFO level.
 
     RISK (test-plan.md line 138): Dry-run mode must not mutate state via
     ``IStateManager.set_last_allocation`` or ``record_snapshot``, and
     ``IShell.run`` must never be called with mutating commands.
+    Each planned action is logged at INFO level.
     """
+    caplog.set_level(logging.INFO)
     vm = make_vm_config(name="testvm", targets=[make_target()])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -432,3 +436,6 @@ def test_dry_run_logs_no_mutation(
     # Pipeline still "succeeds" — dry-run is not an error, it just skips
     # mutations.
     assert result.success is True
+
+    # Dry-run logs planned actions at INFO level.
+    assert "[dry-run]" in caplog.text

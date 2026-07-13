@@ -1,0 +1,64 @@
+# qsnap configuration file
+# Place at /etc/qsnap/qsnap.toml
+
+# ── Global options ──────────────────────────────────────────────────────
+
+# Timestamp format for snapshot names.
+#   short    → 20250713
+#   long     → 20250713T1531          (default)
+#   long-iso → 20250713T153123+0200
+timestamp_format = "long"
+
+# Day on which the weekly retention bucket boundary falls.
+# One of: monday, tuesday, wednesday, thursday, friday, saturday, sunday
+preserve_day_of_week = "monday"
+
+# Directory for persistent state files (per-VM JSON).
+state_dir = "/var/lib/qsnap/state"
+
+# Lockfile path.  When set, qsnap acquires an exclusive flock before
+# running.  Set to a path or leave unset to disable locking.
+# lockfile = "/run/qsnap.lock"
+
+# Default retention policy for snapshots (applies to all VMs unless
+# overridden at the VM level).
+# Format: "<count>h <count>d <count>w <count>m <count>y"
+# Examples:
+#   "24h 7d 4w 12m 0y" — keep 24 hourly, 7 daily, 4 weekly, 12 monthly
+#   "all"              — keep everything (default)
+snapshot_preserve = "24h 7d 4w 12m 1y"
+
+# Default retention policy for backup targets.
+target_preserve = "48h 14d 8w 12m 1y"
+
+
+# ── VM definitions ──────────────────────────────────────────────────────
+
+[[vm]]
+name = "debiantest"
+base_image = "/var/lib/libvirt/images/debiantest.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
+
+# Override snapshot creation mode: "always" (default) or "onchange"
+# snapshot_create = "onchange"
+
+# Override snapshot retention for this VM
+# snapshot_preserve = "48h 14d 8w 12m 1y"
+
+# Override backup retention for this VM's targets
+# target_preserve = "96h 30d 16w 12m 2y"
+
+  # ── Backup targets ───────────────────────────────────────────────────
+  [[vm.target]]
+  path = "/mnt/backup/debiantest"
+  incremental = true
+  # Override backup retention for this target only
+  # target_preserve = "72h 21d 12w 18m 3y"
+
+# [[vm]]
+# name = "centos9"
+# base_image = "/var/lib/libvirt/images/centos9.qcow2"
+# snapshot_dir = "/var/lib/libvirt/snapshots/centos9"
+#
+#   [[vm.target]]
+#   path = "/mnt/backup/centos9"

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.cli.app import build_argparser
+from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from tests.mocks import (
     InMemoryStateManager,
     MockConfigFacade,
@@ -77,3 +80,68 @@ def make_target():
         return TargetConfig(**defaults)  # type: ignore[arg-type]
 
     return _make
+
+
+@pytest.fixture
+def make_global_config():
+    """Factory function to create GlobalConfig instances for tests."""
+
+    def _make(
+        timestamp_format: str = "long",
+        preserve_day_of_week: str = "monday",
+        state_dir: str = "/var/lib/qsnap/state",
+        lockfile: str | None = None,
+        snapshot_preserve: str | None = None,
+        target_preserve: str | None = None,
+    ) -> GlobalConfig:
+        return GlobalConfig(
+            timestamp_format=timestamp_format,
+            preserve_day_of_week=preserve_day_of_week,
+            state_dir=state_dir,
+            lockfile=lockfile,
+            snapshot_preserve=snapshot_preserve,
+            target_preserve=target_preserve,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def mock_lock_manager():
+    """A mock LockManager whose acquire() always returns True."""
+    mgr = Mock()
+    mgr.acquire.return_value = True
+    mgr.release.return_value = None
+    return mgr
+
+
+@pytest.fixture
+def cli_app():
+    """The built ArgumentParser for CLI tests that parse argv lists."""
+    return build_argparser()
+
+
+@pytest.fixture
+def frozen_clock():
+    """Context manager / fixture that freezes datetime.now() to a fixed value.
+
+    Returns a function that takes a datetime and returns a context manager.
+    Usage::
+
+        with frozen_clock(datetime(2025, 7, 13, 15, 31)):
+            assert datetime.now() == datetime(2025, 7, 13, 15, 31)
+    """
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    def _freeze(frozen_dt: datetime):
+        @contextmanager
+        def _ctx():
+            with patch("qsnap.core.datetime") as mock_dt:
+                mock_dt.now.return_value = frozen_dt
+                mock_dt.side_effect = lambda *a, **kw: frozen_dt
+                yield frozen_dt
+
+        return _ctx()
+
+    return _freeze

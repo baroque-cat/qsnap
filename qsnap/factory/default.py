@@ -7,6 +7,8 @@ concrete module instances.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.factory import IVMModuleFactory
@@ -21,6 +23,7 @@ from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.retention.time_based import TimeBasedRetention
+from qsnap.state.json_manager import JsonStateManager
 
 
 class DefaultFactory(IVMModuleFactory):
@@ -33,6 +36,11 @@ class DefaultFactory(IVMModuleFactory):
     def __init__(self, shell: IShell, state: IStateManager) -> None:
         self._shell = shell
         self._state = state
+
+    @staticmethod
+    def create_state_manager(state_dir: str | Path) -> IStateManager:
+        """Create the default concrete ``IStateManager`` (JSON file-backed)."""
+        return JsonStateManager(state_dir)
 
     def create_snapshot_provider(self, vm_config: VMConfig) -> ISnapshotProvider:
         return ExternalSnapshotProvider(self._shell)

@@ -58,6 +58,14 @@ class ConfigFacade(IConfigFacade):
                 global_kwargs[key] = str(raw[key])
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
+        # Validate preserve_day_of_week.
+        valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+        if self._global.preserve_day_of_week.lower() not in valid_days:
+            raise ConfigError(
+                f"Invalid preserve_day_of_week: {self._global.preserve_day_of_week!r}. "
+                f"Must be one of: {', '.join(sorted(valid_days))}"
+            )
+
         # Build VM configs.
         vm_sections = raw.get("vm", [])
         if not isinstance(vm_sections, list):

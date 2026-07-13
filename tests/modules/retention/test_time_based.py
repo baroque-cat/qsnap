@@ -319,3 +319,114 @@ def test_evaluate_is_deterministic():
     # The late-night item shares day-1's bucket but is not the earliest, so
     # it is removed (and is outside the 0h preserve window).
     assert "late-d1" in set(midnight_result.remove)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. preserve_day_of_week — weekly bucket boundary
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_weekly_retention_tuesday_boundary_keeps_four():
+    """Tuesday boundary splits Monday items into distinct week buckets.
+
+    Five items, one per week on Mondays at noon.  With
+    ``preserve_day_of_week="tuesday"`` each Monday falls into a different
+    week bucket (Monday is before Tuesday, so the week-start is pushed back
+    6 days).  With ``weekly=4`` the 4 most-recent buckets are kept and the
+    oldest is removed.
+    """
+    items = [
+        RetentionItem(name=f"week{i}", timestamp=datetime(2025, 1, 6, 12, 0) + timedelta(weeks=i))
+        for i in range(5)
+    ]
+    policy = RetentionPolicy(weekly=4, preserve_min="0h")
+    result = TimeBasedRetention(policy).evaluate(
+        items, policy, now=items[-1].timestamp, preserve_day_of_week="tuesday"
+    )
+    assert len(result.keep) == 4
+    assert len(result.remove) == 1
+    assert "week0" in result.remove
+
+
+def test_weekly_retention_default_monday_boundary_keeps_two():
+    """Default Monday boundary groups same-ISO-week items together.
+
+    w1_mon and w1_sun are in the same Monday-anchored week bucket, while
+    w2_mon and w3_mon each start their own week.  With ``weekly=2`` the two
+    most-recent week buckets (week3 and week2) are selected, so only
+    w2_mon and w3_mon are kept.
+    """
+    items = [
+        RetentionItem(name="w1_mon", timestamp=datetime(2025, 1, 6, 12, 0)),
+        RetentionItem(name="w1_sun", timestamp=datetime(2025, 1, 12, 12, 0)),
+        RetentionItem(name="w2_mon", timestamp=datetime(2025, 1, 13, 12, 0)),
+        RetentionItem(name="w3_mon", timestamp=datetime(2025, 1, 20, 12, 0)),
+    ]
+    policy = RetentionPolicy(weekly=2, preserve_min="0h")
+    result = TimeBasedRetention(policy).evaluate(
+        items, policy, now=items[-1].timestamp
+    )
+    assert len(result.keep) == 2
+    assert "w2_mon" in result.keep
+    assert "w3_mon" in result.keep
+
+
+def test_preserve_day_of_week_sunday_boundary_keeps_two():
+    """Sunday boundary groups Sunday and following Monday together.
+
+    With a Sunday week boundary, sun1 (Jan 5) and mon1 (Jan 6) land in the
+    same week bucket (Jan 5), while sat1 (Jan 4) falls into the Dec 29
+    bucket.  The four week buckets are: Dec 29, Jan 5, Jan 12, Jan 19.
+    With ``weekly=2`` the two most-recent (Jan 12, Jan 19) are kept, so
+    sun2 and sun3 are kept while sat1, sun1, and mon1 are removed.
+    """
+    items = [
+        RetentionItem(name="sat1", timestamp=datetime(2025, 1, 4, 12, 0)),
+        RetentionItem(name="sun1", timestamp=datetime(2025, 1, 5, 12, 0)),
+        RetentionItem(name="mon1", timestamp=datetime(2025, 1, 6, 12, 0)),
+        RetentionItem(name="sun2", timestamp=datetime(2025, 1, 12, 12, 0)),
+        RetentionItem(name="sun3", timestamp=datetime(2025, 1, 19, 12, 0)),
+    ]
+    policy = RetentionPolicy(weekly=2, preserve_min="0h")
+    result = TimeBasedRetention(policy).evaluate(
+        items, policy, now=items[-1].timestamp, preserve_day_of_week="sunday"
+    )
+    assert "sun2" in result.keep
+    assert "sun3" in result.keep
+    assert "sun1" in result.remove
+    assert "mon1" in result.remove
+
+
+def test_preserve_day_of_week_case_insensitive():
+    """Uppercase preserve_day_of_week produces the same result as lowercase."""
+    items = [
+        RetentionItem(name=f"week{i}", timestamp=datetime(2025, 1, 6, 12, 0) + timedelta(weeks=i))
+        for i in range(5)
+    ]
+    policy = RetentionPolicy(weekly=4, preserve_min="0h")
+    now = items[-1].timestamp
+
+    r_lower = TimeBasedRetention(policy).evaluate(
+        items, policy, now=now, preserve_day_of_week="tuesday"
+    )
+    r_upper = TimeBasedRetention(policy).evaluate(
+        items, policy, now=now, preserve_day_of_week="TUESDAY"
+    )
+    assert r_lower.keep == r_upper.keep
+    assert r_lower.remove == r_upper.remove
+
+
+def test_preserve_day_of_week_does_not_affect_other_buckets():
+    """When weekly=0, preserve_day_of_week has no effect on results."""
+    items = _load_fixture("daily_set.json")
+    now = items[-1].timestamp
+    policy = RetentionPolicy(hourly=24, daily=7, weekly=0, preserve_min="0h")
+
+    r1 = TimeBasedRetention(policy).evaluate(
+        items, policy, now=now, preserve_day_of_week="wednesday"
+    )
+    r2 = TimeBasedRetention(policy).evaluate(
+        items, policy, now=now, preserve_day_of_week="monday"
+    )
+    assert r1.keep == r2.keep
+    assert r1.remove == r2.remove

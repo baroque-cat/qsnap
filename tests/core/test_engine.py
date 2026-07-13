@@ -11,6 +11,8 @@ object is an instance of ``IConfigFacade``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core, PipelineResult, VMRunResult
@@ -18,6 +20,8 @@ from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
+from qsnap.models.config import GlobalConfig
+from qsnap.models.results import SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
@@ -62,6 +66,10 @@ def test_core_init_stores_dependencies(
 
     # dry_run defaults to False.
     assert core.dry_run is False
+
+    # Preserve flags default to False.
+    assert core.preserve_snapshots is False
+    assert core.preserve_backups is False
 
 
 # ── test_core_run_all_vms ─────────────────────────────────────────────────
@@ -151,3 +159,204 @@ def test_core_run_with_filter(
     assert len(result.results) == 1
     assert result.results[0].vm_name == "vm1"
     assert result.results[0].success is True
+
+
+# ── test_generate_snapshot_name_appends_collision_suffix ──────────────────
+
+
+def test_generate_snapshot_name_appends_collision_suffix(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """When the timestamp-based name collides, ``_N`` suffix is appended."""
+    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
+    config = MockConfigFacade(
+        global_config=GlobalConfig(timestamp_format="long"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    (tmp_path / "testvm.20250713T1531.qcow2").touch()
+
+    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
+        name = core._generate_snapshot_name(vm)
+
+    assert name == "testvm.20250713T1531_1"
+
+
+# ── test_generate_snapshot_name_collision_increments_suffix ───────────────
+
+
+def test_generate_snapshot_name_collision_increments_suffix(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """When both the base name and ``_1`` exist, ``_2`` is used."""
+    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
+    config = MockConfigFacade(
+        global_config=GlobalConfig(timestamp_format="long"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    (tmp_path / "testvm.20250713T1531.qcow2").touch()
+    (tmp_path / "testvm.20250713T1531_1.qcow2").touch()
+
+    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
+        name = core._generate_snapshot_name(vm)
+
+    assert name == "testvm.20250713T1531_2"
+
+
+# ── test_core_uses_config_timestamp_format_for_snapshot_name ──────────────
+
+
+def test_core_uses_config_timestamp_format_for_snapshot_name(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """``short`` timestamp format produces a date-only snapshot name."""
+    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
+    config = MockConfigFacade(
+        global_config=GlobalConfig(timestamp_format="short"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
+        name = core._generate_snapshot_name(vm)
+
+    assert name == "testvm.20250713"
+
+
+# ── test_core_timestamp_format_long_produces_long_name ────────────────────
+
+
+def test_core_timestamp_format_long_produces_long_name(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """``long`` timestamp format produces a date+hour+minute snapshot name."""
+    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
+    config = MockConfigFacade(
+        global_config=GlobalConfig(timestamp_format="long"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
+        name = core._generate_snapshot_name(vm)
+
+    assert name == "testvm.20250713T1531"
+
+
+# ── test_core_timestamp_format_long_iso_produces_iso_name ─────────────────
+
+
+def test_core_timestamp_format_long_iso_produces_iso_name(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """``long-iso`` timestamp format produces an ISO 8601 snapshot name with seconds."""
+    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
+    config = MockConfigFacade(
+        global_config=GlobalConfig(timestamp_format="long-iso"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
+        name = core._generate_snapshot_name(vm)
+
+    assert name.startswith("testvm.20250713T153123")
+
+
+# ── test_core_passes_preserve_day_of_week_to_retention_engine ─────────────
+
+
+def test_core_passes_preserve_day_of_week_to_retention_engine(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core passes ``preserve_day_of_week`` from GlobalConfig to the retention engine."""
+    vm = make_vm_config(
+        name="testvm",
+        targets=[make_target()],
+        snapshot_preserve="24h",
+    )
+    config = MockConfigFacade(
+        global_config=GlobalConfig(preserve_day_of_week="tuesday"),
+        vms=[vm],
+    )
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    with patch.object(
+        mock_factory._retention_engine,
+        "evaluate",
+        wraps=mock_factory._retention_engine.evaluate,
+    ) as eval_spy:
+        core.run()
+
+    assert eval_spy.called
+    assert eval_spy.call_args.kwargs["preserve_day_of_week"] == "tuesday"

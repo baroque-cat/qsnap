@@ -1,0 +1,10 @@
+# Config with a valid preserve_day_of_week value
+preserve_day_of_week = "friday"
+
+[[vm]]
+name = "testvm"
+base_image = "/var/lib/libvirt/images/testvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"

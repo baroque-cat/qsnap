@@ -55,3 +55,38 @@ def test_parse_invalid_toml_raises() -> None:
     """Malformed TOML (unclosed string) raises ConfigError."""
     with pytest.raises(ConfigError, match="Invalid TOML"):
         ConfigFacade(FIXTURES / "invalid.toml")
+
+
+@pytest.mark.unit
+def test_config_parser_reads_lockfile_field_into_globalconfig() -> None:
+    """The top-level ``lockfile`` key is parsed into GlobalConfig."""
+    facade = ConfigFacade(FIXTURES / "global_fields.toml")
+    assert facade.get_global().lockfile == "/var/lock/qsnap.lock"
+
+
+@pytest.mark.unit
+def test_config_parser_reads_timestamp_format_field() -> None:
+    """The top-level ``timestamp_format`` key is parsed into GlobalConfig."""
+    facade = ConfigFacade(FIXTURES / "global_fields.toml")
+    assert facade.get_global().timestamp_format == "short"
+
+
+@pytest.mark.unit
+def test_config_parser_reads_preserve_day_of_week_field() -> None:
+    """The top-level ``preserve_day_of_week`` key is parsed into GlobalConfig."""
+    facade = ConfigFacade(FIXTURES / "global_fields.toml")
+    assert facade.get_global().preserve_day_of_week == "wednesday"
+
+
+@pytest.mark.unit
+def test_config_parser_lockfile_defaults_to_none() -> None:
+    """When no ``lockfile`` is set, GlobalConfig.lockfile defaults to None."""
+    facade = ConfigFacade(FIXTURES / "minimal.toml")
+    assert facade.get_global().lockfile is None
+
+
+@pytest.mark.unit
+def test_config_parser_timestamp_format_defaults_to_long() -> None:
+    """When no ``timestamp_format`` is set, it defaults to 'long'."""
+    facade = ConfigFacade(FIXTURES / "minimal.toml")
+    assert facade.get_global().timestamp_format == "long"

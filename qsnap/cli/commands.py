@@ -1,0 +1,233 @@
+"""Handler functions for each CLI subcommand.
+
+This module is a **thin translation layer**: it receives a ``Core``
+instance and parsed CLI args, calls the appropriate Core method, and
+formats the returned results.  It contains NO business logic and NO
+imports from ``qsnap.modules``, ``qsnap.config``, ``qsnap.retention``,
+or ``qsnap.state``.
+"""
+
+from __future__ import annotations
+
+from argparse import Namespace
+
+from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
+from qsnap.cli.format import format_output
+from qsnap.core import Core, PipelineResult
+from qsnap.models.config import VMConfig
+from qsnap.models.results import CheckResult, RetentionResult, SnapshotInfo
+
+# ── helpers ───────────────────────────────────────────────────────────────
+
+
+def _get_vm_filter(args: Namespace) -> str | None:
+    """Extract the first VM name from positional args, or ``None``."""
+    vm: list[str] = getattr(args, "vm", [])
+    return vm[0] if vm else None
+
+
+def _snapshots_to_rows(data: dict[str, list[SnapshotInfo]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for vm_name, snapshots in data.items():
+        for snap in snapshots:
+            rows.append(
+                {
+                    "vm": vm_name,
+                    "name": snap.name,
+                    "path": str(snap.path),
+                    "timestamp": snap.timestamp.isoformat(),
+                    "allocation": str(snap.allocation),
+                }
+            )
+    return rows
+
+
+def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for vm in vms:
+        rows.append(
+            {
+                "name": vm.name,
+                "base_image": str(vm.base_image),
+                "snapshot_dir": str(vm.snapshot_dir),
+                "snapshot_create": vm.snapshot_create,
+                "targets": str(len(vm.targets)),
+            }
+        )
+    return rows
+
+
+def _latest_to_rows(
+    data: dict[str, SnapshotInfo | None],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for vm_name, snap in data.items():
+        if snap is None:
+            rows.append(
+                {"vm": vm_name, "name": "-", "timestamp": "-", "allocation": "-"}
+            )
+        else:
+            rows.append(
+                {
+                    "vm": vm_name,
+                    "name": snap.name,
+                    "timestamp": snap.timestamp.isoformat(),
+                    "allocation": str(snap.allocation),
+                }
+            )
+    return rows
+
+
+def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for vm_name, result in data.items():
+        rows.append(
+            {
+                "vm": vm_name,
+                "status": result.status,
+                "broken_snapshots": (
+                    ", ".join(result.broken_snapshots)
+                    if result.broken_snapshots
+                    else "-"
+                ),
+            }
+        )
+    return rows
+
+
+def _stats_to_rows(
+    snapshots: dict[str, list[SnapshotInfo]],
+    backups: dict[str, list[SnapshotInfo]],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    all_vms = set(snapshots.keys()) | set(backups.keys())
+    for vm_name in sorted(all_vms):
+        snaps = snapshots.get(vm_name, [])
+        bcks = backups.get(vm_name, [])
+        rows.append(
+            {
+                "vm": vm_name,
+                "snapshots": str(len(snaps)),
+                "snapshot_size": str(sum(s.allocation for s in snaps)),
+                "backups": str(len(bcks)),
+                "backup_size": str(sum(b.allocation for b in bcks)),
+            }
+        )
+    return rows
+
+
+def _print_schedule(schedule: dict[str, RetentionResult]) -> None:
+    """Print retention schedule (keep/remove) per VM to stdout."""
+    for vm_name, result in schedule.items():
+        print(f"=== {vm_name} ===")
+        keep_str = ", ".join(result.keep) if result.keep else "(none)"
+        remove_str = ", ".join(result.remove) if result.remove else "(none)"
+        print(f"  Keep:   {keep_str}")
+        print(f"  Remove: {remove_str}")
+
+
+def _format_pipeline_result(result: PipelineResult) -> int:
+    """Print pipeline results and return exit code."""
+    for r in result.results:
+        if r.success:
+            print(f"  {r.vm_name}: OK")
+        else:
+            print(f"  {r.vm_name}: FAILED - {r.error or 'unknown error'}")
+    return EXIT_SUCCESS if result.success else EXIT_GENERIC
+
+
+# ── action subcommands ───────────────────────────────────────────────────
+
+
+def handle_run(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    if getattr(args, "print_schedule", False):
+        schedule = core.print_schedule(vm_filter)
+        _print_schedule(schedule)
+    result = core.run(vm_filter)
+    return _format_pipeline_result(result)
+
+
+def handle_snapshot(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    if getattr(args, "print_schedule", False):
+        schedule = core.print_schedule(vm_filter)
+        _print_schedule(schedule)
+    result = core.snapshot(vm_filter)
+    return _format_pipeline_result(result)
+
+
+def handle_backup(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    if getattr(args, "print_schedule", False):
+        schedule = core.print_schedule(vm_filter)
+        _print_schedule(schedule)
+    result = core.backup(vm_filter)
+    return _format_pipeline_result(result)
+
+
+def handle_prune(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    if getattr(args, "print_schedule", False):
+        schedule = core.print_schedule(vm_filter)
+        _print_schedule(schedule)
+    result = core.prune(vm_filter)
+    return _format_pipeline_result(result)
+
+
+# ── informational subcommands ─────────────────────────────────────────────
+
+
+def handle_list(core: Core, args: Namespace) -> int:
+    sub: str = args.list_subcommand
+    vm_filter = _get_vm_filter(args)
+    fmt: str = getattr(args, "format", "table")
+
+    if sub == "snapshots":
+        data = core.list_snapshots(vm_filter)
+        rows = _snapshots_to_rows(data)
+        columns = ["vm", "name", "path", "timestamp", "allocation"]
+    elif sub == "backups":
+        data = core.list_backups(vm_filter)
+        rows = _snapshots_to_rows(data)
+        columns = ["vm", "name", "path", "timestamp", "allocation"]
+    elif sub == "config":
+        vms = core.list_config()
+        rows = _config_to_rows(vms)
+        columns = ["name", "base_image", "snapshot_dir", "snapshot_create", "targets"]
+    elif sub == "latest":
+        data = core.list_latest(vm_filter)
+        rows = _latest_to_rows(data)
+        columns = ["vm", "name", "timestamp", "allocation"]
+    else:
+        return EXIT_GENERIC
+
+    output = format_output(rows, columns, fmt)
+    if output:
+        print(output)
+    return EXIT_SUCCESS
+
+
+def handle_stats(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    fmt: str = getattr(args, "format", "table")
+    snapshots = core.list_snapshots(vm_filter)
+    backups = core.list_backups(vm_filter)
+    rows = _stats_to_rows(snapshots, backups)
+    columns = ["vm", "snapshots", "snapshot_size", "backups", "backup_size"]
+    output = format_output(rows, columns, fmt)
+    if output:
+        print(output)
+    return EXIT_SUCCESS
+
+
+def handle_check(core: Core, args: Namespace) -> int:
+    vm_filter = _get_vm_filter(args)
+    fmt: str = getattr(args, "format", "table")
+    data = core.check(vm_filter)
+    rows = _check_to_rows(data)
+    columns = ["vm", "status", "broken_snapshots"]
+    output = format_output(rows, columns, fmt)
+    if output:
+        print(output)
+    return EXIT_SUCCESS

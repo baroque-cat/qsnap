@@ -11,6 +11,7 @@ from qsnap.models.config import (
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
+    CheckResult,
     CommitResult,
     RetentionItem,
     RetentionResult,
@@ -22,6 +23,7 @@ from qsnap.models.results import (
 __all__ = [
     "BackupResult",
     "ChangeResult",
+    "CheckResult",
     "CommitResult",
     "GlobalConfig",
     "RetentionItem",
