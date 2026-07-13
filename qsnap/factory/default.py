@@ -1,10 +1,8 @@
 """DefaultFactory — concrete IVMModuleFactory.
 
 Constructor receives ``IShell`` and ``IStateManager``, storing them for
-injection into module constructors.  Methods for modules not yet
-implemented raise ``NotImplementedError``.  The retention engine factory
-method works immediately (``TimeBasedRetention`` is pure, no Core
-dependency).
+injection into module constructors.  All five ``create_*`` methods return
+concrete module instances.
 """
 
 from __future__ import annotations
@@ -18,6 +16,10 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
+from qsnap.modules.backup.file_copy import FileCopyBackupProvider
+from qsnap.modules.change.allocation_detector import AllocationSizeDetector
+from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
+from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.retention.time_based import TimeBasedRetention
 
 
@@ -33,20 +35,20 @@ class DefaultFactory(IVMModuleFactory):
         self._state = state
 
     def create_snapshot_provider(self, vm_config: VMConfig) -> ISnapshotProvider:
-        raise NotImplementedError("SnapshotProvider not yet implemented")
+        return ExternalSnapshotProvider(self._shell)
 
     def create_backup_provider(
         self,
         vm_config: VMConfig,
         target: TargetConfig,
     ) -> IBackupProvider:
-        raise NotImplementedError("BackupProvider not yet implemented")
+        return FileCopyBackupProvider(self._shell)
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:
         return TimeBasedRetention(policy)
 
     def create_change_detector(self, mode: str) -> IChangeDetector:
-        raise NotImplementedError("ChangeDetector not yet implemented")
+        return AllocationSizeDetector(self._shell, self._state)
 
     def create_lifecycle_manager(self) -> ILifecycleManager:
-        raise NotImplementedError("LifecycleManager not yet implemented")
+        return BlockCommitManager(self._shell)

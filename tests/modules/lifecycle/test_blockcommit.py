@@ -1,0 +1,347 @@
+"""Tests for BlockCommitManager -- backing chain lifecycle management.
+
+These tests exercise ``BlockCommitManager`` (implements ``ILifecycleManager``)
+in complete isolation.  All ``virsh`` calls go through a mocked ``IShell``.
+The manager does NOT inherit from Core (design D1) and takes only ``IShell``
+as a constructor dependency.
+
+Test scenarios (per spec: lifecycle-manager/spec.md):
+
+1. **Single snapshot success** -- domblklist resolves target "vda",
+   blockcommit returns exit 0, result is ``CommitResult(success=True)``.
+2. **Virsh error** -- blockcommit returns non-zero exit code, result is
+   ``CommitResult(success=False, error=<stderr>)``.
+3. **Empty list no-op** -- empty ``snapshots_to_merge`` produces success
+   with ``committed_snapshot=""`` and zero shell calls.
+4. **Timeout** -- blockcommit ``ShellResult`` has ``success=False`` with
+   error containing "timed out".
+5. **Multiple snapshots sequential** (design D4) -- snapshots merged one at
+   a time, oldest first.  Short-circuits on first failure: remaining
+   snapshots are NOT attempted.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from qsnap.interfaces.shell import IShell
+from qsnap.models.results import CommitResult, ShellResult, SnapshotInfo
+from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
+from tests.mocks.mock_shell import MockShell
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+# Standard domblklist output with a single disk target "vda".
+_DOMBLKLIST_OUTPUT = (
+    " Target   Source\n"
+    "------------------------------------\n"
+    " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+)
+
+
+class CountingShell(IShell):
+    """Wrapper around an ``IShell`` that records every command passed to ``run()``.
+
+    Delegates actual execution to the inner shell (typically ``MockShell``)
+    while capturing the full command list for post-call assertions such as
+    call-count verification and flag inspection.
+    """
+
+    def __init__(self, inner: IShell) -> None:
+        self._inner = inner
+        self.calls: list[list[str]] = []
+
+    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+        self.calls.append(list(cmd))
+        return self._inner.run(cmd, timeout)
+
+
+def _make_snapshot(
+    name: str = "testvm.20250101T000000",
+    path: str = "/snapshots/testvm.20250101T000000.qcow2",
+    timestamp: datetime | None = None,
+    allocation: int = 65536,
+) -> SnapshotInfo:
+    """Create a ``SnapshotInfo`` with sensible defaults."""
+    return SnapshotInfo(
+        name=name,
+        path=Path(path),
+        timestamp=timestamp or datetime(2025, 1, 1, 0, 0, 0),
+        allocation=allocation,
+    )
+
+
+def _blockcommit_calls(shell: CountingShell) -> list[list[str]]:
+    """Extract only the blockcommit commands from recorded calls."""
+    return [c for c in shell.calls if "blockcommit" in " ".join(c)]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 1. Successful blockcommit of a single snapshot
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_config):
+    """A single snapshot is merged successfully.
+
+    - ``virsh domblklist`` returns output with target "vda".
+    - ``virsh blockcommit`` returns exit 0.
+    - Result: ``CommitResult(success=True, committed_snapshot=<snap.name>)``.
+    - The blockcommit command contains ``--base``, ``--top``, ``--delete``,
+      ``--verbose``, ``--wait``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert isinstance(result, CommitResult)
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+    assert result.error is None
+
+    # Verify exactly one blockcommit call with all required flags.
+    bc_calls = _blockcommit_calls(shell)
+    assert len(bc_calls) == 1
+
+    cmd = bc_calls[0]
+    assert "--base" in cmd
+    assert "--top" in cmd
+    assert "--delete" in cmd
+    assert "--verbose" in cmd
+    assert "--wait" in cmd
+
+    # Verify --base points to vm_config.base_image and --top to snapshot path.
+    base_idx = cmd.index("--base")
+    assert cmd[base_idx + 1] == str(vm_config.base_image)
+    top_idx = cmd.index("--top")
+    assert cmd[top_idx + 1] == str(snap.path)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 2. Blockcommit fails -- virsh returns non-zero exit code
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
+    """A non-zero exit code from virsh blockcommit yields a failure result.
+
+    - ``domblklist`` returns success.
+    - ``blockcommit`` returns exit 1 with an error message.
+    - Result: ``CommitResult(success=False, error=<error from virsh>)``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    error_msg = "error: operation failed: blockcommit"
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=error_msg,
+        returncode=1,
+        error=error_msg,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert result.success is False
+    assert result.error == error_msg
+    assert result.committed_snapshot == snap.name
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 3. Empty snapshot list -- nothing to merge
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_empty_list_no_op(mock_shell: MockShell, make_vm_config):
+    """An empty snapshot list is a no-op.
+
+    - No ``domblklist`` call, no ``blockcommit`` call.
+    - Result: ``CommitResult(success=True, committed_snapshot="")``.
+    """
+    vm_config = make_vm_config()
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [])
+
+    assert result.success is True
+    assert result.committed_snapshot == ""
+    assert result.error is None
+
+    # No shell commands should have been executed at all.
+    assert len(shell.calls) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 4. Blockcommit times out
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
+    """A blockcommit timeout yields ``CommitResult(success=False)`` with "timed out".
+
+    - ``domblklist`` returns success.
+    - ``blockcommit`` returns ``ShellResult(success=False)`` with error
+      containing "timed out".
+    - Result: ``CommitResult(success=False)`` with error containing "timed out".
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr="",
+        returncode=-1,
+        error="virsh blockcommit timed out after 3600 seconds",
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert result.success is False
+    assert "timed out" in result.error
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 5. Multiple snapshots merged sequentially (design D4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_multiple_snapshots_sequential(
+    mock_shell: MockShell, make_vm_config
+):
+    """Multiple snapshots are merged one at a time (design D4).
+
+    Success path:
+    - ``[snap1, snap2]`` -> blockcommit called for snap1, then snap2.
+    - Result: ``CommitResult(success=True, committed_snapshot=snap2.name)``.
+    - blockcommit is called exactly twice (oldest first).
+
+    Failure path (short-circuit, design D4):
+    - If blockcommit for snap1 fails, snap2 is NOT attempted.
+    - Result: ``CommitResult(success=False, committed_snapshot=snap1.name)``.
+    - blockcommit is called exactly once (for snap1 only).
+    """
+    vm_config = make_vm_config()
+    snap1 = _make_snapshot(
+        name="testvm.20250101T000000",
+        path="/snapshots/testvm.20250101T000000.qcow2",
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+    )
+    snap2 = _make_snapshot(
+        name="testvm.20250102T000000",
+        path="/snapshots/testvm.20250102T000000.qcow2",
+        timestamp=datetime(2025, 1, 2, 0, 0, 0),
+        allocation=131072,
+    )
+
+    # ── Success path: both snapshots merged ───────────────────────────
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap1, snap2])
+
+    assert result.success is True
+    assert result.committed_snapshot == snap2.name  # last merged
+    assert result.error is None
+
+    # blockcommit called exactly twice (once per snapshot, oldest first).
+    bc_calls = _blockcommit_calls(shell)
+    assert len(bc_calls) == 2
+
+    # First call targets snap1 (oldest), second targets snap2.
+    assert str(snap1.path) in bc_calls[0]
+    assert str(snap2.path) in bc_calls[1]
+
+    # ── Failure path: short-circuit on first failure (design D4) ──────
+    # If the first blockcommit fails, the second is NOT executed.
+
+    fail_shell = MockShell()
+    fail_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    fail_error = "error: blockcommit failed for snap1"
+    fail_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=fail_error,
+        returncode=1,
+        error=fail_error,
+    ))
+
+    fail_counting = CountingShell(fail_shell)
+    fail_manager = BlockCommitManager(shell=fail_counting)
+
+    fail_result = fail_manager.blockcommit(vm_config, [snap1, snap2])
+
+    assert fail_result.success is False
+    assert fail_result.committed_snapshot == snap1.name  # the one that failed
+    assert fail_result.error == fail_error
+
+    # Only one blockcommit call (for snap1); snap2 was NOT attempted.
+    fail_bc_calls = _blockcommit_calls(fail_counting)
+    assert len(fail_bc_calls) == 1
+    assert str(snap1.path) in fail_bc_calls[0]

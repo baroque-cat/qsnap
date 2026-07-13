@@ -1,0 +1,220 @@
+"""ExternalSnapshotProvider — external disk-only snapshot management via virsh.
+
+Implements ``ISnapshotProvider``.  Does NOT inherit from Core (design D1):
+the only dependency is ``IShell``.  All virsh/qemu-img calls go through
+the injected shell abstraction.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+
+from qsnap.interfaces.shell import IShell
+from qsnap.interfaces.snapshot import ISnapshotProvider
+from qsnap.models.config import VMConfig
+from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
+
+logger = logging.getLogger(__name__)
+
+
+class ExternalSnapshotProvider(ISnapshotProvider):
+    """External disk-only snapshot provider using ``virsh snapshot-create-as``."""
+
+    def __init__(self, shell: IShell) -> None:
+        self._shell = shell
+
+    # ── ISnapshotProvider implementation ──────────────────────────────
+
+    def create(
+        self,
+        vm_config: VMConfig,
+        snapshot_name: str,
+        disk: str,
+        snapshot_path: Path,
+    ) -> SnapshotResult:
+        """Create an external disk-only snapshot.
+
+        1. ``virsh snapshot-create-as --disk-only --atomic --no-metadata``
+        2. ``chmod g+rw,o+r`` on the new snapshot file
+        3. ``qemu-img info --output=json`` to read ``actual-size``
+        """
+        # Step 1: virsh snapshot-create-as
+        create_cmd = [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_config.name,
+            "--name",
+            snapshot_name,
+            "--diskspec",
+            f"{disk},file={snapshot_path},snapshot=external",
+            "--disk-only",
+            "--atomic",
+            "--no-metadata",
+        ]
+        create_result = self._shell.run(create_cmd, timeout=120)
+        if not create_result.success:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=create_result.error,
+            )
+
+        # Step 2: chmod g+rw,o+r
+        chmod_cmd = ["chmod", "g+rw,o+r", str(snapshot_path)]
+        chmod_result = self._shell.run(chmod_cmd, timeout=30)
+        if not chmod_result.success:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=chmod_result.error,
+            )
+
+        # Step 3: qemu-img info to get actual-size
+        info_cmd = [
+            "qemu-img",
+            "info",
+            "--output=json",
+            str(snapshot_path),
+        ]
+        info_result = self._shell.run(info_cmd, timeout=60)
+        if not info_result.success:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=info_result.error,
+            )
+
+        try:
+            info = json.loads(info_result.stdout)
+            actual_size = int(info["actual-size"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=f"Failed to parse qemu-img info output: {exc}",
+            )
+
+        return SnapshotResult(
+            success=True,
+            name=snapshot_name,
+            path=snapshot_path,
+            new_allocation=actual_size,
+            error=None,
+        )
+
+    def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
+        """List existing snapshots via the backing chain of the active disk.
+
+        1. ``virsh domblklist`` to find the active disk path.
+        2. ``qemu-img info --force-share --backing-chain --output=json``.
+        3. Skip the first element (base image); build ``SnapshotInfo`` for
+           each subsequent chain element.
+        """
+        # Step 1: Get active disk path via domblklist
+        domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
+        domblklist_result = self._shell.run(domblklist_cmd, timeout=30)
+        if not domblklist_result.success:
+            return []
+
+        active_disk = _parse_domblklist_path(domblklist_result.stdout)
+        if active_disk is None:
+            return []
+
+        # Step 2: qemu-img info --backing-chain
+        chain_cmd = [
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--backing-chain",
+            "--output=json",
+            active_disk,
+        ]
+        chain_result = self._shell.run(chain_cmd, timeout=60)
+        if not chain_result.success:
+            return []
+
+        try:
+            chain = json.loads(chain_result.stdout)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(chain, list) or len(chain) <= 1:
+            return []
+
+        # Step 3: Build SnapshotInfo for each element after the base
+        snapshots: list[SnapshotInfo] = []
+        for element in chain[1:]:
+            filename = element.get("filename", "")
+            name = Path(filename).stem
+            actual_size = int(element.get("actual-size", 0))
+            timestamp = _parse_timestamp(name, Path(filename))
+            snapshots.append(
+                SnapshotInfo(
+                    name=name,
+                    path=Path(filename),
+                    timestamp=timestamp,
+                    allocation=actual_size,
+                )
+            )
+
+        snapshots.sort(key=lambda s: s.timestamp)
+        return snapshots
+
+    def delete(self, snapshot: SnapshotInfo) -> ShellResult:
+        """Delete a snapshot file via ``rm -f``."""
+        cmd = ["rm", "-f", str(snapshot.path)]
+        return self._shell.run(cmd, timeout=30)
+
+
+# ── module-level helpers (shared parsing logic) ─────────────────────────
+
+
+def _parse_domblklist_path(stdout: str) -> str | None:
+    """Extract the active disk path from ``virsh domblklist`` output.
+
+    The output looks like::
+
+        Target   Source
+        ------------------------------------
+        vda      /var/lib/libvirt/images/vm.qcow2
+
+    Returns the source path (last column) of the first data row.
+    """
+    lines = stdout.strip().splitlines()
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] != "Target" and not line.startswith("-"):
+            return parts[-1]
+    return None
+
+
+def _parse_timestamp(name: str, filepath: Path) -> datetime:
+    """Try to parse a timestamp from the snapshot name.
+
+    The name format is typically ``vm.20250101T000000``.  Falls back to
+    the file's mtime if the name does not contain a parseable timestamp.
+    """
+    name_parts = name.split(".")
+    if len(name_parts) >= 2:
+        ts_str = name_parts[-1]
+        try:
+            return datetime.strptime(ts_str, "%Y%m%dT%H%M%S")
+        except ValueError:
+            pass
+    try:
+        mtime = filepath.stat().st_mtime
+        return datetime.fromtimestamp(mtime)
+    except (OSError, ValueError):
+        return datetime.now()
