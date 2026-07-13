@@ -73,11 +73,11 @@ class CommitResult:
 class ChangeResult:
     """Outcome of a change-detection check.
 
-    ``has_changed`` is True when the VM disk allocation has grown since the
+    ``changed`` is True when the VM disk allocation has grown since the
     last recorded value.
     """
 
-    has_changed: bool
+    changed: bool
     last_allocation: int
     current_allocation: int
 
@@ -143,3 +143,36 @@ class CheckResult:
     vm_name: str
     status: str
     broken_snapshots: list[str] = field(default_factory=list)
+
+
+# ── Restore ───────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    """Outcome of a restore operation.
+
+    ``chain_files`` lists all copied file paths (base-to-top order).
+    ``restored_path`` is the target directory.
+    """
+
+    success: bool
+    snapshot_name: str
+    restored_path: Path
+    chain_files: list[Path]
+    error: str | None
+
+
+# ── Schedule (print_schedule) ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ScheduleResult:
+    """Retention schedule for a single VM.
+
+    ``snapshots`` is the snapshot retention result.
+    ``backups`` maps target path strings to per-target backup retention.
+    """
+
+    snapshots: RetentionResult
+    backups: dict[str, RetentionResult] = field(default_factory=dict)  # type: ignore[unknown-variable-type]

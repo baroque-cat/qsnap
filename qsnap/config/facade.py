@@ -109,6 +109,15 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve = global_cfg.target_preserve
 
+        # disks: optional explicit list of disk targets.
+        disks_raw = vm_raw.get("disks")
+        if disks_raw is not None:
+            if not isinstance(disks_raw, list):
+                raise ConfigError("'disks' must be an array of strings")
+            disks: list[str] | None = [str(d) for d in disks_raw]  # type: ignore[unknown-argument-type, unknown-variable-type]
+        else:
+            disks = None
+
         # Build targets.
         target_sections = vm_raw.get("target", [])
         if not isinstance(target_sections, list):
@@ -125,6 +134,7 @@ class ConfigFacade(IConfigFacade):
             snapshot_create=snapshot_create,
             snapshot_preserve=snapshot_preserve,
             target_preserve=target_preserve,
+            disks=disks,
             targets=targets,
         )
 
@@ -138,6 +148,7 @@ class ConfigFacade(IConfigFacade):
 
         path = Path(str(tgt_raw["path"]))
         incremental = bool(tgt_raw.get("incremental", True))
+        incremental_mode = str(tgt_raw.get("incremental_mode", "file-copy"))
 
         # target_preserve: target overrides VM.
         target_preserve: str | None
@@ -149,6 +160,7 @@ class ConfigFacade(IConfigFacade):
         return TargetConfig(
             path=path,
             incremental=incremental,
+            incremental_mode=incremental_mode,
             target_preserve=target_preserve,
         )
 

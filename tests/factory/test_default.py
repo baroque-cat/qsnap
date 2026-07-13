@@ -11,6 +11,9 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
+from qsnap.models.results import ShellResult
+from qsnap.modules.backup.bitmap import BitmapBackupProvider
+from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 
 
 def test_default_factory_stores_shell_and_state(mock_shell, mock_state):
@@ -78,3 +81,63 @@ def test_default_factory_all_five_methods_return_instances(
     assert isinstance(factory.create_retention_engine(RetentionPolicy()), IRetentionEngine)
     assert isinstance(factory.create_change_detector("always"), IChangeDetector)
     assert isinstance(factory.create_lifecycle_manager(), ILifecycleManager)
+
+
+def test_factory_selects_bitmap_provider_for_bitmap_mode(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """DefaultFactory.create_backup_provider() with bitmap mode returns
+    BitmapBackupProvider when qemu-img version >= 5.1."""
+    mock_shell.expect("qemu-img --version").returns(
+        ShellResult(
+            success=True,
+            stdout="qemu-img version 5.2.0 (qemu-5.2.0)",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+    provider = factory.create_backup_provider(make_vm_config(), target)
+    assert isinstance(provider, BitmapBackupProvider)
+
+
+def test_factory_selects_file_copy_provider_for_default_mode(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """DefaultFactory.create_backup_provider() with file-copy mode returns
+    FileCopyBackupProvider (no qemu-img version check needed)."""
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="file-copy")
+    provider = factory.create_backup_provider(make_vm_config(), target)
+    assert isinstance(provider, FileCopyBackupProvider)
+
+
+def test_factory_falls_back_to_file_copy_on_old_qemu(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """When qemu-img version < 5.1, bitmap mode falls back to
+    FileCopyBackupProvider (RuntimeError from version check is caught)."""
+    mock_shell.expect("qemu-img --version").returns(
+        ShellResult(
+            success=True,
+            stdout="qemu-img version 4.2.0 (qemu-4.2.0)",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+    provider = factory.create_backup_provider(make_vm_config(), target)
+    assert isinstance(provider, FileCopyBackupProvider)

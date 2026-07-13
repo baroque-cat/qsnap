@@ -76,3 +76,61 @@ The system SHALL delete a backup file via `rm -f`. The method accepts a `Snapsho
 - **WHEN** the backup file does not exist
 - **THEN** `rm -f` returns success
 - **AND** the module returns `ShellResult(success=True)`
+
+### Requirement: BitmapBackupProvider implements IBackupProvider
+The system SHALL provide a `BitmapBackupProvider` class in `qsnap/modules/backup/bitmap.py` that implements `IBackupProvider`. It SHALL accept `IShell` as its sole constructor dependency.
+
+#### Scenario: Constructor accepts IShell
+- **WHEN** `BitmapBackupProvider(shell=mock_shell)` is instantiated
+- **THEN** `isinstance(provider, IBackupProvider)` is True
+- **THEN** the provider is ready for transfer operations
+
+### Requirement: Transfer missing snapshots via dirty bitmap extraction
+The system SHALL determine which snapshots are missing on the target and for each SHALL: (1) use the prior backup's checkpoint to extract dirty blocks via `qemu-img convert --bitmap`, (2) delete the prior checkpoint via `virsh checkpoint-delete --metadata`, (3) create a new checkpoint via `virsh checkpoint-create-as`. Checkpoint names SHALL use the `qsnap-{target_hash}-{snapshot_name}` format.
+
+#### Scenario: First backup — full copy (no prior checkpoint)
+- **WHEN** no prior qsnap checkpoint exists for this VM+target combination
+- **THEN** `BitmapBackupProvider` performs a full `qemu-img convert` (no `--bitmap` flag)
+- **THEN** the backup is a standalone qcow2 file on the target containing the complete virtual disk
+
+#### Scenario: Incremental backup — dirty blocks only
+- **WHEN** a prior qsnap checkpoint exists for this VM+target
+- **AND** the VM has written data since that checkpoint
+- **THEN** `qemu-img convert --bitmap "<checkpoint>"` extracts only changed blocks
+- **THEN** the resulting backup file size is proportional to the changed data, not the full disk
+
+#### Scenario: Checkpoint cleanup after successful transfer
+- **WHEN** `qemu-img convert` completes successfully
+- **THEN** the prior checkpoint is deleted via `virsh checkpoint-delete --metadata`
+- **THEN** a new checkpoint is created for the next incremental run
+
+#### Scenario: Transfer failure preserves checkpoint
+- **WHEN** `qemu-img convert` fails (non-zero exit, timeout)
+- **THEN** the checkpoint is NOT deleted
+- **THEN** the module returns `BackupResult(success=False, error=<stderr>)`
+- **THEN** the next run can retry using the preserved checkpoint
+
+### Requirement: Rebase error handling in FileCopyBackupProvider
+`FileCopyBackupProvider.transfer_missing()` SHALL return `BackupResult(success=False, error=<message>)` when `qemu-img rebase -u` fails. It SHALL NOT silently swallow the error.
+
+#### Scenario: Rebase fails due to invalid backing path
+- **WHEN** `qemu-img rebase -u -b /nonexistent/base.qcow2 /target/snap.qcow2` returns non-zero
+- **THEN** the backup for that snapshot is marked `success=False` with the rebase error message
+
+### Requirement: List checkpoints for target
+`BitmapBackupProvider` SHALL provide a method `list_checkpoints(vm_name: str) -> list[str]` that discovers existing qsnap-owned checkpoints via `virsh checkpoint-list --name`. Only checkpoints with the `qsnap-` prefix SHALL be returned.
+
+#### Scenario: Existing qsnap checkpoints found
+- **WHEN** `virsh checkpoint-list --name VM` returns `["qsnap-target1-20250101", "manual-checkpoint", "qsnap-target1-20250102"]`
+- **THEN** `list_checkpoints("VM")` returns `["qsnap-target1-20250101", "qsnap-target1-20250102"]`
+
+### Requirement: Factory selects BitmapBackupProvider for bitmap mode
+`DefaultFactory.create_backup_provider(vm_config, target)` SHALL return `BitmapBackupProvider` when `target.incremental_mode == "bitmap"`. It SHALL return `FileCopyBackupProvider` when `target.incremental_mode == "file-copy"` (default). On `BitmapBackupProvider` construction failure (QEMU < 5.1), it SHALL log a warning and fall back to `FileCopyBackupProvider`.
+
+#### Scenario: Bitmap mode selected via TargetConfig
+- **WHEN** a target has `incremental_mode = "bitmap"`
+- **THEN** `factory.create_backup_provider(vm_config, target)` returns a `BitmapBackupProvider` instance
+
+#### Scenario: File-copy mode is the default
+- **WHEN** a target has `incremental_mode` unset or set to `"file-copy"`
+- **THEN** `factory.create_backup_provider(vm_config, target)` returns a `FileCopyBackupProvider` instance

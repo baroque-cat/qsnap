@@ -48,12 +48,17 @@ class GlobalConfig:
 class TargetConfig:
     """A single backup target for a VM.
 
+    ``incremental_mode`` selects the backup strategy: ``"file-copy"``
+    (whole-file copy, current behaviour) or ``"bitmap"`` (dirty-block
+    extraction via checkpoint).
+
     ``target_preserve`` is a raw retention-policy string resolved via
     option inheritance (global → VM → target).
     """
 
     path: Path
     incremental: bool = True
+    incremental_mode: str = "file-copy"
     target_preserve: str | None = None
 
 
@@ -66,6 +71,10 @@ class VMConfig:
     ``snapshot_preserve`` and ``target_preserve`` are raw retention-policy
     strings resolved via option inheritance.
 
+    ``disks`` is an optional explicit list of disk targets (e.g.
+    ``["vda", "vdb"]``).  When ``None``, Core auto-discovers all disks
+    via ``virsh domblklist``.
+
     ``targets`` uses a defensive copy on construction so that external
     mutation of the original list does not affect this instance.
     """
@@ -76,6 +85,7 @@ class VMConfig:
     snapshot_create: str = "always"
     snapshot_preserve: str | None = None
     target_preserve: str | None = None
+    disks: list[str] | None = None
     targets: list[TargetConfig] = field(default_factory=list)
 
     def __post_init__(self) -> None:

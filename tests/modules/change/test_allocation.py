@@ -3,10 +3,10 @@
 These tests verify the four scenarios from the change-detection spec
 (``openspec/changes/implement-domain-modules/specs/change-detection/spec.md``):
 
-1. Allocation has grown — changes detected (has_changed=True)
-2. Allocation unchanged — no changes (has_changed=False)
+1. Allocation has grown — changes detected (changed=True)
+2. Allocation unchanged — no changes (changed=False)
 3. First run — no previous state (short-circuit, no shell calls)
-4. Command failure — fail-safe (has_changed=True)
+4. Command failure — fail-safe (changed=True)
 
 Design D3 verification (``design.md``):
     The detector MUST resolve the active disk path via ``virsh domblklist``,
@@ -26,7 +26,6 @@ import pytest
 from qsnap.models.results import ChangeResult, ShellResult
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from tests.mocks.mock_shell import MockShell
-
 
 # ── Call-tracking MockShell subclass ──────────────────────────────────────
 
@@ -149,7 +148,7 @@ def test_has_changed_allocation_grown(
     mock_state,
     make_vm_config,
 ):
-    """Allocation grew from 65536 to 131072 — has_changed=True.
+    """Allocation grew from 65536 to 131072 — changed=True.
 
     Also verifies design D3: the detector resolves the active disk path via
     ``virsh domblklist`` (returning ``/new/active/path.qcow2``), NOT
@@ -171,7 +170,7 @@ def test_has_changed_allocation_grown(
     result = detector.has_changed(vm_config)
 
     assert result == ChangeResult(
-        has_changed=True,
+        changed=True,
         last_allocation=65536,
         current_allocation=131072,
     )
@@ -190,7 +189,7 @@ def test_has_changed_allocation_unchanged(
     mock_state,
     make_vm_config,
 ):
-    """Allocation stayed at 65536 — has_changed=False.
+    """Allocation stayed at 65536 — changed=False.
 
     Also verifies design D3: the active disk path comes from domblklist
     output (``/new/active/path.qcow2``), not ``base_image``
@@ -208,7 +207,7 @@ def test_has_changed_allocation_unchanged(
     result = detector.has_changed(vm_config)
 
     assert result == ChangeResult(
-        has_changed=False,
+        changed=False,
         last_allocation=65536,
         current_allocation=65536,
     )
@@ -229,7 +228,7 @@ def test_has_changed_first_run_no_state(
 ):
     """First run: state has no last_allocation (None) — short-circuit.
 
-    The detector returns ``has_changed=True`` immediately without calling
+    The detector returns ``changed=True`` immediately without calling
     any shell commands (domblklist and qemu-img info are NOT executed).
     This guarantees the first snapshot is always created.
     """
@@ -246,7 +245,7 @@ def test_has_changed_first_run_no_state(
     result = detector.has_changed(vm_config)
 
     assert result == ChangeResult(
-        has_changed=True,
+        changed=True,
         last_allocation=0,
         current_allocation=0,
     )
@@ -269,10 +268,10 @@ def test_has_changed_command_fails_failsafe(
     mock_state,
     make_vm_config,
 ):
-    """domblklist fails (non-zero exit) — fail-safe: has_changed=True.
+    """domblklist fails (non-zero exit) — fail-safe: changed=True.
 
     Rather create an unnecessary snapshot than miss changes.  The detector
-    should return ``has_changed=True`` with ``last_allocation`` preserved
+    should return ``changed=True`` with ``last_allocation`` preserved
     from state and ``current_allocation=0`` (unknown due to failure).
     """
     mock_state.set_last_allocation("testvm", 65536)
@@ -284,7 +283,7 @@ def test_has_changed_command_fails_failsafe(
     result = detector.has_changed(vm_config)
 
     assert result == ChangeResult(
-        has_changed=True,
+        changed=True,
         last_allocation=65536,
         current_allocation=0,
     )
@@ -301,3 +300,143 @@ def test_has_changed_command_fails_failsafe(
     assert len(qemu_calls) == 0, (
         "qemu-img info should NOT be called when domblklist fails"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 5. Per-disk selection — vdb uses vdb path
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_has_changed_per_disk_vdb_uses_vdb_path(
+    tracking_shell: CallTrackingShell,
+    mock_state,
+    make_vm_config,
+):
+    """When ``disk='vdb'`` is passed, the detector uses the vdb path from
+    domblklist (not vda).  Mock domblklist with both vda and vdb, verify
+    ``qemu-img info`` is called on vdb's path.
+    """
+    mock_state.set_last_allocation("testvm", 65536)
+
+    vda_path = "/var/lib/libvirt/images/testvm.qcow2"
+    vdb_path = "/var/lib/libvirt/images/testvm-disk2.qcow2"
+
+    domblklist_output = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        f" vda      {vda_path}\n"
+        f" vdb      {vdb_path}\n"
+    )
+    tracking_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=domblklist_output,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    tracking_shell.expect("qemu-img info").returns(
+        _ok_qemu_img_result(131072)
+    )
+
+    vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
+    detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
+    result = detector.has_changed(vm_config, disk="vdb")
+
+    assert result == ChangeResult(
+        changed=True,
+        last_allocation=65536,
+        current_allocation=131072,
+    )
+
+    # Verify qemu-img info was called with vdb path, not vda path
+    qemu_calls = [
+        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
+    ]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert vdb_path in qemu_cmd_str, (
+        f"qemu-img info should use vdb path ({vdb_path}), "
+        f"but command was: {qemu_cmd_str}"
+    )
+    assert vda_path not in qemu_cmd_str, (
+        f"qemu-img info must NOT use vda path ({vda_path}), "
+        f"but command was: {qemu_cmd_str}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. No disk specified — backward compatible (first disk)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_has_changed_no_disk_uses_first_disk_backward_compatible(
+    tracking_shell: CallTrackingShell,
+    mock_state,
+    make_vm_config,
+):
+    """When ``disk=None`` (default), the detector uses the first disk from
+    domblklist (backward compatible with pre-per-disk behaviour).
+    """
+    mock_state.set_last_allocation("testvm", 65536)
+
+    vda_path = "/var/lib/libvirt/images/testvm.qcow2"
+    vdb_path = "/var/lib/libvirt/images/testvm-disk2.qcow2"
+
+    domblklist_output = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        f" vda      {vda_path}\n"
+        f" vdb      {vdb_path}\n"
+    )
+    tracking_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=domblklist_output,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    tracking_shell.expect("qemu-img info").returns(
+        _ok_qemu_img_result(65536)
+    )
+
+    vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
+    detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
+    result = detector.has_changed(vm_config)  # disk=None (default)
+
+    assert result == ChangeResult(
+        changed=False,
+        last_allocation=65536,
+        current_allocation=65536,
+    )
+
+    # Verify qemu-img info was called with vda path (first disk)
+    qemu_calls = [
+        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
+    ]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert vda_path in qemu_cmd_str, (
+        f"qemu-img info should use first disk path ({vda_path}), "
+        f"but command was: {qemu_cmd_str}"
+    )
+    assert vdb_path not in qemu_cmd_str
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. Shared parser imports
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_allocation_detector_imports_shared_parsers():
+    """Verify ``allocation_detector.py`` imports shared parsers from
+    ``qsnap.utils.parsing`` (not local duplicates).
+    """
+    from qsnap.modules.change import allocation_detector
+    from qsnap.utils.parsing import parse_domblklist_disks
+
+    assert hasattr(allocation_detector, "parse_domblklist_disks")
+    assert allocation_detector.parse_domblklist_disks is parse_domblklist_disks

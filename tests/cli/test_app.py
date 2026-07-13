@@ -11,7 +11,6 @@ from qsnap.cli.errors import EXIT_LOCKFILE, EXIT_PARSE, EXIT_SUCCESS
 from qsnap.core import PipelineResult, VMRunResult
 from tests.mocks import MockConfigFacade
 
-
 # ── Argument parsing tests ──────────────────────────────────────────────
 
 
@@ -136,3 +135,25 @@ def test_lockfile_held_returns_exit_code_three(
 def test_unknown_subcommand_returns_parse_error_exit_code_2():
     code = main(["bogus"])
     assert code == EXIT_PARSE
+
+
+# ── restore and check argument parsing tests ────────────────────────────
+
+
+def test_restore_subcommand_parses_positional_args():
+    parser = build_argparser()
+    ns = parser.parse_args(["restore", "mysnap", "/tmp/target"])
+    assert ns.snapshot_name == "mysnap"
+    assert ns.target_dir == "/tmp/target"
+
+
+def test_check_deep_flag_sets_deep_true():
+    parser = build_argparser()
+    ns = parser.parse_args(["check", "--deep"])
+    assert ns.deep is True
+
+
+def test_check_without_deep_defaults_false():
+    parser = build_argparser()
+    ns = parser.parse_args(["check"])
+    assert ns.deep is False

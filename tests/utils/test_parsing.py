@@ -1,0 +1,110 @@
+"""Unit tests for shared parsing utilities in qsnap.utils.parsing.
+
+Tests cover ``parse_domblklist_path``, ``parse_domblklist_target``,
+``parse_domblklist_disks``, and ``parse_timestamp``.  All functions are
+pure — no I/O except ``parse_timestamp`` which reads file metadata
+(``stat().st_mtime``) as a fallback.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from qsnap.utils.parsing import (
+    parse_domblklist_disks,
+    parse_domblklist_path,
+    parse_domblklist_target,
+    parse_timestamp,
+)
+
+# ── parse_domblklist_path ──────────────────────────────────────────────────
+
+
+def test_parse_domblklist_path_one_disk():
+    """Standard domblklist output with vda returns the source path."""
+    stdout = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    result = parse_domblklist_path(stdout)
+    assert result == "/var/lib/libvirt/images/testvm.qcow2"
+
+
+def test_parse_domblklist_path_multiple_lines_skips_header():
+    """Multiple data lines — header and separator are skipped, returns
+    the path of the first data row."""
+    stdout = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+        " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
+    )
+    result = parse_domblklist_path(stdout)
+    assert result == "/var/lib/libvirt/images/testvm.qcow2"
+
+
+def test_parse_domblklist_path_empty_raises_value_error():
+    """Empty output raises ValueError."""
+    with pytest.raises(ValueError, match="no data rows"):
+        parse_domblklist_path("")
+
+
+# ── parse_domblklist_target ────────────────────────────────────────────────
+
+
+def test_parse_domblklist_target_returns_target_name():
+    """Returns the first column (target device name, e.g. 'vda')."""
+    stdout = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    result = parse_domblklist_target(stdout)
+    assert result == "vda"
+
+
+# ── parse_domblklist_disks ─────────────────────────────────────────────────
+
+
+def test_parse_domblklist_disks_returns_all_disks():
+    """Multiple disks returns a list of (target, path) tuples."""
+    stdout = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+        " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
+    )
+    result = parse_domblklist_disks(stdout)
+    assert result == [
+        ("vda", "/var/lib/libvirt/images/testvm.qcow2"),
+        ("vdb", "/var/lib/libvirt/images/testvm-disk2.qcow2"),
+    ]
+
+
+# ── parse_timestamp ────────────────────────────────────────────────────────
+
+
+def test_parse_timestamp_long_format_from_filename():
+    """Parse ``vm.20250101T120000`` → datetime(2025, 1, 1, 12, 0, 0)."""
+    result = parse_timestamp(
+        "vm.20250101T120000", Path("/fake/path.qcow2")
+    )
+    assert result == datetime(2025, 1, 1, 12, 0, 0)
+
+
+def test_parse_timestamp_falls_back_to_mtime(tmp_path):
+    """When the filename has no parseable timestamp, falls back to the
+    file's mtime.
+    """
+    filepath = tmp_path / "no-timestamp.qcow2"
+    filepath.write_bytes(b"\x00")
+
+    mtime = filepath.stat().st_mtime
+    expected = datetime.fromtimestamp(mtime)
+
+    result = parse_timestamp("no-timestamp", filepath)
+    assert result == expected

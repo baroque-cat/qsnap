@@ -30,7 +30,6 @@ from qsnap.models.results import CommitResult, ShellResult, SnapshotInfo
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
 from tests.mocks.mock_shell import MockShell
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 # Standard domblklist output with a single disk target "vda".

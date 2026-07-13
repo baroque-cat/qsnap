@@ -57,7 +57,27 @@ def test_change_detector_has_changed_returns_change_result(cls, init_kwargs):
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, disk="vda")
+    assert isinstance(result, ChangeResult)
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (AllocationSizeDetector, {"shell": MockShell(), "state": InMemoryStateManager()}),
+        (MockChangeDetector, {}),
+    ],
+    ids=["allocation", "mock"],
+)
+def test_change_detector_has_changed_accepts_disk_parameter(cls, init_kwargs):
+    """has_changed() accepts optional disk: str parameter for all implementations."""
+    detector = cls(**init_kwargs)
+    vm_config = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    result = detector.has_changed(vm_config, disk="vda")
     assert isinstance(result, ChangeResult)
 
 

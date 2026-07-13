@@ -9,13 +9,15 @@ or ``qsnap.state``.
 
 from __future__ import annotations
 
+import sys
 from argparse import Namespace
+from pathlib import Path
 
-from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
+from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.cli.format import format_output
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import CheckResult, RetentionResult, SnapshotInfo
+from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -116,24 +118,39 @@ def _stats_to_rows(
     return rows
 
 
-def _print_schedule(schedule: dict[str, RetentionResult]) -> None:
+def _print_schedule(schedule: dict[str, ScheduleResult]) -> None:
     """Print retention schedule (keep/remove) per VM to stdout."""
     for vm_name, result in schedule.items():
         print(f"=== {vm_name} ===")
-        keep_str = ", ".join(result.keep) if result.keep else "(none)"
-        remove_str = ", ".join(result.remove) if result.remove else "(none)"
-        print(f"  Keep:   {keep_str}")
-        print(f"  Remove: {remove_str}")
+        keep_str = ", ".join(result.snapshots.keep) if result.snapshots.keep else "(none)"
+        remove_str = ", ".join(result.snapshots.remove) if result.snapshots.remove else "(none)"
+        print("  Snapshots:")
+        print(f"    Keep:   {keep_str}")
+        print(f"    Remove: {remove_str}")
+        for target_path, backup_ret in result.backups.items():
+            print(f"  Backups [{target_path}]:")
+            b_keep = ", ".join(backup_ret.keep) if backup_ret.keep else "(none)"
+            b_remove = ", ".join(backup_ret.remove) if backup_ret.remove else "(none)"
+            print(f"    Keep:   {b_keep}")
+            print(f"    Remove: {b_remove}")
 
 
 def _format_pipeline_result(result: PipelineResult) -> int:
-    """Print pipeline results and return exit code."""
+    """Print pipeline results and return exit code.
+
+    Returns ``EXIT_BACKUP_ABORT`` (10) if any VM had a backup failure,
+    even if the pipeline itself succeeded.
+    """
     for r in result.results:
         if r.success:
             print(f"  {r.vm_name}: OK")
         else:
             print(f"  {r.vm_name}: FAILED - {r.error or 'unknown error'}")
-    return EXIT_SUCCESS if result.success else EXIT_GENERIC
+    if not result.success:
+        return EXIT_GENERIC
+    if any(r.backup_failed for r in result.results):
+        return EXIT_BACKUP_ABORT
+    return EXIT_SUCCESS
 
 
 # ── action subcommands ───────────────────────────────────────────────────
@@ -224,10 +241,37 @@ def handle_stats(core: Core, args: Namespace) -> int:
 def handle_check(core: Core, args: Namespace) -> int:
     vm_filter = _get_vm_filter(args)
     fmt: str = getattr(args, "format", "table")
-    data = core.check(vm_filter)
+    deep: bool = getattr(args, "deep", False)
+    data = core.check(vm_filter, deep=deep)
     rows = _check_to_rows(data)
     columns = ["vm", "status", "broken_snapshots"]
     output = format_output(rows, columns, fmt)
     if output:
         print(output)
     return EXIT_SUCCESS
+
+
+def handle_restore(core: Core, args: Namespace) -> int:
+    snapshot_name: str = args.snapshot_name
+    target_dir = Path(args.target_dir)
+    vm_filter = _get_vm_filter(args)
+
+    # Validate target_dir exists
+    if not target_dir.is_dir():
+        print(
+            f"Error: target directory does not exist: {target_dir}",
+            file=sys.stderr,
+        )
+        return EXIT_GENERIC
+
+    result = core.restore(snapshot_name, target_dir, vm_filter)
+
+    if result.success:
+        print(f"Restored '{snapshot_name}' to {target_dir}")
+        print("Chain files:")
+        for f in result.chain_files:
+            print(f"  {f}")
+        return EXIT_SUCCESS
+    else:
+        print(f"Error: {result.error}", file=sys.stderr)
+        return EXIT_GENERIC

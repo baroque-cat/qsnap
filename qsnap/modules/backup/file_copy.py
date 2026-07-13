@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.utils.parsing import parse_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,31 @@ class FileCopyBackupProvider(IBackupProvider):
                                 backing_basename,
                                 str(target_file),
                             ]
-                            self._shell.run(rebase_cmd, timeout=60)
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        pass
+                            rebase_result = self._shell.run(rebase_cmd, timeout=60)
+                            if not rebase_result.success:
+                                results.append(
+                                    BackupResult(
+                                        success=False,
+                                        snapshot_name=snapshot.name,
+                                        source_path=snapshot.path,
+                                        target_path=target_file,
+                                        bytes_transferred=bytes_transferred,
+                                        error=f"rebase failed: {rebase_result.error}",
+                                    )
+                                )
+                                continue
+                    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                        results.append(
+                            BackupResult(
+                                success=False,
+                                snapshot_name=snapshot.name,
+                                source_path=snapshot.path,
+                                target_path=target_file,
+                                bytes_transferred=bytes_transferred,
+                                error=f"rebase failed: {exc}",
+                            )
+                        )
+                        continue
 
             results.append(
                 BackupResult(
@@ -145,7 +167,7 @@ class FileCopyBackupProvider(IBackupProvider):
 
             name = file.stem
             actual_size = int(info.get("actual-size", 0))
-            timestamp = _parse_timestamp(name, file)
+            timestamp = parse_timestamp(name, file)
 
             snapshots.append(
                 SnapshotInfo(
@@ -163,26 +185,3 @@ class FileCopyBackupProvider(IBackupProvider):
         """Delete a backup file via ``rm -f``."""
         cmd = ["rm", "-f", str(backup.path)]
         return self._shell.run(cmd, timeout=30)
-
-
-# ── module-level helpers ─────────────────────────────────────────────────
-
-
-def _parse_timestamp(name: str, filepath: Path) -> datetime:
-    """Try to parse a timestamp from the filename stem.
-
-    The name format is typically ``vm.20250101T000000``.  Falls back to
-    the file's mtime if the name does not contain a parseable timestamp.
-    """
-    name_parts = name.split(".")
-    if len(name_parts) >= 2:
-        ts_str = name_parts[-1]
-        try:
-            return datetime.strptime(ts_str, "%Y%m%dT%H%M%S")
-        except ValueError:
-            pass
-    try:
-        mtime = filepath.stat().st_mtime
-        return datetime.fromtimestamp(mtime)
-    except (OSError, ValueError):
-        return datetime.now()

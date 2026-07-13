@@ -35,9 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # Transfer Missing
@@ -445,3 +444,84 @@ def test_delete_backup_file_not_found(mock_shell):
 
     assert result.success is True
     assert result.error is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Rebase failure & shared parser imports
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_rebase_failure_returns_backup_result_failure(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``qemu-img rebase`` fails (MockShell returns failure),
+    ``transfer_missing`` returns a ``BackupResult`` with ``success=False``
+    and an error message containing ``"rebase failed"``.
+
+    The rebase step is part of the incremental backup flow: after copying
+    the snapshot file, the backing path is rebased to a bare filename.
+    If the rebase command itself fails, the provider must report the
+    failure rather than silently returning success.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=True
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Mock cp returns success
+    mock_shell.expect("cp").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # Mock qemu-img info returns JSON with backing-filename
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "actual-size": 65536,
+                    "backing-filename": "/source/path/backing.qcow2",
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Mock qemu-img rebase returns FAILURE
+    rebase_error = "rebase error: backing file not found"
+    mock_shell.expect("qemu-img rebase").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=rebase_error,
+            returncode=1,
+            error=rebase_error,
+        )
+    )
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "rebase failed" in results[0].error
+
+
+def test_file_copy_provider_imports_shared_parsers():
+    """Verify ``file_copy.py`` imports ``parse_timestamp`` from
+    ``qsnap.utils.parsing`` (shared parser, not a local duplicate).
+    """
+    from qsnap.modules.backup import file_copy
+    from qsnap.utils.parsing import parse_timestamp
+
+    assert hasattr(file_copy, "parse_timestamp")
+    assert file_copy.parse_timestamp is parse_timestamp

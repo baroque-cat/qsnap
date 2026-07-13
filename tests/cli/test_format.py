@@ -1,4 +1,4 @@
-from qsnap.cli.format import format_table, format_raw, format_output
+from qsnap.cli.format import format_output, format_raw, format_table
 
 
 def test_format_table_produces_aligned_columns_uppercase_headers():
@@ -45,7 +45,7 @@ def test_format_raw_produces_space_separated_key_value_pairs():
     assert "path=/tmp/snap2.qcow2" in lines[1]
 
     # Pairs are space-separated on the same line
-    assert "name=snap1 path=/tmp/snap1.qcow2" == lines[0]
+    assert lines[0] == "name=snap1 path=/tmp/snap1.qcow2"
 
 
 def test_format_long_produces_extended_columns():

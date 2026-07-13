@@ -15,21 +15,32 @@ The system SHALL determine whether a VM disk has changed by comparing the curren
 
 - **WHEN** `IStateManager.get_last_allocation()` returns 65536
 - **AND** `qemu-img info` on the active image returns `actual-size: 131072`
-- **THEN** the module returns `ChangeResult(has_changed=True, last_allocation=65536, current_allocation=131072)`
+- **THEN** the module returns `ChangeResult(changed=True, last_allocation=65536, current_allocation=131072)`
 
 #### Scenario: Allocation unchanged — no changes
 
 - **WHEN** `IStateManager.get_last_allocation()` returns 65536
 - **AND** `qemu-img info` on the active image returns `actual-size: 65536`
-- **THEN** the module returns `ChangeResult(has_changed=False, last_allocation=65536, current_allocation=65536)`
+- **THEN** the module returns `ChangeResult(changed=False, last_allocation=65536, current_allocation=65536)`
 
 #### Scenario: First run — no previous state
 
 - **WHEN** `IStateManager.get_last_allocation()` returns `None`
-- **THEN** the module returns `ChangeResult(has_changed=True, last_allocation=0, current_allocation=0)`
+- **THEN** the module returns `ChangeResult(changed=True, last_allocation=0, current_allocation=0)`
 - **AND** this guarantees the first snapshot is created
 
 #### Scenario: virsh or qemu-img command fails
 
 - **WHEN** `virsh domblklist` or `qemu-img info` returns an error
-- **THEN** the module returns `ChangeResult(has_changed=True)` (fail-safe: rather create an unnecessary snapshot than miss changes)
+- **THEN** the module returns `ChangeResult(changed=True)` (fail-safe: rather create an unnecessary snapshot than miss changes)
+
+### Requirement: Per-disk change detection
+`IChangeDetector.has_changed()` SHALL accept an optional `disk: str` parameter. When provided, change detection SHALL be scoped to that specific disk. When omitted, change detection SHALL apply to the first discovered disk (backward-compatible).
+
+#### Scenario: Per-disk change detection for vdb
+- **WHEN** `detector.has_changed(vm_config, disk="vdb")` is called
+- **THEN** allocation comparison uses the `vdb` disk path from `virsh domblklist`
+
+#### Scenario: Backward-compatible no-disk call
+- **WHEN** `detector.has_changed(vm_config)` is called without `disk`
+- **THEN** the first disk from `virsh domblklist` is used (existing behaviour)

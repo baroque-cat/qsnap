@@ -10,6 +10,7 @@ and that call ordering is correct.
 from __future__ import annotations
 
 from argparse import Namespace
+from pathlib import Path
 from unittest.mock import Mock
 
 from qsnap.cli.commands import (
@@ -17,13 +18,14 @@ from qsnap.cli.commands import (
     handle_check,
     handle_list,
     handle_prune,
+    handle_restore,
     handle_run,
     handle_snapshot,
     handle_stats,
 )
-from qsnap.cli.errors import EXIT_SUCCESS
+from qsnap.cli.errors import EXIT_GENERIC
 from qsnap.core import Core, PipelineResult, VMRunResult
-
+from qsnap.models.results import RestoreResult
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -81,6 +83,13 @@ def _make_mock_core() -> Mock:
     core.list_config.return_value = []
     core.list_latest.return_value = {}
     core.check.return_value = {}
+    core.restore.return_value = RestoreResult(
+        success=True,
+        snapshot_name="",
+        restored_path=Path("/tmp"),
+        chain_files=[],
+        error=None,
+    )
     return core
 
 
@@ -161,7 +170,7 @@ def test_check_subcommand_dispatches_to_core_check():
     mock_core = _make_mock_core()
     args = _make_action_args(command="check")
     handle_check(mock_core, args)
-    mock_core.check.assert_called_once_with(None)
+    mock_core.check.assert_called_once_with(None, deep=False)
 
 
 # ── flag translation tests (real Core) ─────────────────────────────────
@@ -227,3 +236,60 @@ def test_no_vm_filter_passes_none_to_core_method():
     args = _make_action_args(vm=[])
     handle_run(mock_core, args)
     mock_core.run.assert_called_once_with(None)
+
+
+# ── restore subcommand dispatch tests ────────────────────────────────────
+
+
+def test_handle_restore_dispatches_to_core_restore_with_positional_args(
+    cli_app, tmp_path
+):
+    """Parse 'restore SNAP TARGET' args, verify core.restore is called."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["restore", "SNAP", str(tmp_path)])
+    handle_restore(mock_core, args)
+    mock_core.restore.assert_called_once_with("SNAP", tmp_path, None)
+
+
+def test_handle_restore_nonexistent_backup_returns_exit_1(cli_app, tmp_path):
+    """When core.restore() returns RestoreResult(success=False), returns EXIT_GENERIC."""
+    mock_core = _make_mock_core()
+    mock_core.restore.return_value = RestoreResult(
+        success=False,
+        snapshot_name="SNAP",
+        restored_path=tmp_path,
+        chain_files=[],
+        error="Snapshot 'SNAP' not found",
+    )
+    args = cli_app.parse_args(["restore", "SNAP", str(tmp_path)])
+    result = handle_restore(mock_core, args)
+    assert result == EXIT_GENERIC
+
+
+def test_handle_restore_missing_target_dir_returns_exit_1(cli_app, tmp_path):
+    """When target_dir does not exist, returns EXIT_GENERIC without calling core.restore()."""
+    mock_core = _make_mock_core()
+    nonexistent = tmp_path / "does_not_exist"
+    args = cli_app.parse_args(["restore", "SNAP", str(nonexistent)])
+    result = handle_restore(mock_core, args)
+    assert result == EXIT_GENERIC
+    mock_core.restore.assert_not_called()
+
+
+# ── check --deep flag tests ──────────────────────────────────────────────
+
+
+def test_handle_check_deep_passes_deep_true_to_core(cli_app):
+    """Parse 'check --deep' args, verify core.check(vm_filter=None, deep=True)."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["check", "--deep"])
+    handle_check(mock_core, args)
+    mock_core.check.assert_called_once_with(None, deep=True)
+
+
+def test_handle_check_without_deep_passes_deep_false_to_core(cli_app):
+    """Parse 'check' args (no --deep), verify core.check(vm_filter=None, deep=False)."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["check"])
+    handle_check(mock_core, args)
+    mock_core.check.assert_called_once_with(None, deep=False)

@@ -29,18 +29,14 @@ def _imported_modules(source: str) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 names.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module is not None:
-                names.append(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            names.append(node.module)
     return names
 
 
 def _starts_with_any(name: str, prefixes: tuple[str, ...]) -> bool:
     """True if *name* starts with any of *prefixes* (module-boundary aware)."""
-    for prefix in prefixes:
-        if name == prefix or name.startswith(prefix + "."):
-            return True
-    return False
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
 
 
 # ── commands.py ───────────────────────────────────────────────────────────

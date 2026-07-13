@@ -11,17 +11,20 @@ object is an instance of ``IConfigFacade``.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from qsnap.cli.commands import _format_pipeline_result
+from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import GlobalConfig
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import BackupResult, RestoreResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
@@ -185,12 +188,12 @@ def test_generate_snapshot_name_appends_collision_suffix(
         shell=mock_shell,
     )
 
-    (tmp_path / "testvm.20250713T1531.qcow2").touch()
+    (tmp_path / "testvm.20250713T1531_vda.qcow2").touch()
 
     with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm)
+        name = core._generate_snapshot_name(vm, disk="vda")
 
-    assert name == "testvm.20250713T1531_1"
+    assert name == "testvm.20250713T1531_vda_1"
 
 
 # ── test_generate_snapshot_name_collision_increments_suffix ───────────────
@@ -217,13 +220,13 @@ def test_generate_snapshot_name_collision_increments_suffix(
         shell=mock_shell,
     )
 
-    (tmp_path / "testvm.20250713T1531.qcow2").touch()
-    (tmp_path / "testvm.20250713T1531_1.qcow2").touch()
+    (tmp_path / "testvm.20250713T1531_vda.qcow2").touch()
+    (tmp_path / "testvm.20250713T1531_vda_1.qcow2").touch()
 
     with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm)
+        name = core._generate_snapshot_name(vm, disk="vda")
 
-    assert name == "testvm.20250713T1531_2"
+    assert name == "testvm.20250713T1531_vda_2"
 
 
 # ── test_core_uses_config_timestamp_format_for_snapshot_name ──────────────
@@ -251,9 +254,9 @@ def test_core_uses_config_timestamp_format_for_snapshot_name(
     )
 
     with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm)
+        name = core._generate_snapshot_name(vm, disk="vda")
 
-    assert name == "testvm.20250713"
+    assert name == "testvm.20250713_vda"
 
 
 # ── test_core_timestamp_format_long_produces_long_name ────────────────────
@@ -281,9 +284,9 @@ def test_core_timestamp_format_long_produces_long_name(
     )
 
     with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm)
+        name = core._generate_snapshot_name(vm, disk="vda")
 
-    assert name == "testvm.20250713T1531"
+    assert name == "testvm.20250713T1531_vda"
 
 
 # ── test_core_timestamp_format_long_iso_produces_iso_name ─────────────────
@@ -311,9 +314,10 @@ def test_core_timestamp_format_long_iso_produces_iso_name(
     )
 
     with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
-        name = core._generate_snapshot_name(vm)
+        name = core._generate_snapshot_name(vm, disk="vda")
 
     assert name.startswith("testvm.20250713T153123")
+    assert name.endswith("_vda")
 
 
 # ── test_core_passes_preserve_day_of_week_to_retention_engine ─────────────
@@ -360,3 +364,307 @@ def test_core_passes_preserve_day_of_week_to_retention_engine(
 
     assert eval_spy.called
     assert eval_spy.call_args.kwargs["preserve_day_of_week"] == "tuesday"
+
+
+# ── test_core_restore_from_snapshot_returns_restore_result ────────────────
+
+
+def test_core_restore_from_snapshot_returns_restore_result(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.restore() finds snapshot in state manager, copies chain, returns success."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/snapshots/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock qemu-img info --backing-chain --output=json (top-to-base order)
+    chain_json = json.dumps(
+        [
+            {"image": "/snapshots/snap1.qcow2"},
+            {"image": "/var/lib/libvirt/images/testvm.qcow2"},
+        ]
+    )
+    mock_shell.expect("backing-chain").returns(
+        ShellResult(success=True, stdout=chain_json, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("cp").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    result = core.restore("snap1", tmp_path)
+
+    assert isinstance(result, RestoreResult)
+    assert result.success is True
+    assert result.snapshot_name == "snap1"
+    assert result.restored_path == tmp_path
+    assert len(result.chain_files) == 2
+    assert result.error is None
+
+
+# ── test_core_restore_from_backup_returns_restore_result ──────────────────
+
+
+def test_core_restore_from_backup_returns_restore_result(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.restore() finds backup in target directory, copies chain, returns success."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    backup = SnapshotInfo(
+        name="backup1",
+        path=Path("/mnt/backup/backup1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+
+    chain_json = json.dumps(
+        [
+            {"image": "/mnt/backup/backup1.qcow2"},
+            {"image": "/var/lib/libvirt/images/testvm.qcow2"},
+        ]
+    )
+    mock_shell.expect("backing-chain").returns(
+        ShellResult(success=True, stdout=chain_json, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("cp").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup]):
+        result = core.restore("backup1", tmp_path)
+
+    assert isinstance(result, RestoreResult)
+    assert result.success is True
+    assert result.snapshot_name == "backup1"
+    assert len(result.chain_files) == 2
+    assert result.error is None
+
+
+# ── test_core_restore_from_bitmap_backup_standalone_file ──────────────────
+
+
+def test_core_restore_from_bitmap_backup_standalone_file(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Restore from bitmap backup (no backing chain, single file)."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    backup = SnapshotInfo(
+        name="bitmap_backup",
+        path=Path("/mnt/backup/bitmap_backup.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+
+    # Single file — no backing chain
+    chain_json = json.dumps([{"image": "/mnt/backup/bitmap_backup.qcow2"}])
+    mock_shell.expect("backing-chain").returns(
+        ShellResult(success=True, stdout=chain_json, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("cp").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup]):
+        result = core.restore("bitmap_backup", tmp_path)
+
+    assert isinstance(result, RestoreResult)
+    assert result.success is True
+    assert len(result.chain_files) == 1
+    assert result.chain_files[0] == tmp_path / "bitmap_backup.qcow2"
+    assert result.error is None
+
+
+# ── test_pipeline_backup_abort_returns_exit_code_10 ───────────────────────
+
+
+def test_pipeline_backup_abort_returns_exit_code_10(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When backup fails, VMRunResult.backup_failed=True and exit code is 10."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    failed_backup = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=Path("/mnt/backup/snap1.qcow2"),
+        bytes_transferred=0,
+        error="transfer failed",
+    )
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "transfer_missing",
+        return_value=[failed_backup],
+    ):
+        result = core.run()
+
+    assert len(result.results) == 1
+    assert result.results[0].backup_failed is True
+
+    exit_code = _format_pipeline_result(result)
+    assert exit_code == EXIT_BACKUP_ABORT
+
+
+# ── test_pipeline_all_backups_succeed_exit_code_not_10 ────────────────────
+
+
+def test_pipeline_all_backups_succeed_exit_code_not_10(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When all backups succeed, exit code is NOT 10 (should be 0)."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.run()
+
+    assert len(result.results) == 1
+    assert result.results[0].backup_failed is False
+
+    exit_code = _format_pipeline_result(result)
+    assert exit_code != EXIT_BACKUP_ABORT
+    assert exit_code == EXIT_SUCCESS
+
+
+# ── test_ondemand_snapshot_created_when_target_reachable ──────────────────
+
+
+def test_ondemand_snapshot_created_when_target_reachable(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When snapshot_create='ondemand' and target path exists, snapshot IS created."""
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_create="ondemand",
+        targets=[make_target(path=str(tmp_path))],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.run()
+
+    assert create_spy.called, (
+        "Snapshot should be created when target is reachable (ondemand)"
+    )
+
+
+# ── test_ondemand_snapshot_skipped_when_no_target_reachable ────────────────
+
+
+def test_ondemand_snapshot_skipped_when_no_target_reachable(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When snapshot_create='ondemand' and no target path exists, snapshot is NOT created."""
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_create="ondemand",
+        targets=[make_target(path="/nonexistent/path/does/not/exist")],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.run()
+
+    assert not create_spy.called, (
+        "Snapshot should NOT be created when no target is reachable (ondemand)"
+    )

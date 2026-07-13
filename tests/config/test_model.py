@@ -126,3 +126,36 @@ def test_retention_policy_defaults():
     assert policy.monthly == 0
     assert policy.yearly == 0
     assert policy.preserve_min == "all"
+
+
+def test_target_config_default_incremental_mode_is_file_copy():
+    """TargetConfig with no incremental_mode arg defaults to 'file-copy'."""
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.incremental_mode == "file-copy"
+
+
+def test_target_config_explicit_incremental_mode_bitmap():
+    """TargetConfig(incremental_mode='bitmap') stores 'bitmap'."""
+    target = TargetConfig(path=Path("/backup/testvm"), incremental_mode="bitmap")
+    assert target.incremental_mode == "bitmap"
+
+
+def test_vm_config_disks_default_none_auto_discovery():
+    """VMConfig with no disks arg defaults to None (auto-discovery via virsh domblklist)."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+    )
+    assert vm.disks is None
+
+
+def test_vm_config_explicit_disks_list():
+    """VMConfig(disks=['vda', 'vdb']) stores the explicit disk list."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+        disks=["vda", "vdb"],
+    )
+    assert vm.disks == ["vda", "vdb"]

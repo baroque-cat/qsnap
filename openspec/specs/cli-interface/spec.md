@@ -1,7 +1,7 @@
 ## Requirements
 
 ### Requirement: CLI entry point
-The system SHALL provide a `qsnap` command-line entry point with subcommands `run`, `snapshot`, `backup`, `prune`, `list`, `stats`, and `check`. Each subcommand SHALL map to a corresponding Core method. The CLI layer SHALL contain no business logic — it is a thin translation layer from CLI args to Core method calls to formatted output.
+The system SHALL provide a `qsnap` command-line entry point with subcommands `run`, `snapshot`, `backup`, `prune`, `list`, `stats`, `check`, and `restore`. Each subcommand SHALL map to a corresponding Core method. The CLI layer SHALL contain no business logic — it is a thin translation layer from CLI args to Core method calls to formatted output.
 
 #### Scenario: Help text
 - **WHEN** `qsnap --help` is executed
@@ -104,3 +104,26 @@ The CLI layer (commands.py) SHALL NOT parse config, create snapshots, evaluate r
 #### Scenario: No business logic in CLI
 - **WHEN** reviewing `qsnap/cli/commands.py`
 - **THEN** it contains no imports from `qsnap.modules`, `qsnap.config`, `qsnap.retention`, or `qsnap.state`
+
+### Requirement: qsnap restore subcommand
+The CLI SHALL provide a `restore` subcommand with arguments: `SNAPSHOT_NAME` (positional, required), `TARGET_DIR` (positional, required), and optional `VM` filter. It SHALL map to `Core.restore(snapshot_name, target_dir, vm_filter)`.
+
+#### Scenario: Restore command invocation
+- **WHEN** `qsnap restore debiantest.20250101T1200 /restore` is executed
+- **THEN** `Core.restore("debiantest.20250101T1200", Path("/restore"))` is called
+
+#### Scenario: Target directory does not exist
+- **WHEN** `qsnap restore snap.20250101 /nonexistent/path` is executed
+- **THEN** the command exits with code 1 and an error message indicating the directory must exist
+
+### Requirement: qsnap check --deep flag
+The `check` subcommand SHALL accept a `--deep` flag. When present, `Core.check(deep=True)` is called, which SHALL execute `qemu-img check` on each snapshot and backup file.
+
+#### Scenario: Deep check invocation
+- **WHEN** `qsnap check --deep` is executed
+- **THEN** `Core.check(vm_filter=None, deep=True)` is called
+- **THEN** output includes corruption status for each file
+
+#### Scenario: Default check without --deep
+- **WHEN** `qsnap check` is executed without `--deep`
+- **THEN** `Core.check(deep=False)` is called (backing-file existence only)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from qsnap.utils.time import resolve_format, format_snapshot_timestamp
+from qsnap.utils.time import format_snapshot_timestamp, resolve_format
 
 
 def test_short_format_produces_yyyymmdd() -> None:

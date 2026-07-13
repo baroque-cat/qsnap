@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import ChangeResult, SnapshotInfo
+from qsnap.models.results import ChangeResult, ShellResult, SnapshotInfo, SnapshotResult
 from tests.mocks import MockConfigFacade
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
@@ -82,7 +82,7 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
 ):
     """In ``onchange`` mode with no detected changes, no snapshot is created.
 
-    The change detector reports ``has_changed=False``, so the pipeline
+    The change detector reports ``changed=False``, so the pipeline
     should skip snapshot creation.  Retention is still evaluated (but with
     an empty state, it returns None).
     """
@@ -100,7 +100,7 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
 
     # Configure the change detector to report no changes.
     no_change = ChangeResult(
-        has_changed=False,
+        changed=False,
         last_allocation=1000,
         current_allocation=1000,
     )
@@ -122,7 +122,7 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
     # Snapshot creation was NOT invoked (no changes detected).
     assert not create_spy.called, (
         "Snapshot provider.create() should NOT be called when onchange "
-        "detector reports has_changed=False"
+        "detector reports changed=False"
     )
 
     # Pipeline still succeeded (skipping a snapshot is not an error).
@@ -439,3 +439,200 @@ def test_dry_run_logs_no_mutation(
 
     # Dry-run logs planned actions at INFO level.
     assert "[dry-run]" in caplog.text
+
+
+# ── test_create_snapshot_single_disk_sda_not_vda ─────────────────────────
+
+
+def test_create_snapshot_single_disk_sda_not_vda(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Mock domblklist returning 'sda' disk. Verify snapshot name has _sda suffix."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " sda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    mock_shell.expect("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=domblklist_output,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.snapshot()
+
+    assert create_spy.called
+    snapshot_name = create_spy.call_args.args[1]
+    disk = create_spy.call_args.args[2]
+    assert disk == "sda"
+    assert snapshot_name.endswith("_sda")
+    assert not snapshot_name.endswith("_vda")
+
+
+# ── test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix ───────
+
+
+def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Mock domblklist returning vda and vdb. Verify two snapshots with _vda and _vdb."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+        " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
+    )
+    mock_shell.expect("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=domblklist_output,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.snapshot()
+
+    assert create_spy.call_count == 2
+    disk_names = [call.args[2] for call in create_spy.call_args_list]
+    assert set(disk_names) == {"vda", "vdb"}
+    snapshot_names = [call.args[1] for call in create_spy.call_args_list]
+    assert any(name.endswith("_vda") for name in snapshot_names)
+    assert any(name.endswith("_vdb") for name in snapshot_names)
+
+
+# ── test_create_snapshot_explicit_disk_list_overrides_discovery ───────────
+
+
+def test_create_snapshot_explicit_disk_list_overrides_discovery(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VMConfig.disks=['sda'] explicitly. Verify domblklist is NOT called, snapshot uses sda."""
+    vm = make_vm_config(name="testvm", disks=["sda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with (
+        patch.object(
+            snapshot_provider,
+            "create",
+            wraps=snapshot_provider.create,
+        ) as create_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        core.snapshot()
+
+    # domblklist should NOT be called (explicit disk list overrides discovery)
+    shell_spy.assert_not_called()
+    # Snapshot should use sda
+    assert create_spy.called
+    assert create_spy.call_args.args[2] == "sda"
+    assert create_spy.call_args.args[1].endswith("_sda")
+
+
+# ── test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline ─────────────
+
+
+def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """vda snapshot succeeds, vdb fails. Verify vda result recorded, vdb error logged, pipeline continues."""
+    vm = make_vm_config(name="testvm", disks=["vda", "vdb"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path):
+        if disk == "vda":
+            return SnapshotResult(
+                success=True,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=65536,
+                error=None,
+            )
+        return SnapshotResult(
+            success=False,
+            name=snapshot_name,
+            path=snapshot_path,
+            new_allocation=0,
+            error="virsh timeout for vdb",
+        )
+
+    caplog.set_level(logging.ERROR)
+    with (
+        patch.object(snapshot_provider, "create", side_effect=create_side_effect),
+    ):
+        result = core.snapshot()
+
+    # Pipeline succeeded (partial failure is not a pipeline failure)
+    assert result.success is True
+
+    # vda snapshot was recorded in state (vdb was not)
+    snapshots = mock_state.get_snapshots("testvm")
+    assert len(snapshots) == 1
+    assert snapshots[0].name.endswith("_vda")
+
+    # vdb error was logged
+    assert "vdb" in caplog.text
+    assert "virsh timeout" in caplog.text

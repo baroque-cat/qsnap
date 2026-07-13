@@ -10,6 +10,7 @@ from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import RetentionItem, RetentionResult
 from tests.mocks.mock_factory import MockVMModuleFactory
+from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvider
 
 
 def test_mock_factory_returns_interface_types(make_vm_config, make_target):
@@ -47,3 +48,22 @@ def test_mock_retention_engine_accepts_preserve_day_of_week(make_vm_config):
         preserve_day_of_week="wednesday",
     )
     assert isinstance(result, RetentionResult)
+
+
+def test_mock_factory_returns_bitmap_provider_for_bitmap_mode(make_vm_config, make_target):
+    """create_backup_provider() returns MockBitmapBackupProvider when
+    target.incremental_mode == 'bitmap'."""
+    factory = MockVMModuleFactory()
+    target = make_target(incremental_mode="bitmap")
+    provider = factory.create_backup_provider(make_vm_config(), target)
+    assert isinstance(provider, MockBitmapBackupProvider)
+    assert isinstance(provider, IBackupProvider)
+
+
+def test_mock_factory_returns_file_copy_provider_for_default_mode(make_vm_config, make_target):
+    """create_backup_provider() returns MockBackupProvider for default mode."""
+    factory = MockVMModuleFactory()
+    target = make_target(incremental_mode="file-copy")
+    provider = factory.create_backup_provider(make_vm_config(), target)
+    assert isinstance(provider, MockBackupProvider)
+    assert isinstance(provider, IBackupProvider)

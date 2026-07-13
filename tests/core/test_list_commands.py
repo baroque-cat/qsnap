@@ -14,16 +14,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core
-from qsnap.models.config import GlobalConfig
 from qsnap.models.results import (
-    CheckResult,
-    RetentionItem,
     RetentionResult,
+    ScheduleResult,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
-
 
 # ── test_list_snapshots_returns_all_vms_sorted_ascending ──────────────────
 
@@ -315,8 +312,8 @@ def test_print_schedule_shows_keep_remove_counts(
         result = core.print_schedule()
 
     assert "testvm" in result
-    assert len(result["testvm"].keep) == 7
-    assert len(result["testvm"].remove) == 3
+    assert len(result["testvm"].snapshots.keep) == 7
+    assert len(result["testvm"].snapshots.remove) == 3
 
 
 # ── test_print_schedule_does_not_call_mutating_shell_commands ─────────────
@@ -549,3 +546,149 @@ def test_check_filtered_vm(
     result = core.check(vm_filter="vm1")
 
     assert set(result.keys()) == {"vm1"}
+
+
+# ── test_print_schedule_shows_snapshot_and_backup_retention ──────────────
+
+
+def test_print_schedule_shows_snapshot_and_backup_retention(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """print_schedule returns ScheduleResult with both .snapshots and .backups keys."""
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_preserve="24h",
+        targets=[make_target(target_preserve="24h")],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup = SnapshotInfo(
+        name="backup1",
+        path=Path("/mnt/backup/backup1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup]):
+        result = core.print_schedule()
+
+    assert "testvm" in result
+    schedule = result["testvm"]
+    assert isinstance(schedule, ScheduleResult)
+
+    # Both snapshot and backup retention are evaluated
+    assert isinstance(schedule.snapshots, RetentionResult)
+    assert len(schedule.snapshots.keep) > 0
+
+    assert isinstance(schedule.backups, dict)
+    assert len(schedule.backups) > 0
+    target_key = str(vm.targets[0].path)
+    assert target_key in schedule.backups
+    assert isinstance(schedule.backups[target_key], RetentionResult)
+    assert len(schedule.backups[target_key].keep) > 0
+
+
+# ── test_check_deep_finds_corruption_reports_broken ──────────────────────
+
+
+def test_check_deep_finds_corruption_reports_broken(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """check(deep=True) runs qemu-img check, finds corruptions>0, reports 'corrupted'."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    mock_shell.expect("qemu-img.*check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 1, "leaks": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    result = core.check(deep=True)
+
+    assert "testvm" in result
+    assert result["testvm"].status == "corrupted"
+    assert "snap1" in result["testvm"].broken_snapshots
+
+
+# ── test_check_deep_clean_image_reports_ok ────────────────────────────────
+
+
+def test_check_deep_clean_image_reports_ok(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """check(deep=True) runs qemu-img check, finds 0 corruptions, reports 'ok'."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    mock_shell.expect("qemu-img.*check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0, "leaks": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    result = core.check(deep=True)
+
+    assert "testvm" in result
+    assert result["testvm"].status == "ok"
+    assert result["testvm"].broken_snapshots == []

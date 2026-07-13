@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
+from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +128,9 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         if not domblklist_result.success:
             return []
 
-        active_disk = _parse_domblklist_path(domblklist_result.stdout)
-        if active_disk is None:
+        try:
+            active_disk = parse_domblklist_path(domblklist_result.stdout)
+        except ValueError:
             return []
 
         # Step 2: qemu-img info --backing-chain
@@ -159,7 +160,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             filename = element.get("filename", "")
             name = Path(filename).stem
             actual_size = int(element.get("actual-size", 0))
-            timestamp = _parse_timestamp(name, Path(filename))
+            timestamp = parse_timestamp(name, Path(filename))
             snapshots.append(
                 SnapshotInfo(
                     name=name,
@@ -176,45 +177,3 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         """Delete a snapshot file via ``rm -f``."""
         cmd = ["rm", "-f", str(snapshot.path)]
         return self._shell.run(cmd, timeout=30)
-
-
-# ── module-level helpers (shared parsing logic) ─────────────────────────
-
-
-def _parse_domblklist_path(stdout: str) -> str | None:
-    """Extract the active disk path from ``virsh domblklist`` output.
-
-    The output looks like::
-
-        Target   Source
-        ------------------------------------
-        vda      /var/lib/libvirt/images/vm.qcow2
-
-    Returns the source path (last column) of the first data row.
-    """
-    lines = stdout.strip().splitlines()
-    for line in lines:
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] != "Target" and not line.startswith("-"):
-            return parts[-1]
-    return None
-
-
-def _parse_timestamp(name: str, filepath: Path) -> datetime:
-    """Try to parse a timestamp from the snapshot name.
-
-    The name format is typically ``vm.20250101T000000``.  Falls back to
-    the file's mtime if the name does not contain a parseable timestamp.
-    """
-    name_parts = name.split(".")
-    if len(name_parts) >= 2:
-        ts_str = name_parts[-1]
-        try:
-            return datetime.strptime(ts_str, "%Y%m%dT%H%M%S")
-        except ValueError:
-            pass
-    try:
-        mtime = filepath.stat().st_mtime
-        return datetime.fromtimestamp(mtime)
-    except (OSError, ValueError):
-        return datetime.now()

@@ -12,16 +12,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from qsnap.core import Core, PipelineResult
-from qsnap.models.config import GlobalConfig
+from qsnap.core import Core
 from qsnap.models.results import (
     BackupResult,
     RetentionResult,
-    ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
-
 
 # ── test_preserve_snapshots_defaults_to_false ────────────────────────────
 

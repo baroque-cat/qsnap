@@ -15,9 +15,29 @@ from qsnap.core import Core
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_modules import MockBackupProvider
 from tests.mocks.mock_shell import MockShell
+
+
+def _make_bitmap_shell() -> MockShell:
+    """Create a MockShell pre-configured for BitmapBackupProvider construction.
+
+    BitmapBackupProvider.__init__ calls ``_check_qemu_version()`` which runs
+    ``qemu-img --version``.  The returned stdout must parse to QEMU >= 5.1.
+    """
+    shell = MockShell()
+    shell.expect("qemu-img --version").returns(
+        ShellResult(
+            success=True,
+            stdout="QEMU emulator version 7.2.0\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    return shell
 
 
 def test_ibackup_provider_is_abstract():
@@ -41,13 +61,24 @@ def test_file_copy_backup_provider_no_core_inheritance():
     assert not issubclass(FileCopyBackupProvider, Core)
 
 
+def test_bitmap_backup_provider_is_ibackup_provider():
+    """BitmapBackupProvider is a subclass of IBackupProvider."""
+    assert issubclass(BitmapBackupProvider, IBackupProvider)
+
+
+def test_bitmap_backup_provider_no_core_inheritance():
+    """BitmapBackupProvider does NOT inherit from Core (design D1)."""
+    assert not issubclass(BitmapBackupProvider, Core)
+
+
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
         (MockBackupProvider, {}),
     ],
-    ids=["file_copy", "mock"],
+    ids=["file_copy", "bitmap", "mock"],
 )
 def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, init_kwargs):
     """transfer_missing() returns a list whose elements are all BackupResult."""
@@ -76,9 +107,10 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
         (MockBackupProvider, {}),
     ],
-    ids=["file_copy", "mock"],
+    ids=["file_copy", "bitmap", "mock"],
 )
 def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     """list() returns a list whose elements are all SnapshotInfo."""
@@ -94,9 +126,10 @@ def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
         (MockBackupProvider, {}),
     ],
-    ids=["file_copy", "mock"],
+    ids=["file_copy", "bitmap", "mock"],
 )
 def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
     """delete() returns a ShellResult."""

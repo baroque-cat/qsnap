@@ -32,7 +32,6 @@ from unittest.mock import patch
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # 1. Successful snapshot creation
 # ──────────────────────────────────────────────────────────────────────────
@@ -422,3 +421,32 @@ def test_delete_snapshot_file_not_found(mock_shell):
 
     assert result.success is True
     assert result.error is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 8. Shared parser imports
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_external_snapshot_provider_imports_shared_parsers():
+    """Verify ``external.py`` imports ``parse_domblklist_path`` and
+    ``parse_timestamp`` from ``qsnap.utils.parsing``, and has NO
+    module-level ``_parse_domblklist_path`` or ``_parse_timestamp``
+    functions (i.e. the local duplicates have been removed).
+    """
+    from qsnap.modules.snapshot import external
+    from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
+
+    # Shared parsers are imported (same object reference)
+    assert external.parse_domblklist_path is parse_domblklist_path
+    assert external.parse_timestamp is parse_timestamp
+
+    # No local duplicate functions exist
+    assert not hasattr(external, "_parse_domblklist_path"), (
+        "external.py should NOT have a local _parse_domblklist_path; "
+        "it must use the shared parser from qsnap.utils.parsing"
+    )
+    assert not hasattr(external, "_parse_timestamp"), (
+        "external.py should NOT have a local _parse_timestamp; "
+        "it must use the shared parser from qsnap.utils.parsing"
+    )

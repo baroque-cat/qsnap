@@ -6,6 +6,7 @@ from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBackupProvider,
+    MockBitmapBackupProvider,
     MockChangeDetector,
     MockLifecycleManager,
     MockRetentionEngine,
@@ -17,6 +18,7 @@ from tests.mocks.mock_state import InMemoryStateManager
 __all__ = [
     "InMemoryStateManager",
     "MockBackupProvider",
+    "MockBitmapBackupProvider",
     "MockChangeDetector",
     "MockConfigFacade",
     "MockLifecycleManager",

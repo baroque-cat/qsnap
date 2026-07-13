@@ -34,6 +34,7 @@ _DISPATCH: dict[str, object] = {
     "list": commands.handle_list,
     "stats": commands.handle_stats,
     "check": commands.handle_check,
+    "restore": commands.handle_restore,
 }
 
 
@@ -127,6 +128,17 @@ def build_argparser() -> argparse.ArgumentParser:
     # check subcommand
     check_parser = subparsers.add_parser("check", help="Verify backing-chain integrity")
     check_parser.add_argument("vm", nargs="*", help="VM name(s) to filter")
+    check_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run qemu-img check for corruption detection",
+    )
+
+    # restore subcommand
+    restore_parser = subparsers.add_parser("restore", help="Restore a backup chain to a target directory")
+    restore_parser.add_argument("snapshot_name", help="Snapshot name to restore")
+    restore_parser.add_argument("target_dir", help="Target directory for restored files")
+    restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
 
     return parser
 

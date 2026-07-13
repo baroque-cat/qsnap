@@ -7,12 +7,17 @@ semantics, and frozen immutability where specified.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
+import pytest
+
+from qsnap.core import VMRunResult
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
     CommitResult,
+    RestoreResult,
     RetentionResult,
     ShellResult,
     SnapshotResult,
@@ -122,12 +127,51 @@ def test_shell_result_failure():
 
 
 def test_change_result_disk_grown():
-    """ChangeResult with has_changed=True and differing allocation values."""
+    """ChangeResult with changed=True and differing allocation values."""
     result = ChangeResult(
-        has_changed=True,
+        changed=True,
         last_allocation=1024,
         current_allocation=2048,
     )
-    assert result.has_changed is True
+    assert result.changed is True
     assert result.last_allocation == 1024
     assert result.current_allocation == 2048
+
+
+def test_restore_result_success_fields_and_frozen():
+    """RestoreResult has all required fields and is frozen."""
+    result = RestoreResult(
+        success=True,
+        snapshot_name="snap1",
+        restored_path=Path("/restore"),
+        chain_files=[Path("/restore/base.qcow2"), Path("/restore/snap1.qcow2")],
+        error=None,
+    )
+    assert result.success is True
+    assert result.snapshot_name == "snap1"
+    assert result.restored_path == Path("/restore")
+    assert len(result.chain_files) == 2
+    assert result.chain_files[0] == Path("/restore/base.qcow2")
+    assert result.chain_files[1] == Path("/restore/snap1.qcow2")
+    assert result.error is None
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.success = False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.error = "mutated"
+
+
+def test_vm_run_result_backup_failed_field():
+    """VMRunResult has backup_failed field (default False) and is frozen."""
+    result = VMRunResult(vm_name="testvm", success=True)
+    assert result.vm_name == "testvm"
+    assert result.success is True
+    assert result.backup_failed is False
+    assert result.error is None
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.backup_failed = True

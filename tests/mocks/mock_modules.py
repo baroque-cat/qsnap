@@ -12,6 +12,7 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
+from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
@@ -91,6 +92,49 @@ class MockBackupProvider(IBackupProvider):
         )
 
 
+class MockBitmapBackupProvider(IBackupProvider):
+    """Mock bitmap backup provider returning valid result types.
+
+    ``transfer_missing`` returns ``BackupResult`` objects whose
+    ``target_path`` points to a standalone qcow2 file (no backing chain),
+    reflecting bitmap backup semantics (design D3).
+    """
+
+    def __init__(self, shell: IShell | None = None) -> None:
+        # Constructor accepts IShell but doesn't need it for mock behavior.
+        self._shell = shell
+
+    def transfer_missing(
+        self,
+        vm_config: VMConfig,
+        target: TargetConfig,
+        snapshots: list[SnapshotInfo],
+    ) -> list[BackupResult]:
+        return [
+            BackupResult(
+                success=True,
+                snapshot_name=s.name,
+                source_path=s.path,
+                target_path=target.path / f"{s.name}.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+            )
+            for s in snapshots
+        ]
+
+    def list(self, target: TargetConfig) -> list[SnapshotInfo]:
+        return []
+
+    def delete(self, backup: SnapshotInfo) -> ShellResult:
+        return ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+
+
 class MockRetentionEngine(IRetentionEngine):
     """Mock retention engine returning a valid RetentionResult."""
 
@@ -108,9 +152,11 @@ class MockRetentionEngine(IRetentionEngine):
 class MockChangeDetector(IChangeDetector):
     """Mock change detector returning a valid ChangeResult."""
 
-    def has_changed(self, vm_config: VMConfig) -> ChangeResult:
+    def has_changed(
+        self, vm_config: VMConfig, disk: str | None = None
+    ) -> ChangeResult:
         return ChangeResult(
-            has_changed=True,
+            changed=True,
             last_allocation=1000000,
             current_allocation=2000000,
         )
