@@ -55,7 +55,7 @@ class MockShell(IShell):
         self._expectations.append(exp)
         return exp
 
-    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         cmd_str = " ".join(cmd)
         for exp in self._expectations:
             if re.search(exp.pattern, cmd_str):

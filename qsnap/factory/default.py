@@ -22,7 +22,9 @@ from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
+from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
+from qsnap.modules.lifecycle.qemu_img_commit import QemuImgCommitManager
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.retention.time_based import TimeBasedRetention
 from qsnap.state.json_manager import JsonStateManager
@@ -70,7 +72,11 @@ class DefaultFactory(IVMModuleFactory):
         return TimeBasedRetention(policy)
 
     def create_change_detector(self, mode: str) -> IChangeDetector:
+        if mode == "allocation-map":
+            return MapChangeDetector(self._shell, self._state)
         return AllocationSizeDetector(self._shell, self._state)
 
-    def create_lifecycle_manager(self) -> ILifecycleManager:
+    def create_lifecycle_manager(self, mode: str = "virsh") -> ILifecycleManager:
+        if mode == "qemu-img":
+            return QemuImgCommitManager(self._shell)
         return BlockCommitManager(self._shell)

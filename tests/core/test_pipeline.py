@@ -18,7 +18,13 @@ from unittest.mock import patch
 
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import ChangeResult, ShellResult, SnapshotInfo, SnapshotResult
+from qsnap.models.results import (
+    BackupResult,
+    ChangeResult,
+    ShellResult,
+    SnapshotInfo,
+    SnapshotResult,
+)
 from tests.mocks import MockConfigFacade
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
@@ -602,7 +608,7 @@ def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
 
     snapshot_provider = mock_factory._snapshot_provider
 
-    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path):
+    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
         if disk == "vda":
             return SnapshotResult(
                 success=True,
@@ -636,3 +642,181 @@ def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
     # vdb error was logged
     assert "vdb" in caplog.text
     assert "virsh timeout" in caplog.text
+
+
+# ── test_metadata_verification_failure_marks_backup_failed ────────────────
+
+
+def test_metadata_verification_failure_marks_backup_failed(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """transfer_missing returns BackupResult(success=False, error="verification
+    failed") → backup_failed=True.
+
+    When the backup provider's transfer_missing returns a failed result with
+    a verification error, the pipeline must set ``backup_failed=True`` on the
+    VMRunResult so the CLI can exit with EXIT_BACKUP_ABORT.
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state so transfer_missing has a snapshot to transfer.
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+    mock_state.record_snapshot(vm.name, snap)
+
+    failed_backup = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=Path("/mnt/backup/snap1.qcow2"),
+        bytes_transferred=0,
+        error="verification failed",
+    )
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "transfer_missing",
+        return_value=[failed_backup],
+    ):
+        result = core.run()
+
+    assert len(result.results) == 1
+    assert result.results[0].backup_failed is True
+
+
+# ── test_pipeline_always_mode_validation_first ────────────────────────────
+
+
+def test_pipeline_always_mode_validation_first(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Verify validation runs before snapshot creation in always mode.
+
+    If validation fails, snapshot_provider.create() must NOT be called.
+    This proves validation executes first and short-circuits the pipeline.
+    """
+    from qsnap.models.results import ShellResult
+
+    # Make validation fail by overriding the snapshot_dir check.
+    mock_shell._expectations = [
+        e for e in mock_shell._expectations if e.pattern != "test -d"
+    ]
+    mock_shell.expect("test -d").returns(
+        ShellResult(
+            success=False, stdout="", stderr="", returncode=1, error="not found"
+        )
+    )
+
+    vm = make_vm_config(name="testvm", snapshot_create="always", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    with (
+        patch.object(
+            core,
+            "_validate_environment",
+            wraps=core._validate_environment,
+        ) as validate_spy,
+        patch.object(
+            snapshot_provider,
+            "create",
+            wraps=snapshot_provider.create,
+        ) as create_spy,
+    ):
+        result = core.run()
+
+    # Validation was called and failed (pipeline stopped).
+    assert validate_spy.called
+
+    # Snapshot creation was NOT called (validation stopped the pipeline).
+    assert not create_spy.called
+
+    # Pipeline failed.
+    assert result.results[0].success is False
+
+
+# ── test_pipeline_onchange_no_changes_validation_first ───────────────────
+
+
+def test_pipeline_onchange_no_changes_validation_first(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Verify validation runs even when no changes are detected (onchange mode).
+
+    In onchange mode with no detected changes, the snapshot is skipped, but
+    environment validation must still execute.  This proves validation runs
+    before change detection.
+    """
+    vm = make_vm_config(name="testvm", snapshot_create="onchange", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    change_detector = mock_factory._change_detector
+
+    no_change = ChangeResult(
+        changed=False,
+        last_allocation=1000,
+        current_allocation=1000,
+    )
+
+    with (
+        patch.object(
+            core,
+            "_validate_environment",
+            wraps=core._validate_environment,
+        ) as validate_spy,
+        patch.object(
+            snapshot_provider,
+            "create",
+            wraps=snapshot_provider.create,
+        ) as create_spy,
+        patch.object(
+            change_detector,
+            "has_changed",
+            return_value=no_change,
+        ),
+    ):
+        result = core.run()
+
+    # Validation was called (runs before change detection).
+    assert validate_spy.called
+
+    # Snapshot was NOT created (no changes detected).
+    assert not create_spy.called
+
+    # Pipeline succeeded (skipping a snapshot is not an error).
+    assert result.success is True

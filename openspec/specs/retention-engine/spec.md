@@ -8,7 +8,7 @@ The system SHALL provide an `IRetentionEngine` ABC with a pure `evaluate` method
 - **THEN** it does not have Core in its MRO (does not inherit from Core)
 
 ### Requirement: TimeBasedRetention implements IRetentionEngine
-The system SHALL provide a `TimeBasedRetention` class that evaluates retention based on item timestamps and a RetentionPolicy.
+The system SHALL provide a `TimeBasedRetention` class that evaluates retention based on item timestamps and a RetentionPolicy. The `preserve_min` field SHALL support the value `"latest"` in addition to `"all"` and duration strings. When `preserve_min` is `"latest"`, only the single most recent item SHALL be kept by the minimum preservation window.
 
 #### Scenario: Hourly retention with 24h policy
 - **WHEN** `evaluate()` is called with 48 items spaced 1 hour apart and `RetentionPolicy(hourly=24, daily=0, weekly=0, monthly=0, yearly=0, preserve_min="0h")`
@@ -25,6 +25,10 @@ The system SHALL provide a `TimeBasedRetention` class that evaluates retention b
 #### Scenario: preserve_min "all" keeps everything
 - **WHEN** `evaluate()` is called with `preserve_min="all"`
 - **THEN** all items are in `keep` and none in `remove`
+
+#### Scenario: preserve_min "latest" keeps only the most recent item
+- **WHEN** `evaluate()` is called with 10 items and `preserve_min="latest"`
+- **THEN** only the single most recent item is in `keep`
 
 ### Requirement: Retention engine is deterministic
 `evaluate()` SHALL be a pure function: given the same inputs, it always returns the same output. No I/O, no random, no external state.

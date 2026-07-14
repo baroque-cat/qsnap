@@ -34,10 +34,12 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         snapshot_name: str,
         disk: str,
         snapshot_path: Path,
+        quiesce: bool = False,
     ) -> SnapshotResult:
         """Create an external disk-only snapshot.
 
         1. ``virsh snapshot-create-as --disk-only --atomic --no-metadata``
+           (with ``--quiesce`` when *quiesce* is True, timeout 180s)
         2. ``chmod g+rw,o+r`` on the new snapshot file
         3. ``qemu-img info --output=json`` to read ``actual-size``
         """
@@ -55,7 +57,10 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             "--atomic",
             "--no-metadata",
         ]
-        create_result = self._shell.run(create_cmd, timeout=120)
+        if quiesce:
+            create_cmd.append("--quiesce")
+        timeout = 180 if quiesce else 120
+        create_result = self._shell.run(create_cmd, timeout=timeout)
         if not create_result.success:
             return SnapshotResult(
                 success=False,

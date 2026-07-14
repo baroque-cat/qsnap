@@ -52,9 +52,9 @@ class CountingShell(IShell):
         self._inner = inner
         self.calls: list[list[str]] = []
 
-    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         self.calls.append(list(cmd))
-        return self._inner.run(cmd, timeout)
+        return self._inner.run(cmd, timeout, check)
 
 
 def _make_snapshot(
@@ -344,3 +344,239 @@ def test_blockcommit_multiple_snapshots_sequential(
     fail_bc_calls = _blockcommit_calls(fail_counting)
     assert len(fail_bc_calls) == 1
     assert str(snap1.path) in fail_bc_calls[0]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. MAC denial — AppArmor blocks blockcommit
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_blocked_by_apparmor(mock_shell: MockShell, make_vm_config):
+    """An AppArmor denial is detected and reported as a MAC failure.
+
+    - ``domblklist`` returns success.
+    - ``blockcommit`` returns non-zero with stderr containing
+      "Permission denied" and "apparmor".
+    - Result: ``CommitResult(success=False, error="blocked by apparmor")``.
+    - ``committed_snapshot`` is empty (no snapshot was merged).
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    apparmor_stderr = (
+        "error: Failed to pivot snapshot: Permission denied\n"
+        "libvirt: AppArmor denial: cannot access /var/lib/libvirt/images"
+    )
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=apparmor_stderr,
+        returncode=1,
+        error=apparmor_stderr,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert result.success is False
+    assert result.error == "blocked by apparmor"
+    assert result.committed_snapshot == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. MAC denial — SELinux blocks blockcommit
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
+    """An SELinux denial is detected and reported as a MAC failure.
+
+    - ``domblklist`` returns success.
+    - ``blockcommit`` returns non-zero with stderr containing
+      "Operation not permitted" and "AVC".
+    - Result: ``CommitResult(success=False, error="blocked by selinux")``.
+    - ``committed_snapshot`` is empty (no snapshot was merged).
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    selinux_stderr = (
+        "error: internal error: Operation not permitted\n"
+        "SELinux: AVC denied: { read } for qemu"
+    )
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=selinux_stderr,
+        returncode=1,
+        error=selinux_stderr,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert result.success is False
+    assert result.error == "blocked by selinux"
+    assert result.committed_snapshot == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 8. AppArmor denial error string enables Core deferral
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_blocked_by_apparmor_returns_deferred(
+    mock_shell: MockShell, make_vm_config
+):
+    """The AppArmor error string enables Core's deferral logic.
+
+    Core defers a blockcommit when ``result.error`` contains "apparmor" or
+    "selinux" (see ``Core._execute_blockcommit_steps``).  This test
+    verifies that the error string produced by ``BlockCommitManager``
+    on an AppArmor denial contains the "apparmor" keyword so that Core
+    can detect it and queue a ``DeferredBlockcommit``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    apparmor_stderr = "Permission denied: apparmor profile violation"
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=apparmor_stderr,
+        returncode=1,
+        error=apparmor_stderr,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    # Core's deferral condition: not success AND error contains "apparmor".
+    assert result.success is False
+    assert result.error is not None
+    assert "apparmor" in result.error
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 9. SELinux denial error string enables Core deferral
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_blocked_by_selinux_returns_deferred(
+    mock_shell: MockShell, make_vm_config
+):
+    """The SELinux error string enables Core's deferral logic.
+
+    Core defers a blockcommit when ``result.error`` contains "apparmor" or
+    "selinux" (see ``Core._execute_blockcommit_steps``).  This test
+    verifies that the error string produced by ``BlockCommitManager``
+    on an SELinux denial contains the "selinux" keyword so that Core
+    can detect it and queue a ``DeferredBlockcommit``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    selinux_stderr = "Operation not permitted: AVC denied"
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=selinux_stderr,
+        returncode=1,
+        error=selinux_stderr,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    # Core's deferral condition: not success AND error contains "selinux".
+    assert result.success is False
+    assert result.error is not None
+    assert "selinux" in result.error
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 10. Normal failure does NOT trigger MAC deferral
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_normal_failure_no_deferral(
+    mock_shell: MockShell, make_vm_config
+):
+    """A non-MAC failure does not produce a deferral error string.
+
+    - ``domblklist`` returns success.
+    - ``blockcommit`` returns non-zero with stderr "No such file or
+      directory" — a normal I/O error, not an AppArmor/SELinux denial.
+    - Result: ``CommitResult(success=False)`` with the original error
+      propagated (not "blocked by ...").
+    - The error string does NOT contain "apparmor" or "selinux", so
+      Core will not defer.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    io_error = "error: No such file or directory"
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=False,
+        stdout="",
+        stderr=io_error,
+        returncode=1,
+        error=io_error,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap])
+
+    assert result.success is False
+    # The original error is propagated, not a MAC-specific message.
+    assert result.error == io_error
+    assert "apparmor" not in result.error
+    assert "selinux" not in result.error
+    assert "blocked by" not in result.error
+    # committed_snapshot reflects the snapshot that failed (normal path).
+    assert result.committed_snapshot == snap.name

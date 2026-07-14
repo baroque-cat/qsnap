@@ -28,3 +28,17 @@ def test_istate_manager_is_abstract():
 
     # An InMemoryStateManager instance is an IStateManager.
     assert isinstance(InMemoryStateManager(), IStateManager)
+
+
+def test_istate_manager_deferred_operations_methods_exist():
+    """IStateManager declares deferred blockcommit operations as abstract.
+
+    The methods ``get_deferred_operations``, ``add_deferred_blockcommit``,
+    and ``clear_deferred_operations`` must all be in
+    ``IStateManager.__abstractmethods__`` so that every concrete
+    implementation is forced to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_deferred_operations" in abstract_methods
+    assert "add_deferred_blockcommit" in abstract_methods
+    assert "clear_deferred_operations" in abstract_methods

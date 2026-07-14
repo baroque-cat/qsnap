@@ -41,9 +41,9 @@ class CallTrackingShell(MockShell):
         super().__init__()
         self.calls: list[list[str]] = []
 
-    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         self.calls.append(list(cmd))
-        return super().run(cmd, timeout)
+        return super().run(cmd, timeout, check)
 
 
 @pytest.fixture

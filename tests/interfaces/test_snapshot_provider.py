@@ -63,7 +63,9 @@ def test_snapshot_provider_create_returns_result(cls, init_kwargs):
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
-    result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"))
+    result = provider.create(
+        vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False
+    )
     assert isinstance(result, SnapshotResult)
     assert isinstance(result.success, bool)
 

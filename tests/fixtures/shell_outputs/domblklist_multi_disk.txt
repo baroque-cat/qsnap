@@ -1,0 +1,4 @@
+ Target   Source
+------------------------------------
+ vda      /var/lib/libvirt/images/testvm.qcow2
+ vdb      /var/lib/libvirt/images/testvm-disk2.qcow2

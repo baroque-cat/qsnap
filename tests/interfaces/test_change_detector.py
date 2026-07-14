@@ -15,6 +15,7 @@ from qsnap.interfaces.change import IChangeDetector
 from qsnap.models.config import VMConfig
 from qsnap.models.results import ChangeResult
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
+from qsnap.modules.change.map_detector import MapChangeDetector
 from tests.mocks.mock_modules import MockChangeDetector
 from tests.mocks.mock_shell import MockShell
 from tests.mocks.mock_state import InMemoryStateManager
@@ -41,13 +42,24 @@ def test_allocation_size_detector_no_core_inheritance():
     assert not issubclass(AllocationSizeDetector, Core)
 
 
+def test_map_change_detector_is_ichange_detector():
+    """MapChangeDetector is a subclass of IChangeDetector."""
+    assert issubclass(MapChangeDetector, IChangeDetector)
+
+
+def test_map_change_detector_no_core_inheritance():
+    """MapChangeDetector does NOT inherit from Core (design D1)."""
+    assert not issubclass(MapChangeDetector, Core)
+
+
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
         (AllocationSizeDetector, {"shell": MockShell(), "state": InMemoryStateManager()}),
+        (MapChangeDetector, {"shell": MockShell(), "state": InMemoryStateManager()}),
         (MockChangeDetector, {}),
     ],
-    ids=["allocation", "mock"],
+    ids=["allocation", "map", "mock"],
 )
 def test_change_detector_has_changed_returns_change_result(cls, init_kwargs):
     """has_changed() returns a ChangeResult."""
@@ -65,9 +77,10 @@ def test_change_detector_has_changed_returns_change_result(cls, init_kwargs):
     "cls,init_kwargs",
     [
         (AllocationSizeDetector, {"shell": MockShell(), "state": InMemoryStateManager()}),
+        (MapChangeDetector, {"shell": MockShell(), "state": InMemoryStateManager()}),
         (MockChangeDetector, {}),
     ],
-    ids=["allocation", "mock"],
+    ids=["allocation", "map", "mock"],
 )
 def test_change_detector_has_changed_accepts_disk_parameter(cls, init_kwargs):
     """has_changed() accepts optional disk: str parameter for all implementations."""
@@ -87,3 +100,11 @@ def test_allocation_size_detector_requires_shell_and_state():
         AllocationSizeDetector()  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         AllocationSizeDetector(shell=MockShell())  # type: ignore[call-arg]
+
+
+def test_map_change_detector_requires_shell_and_state():
+    """MapChangeDetector requires both IShell and IStateManager constructor arguments."""
+    with pytest.raises(TypeError):
+        MapChangeDetector()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        MapChangeDetector(shell=MockShell())  # type: ignore[call-arg]

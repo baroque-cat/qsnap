@@ -80,6 +80,28 @@ def _latest_to_rows(
     return rows
 
 
+def _print_tree(
+    data: dict[str, list[SnapshotInfo]],
+    vm_configs: list[VMConfig],
+) -> None:
+    """Print snapshots as an indented backing-chain tree.
+
+    The backing chain is: base_image ← snap1 ← snap2 ← ...
+    Each level is indented one step deeper than its parent.
+    """
+    base_map = {vm.name: vm.base_image for vm in vm_configs}
+    for vm_name, snapshots in data.items():
+        print(f"=== {vm_name} ===")
+        base = base_map.get(vm_name)
+        if base is not None:
+            print(f"{base.name}")
+        else:
+            print("(unknown base image)")
+        for i, snap in enumerate(snapshots):
+            indent = "  " * (i + 1)
+            print(f"{indent}{snap.path.name}")
+
+
 def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for vm_name, result in data.items():
@@ -202,6 +224,9 @@ def handle_list(core: Core, args: Namespace) -> int:
 
     if sub == "snapshots":
         data = core.list_snapshots(vm_filter)
+        if getattr(args, "tree", False):
+            _print_tree(data, core.list_config())
+            return EXIT_SUCCESS
         rows = _snapshots_to_rows(data)
         columns = ["vm", "name", "path", "timestamp", "allocation"]
     elif sub == "backups":

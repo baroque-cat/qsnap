@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
 
 
 class IStateManager(ABC):
@@ -32,4 +32,21 @@ class IStateManager(ABC):
     @abstractmethod
     def get_snapshots(self, vm_name: str) -> list[SnapshotInfo]:
         """Return all recorded snapshots for *vm_name*, sorted by creation time."""
+        ...
+
+    @abstractmethod
+    def get_deferred_operations(self, vm_name: str) -> list[DeferredBlockcommit]:
+        """Return all deferred blockcommit operations for *vm_name*."""
+        ...
+
+    @abstractmethod
+    def add_deferred_blockcommit(
+        self, vm_name: str, snapshots: list[str], reason: str
+    ) -> None:
+        """Queue a deferred blockcommit for *vm_name* with the given *reason*."""
+        ...
+
+    @abstractmethod
+    def clear_deferred_operations(self, vm_name: str) -> None:
+        """Clear all deferred blockcommit operations for *vm_name*."""
         ...

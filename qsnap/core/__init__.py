@@ -25,6 +25,7 @@ from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
     CheckResult,
+    DeferredBlockcommit,
     RestoreResult,
     RetentionItem,
     RetentionResult,
@@ -464,19 +465,123 @@ class Core:
 
     # ── full pipeline ──────────────────────────────────────────────────
 
+    def _validate_environment(self, vm_config: VMConfig) -> CheckResult:
+        """Pre-flight environment validation before pipeline execution.
+
+        Verifies:
+        (a) snapshot_dir exists and is writable (``test -d`` + ``test -w``)
+        (b) base_image file exists (``test -f``)
+        (c) virsh and qemu-img binaries are in PATH (``which``)
+        (d) VM is defined in libvirt (``virsh dominfo`` returns 0)
+
+        All checks go through ``IShell`` so they are fully mockable in tests.
+        Returns ``CheckResult`` with ``status="ok"`` or
+        ``status="validation_failed"``.
+        """
+        broken: list[str] = []
+
+        # (a) snapshot_dir exists and is writable
+        dir_check = self._shell.run(
+            ["test", "-d", str(vm_config.snapshot_dir)],
+            timeout=10, check=True,
+        )
+        if not dir_check.success:
+            broken.append(
+                f"snapshot_dir not found: {vm_config.snapshot_dir}"
+            )
+        else:
+            write_check = self._shell.run(
+                ["test", "-w", str(vm_config.snapshot_dir)],
+                timeout=10, check=True,
+            )
+            if not write_check.success:
+                broken.append(
+                    f"snapshot_dir not writable: {vm_config.snapshot_dir}"
+                )
+
+        # (b) base_image file exists
+        img_check = self._shell.run(
+            ["test", "-f", str(vm_config.base_image)],
+            timeout=10, check=True,
+        )
+        if not img_check.success:
+            broken.append(
+                f"base_image not found: {vm_config.base_image}"
+            )
+
+        # (c) virsh and qemu-img in PATH
+        for binary in ("virsh", "qemu-img"):
+            result = self._shell.run(
+                ["which", binary], timeout=10, check=True,
+            )
+            if not result.success:
+                broken.append(f"{binary} not in PATH")
+
+        # (d) VM defined in libvirt
+        dominfo = self._shell.run(
+            ["virsh", "dominfo", "--domain", vm_config.name],
+            timeout=30, check=True,
+        )
+        if not dominfo.success:
+            broken.append(
+                f"VM not defined in libvirt: {vm_config.name}"
+            )
+
+        # (e) Target paths exist (mode-dependent)
+        for target in vm_config.targets:
+            target_check = self._shell.run(
+                ["test", "-d", str(target.path)],
+                timeout=10, check=True,
+            )
+            if not target_check.success:
+                if vm_config.snapshot_create == "ondemand":
+                    logger.info(
+                        "Target %s unreachable (ondemand mode)",
+                        target.path,
+                    )
+                else:
+                    broken.append(
+                        f"target directory not found: {target.path}"
+                    )
+
+        if broken:
+            return CheckResult(
+                vm_name=vm_config.name,
+                status="validation_failed",
+                broken_snapshots=broken,
+            )
+        return CheckResult(
+            vm_name=vm_config.name,
+            status="ok",
+        )
+
     def _execute_pipeline(self, vm_config: VMConfig) -> bool:
         """Execute the full pipeline for a single VM.
 
         Steps:
-        1. Change detection (if ``snapshot_create`` mode requires it)
-        2. Snapshot creation (if detector says we should, or mode is "always")
-        3. Snapshot retention evaluation
-        4. Snapshot lifecycle — blockcommit removed snapshots
-        5. Per-target backup transfer → backup retention → cleanup
+        1. Pre-flight environment validation
+        2. Deferred blockcommit check (if VM is shut off)
+        3. Change detection (if ``snapshot_create`` mode requires it)
+        4. Snapshot creation (if detector says we should, or mode is "always")
+        5. Snapshot retention evaluation
+        6. Snapshot lifecycle — blockcommit removed snapshots
+        7. Per-target backup transfer → backup verification → backup retention → cleanup
 
         Returns:
             True if any backup transfer failed (for EXIT_BACKUP_ABORT).
         """
+        # Step 1: Pre-flight validation (skipped in dry-run mode)
+        if not self._dry_run:
+            validation = self._validate_environment(vm_config)
+            if validation.status != "ok":
+                error_msg = "; ".join(validation.broken_snapshots)
+                logger.error(
+                    "Environment validation failed for VM %s: %s",
+                    vm_config.name,
+                    error_msg,
+                )
+                raise RuntimeError(error_msg)
+
         self._execute_snapshot_steps(vm_config)
         return self._execute_backup_steps(vm_config)
 
@@ -487,10 +592,15 @@ class Core:
 
         Returns False (no backup steps, so no backup failure).
         """
+        # Step 0: Deferred blockcommit check
+        self._check_deferred_operations(vm_config)
+
         # Step 1: Change detection / ondemand check
         should_snapshot = True
         if vm_config.snapshot_create == "onchange":
-            detector = self._factory.create_change_detector(vm_config.snapshot_create)
+            detector = self._factory.create_change_detector(
+                vm_config.change_detection_mode
+            )
             disks = self._resolve_disks(vm_config)
             should_snapshot = any(
                 detector.has_changed(vm_config, disk=disk).changed
@@ -517,6 +627,73 @@ class Core:
             self._blockcommit_snapshots(vm_config, retention_result)
 
         return False
+
+    def _check_deferred_operations(self, vm_config: VMConfig) -> None:
+        """Check and execute deferred blockcommit operations.
+
+        Before creating new snapshots, check if there are pending deferred
+        blockcommits. If the VM is shut off, execute them and clear the
+        queue on success. If the VM is running, skip with an INFO log.
+        """
+        deferred = self._state.get_deferred_operations(vm_config.name)
+        if not deferred:
+            return
+
+        # Check VM state
+        domstate_cmd = [
+            "virsh", "domstate", "--domain", vm_config.name,
+        ]
+        state_result = self._shell.run(domstate_cmd, timeout=30)
+        vm_state = state_result.stdout.strip().lower() if state_result.success else ""
+
+        if "shut off" in vm_state:
+            # Execute deferred blockcommits
+            manager = self._factory.create_lifecycle_manager(
+                mode=vm_config.lifecycle_mode,
+            )
+            failed_entries: list[DeferredBlockcommit] = []
+            for entry in deferred:
+                snapshots = [
+                    s for s in self._state.get_snapshots(vm_config.name)
+                    if s.name in entry.snapshots
+                ]
+                if not snapshots:
+                    logger.warning(
+                        "Deferred snapshots not found for VM %s: %s",
+                        vm_config.name,
+                        entry.snapshots,
+                    )
+                    failed_entries.append(entry)
+                    continue
+                result = manager.blockcommit(vm_config, snapshots)
+                if result.success:
+                    logger.info(
+                        "Deferred blockcommit succeeded for VM %s "
+                        "(was blocked by %s)",
+                        vm_config.name,
+                        entry.reason,
+                    )
+                else:
+                    # Still failing — keep for next run
+                    logger.warning(
+                        "Deferred blockcommit still failing for VM %s: %s",
+                        vm_config.name,
+                        result.error,
+                    )
+                    failed_entries.append(entry)
+
+            # Update deferred queue: clear all, then re-add only failures
+            if len(failed_entries) < len(deferred):
+                self._state.clear_deferred_operations(vm_config.name)
+                for entry in failed_entries:
+                    self._state.add_deferred_blockcommit(
+                        vm_config.name, entry.snapshots, entry.reason,
+                    )
+        else:
+            logger.info(
+                "Skipping %d deferred blockcommits — VM is running",
+                len(deferred),
+            )
 
     def _create_snapshot(self, vm_config: VMConfig) -> list[SnapshotResult]:
         """Step 2: Create a snapshot for each disk of *vm_config*.
@@ -549,6 +726,7 @@ class Core:
                 snapshot_name,
                 disk,
                 snapshot_path,
+                quiesce=vm_config.snapshot_quiesce,
             )
             if result.success:
                 info = SnapshotInfo(
@@ -640,8 +818,27 @@ class Core:
             )
             return
 
-        manager = self._factory.create_lifecycle_manager()
-        manager.blockcommit(vm_config, to_merge)
+        manager = self._factory.create_lifecycle_manager(
+            mode=vm_config.lifecycle_mode,
+        )
+        result = manager.blockcommit(vm_config, to_merge)
+
+        # Check for MAC denial — defer if blocked by AppArmor/SELinux
+        if not result.success and result.error and (
+            "apparmor" in result.error or "selinux" in result.error
+        ):
+                reason = "apparmor" if "apparmor" in result.error else "selinux"
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    [s.name for s in to_merge],
+                    reason,
+                )
+                logger.info(
+                    "Blockcommit blocked by %s for VM %s — "
+                    "deferred to next VM shutdown",
+                    reason,
+                    vm_config.name,
+                )
 
     # ── backup steps (5) ───────────────────────────────────────────────
 
@@ -789,6 +986,9 @@ class Core:
         """
         if preserve_str is None:
             return RetentionPolicy()
+
+        if preserve_str == "latest":
+            return RetentionPolicy(preserve_min="latest")
 
         counts: dict[str, int] = {
             "hourly": 0,

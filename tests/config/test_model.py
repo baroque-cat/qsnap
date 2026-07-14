@@ -159,3 +159,108 @@ def test_vm_config_explicit_disks_list():
         disks=["vda", "vdb"],
     )
     assert vm.disks == ["vda", "vdb"]
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.verify — post-transfer verification mode
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_default_verify_metadata():
+    """TargetConfig with no verify arg defaults to 'metadata'."""
+    target = TargetConfig(path=Path("/tmp"))
+    assert target.verify == "metadata"
+
+
+def test_target_config_explicit_verify_full():
+    """TargetConfig(verify='full') stores 'full'."""
+    target = TargetConfig(path=Path("/tmp"), verify="full")
+    assert target.verify == "full"
+
+
+def test_target_config_verify_off():
+    """TargetConfig(verify='off') stores 'off' (verification disabled)."""
+    target = TargetConfig(path=Path("/tmp"), verify="off")
+    assert target.verify == "off"
+
+
+def test_target_config_verify_immutable():
+    """TargetConfig is a frozen dataclass; mutating verify raises FrozenInstanceError."""
+    target = TargetConfig(path=Path("/tmp"))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        target.verify = "off"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# VMConfig.snapshot_quiesce — --quiesce flag for virsh snapshot-create-as
+# ---------------------------------------------------------------------------
+
+
+def test_vm_config_snapshot_quiesce_default_false():
+    """VMConfig with no snapshot_quiesce arg defaults to False."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+    )
+    assert vm.snapshot_quiesce is False
+
+
+def test_vm_config_snapshot_quiesce_true():
+    """VMConfig(snapshot_quiesce=True) stores True."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+        snapshot_quiesce=True,
+    )
+    assert vm.snapshot_quiesce is True
+
+
+def test_vm_config_snapshot_quiesce_immutable():
+    """VMConfig is a frozen dataclass; mutating snapshot_quiesce raises FrozenInstanceError."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+        snapshot_quiesce=True,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        vm.snapshot_quiesce = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# VMConfig.lifecycle_mode — snapshot-merge strategy
+# ---------------------------------------------------------------------------
+
+
+def test_vm_config_lifecycle_mode_default_virsh():
+    """VMConfig with no lifecycle_mode arg defaults to 'virsh' (blockcommit)."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+    )
+    assert vm.lifecycle_mode == "virsh"
+
+
+def test_vm_config_lifecycle_mode_qemu_img():
+    """VMConfig(lifecycle_mode='qemu-img') stores 'qemu-img' (qemu-img commit)."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
+        lifecycle_mode="qemu-img",
+    )
+    assert vm.lifecycle_mode == "qemu-img"
+
+
+# ---------------------------------------------------------------------------
+# RetentionPolicy.preserve_min — minimum preservation duration
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_preserve_min_latest():
+    """RetentionPolicy(preserve_min='latest') stores 'latest'."""
+    policy = RetentionPolicy(preserve_min="latest")
+    assert policy.preserve_min == "latest"

@@ -5,8 +5,10 @@ Stores state in a dict.  All methods fully functional.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
 
 
 class InMemoryStateManager(IStateManager):
@@ -43,3 +45,31 @@ class InMemoryStateManager(IStateManager):
         if not snapshots:
             return []
         return sorted(snapshots, key=lambda s: s.timestamp)  # type: ignore[union-attr]
+
+    def get_deferred_operations(self, vm_name: str) -> list[DeferredBlockcommit]:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return []
+        deferred = vm_state.get("deferred_operations", [])
+        if not deferred:
+            return []
+        return list(deferred)  # type: ignore[return-value]
+
+    def add_deferred_blockcommit(
+        self, vm_name: str, snapshots: list[str], reason: str
+    ) -> None:
+        if vm_name not in self._state:
+            self._state[vm_name] = {}
+        deferred = self._state[vm_name].setdefault("deferred_operations", [])
+        deferred.append(
+            DeferredBlockcommit(
+                snapshots=list(snapshots),
+                reason=reason,
+                since=datetime.now(),
+            )
+        )
+
+    def clear_deferred_operations(self, vm_name: str) -> None:
+        if vm_name not in self._state:
+            return
+        self._state[vm_name]["deferred_operations"] = []

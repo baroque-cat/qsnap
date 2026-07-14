@@ -430,3 +430,47 @@ def test_preserve_day_of_week_does_not_affect_other_buckets():
     )
     assert r1.keep == r2.keep
     assert r1.remove == r2.remove
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. preserve_min="latest" — keep only the most recent item
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_preserve_min_latest_keeps_only_most_recent():
+    """preserve_min="latest" keeps only the single most-recent item.
+
+    ``_parse_duration("latest")`` returns ``timedelta(0)`` (a zero-width
+    window), and the ``preserve_min == "latest"`` branch in ``evaluate()``
+    force-keeps only the most-recent item (the last after ascending sort).
+    With all bucket counts at 0, no additional items are rescued by the
+    time-bucket retention, so exactly 1 item is kept and the remaining 9
+    are removed.
+    """
+    items = [
+        RetentionItem(name=f"snap.{i:02d}", timestamp=datetime(2025, 1, 1, 0, 0) + timedelta(hours=i))
+        for i in range(10)
+    ]
+    now = items[-1].timestamp  # 2025-01-01T09:00:00
+
+    policy = RetentionPolicy(
+        hourly=0,
+        daily=0,
+        weekly=0,
+        monthly=0,
+        yearly=0,
+        preserve_min="latest",
+    )
+
+    result = TimeBasedRetention(policy).evaluate(items, policy, now=now)
+
+    # Exactly one item is kept: the most recent (snap.09).
+    assert len(result.keep) == 1
+    assert result.keep == ["snap.09"]
+
+    # The other 9 items are removed.
+    assert len(result.remove) == 9
+    assert set(result.remove) == {f"snap.{i:02d}" for i in range(9)}
+
+    # No item appears in both lists.
+    assert not (set(result.keep) & set(result.remove))

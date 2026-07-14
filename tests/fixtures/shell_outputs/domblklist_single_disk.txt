@@ -1,0 +1,3 @@
+ Target   Source
+------------------------------------
+ vda      /var/lib/libvirt/images/testvm.qcow2

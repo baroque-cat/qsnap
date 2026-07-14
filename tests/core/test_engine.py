@@ -668,3 +668,83 @@ def test_ondemand_snapshot_skipped_when_no_target_reachable(
     assert not create_spy.called, (
         "Snapshot should NOT be created when no target is reachable (ondemand)"
     )
+
+
+# ── test_core_passes_quiesce_true_to_snapshot_provider ────────────────────
+
+
+def test_core_passes_quiesce_true_to_snapshot_provider(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core passes ``quiesce=True`` to ``snapshot_provider.create()``.
+
+    When ``VMConfig.snapshot_quiesce`` is ``True``, the ``create()`` call
+    must receive ``quiesce=True`` as a keyword argument.
+    """
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_quiesce=True,
+        disks=["vda"],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.snapshot()
+
+    assert create_spy.called
+    assert create_spy.call_args.kwargs.get("quiesce") is True
+
+
+# ── test_core_passes_quiesce_false_to_snapshot_provider ───────────────────
+
+
+def test_core_passes_quiesce_false_to_snapshot_provider(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core passes ``quiesce=False`` to ``snapshot_provider.create()``.
+
+    When ``VMConfig.snapshot_quiesce`` is ``False`` (the default), the
+    ``create()`` call must receive ``quiesce=False``.
+    """
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_quiesce=False,
+        disks=["vda"],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.snapshot()
+
+    assert create_spy.called
+    assert create_spy.call_args.kwargs.get("quiesce") is False

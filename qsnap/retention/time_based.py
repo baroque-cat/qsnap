@@ -35,9 +35,12 @@ def _parse_duration(text: str) -> timedelta:
     """Parse a duration string like ``"6h"``, ``"2d"`` into a ``timedelta``.
 
     ``"all"`` returns ``timedelta.max`` (effectively infinite).
+    ``"latest"`` returns ``timedelta(0)`` (zero-width window).
     """
     if text == "all":
         return timedelta.max
+    if text == "latest":
+        return timedelta(0)
     match = re.match(r"^(\d+)([hdwmy])$", text)
     if match is None:
         raise ValueError(f"Invalid duration string: {text!r}")
@@ -100,6 +103,10 @@ class TimeBasedRetention(IRetentionEngine):
         # 1. preserve_min — keep all items within the minimum window.
         if policy.preserve_min == "all":
             keep_names.update(it.name for it in sorted_items)
+        elif policy.preserve_min == "latest":
+            # Keep only the single most recent item.
+            if sorted_items:
+                keep_names.add(sorted_items[-1].name)
         else:
             min_delta = _parse_duration(policy.preserve_min)
             threshold = now - min_delta

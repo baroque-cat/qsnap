@@ -31,6 +31,7 @@ def test_help_text_lists_subcommands_and_flags(capsys):
         "--loglevel",
         "--format",
         "--lockfile",
+        "-L",
     ):
         assert flag in text
 
@@ -157,3 +158,34 @@ def test_check_without_deep_defaults_false():
     parser = build_argparser()
     ns = parser.parse_args(["check"])
     assert ns.deep is False
+
+
+# ── --tree and -L/--long flag tests ─────────────────────────────────────
+
+
+def test_tree_flag_parses(cli_app):
+    """--tree flag on 'list snapshots' sets ns.tree to True."""
+    ns = cli_app.parse_args(["list", "snapshots", "--tree"])
+    assert ns.tree is True
+
+
+def test_tree_flag_defaults_false(cli_app):
+    """Without --tree, ns.tree is False."""
+    ns = cli_app.parse_args(["list", "snapshots"])
+    assert ns.tree is False
+
+
+def test_long_flag_translates_to_format_long(cli_app):
+    """-L flag sets long_format=True; after main() resolution, format == 'long'."""
+    ns = cli_app.parse_args(["-L", "list", "snapshots"])
+    assert ns.long_format is True
+    # Simulate main() resolution: -L → format="long"
+    if getattr(ns, "long_format", False):
+        ns.format = "long"
+    assert ns.format == "long"
+
+
+def test_long_flag_with_list(cli_app):
+    """--long flag (long form of -L) sets ns.long_format to True."""
+    ns = cli_app.parse_args(["--long", "list", "snapshots"])
+    assert ns.long_format is True

@@ -47,9 +47,7 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     - The virsh command contains ``--disk-only --atomic --no-metadata``.
     """
     vm_config = make_vm_config()
-    snapshot_path = Path(
-        "/var/lib/libvirt/snapshots/testvm/snap.20250101T000000"
-    )
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
     # Step 1: virsh snapshot-create-as succeeds
     mock_shell.expect("virsh snapshot-create-as").returns(
@@ -72,9 +70,7 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
         )
     )
     # Step 3: qemu-img info returns JSON with actual-size
-    qemu_info_json = json.dumps(
-        {"actual-size": 1048576, "virtual-size": 1073741824}
-    )
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -93,6 +89,7 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
             snapshot_name="snap.20250101T000000",
             disk="vda",
             snapshot_path=snapshot_path,
+            quiesce=False,  # explicit — verify backward-compatible signature
         )
 
     # Assert successful result with correct allocation from qemu-img info
@@ -103,16 +100,14 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     assert result.path == snapshot_path
 
     # Assert the virsh command contains "vda" and the required flags
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
-    virsh_cmd = next(
-        cmd for cmd in all_cmds if "snapshot-create-as" in cmd
-    )
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    virsh_cmd = next(cmd for cmd in all_cmds if "snapshot-create-as" in cmd)
     assert "vda" in virsh_cmd
     assert "--disk-only" in virsh_cmd
     assert "--atomic" in virsh_cmd
     assert "--no-metadata" in virsh_cmd
+    # quiesce=False → no --quiesce flag
+    assert "--quiesce" not in virsh_cmd
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -126,9 +121,7 @@ def test_create_snapshot_virsh_fails(mock_shell, make_vm_config):
     and short-circuits — ``chmod`` and ``qemu-img info`` are NOT called.
     """
     vm_config = make_vm_config()
-    snapshot_path = Path(
-        "/var/lib/libvirt/snapshots/testvm/snap.20250101T000000"
-    )
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
     stderr_msg = "error: internal error: snapshot creation failed"
     mock_shell.expect("virsh snapshot-create-as").returns(
@@ -156,12 +149,9 @@ def test_create_snapshot_virsh_fails(mock_shell, make_vm_config):
     assert result.new_allocation == 0
 
     # Assert short-circuit: only virsh was called; chmod and qemu-img were NOT
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     assert len(all_cmds) == 1, (
-        "Only the virsh command should have been called, "
-        f"but got {len(all_cmds)} calls"
+        f"Only the virsh command should have been called, but got {len(all_cmds)} calls"
     )
     assert "snapshot-create-as" in all_cmds[0]
     assert not any("chmod" in cmd for cmd in all_cmds), (
@@ -188,11 +178,11 @@ def test_create_snapshot_timeout(mock_shell, make_vm_config):
     the exception (bypassing the module's result-object contract), we
     simulate the timeout by configuring ``MockShell`` to return the same
     ``ShellResult`` that ``SubprocessShell`` would produce.
+
+    Also verifies the default (non-quiesce) timeout is 120 seconds.
     """
     vm_config = make_vm_config()
-    snapshot_path = Path(
-        "/var/lib/libvirt/snapshots/testvm/snap.20250101T000000"
-    )
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
     mock_shell.expect("virsh snapshot-create-as").returns(
         ShellResult(
@@ -204,17 +194,343 @@ def test_create_snapshot_timeout(mock_shell, make_vm_config):
         )
     )
 
-    provider = ExternalSnapshotProvider(mock_shell)
-    result = provider.create(
-        vm_config=vm_config,
-        snapshot_name="snap.20250101T000000",
-        disk="vda",
-        snapshot_path=snapshot_path,
-    )
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
 
     assert result.success is False
     assert "timed out" in result.error.lower()
     assert result.new_allocation == 0
+
+    # Verify 120s default timeout (non-quiesce path)
+    virsh_calls = [
+        call_obj
+        for call_obj in shell_spy.call_args_list
+        if "snapshot-create-as" in " ".join(call_obj.args[0])
+    ]
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 120
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 3a. Quiesce support — --quiesce flag and 180s timeout
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _expect_successful_create(mock_shell):
+    """Configure MockShell expectations for a successful create() pipeline.
+
+    Sets up virsh snapshot-create-as, chmod, and qemu-img info to all
+    succeed.  The qemu-img info JSON carries ``actual-size: 1048576``.
+    """
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _virsh_create_calls(shell_spy):
+    """Extract all virsh snapshot-create-as calls recorded by *shell_spy*."""
+    return [
+        call_obj
+        for call_obj in shell_spy.call_args_list
+        if "snapshot-create-as" in " ".join(call_obj.args[0])
+    ]
+
+
+def test_create_snapshot_with_quiesce_enabled(mock_shell, make_vm_config):
+    """When ``quiesce=True``, the virsh command contains ``--quiesce``."""
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is True
+    virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
+    assert len(virsh_cmds) == 1
+    assert "--quiesce" in virsh_cmds[0]
+
+
+def test_create_snapshot_without_quiesce_default(mock_shell, make_vm_config):
+    """When ``quiesce`` is not passed (defaults to ``False``), the virsh
+    command does NOT contain ``--quiesce``.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            # quiesce not passed — defaults to False
+        )
+
+    assert result.success is True
+    virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
+    assert len(virsh_cmds) == 1
+    assert "--quiesce" not in virsh_cmds[0]
+
+
+def test_create_snapshot_quiesce_enabled(mock_shell, make_vm_config):
+    """When ``quiesce=True``, the timeout passed to ``shell.run()`` for the
+    virsh command is 180 seconds.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is True
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 180
+
+
+def test_create_snapshot_quiesce_disabled_default(mock_shell, make_vm_config):
+    """When ``quiesce`` is not passed (defaults to ``False``), the timeout
+    passed to ``shell.run()`` for the virsh command is 120 seconds.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            # quiesce not passed — defaults to False
+        )
+
+    assert result.success is True
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 120
+
+
+def test_create_snapshot_quiesce_guest_agent_not_installed(mock_shell, make_vm_config):
+    """When virsh returns a non-zero exit with a guest-agent error (because
+    qemu-guest-agent is not installed), ``create()`` returns
+    ``SnapshotResult(success=False)`` and does NOT silently fall back to a
+    non-quiesce snapshot.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    stderr_msg = (
+        "error: internal error: unable to execute guest agent: qemu-guest-agent is not running"
+    )
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is False
+    assert result.error == stderr_msg
+    assert result.new_allocation == 0
+
+    # No silent fallback: exactly ONE virsh call (with --quiesce), no retry
+    virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
+    assert len(virsh_cmds) == 1, (
+        f"Should not retry/fallback — exactly one virsh call expected, but got {len(virsh_cmds)}"
+    )
+    assert "--quiesce" in virsh_cmds[0]
+
+
+def test_create_snapshot_quiesce_timeout_180s(mock_shell, make_vm_config):
+    """When ``quiesce=True``, the timeout passed to ``shell.run()`` for the
+    virsh command is exactly 180 seconds (not 120).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is True
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 180
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 3b. Quiesce risk tests — timeout and fallback safety
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_risk_quiesce_timeout_180s_not_120s(mock_shell, make_vm_config):
+    """Risk test: when ``quiesce=True``, the virsh timeout MUST be 180s,
+    NOT 120s.  A 120s timeout for a quiesced snapshot is a bug — the
+    guest agent freeze/thaw cycle needs extra time.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is True
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    timeout = virsh_calls[0].kwargs["timeout"]
+    assert timeout == 180, f"Expected 180s timeout for quiesce, got {timeout}"
+    assert timeout != 120, "120s timeout for quiesce path is a bug"
+
+
+def test_risk_quiesce_agent_timeout_returns_failure(mock_shell, make_vm_config):
+    """Risk test: when the quiesced virsh command times out, ``create()``
+    returns ``SnapshotResult(success=False)`` with an error containing
+    "timed out".
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error="Command timed out after 180s",
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is False
+    assert "timed out" in result.error.lower()
+    assert result.new_allocation == 0
+
+    # Verify the timeout was 180 (quiesce path)
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 180
+
+
+def test_risk_quiesce_no_silent_fallback(mock_shell, make_vm_config):
+    """Risk test: when the quiesced snapshot fails due to a guest-agent
+    error, ``create()`` must return the error — it must NOT silently
+    retry without ``--quiesce``.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    stderr_msg = (
+        "error: internal error: unable to execute guest agent: qemu-guest-agent is not responding"
+    )
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+            quiesce=True,
+        )
+
+    assert result.success is False
+    assert result.error == stderr_msg
+    assert result.new_allocation == 0
+
+    # No fallback: exactly ONE virsh call, and it must contain --quiesce
+    virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
+    assert len(virsh_cmds) == 1, (
+        "Must NOT retry without --quiesce — exactly one virsh call expected, "
+        f"but got {len(virsh_cmds)}"
+    )
+    assert "--quiesce" in virsh_cmds[0], (
+        "The single virsh call must include --quiesce (no silent fallback)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -252,17 +568,11 @@ def test_list_backing_chain_with_snapshots(mock_shell, make_vm_config):
             "actual-size": 1073741824,
         },
         {
-            "filename": (
-                "/var/lib/libvirt/snapshots/testvm/"
-                "testvm.20250101T000000.qcow2"
-            ),
+            "filename": ("/var/lib/libvirt/snapshots/testvm/testvm.20250101T000000.qcow2"),
             "actual-size": 1048576,
         },
         {
-            "filename": (
-                "/var/lib/libvirt/snapshots/testvm/"
-                "testvm.20250102T000000.qcow2"
-            ),
+            "filename": ("/var/lib/libvirt/snapshots/testvm/testvm.20250102T000000.qcow2"),
             "actual-size": 2097152,
         },
     ]
@@ -372,9 +682,7 @@ def test_delete_snapshot_success(mock_shell):
 
     snapshot = SnapshotInfo(
         name="snap.20250101T000000",
-        path=Path(
-            "/var/lib/libvirt/snapshots/testvm/snap.20250101T000000.qcow2"
-        ),
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=1048576,
     )
@@ -409,9 +717,7 @@ def test_delete_snapshot_file_not_found(mock_shell):
 
     snapshot = SnapshotInfo(
         name="snap.20250101T000000",
-        path=Path(
-            "/var/lib/libvirt/snapshots/testvm/nonexistent.qcow2"
-        ),
+        path=Path("/var/lib/libvirt/snapshots/testvm/nonexistent.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=1048576,
     )

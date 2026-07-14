@@ -10,6 +10,7 @@ and that call ordering is correct.
 from __future__ import annotations
 
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -23,9 +24,10 @@ from qsnap.cli.commands import (
     handle_snapshot,
     handle_stats,
 )
-from qsnap.cli.errors import EXIT_GENERIC
+from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
-from qsnap.models.results import RestoreResult
+from qsnap.models.config import VMConfig
+from qsnap.models.results import RestoreResult, SnapshotInfo
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -53,6 +55,7 @@ def _make_list_args(**overrides) -> Namespace:
         "list_subcommand": "snapshots",
         "vm": [],
         "format": "table",
+        "tree": False,
         "dry_run": False,
         "preserve": False,
         "preserve_snapshots": False,
@@ -293,3 +296,38 @@ def test_handle_check_without_deep_passes_deep_false_to_core(cli_app):
     args = cli_app.parse_args(["check"])
     handle_check(mock_core, args)
     mock_core.check.assert_called_once_with(None, deep=False)
+
+
+# ── --tree flag dispatch tests ───────────────────────────────────────────
+
+
+def test_list_snapshots_tree_dispatches_to_core_list_snapshots(capsys):
+    """handle_list with tree=True calls core.list_snapshots() and _print_tree."""
+    mock_core = _make_mock_core()
+    mock_core.list_snapshots.return_value = {
+        "testvm": [
+            SnapshotInfo(
+                name="snap1",
+                path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1.qcow2"),
+                timestamp=datetime(2025, 7, 14, 10, 0),
+                allocation=1024,
+            ),
+        ]
+    }
+    mock_core.list_config.return_value = [
+        VMConfig(
+            name="testvm",
+            base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+            snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+        )
+    ]
+    args = _make_list_args(tree=True)
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    mock_core.list_snapshots.assert_called_once_with(None)
+    mock_core.list_config.assert_called_once_with()
+    captured = capsys.readouterr()
+    assert "=== testvm ===" in captured.out
+    assert "testvm.qcow2" in captured.out
+    assert "  testvm.snap1.qcow2" in captured.out

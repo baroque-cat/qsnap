@@ -127,6 +127,21 @@ class RetentionResult:
     remove: list[str] = field(default_factory=list)
 
 
+# ── Deferred operations ──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DeferredBlockcommit:
+    """A deferred blockcommit operation blocked by MAC (AppArmor/SELinux).
+
+    Stored in ``IStateManager`` and retried when the VM is shut off.
+    """
+
+    snapshots: list[str]
+    reason: str
+    since: datetime
+
+
 # ── Check (backing-chain integrity) ───────────────────────────────────────
 
 

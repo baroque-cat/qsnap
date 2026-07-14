@@ -12,8 +12,23 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
+from qsnap.utils.parsing import parse_domblklist_target
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_mac_denial(stderr: str) -> str | None:
+    """Detect AppArmor/SELinux denial from virsh stderr.
+
+    Returns ``"apparmor"``, ``"selinux"``, or ``None`` if the error is
+    not MAC-related.
+    """
+    lower = stderr.lower()
+    if "permission denied" in lower or "apparmor" in lower:
+        return "apparmor"
+    if "operation not permitted" in lower or "avc" in lower:
+        return "selinux"
+    return None
 
 
 class BlockCommitManager(ILifecycleManager):
@@ -55,8 +70,9 @@ class BlockCommitManager(ILifecycleManager):
                 error=domblklist_result.error,
             )
 
-        target = _parse_domblklist_target(domblklist_result.stdout)
-        if target is None:
+        try:
+            target = parse_domblklist_target(domblklist_result.stdout)
+        except ValueError:
             return CommitResult(
                 success=False,
                 committed_snapshot="",
@@ -83,6 +99,14 @@ class BlockCommitManager(ILifecycleManager):
             ]
             result = self._shell.run(cmd, timeout=3600)
             if not result.success:
+                # Check for MAC denial (AppArmor/SELinux)
+                mac_reason = _detect_mac_denial(result.stderr)
+                if mac_reason is not None:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=f"blocked by {mac_reason}",
+                    )
                 # Short-circuit on first failure (design D4)
                 return CommitResult(
                     success=False,
@@ -96,25 +120,3 @@ class BlockCommitManager(ILifecycleManager):
             committed_snapshot=last_merged,
             error=None,
         )
-
-
-# ── module-level helpers ─────────────────────────────────────────────────
-
-
-def _parse_domblklist_target(stdout: str) -> str | None:
-    """Extract the disk target (first column, e.g. ``vda``) from domblklist output.
-
-    The output looks like::
-
-        Target   Source
-        ------------------------------------
-        vda      /var/lib/libvirt/images/vm.qcow2
-
-    Returns the target device name of the first data row.
-    """
-    lines = stdout.strip().splitlines()
-    for line in lines:
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] != "Target" and not line.startswith("-"):
-            return parts[0]
-    return None

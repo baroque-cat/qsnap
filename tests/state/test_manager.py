@@ -7,6 +7,7 @@ recording/listing with timestamp sorting, and the atomic write pattern
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
 from qsnap.state.json_manager import JsonStateManager
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -128,3 +129,98 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     # Re-reading through the manager must yield the original value.
     assert manager.get_last_allocation("crashvm") == 100
+
+
+# ── deferred operations tests ────────────────────────────────────────────
+
+
+def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry; get_deferred_operations returns it with correct fields."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2"]
+    assert op.reason == "apparmor"
+    assert isinstance(op.since, datetime)
+
+
+def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
+    """Alternate: add_deferred_blockcommit round-trips through get_deferred_operations."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2"]
+    assert op.reason == "apparmor"
+    assert isinstance(op.since, datetime)
+
+
+def test_clear_deferred_operations(tmp_path: Path) -> None:
+    """clear_deferred_operations removes all queued operations for a VM."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", ["snap2.qcow2", "snap3.qcow2"], "selinux")
+
+    assert len(manager.get_deferred_operations("vm1")) == 2
+
+    manager.clear_deferred_operations("vm1")
+
+    assert manager.get_deferred_operations("vm1") == []
+
+
+def test_no_deferred_operations_empty_list(tmp_path: Path) -> None:
+    """A VM with no state file returns an empty list, not None or an exception."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    result = manager.get_deferred_operations("vm_new")
+
+    assert result == []
+
+
+def test_deferred_operations_persisted_to_json(tmp_path: Path) -> None:
+    """Deferred operations survive across JsonStateManager instances pointing to the same dir."""
+    manager1 = JsonStateManager(state_dir=tmp_path)
+    manager1.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+    manager1.add_deferred_blockcommit("vm1", ["snap2.qcow2"], "selinux")
+
+    # New manager instance, same state directory — must load persisted data.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    ops = manager2.get_deferred_operations("vm1")
+
+    assert len(ops) == 2
+    assert ops[0].snapshots == ["snap1.qcow2"]
+    assert ops[0].reason == "apparmor"
+    assert isinstance(ops[0].since, datetime)
+    assert ops[1].snapshots == ["snap2.qcow2"]
+    assert ops[1].reason == "selinux"
+    assert isinstance(ops[1].since, datetime)
+
+
+def test_deferred_blockcommit_dataclass_fields() -> None:
+    """DeferredBlockcommit is a frozen dataclass with snapshots, reason, since fields."""
+    item = DeferredBlockcommit(
+        snapshots=["snap1.qcow2"],
+        reason="apparmor",
+        since=datetime(2024, 1, 1, 12, 0, 0),
+    )
+
+    # Fields exist and hold correct values.
+    assert item.snapshots == ["snap1.qcow2"]
+    assert item.reason == "apparmor"
+    assert item.since == datetime(2024, 1, 1, 12, 0, 0)
+
+    # Frozen: mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        item.reason = "selinux"  # type: ignore[misc]

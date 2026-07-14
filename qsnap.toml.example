@@ -42,6 +42,15 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # Override snapshot creation mode: "always" (default) or "onchange"
 # snapshot_create = "onchange"
 
+# Use --quiesce flag when creating snapshots (requires qemu-guest-agent
+# installed in the VM).  Useful for filesystem-consistent snapshots.
+# snapshot_quiesce = false
+
+# Lifecycle mode for merging snapshots back into the base image:
+#   "virsh"    — use virsh blockcommit (default)
+#   "qemu-img" — use qemu-img commit (works without libvirt)
+# lifecycle_mode = "virsh"
+
 # Override snapshot retention for this VM
 # snapshot_preserve = "48h 14d 8w 12m 1y"
 
@@ -54,6 +63,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   incremental = true
   # Override backup retention for this target only
   # target_preserve = "72h 21d 12w 18m 3y"
+  # Backup verification level:
+  #   "metadata" — verify qcow2 format + virtual-size match (default)
+  #   "full"     — metadata check + qemu-img compare
+  #   "off"      — no verification
+  # verify = "metadata"
 
 # [[vm]]
 # name = "centos9"

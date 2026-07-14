@@ -20,7 +20,7 @@ class SubprocessShell(IShell):
     failures (non-zero exit, timeout, command not found).
     """
 
-    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         start = time.monotonic()
         try:
             proc = subprocess.run(
@@ -62,11 +62,21 @@ class SubprocessShell(IShell):
                 error=f"Command not found: {exc}",
             )
 
-        logger.debug(
-            "cmd=%s timeout=%d returncode=%d duration=%.3fs",
-            cmd,
-            timeout,
-            result.returncode,
-            duration,
-        )
+        if not result.success and not check:
+            logger.error(
+                "cmd=%s timeout=%d returncode=%d duration=%.3fs error=%s",
+                cmd,
+                timeout,
+                result.returncode,
+                duration,
+                result.error,
+            )
+        else:
+            logger.debug(
+                "cmd=%s timeout=%d returncode=%d duration=%.3fs",
+                cmd,
+                timeout,
+                result.returncode,
+                duration,
+            )
         return result

@@ -24,14 +24,14 @@ from tests.mocks.mock_shell import MockShell
 def _make_bitmap_shell() -> MockShell:
     """Create a MockShell pre-configured for BitmapBackupProvider construction.
 
-    BitmapBackupProvider.__init__ calls ``_check_qemu_version()`` which runs
-    ``qemu-img --version``.  The returned stdout must parse to QEMU >= 5.1.
+    BitmapBackupProvider.__init__ calls ``_check_libvirt_version()`` which
+    runs ``virsh --version``.  The returned stdout must parse to libvirt >= 6.0.
     """
     shell = MockShell()
-    shell.expect("qemu-img --version").returns(
+    shell.expect("virsh --version").returns(
         ShellResult(
             success=True,
-            stdout="QEMU emulator version 7.2.0\n",
+            stdout="virsh 8.2.0\n",
             stderr="",
             returncode=0,
             error=None,

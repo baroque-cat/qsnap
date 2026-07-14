@@ -95,6 +95,17 @@ class ConfigFacade(IConfigFacade):
         # snapshot_create: VM-level or default "always".
         snapshot_create = str(vm_raw.get("snapshot_create", "always"))
 
+        # snapshot_quiesce: VM-level or default False.
+        snapshot_quiesce = bool(vm_raw.get("snapshot_quiesce", False))
+
+        # lifecycle_mode: "virsh" (default) or "qemu-img".
+        lifecycle_mode = str(vm_raw.get("lifecycle_mode", "virsh"))
+
+        # change_detection_mode: "allocation-size" (default) or "allocation-map".
+        change_detection_mode = str(
+            vm_raw.get("change_detection_mode", "allocation-size")
+        )
+
         # snapshot_preserve: VM overrides global.
         snapshot_preserve: str | None
         if "snapshot_preserve" in vm_raw:
@@ -134,6 +145,9 @@ class ConfigFacade(IConfigFacade):
             snapshot_create=snapshot_create,
             snapshot_preserve=snapshot_preserve,
             target_preserve=target_preserve,
+            snapshot_quiesce=snapshot_quiesce,
+            lifecycle_mode=lifecycle_mode,
+            change_detection_mode=change_detection_mode,
             disks=disks,
             targets=targets,
         )
@@ -157,11 +171,15 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve = vm_target_preserve
 
+        # verify: "metadata" (default), "full", or "off".
+        verify = str(tgt_raw.get("verify", "metadata"))
+
         return TargetConfig(
             path=path,
             incremental=incremental,
             incremental_mode=incremental_mode,
             target_preserve=target_preserve,
+            verify=verify,
         )
 
     # ── IConfigFacade implementation ──────────────────────────────────

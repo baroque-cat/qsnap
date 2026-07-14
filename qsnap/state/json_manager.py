@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
 
 
 class JsonStateManager(IStateManager):
@@ -98,3 +98,53 @@ class JsonStateManager(IStateManager):
         ]
         snapshots.sort(key=lambda s: s.timestamp)
         return snapshots
+
+    # ── Deferred operations ───────────────────────────────────────────
+
+    @staticmethod
+    def _deferred_to_dict(item: DeferredBlockcommit) -> dict[str, object]:
+        return {
+            "snapshots": list(item.snapshots),
+            "reason": item.reason,
+            "since": item.since.isoformat(),
+        }
+
+    @staticmethod
+    def _dict_to_deferred(d: dict[str, object]) -> DeferredBlockcommit:
+        return DeferredBlockcommit(
+            snapshots=list(d.get("snapshots", [])),  # type: ignore[arg-type]
+            reason=str(d["reason"]),
+            since=datetime.fromisoformat(str(d["since"])),
+        )
+
+    def get_deferred_operations(self, vm_name: str) -> list[DeferredBlockcommit]:
+        data = self._load(vm_name)
+        raw_list = data.get("deferred_operations", [])
+        if not raw_list:
+            return []
+        return [
+            self._dict_to_deferred(d)  # type: ignore[arg-type]
+            for d in raw_list  # type: ignore[union-attr]
+        ]
+
+    def add_deferred_blockcommit(
+        self, vm_name: str, snapshots: list[str], reason: str
+    ) -> None:
+        data = self._load(vm_name)
+        raw_list: list[dict[str, object]] = list(data.get("deferred_operations", []))  # type: ignore[arg-type]
+        raw_list.append(
+            self._deferred_to_dict(
+                DeferredBlockcommit(
+                    snapshots=list(snapshots),
+                    reason=reason,
+                    since=datetime.now(),
+                )
+            )
+        )
+        data["deferred_operations"] = raw_list
+        self._save(vm_name, data)
+
+    def clear_deferred_operations(self, vm_name: str) -> None:
+        data = self._load(vm_name)
+        data["deferred_operations"] = []
+        self._save(vm_name, data)

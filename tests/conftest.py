@@ -10,6 +10,7 @@ import pytest
 
 from qsnap.cli.app import build_argparser
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.results import ShellResult
 from tests.mocks import (
     InMemoryStateManager,
     MockConfigFacade,
@@ -18,10 +19,58 @@ from tests.mocks import (
 )
 
 
+def _setup_validation_expectations(shell: MockShell) -> None:
+    """Pre-configure MockShell with expectations for Core._validate_environment().
+
+    Core's pre-flight validation runs ``test -d``, ``test -w``,
+    ``test -f``, ``which virsh``, ``which qemu-img``, and
+    ``virsh dominfo``.  These expectations ensure validation passes
+    for any VM name.
+    """
+    shell.expect("test -d").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    shell.expect("test -w").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    shell.expect("which virsh").returns(
+        ShellResult(
+            success=True,
+            stdout="/usr/bin/virsh\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    shell.expect("which qemu-img").returns(
+        ShellResult(
+            success=True,
+            stdout="/usr/bin/qemu-img\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    shell.expect("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: 1\nName: testvm\nState: running\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
 @pytest.fixture
 def mock_shell() -> MockShell:
-    """A fresh MockShell instance."""
-    return MockShell()
+    """A fresh MockShell instance with validation expectations pre-configured."""
+    shell = MockShell()
+    _setup_validation_expectations(shell)
+    return shell
 
 
 @pytest.fixture

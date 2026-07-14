@@ -50,6 +50,10 @@ class IVMModuleFactory(ABC):
         ...
 
     @abstractmethod
-    def create_lifecycle_manager(self) -> ILifecycleManager:
-        """Create a lifecycle manager."""
+    def create_lifecycle_manager(self, mode: str = "virsh") -> ILifecycleManager:
+        """Create a lifecycle manager for the given *mode*.
+
+        ``mode`` selects the merge strategy: ``"virsh"`` (blockcommit,
+        default) or ``"qemu-img"`` (commit).
+        """
         ...

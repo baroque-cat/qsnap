@@ -1,0 +1,23 @@
+[
+    {
+        "filename": "/var/lib/libvirt/snapshots/testvm/testvm.20250102T000000.qcow2",
+        "actual-size": 2097152,
+        "virtual-size": 1073741824,
+        "format": "qcow2",
+        "backing-filename": "/var/lib/libvirt/snapshots/testvm/testvm.20250101T000000.qcow2"
+    },
+    {
+        "filename": "/var/lib/libvirt/snapshots/testvm/testvm.20250101T000000.qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "format": "qcow2",
+        "backing-filename": "/var/lib/libvirt/images/testvm.qcow2"
+    },
+    {
+        "filename": "/var/lib/libvirt/images/testvm.qcow2",
+        "actual-size": 1073741824,
+        "virtual-size": 1073741824,
+        "format": "qcow2",
+        "backing-filename": null
+    }
+]

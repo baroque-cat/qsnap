@@ -18,6 +18,7 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.modules.backup.verification import verify_backup
 from qsnap.utils.parsing import parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,26 @@ class FileCopyBackupProvider(IBackupProvider):
                             )
                         )
                         continue
+
+            # Step 4: Verification (if enabled).
+            verify_error = verify_backup(
+                self._shell,
+                str(snapshot.path),
+                str(target_file),
+                target.verify,
+            )
+            if verify_error is not None:
+                results.append(
+                    BackupResult(
+                        success=False,
+                        snapshot_name=snapshot.name,
+                        source_path=snapshot.path,
+                        target_path=target_file,
+                        bytes_transferred=bytes_transferred,
+                        error=verify_error,
+                    )
+                )
+                continue
 
             results.append(
                 BackupResult(

@@ -36,6 +36,7 @@ class MockSnapshotProvider(ISnapshotProvider):
         snapshot_name: str,
         disk: str,
         snapshot_path: Path,
+        quiesce: bool = False,
     ) -> SnapshotResult:
         return SnapshotResult(
             success=True,

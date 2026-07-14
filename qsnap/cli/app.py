@@ -91,7 +91,7 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Output format: table (default), long, raw, col:<columns>",
     )
     parser.add_argument(
-        "-L", dest="long_format",
+        "--long", "-L", dest="long_format",
         action="store_true",
         help="Shortcut for --format long",
     )
@@ -116,7 +116,14 @@ def build_argparser() -> argparse.ArgumentParser:
     # list subcommand with sub-subcommands
     list_parser = subparsers.add_parser("list", help="List snapshots, backups, config, or latest")
     list_subparsers = list_parser.add_subparsers(dest="list_subcommand", required=True)
-    for list_cmd in ("snapshots", "backups", "latest"):
+    snap_sub = list_subparsers.add_parser("snapshots")
+    snap_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
+    snap_sub.add_argument(
+        "--tree",
+        action="store_true",
+        help="Display backing chain as an indented tree",
+    )
+    for list_cmd in ("backups", "latest"):
         list_sub = list_subparsers.add_parser(list_cmd)
         list_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
     list_subparsers.add_parser("config")

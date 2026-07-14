@@ -1,0 +1,7 @@
+{
+    "virtual-size": 1073741824,
+    "actual-size": 1048576,
+    "format": "qcow2",
+    "filename": "/var/lib/libvirt/images/testvm.qcow2",
+    "backing-filename": null
+}

@@ -54,7 +54,8 @@ def test_transfer_missing_new_snapshot_empty_target(
     vm_config = make_vm_config()
     # Target path does not exist -> list() returns [] with no shell calls
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=False
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off",
     )
 
     snapshot = SnapshotInfo(
@@ -117,7 +118,7 @@ def test_transfer_missing_existing_snapshot_skipped(
     appear in the returned ``BackupResult`` list.
     """
     vm_config = make_vm_config()
-    target = make_target(path=str(tmp_path), incremental=False)
+    target = make_target(path=str(tmp_path), incremental=False, verify="off")
 
     snapshot = SnapshotInfo(
         name="testvm.20250101T000000",
@@ -171,7 +172,8 @@ def test_transfer_incremental_rebase_backing_path(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=True
+        path=str(tmp_path / "nonexistent_target"), incremental=True,
+        verify="off",
     )
 
     snapshot = SnapshotInfo(
@@ -244,7 +246,8 @@ def test_transfer_non_incremental_no_rebase(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=False
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off",
     )
 
     snapshot = SnapshotInfo(
@@ -285,7 +288,8 @@ def test_transfer_copy_fails_disk_full(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=False
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off",
     )
 
     snapshot = SnapshotInfo(
@@ -465,7 +469,8 @@ def test_transfer_rebase_failure_returns_backup_result_failure(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=True
+        path=str(tmp_path / "nonexistent_target"), incremental=True,
+        verify="off",
     )
 
     snapshot = SnapshotInfo(
@@ -525,3 +530,226 @@ def test_file_copy_provider_imports_shared_parsers():
 
     assert hasattr(file_copy, "parse_timestamp")
     assert file_copy.parse_timestamp is parse_timestamp
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Verification (metadata / full / off)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_missing_metadata_verification_default(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``target.verify`` is ``"metadata"`` (the default), after the
+    ``cp`` command, ``qemu-img info`` is called on both source and
+    target to verify format, virtual-size, and actual-size.
+
+    With matching metadata, ``transfer_missing`` returns
+    ``BackupResult(success=True)``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=False,
+        # verify defaults to "metadata"
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    qcow2_info = json.dumps(
+        {
+            "format": "qcow2",
+            "virtual-size": 1073741824,
+            "actual-size": 1048576,
+        }
+    )
+
+    # Mock cp returns success
+    mock_shell.expect(r"^cp ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # Mock qemu-img info (used by verification for both source and target)
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qcow2_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Side effect: simulate cp creating the target file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("cp "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+
+    # Verify qemu-img info was called (for verification: source + target)
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    info_cmds = [cmd for cmd in all_cmds if "qemu-img info" in cmd]
+    assert len(info_cmds) >= 2
+
+
+def test_transfer_missing_full_verification(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``target.verify`` is ``"full"``, after the metadata check,
+    ``qemu-img compare`` is called to verify byte-level integrity.
+
+    With both metadata and compare succeeding, ``transfer_missing``
+    returns ``BackupResult(success=True)``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"), incremental=False, verify="full",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    qcow2_info = json.dumps(
+        {
+            "format": "qcow2",
+            "virtual-size": 1073741824,
+            "actual-size": 1048576,
+        }
+    )
+
+    # Mock cp returns success
+    mock_shell.expect(r"^cp ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # Mock qemu-img info (for verification)
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qcow2_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Mock qemu-img compare returns success
+    mock_shell.expect(r"qemu-img compare").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate cp creating the target file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("cp "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+
+    # Verify qemu-img compare was called
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
+    assert len(compare_cmds) == 1
+
+
+def test_transfer_missing_no_verification_when_off(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``target.verify`` is ``"off"``, no ``qemu-img`` commands are
+    called after ``cp``.  Only ``cp`` is executed (no rebase since
+    ``incremental=False``), and ``transfer_missing`` returns
+    ``BackupResult(success=True)``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"), incremental=False, verify="off",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Mock cp returns success
+    mock_shell.expect(r"^cp ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate cp creating the target file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("cp "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+
+    # Verify NO qemu-img commands were called
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    qemu_cmds = [cmd for cmd in all_cmds if "qemu-img" in cmd]
+    assert len(qemu_cmds) == 0

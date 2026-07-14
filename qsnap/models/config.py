@@ -54,12 +54,17 @@ class TargetConfig:
 
     ``target_preserve`` is a raw retention-policy string resolved via
     option inheritance (global → VM → target).
+
+    ``verify`` controls post-transfer verification: ``"metadata"``
+    (default) checks qcow2 format and virtual-size match, ``"full"``
+    additionally runs ``qemu-img compare``, ``"off"`` skips verification.
     """
 
     path: Path
     incremental: bool = True
     incremental_mode: str = "file-copy"
     target_preserve: str | None = None
+    verify: str = "metadata"
 
 
 @dataclass(frozen=True)
@@ -75,8 +80,19 @@ class VMConfig:
     ``["vda", "vdb"]``).  When ``None``, Core auto-discovers all disks
     via ``virsh domblklist``.
 
-    ``targets`` uses a defensive copy on construction so that external
-    mutation of the original list does not affect this instance.
+    ``snapshot_quiesce`` enables the ``--quiesce`` flag for
+    ``virsh snapshot-create-as`` (requires qemu-guest-agent).
+
+    ``lifecycle_mode`` selects the snapshot-merge strategy:
+    ``"virsh"`` (blockcommit, default) or ``"qemu-img"`` (commit).
+
+    ``change_detection_mode`` selects the change-detection strategy
+    for ``onchange`` mode: ``"allocation-size"`` (default, compares
+    ``qemu-img info`` actual-size) or ``"allocation-map"`` (compares
+    ``qemu-img map`` allocated regions).
+
+    ``targets`` uses a defensive copy on construction so that
+    external mutation of the original list does not affect this instance.
     """
 
     name: str
@@ -85,6 +101,9 @@ class VMConfig:
     snapshot_create: str = "always"
     snapshot_preserve: str | None = None
     target_preserve: str | None = None
+    snapshot_quiesce: bool = False
+    lifecycle_mode: str = "virsh"
+    change_detection_mode: str = "allocation-size"
     disks: list[str] | None = None
     targets: list[TargetConfig] = field(default_factory=list)
 

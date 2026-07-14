@@ -19,8 +19,13 @@ class ISnapshotProvider(ABC):
         snapshot_name: str,
         disk: str,
         snapshot_path: Path,
+        quiesce: bool = False,
     ) -> SnapshotResult:
-        """Create an external disk-only snapshot."""
+        """Create an external disk-only snapshot.
+
+        When *quiesce* is ``True``, pass ``--quiesce`` to virsh
+        (requires qemu-guest-agent in the VM).
+        """
         ...
 
     @abstractmethod

@@ -52,5 +52,5 @@ class MockVMModuleFactory(IVMModuleFactory):
     def create_change_detector(self, mode: str) -> IChangeDetector:
         return self._change_detector
 
-    def create_lifecycle_manager(self) -> ILifecycleManager:
+    def create_lifecycle_manager(self, mode: str = "virsh") -> ILifecycleManager:
         return self._lifecycle_manager

@@ -16,8 +16,12 @@ class IShell(ABC):
     """
 
     @abstractmethod
-    def run(self, cmd: list[str], timeout: int) -> ShellResult:
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         """Execute *cmd* with a *timeout* in seconds.
+
+        When *check* is ``True``, command failures are logged at DEBUG
+        level (not ERROR) — useful for pre-flight checks where failure
+        is expected and not an error condition.
 
         Returns a :class:`ShellResult` — never raises for expected
         failures (non-zero exit, timeout, command not found).
