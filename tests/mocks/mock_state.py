@@ -75,6 +75,24 @@ class InMemoryStateManager(IStateManager):
             return
         self._state[vm_name]["deferred_operations"] = []
 
+    def update_deferred_warning(
+        self, vm_name: str, index: int, timestamp: datetime
+    ) -> None:
+        """Update ``last_warned_at`` on the deferred operation at *index*."""
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return
+        deferred = vm_state.get("deferred_operations", [])
+        if isinstance(deferred, list) and 0 <= index < len(deferred):
+            item = deferred[index]
+            if isinstance(item, DeferredBlockcommit):
+                deferred[index] = DeferredBlockcommit(
+                    snapshots=item.snapshots,
+                    reason=item.reason,
+                    since=item.since,
+                    last_warned_at=timestamp,
+                )
+
     # ── Full backup tracking ──────────────────────────────────────────
 
     def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:

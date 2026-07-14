@@ -29,6 +29,10 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.timestamp_format = "short"  # type: ignore[misc]
 
+    # Mutating rate_limit also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.rate_limit = "100M"  # type: ignore[misc]
+
 
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
@@ -39,6 +43,11 @@ def test_global_config_defaults():
     assert cfg.lockfile is None
     assert cfg.snapshot_preserve is None
     assert cfg.target_preserve is None
+    assert cfg.rate_limit == "no"
+    assert cfg.deferred_warn_count == "5"
+    assert cfg.deferred_crit_count == "10"
+    assert cfg.deferred_warn_age == "7d"
+    assert cfg.deferred_crit_age == "14d"
 
 
 def test_vm_config_required_fields():
@@ -104,6 +113,9 @@ def test_target_config_incremental():
     # Default value for incremental is True.
     default_target = TargetConfig(path=Path("/backup/testvm"))
     assert default_target.incremental is True
+
+    # rate_limit defaults to "no" on TargetConfig.
+    assert default_target.rate_limit == "no"
 
 
 def test_retention_policy_hourly_daily():
@@ -312,3 +324,102 @@ def test_vm_config_preserve_min_fields_exist(make_vm_config):
     vm = make_vm_config()
     assert vm.snapshot_preserve_min is None
     assert vm.target_preserve_min is None
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.rate_limit / deferred thresholds
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_rate_limit_defaults_no():
+    """GlobalConfig() defaults rate_limit to 'no' (unlimited)."""
+    cfg = GlobalConfig()
+    assert cfg.rate_limit == "no"
+
+
+def test_global_config_rate_limit_frozen():
+    """GlobalConfig is frozen; mutating rate_limit raises FrozenInstanceError."""
+    cfg = GlobalConfig(rate_limit="100M")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.rate_limit = "500K"  # type: ignore[misc]
+
+
+def test_target_config_rate_limit_frozen():
+    """TargetConfig is frozen; mutating rate_limit raises FrozenInstanceError."""
+    target = TargetConfig(path=Path("/mnt/backup/testvm"), rate_limit="100M")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        target.rate_limit = "500K"  # type: ignore[misc]
+
+
+def test_global_config_deferred_thresholds_defaults():
+    """GlobalConfig() defaults all four deferred-monitoring thresholds."""
+    cfg = GlobalConfig()
+    assert cfg.deferred_warn_count == "5"
+    assert cfg.deferred_crit_count == "10"
+    assert cfg.deferred_warn_age == "7d"
+    assert cfg.deferred_crit_age == "14d"
+
+
+def test_global_config_deferred_thresholds_frozen():
+    """GlobalConfig is frozen; mutating deferred fields raises FrozenInstanceError."""
+    cfg = GlobalConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deferred_warn_count = "3"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deferred_crit_count = "20"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deferred_warn_age = "1d"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deferred_crit_age = "30d"  # type: ignore[misc]
+
+
+def test_global_config_has_rate_limit_field():
+    """GlobalConfig dataclass has a 'rate_limit' field."""
+    field_names = {f.name for f in dataclasses.fields(GlobalConfig)}
+    assert "rate_limit" in field_names
+
+
+def test_global_config_has_deferred_threshold_fields():
+    """GlobalConfig dataclass has all four deferred-monitoring fields."""
+    field_names = {f.name for f in dataclasses.fields(GlobalConfig)}
+    assert "deferred_warn_count" in field_names
+    assert "deferred_crit_count" in field_names
+    assert "deferred_warn_age" in field_names
+    assert "deferred_crit_age" in field_names
+
+
+def test_target_config_has_rate_limit_field():
+    """TargetConfig dataclass has a 'rate_limit' field."""
+    field_names = {f.name for f in dataclasses.fields(TargetConfig)}
+    assert "rate_limit" in field_names
+
+
+# ---------------------------------------------------------------------------
+# Fixture support — make_global_config / make_target accept new kwargs
+# ---------------------------------------------------------------------------
+
+
+def test_make_global_config_accepts_rate_limit_kwarg(make_global_config):
+    """make_global_config fixture forwards the rate_limit kwarg to GlobalConfig."""
+    cfg = make_global_config(rate_limit="100M")
+    assert cfg.rate_limit == "100M"
+
+
+def test_make_global_config_accepts_deferred_kwargs(make_global_config):
+    """make_global_config fixture forwards all four deferred-threshold kwargs."""
+    cfg = make_global_config(
+        deferred_warn_count="3",
+        deferred_crit_count="20",
+        deferred_warn_age="1d",
+        deferred_crit_age="30d",
+    )
+    assert cfg.deferred_warn_count == "3"
+    assert cfg.deferred_crit_count == "20"
+    assert cfg.deferred_warn_age == "1d"
+    assert cfg.deferred_crit_age == "30d"
+
+
+def test_make_target_accepts_rate_limit_kwarg(make_target):
+    """make_target fixture forwards the rate_limit kwarg to TargetConfig."""
+    target = make_target(rate_limit="500K")
+    assert target.rate_limit == "500K"

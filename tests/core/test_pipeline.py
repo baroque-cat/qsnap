@@ -64,6 +64,11 @@ def test_pipeline_always_mode_creates_snapshot(
             "create_change_detector",
             wraps=mock_factory.create_change_detector,
         ) as cd_spy,
+        patch.object(
+            core,
+            "_check_deferred_thresholds",
+            wraps=core._check_deferred_thresholds,
+        ) as deferred_spy,
     ):
         result = core.run()
 
@@ -72,6 +77,9 @@ def test_pipeline_always_mode_creates_snapshot(
 
     # Change detection was NOT invoked (always mode skips it).
     assert not cd_spy.called, "create_change_detector() should NOT be called in always mode"
+
+    # Deferred threshold check was called after pipeline.
+    assert deferred_spy.called, "_check_deferred_thresholds() should be called after pipeline"
 
     # Pipeline succeeded.
     assert result.success is True
@@ -122,6 +130,11 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
             "has_changed",
             return_value=no_change,
         ),
+        patch.object(
+            core,
+            "_check_deferred_thresholds",
+            wraps=core._check_deferred_thresholds,
+        ) as deferred_spy,
     ):
         result = core.run()
 
@@ -129,6 +142,11 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
     assert not create_spy.called, (
         "Snapshot provider.create() should NOT be called when onchange "
         "detector reports changed=False"
+    )
+
+    # Deferred threshold check runs even when no snapshot created.
+    assert deferred_spy.called, (
+        "_check_deferred_thresholds() should run even when no snapshot created"
     )
 
     # Pipeline still succeeded (skipping a snapshot is not an error).

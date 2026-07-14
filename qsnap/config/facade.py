@@ -12,6 +12,7 @@ from pathlib import Path
 
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.utils.parsing import parse_rate_limit
 
 
 class ConfigError(Exception):
@@ -55,10 +56,21 @@ class ConfigFacade(IConfigFacade):
             "target_preserve",
             "snapshot_preserve_min",
             "target_preserve_min",
+            "rate_limit",
+            "deferred_warn_count",
+            "deferred_crit_count",
+            "deferred_warn_age",
+            "deferred_crit_age",
         ):
             if key in raw:
                 global_kwargs[key] = str(raw[key])
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
+
+        # Validate rate_limit format.
+        try:
+            parse_rate_limit(self._global.rate_limit)
+        except ValueError as exc:
+            raise ConfigError(f"Invalid global rate_limit: {exc}") from exc
 
         # Validate preserve_day_of_week.
         valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
@@ -153,7 +165,12 @@ class ConfigFacade(IConfigFacade):
         targets: list[TargetConfig] = []
         for tgt_raw in target_sections:
             targets.append(
-                ConfigFacade._build_target(tgt_raw, target_preserve, target_preserve_min)
+                ConfigFacade._build_target(
+                    tgt_raw,
+                    target_preserve,
+                    target_preserve_min,
+                    global_cfg.rate_limit,
+                )
             )
 
         return VMConfig(
@@ -177,6 +194,7 @@ class ConfigFacade(IConfigFacade):
         tgt_raw: dict[str, object],
         vm_target_preserve: str | None,
         vm_target_preserve_min: str | None = None,
+        global_rate_limit: str = "no",
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -208,6 +226,13 @@ class ConfigFacade(IConfigFacade):
         # verify: "metadata" (default), "hash", "full", or "off".
         verify = str(tgt_raw.get("verify", "metadata"))
 
+        # rate_limit: target overrides global default.
+        rate_limit = str(tgt_raw.get("rate_limit", global_rate_limit))
+        try:
+            parse_rate_limit(rate_limit)
+        except ValueError as exc:
+            raise ConfigError(f"Invalid target rate_limit: {exc}") from exc
+
         return TargetConfig(
             path=path,
             incremental=incremental,
@@ -217,6 +242,7 @@ class ConfigFacade(IConfigFacade):
             target_preserve_min=target_preserve_min,
             full_every=full_every,
             full_compress=full_compress,
+            rate_limit=rate_limit,
         )
 
     # ── IConfigFacade implementation ──────────────────────────────────

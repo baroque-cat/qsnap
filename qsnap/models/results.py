@@ -8,7 +8,7 @@ string that is non-None iff ``success`` is False.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── Shell ────────────────────────────────────────────────────────────────
@@ -154,10 +154,30 @@ class DeferredBlockcommit:
     """A deferred blockcommit operation blocked by MAC (AppArmor/SELinux).
 
     Stored in ``IStateManager`` and retried when the VM is shut off.
+    ``last_warned_at`` tracks the last time a warning was logged for this
+    deferred operation (backward-compatible: ``None`` for old state files).
     """
 
     snapshots: list[str]
     reason: str
+    since: datetime
+    last_warned_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class DeferredSummary:
+    """Per-VM summary of deferred blockcommit operations.
+
+    ``snapshot_count`` is the total number of snapshots across all deferred
+    operations for this VM.  ``reason`` is the MAC reason (apparmor/selinux)
+    from the oldest deferred entry.  ``age`` is the age of the oldest
+    deferred operation.  ``since`` is the timestamp of the oldest entry.
+    """
+
+    vm_name: str
+    snapshot_count: int
+    reason: str
+    age: timedelta
     since: datetime
 
 
@@ -172,11 +192,22 @@ class CheckResult:
     or more snapshots in the chain are missing or corrupt.
     ``broken_snapshots`` lists the names of problematic snapshots (empty
     when ``status`` is ``"ok"``).
+
+    Deferred fields: ``deferred_count`` is the number of pending deferred
+    blockcommits, ``deferred_reason`` is the MAC reason (apparmor/selinux),
+    ``deferred_age`` is the age of the oldest deferred operation (human-
+    readable string), ``deferred_severity`` is ``"ok"``, ``"warning"``, or
+    ``"critical"``, and ``remediation`` contains suggested fix commands.
     """
 
     vm_name: str
     status: str
     broken_snapshots: list[str] = field(default_factory=list)
+    deferred_count: int = 0
+    deferred_reason: str | None = None
+    deferred_age: str | None = None
+    deferred_severity: str = "ok"
+    remediation: str | None = None
 
 
 # ── Restore ───────────────────────────────────────────────────────────────

@@ -31,12 +31,14 @@ Delete Backups:
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
+from tests.mocks.mock_shell import MockShell
 
 # ──────────────────────────────────────────────────────────────────────────
 # Transfer Missing
@@ -89,7 +91,9 @@ def test_transfer_missing_new_snapshot_empty_target(
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(vm_config, target, [snapshot])
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
 
     # Assert successful result with correct file size
     assert len(results) == 1
@@ -215,7 +219,9 @@ def test_transfer_incremental_rebase_backing_path(
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(vm_config, target, [snapshot])
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
 
     # Assert successful result
     assert len(results) == 1
@@ -967,7 +973,9 @@ def test_transfer_missing_rebases_to_full_anchor(
         mock_shell, "run", side_effect=spied_run
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(vm_config, target, [snapshot])
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
 
     # Assert successful result
     assert len(results) == 1
@@ -1110,3 +1118,546 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     assert "/source/path/backing.qcow2" not in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Rate-limited transfer (rsync --bwlimit)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_with_rate_limit_uses_rsync(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``rate_limit`` is set and rsync is available, the provider
+    uses ``rsync --bwlimit=<kib> --partial --progress`` instead of ``cp``.
+
+    ``rate_limit="100M"`` → ``rate_limit_to_kib("100M") == 102400`` →
+    ``--bwlimit=102400``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # which rsync → success (pre-configured in mock_shell fixture)
+    # rsync → success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].bytes_transferred == 65536
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--bwlimit=102400" in rsync_cmds[0]
+    assert "--partial" in rsync_cmds[0]
+    assert "--progress" in rsync_cmds[0]
+    assert str(snapshot.path) in rsync_cmds[0]
+
+
+def test_transfer_without_rate_limit_uses_cp(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``rate_limit`` is ``"no"``, the provider uses ``cp`` (not
+    rsync) and does NOT issue a ``which rsync`` check.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="no",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^cp").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("cp "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
+    assert len(cp_cmds) == 1
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 0
+    # which rsync should NOT be called when rate_limit == "no"
+    which_cmds = [cmd for cmd in all_cmds if cmd.startswith("which rsync")]
+    assert len(which_cmds) == 0
+
+
+def test_partial_file_resumes_with_rsync(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When a partial file exists in the target and ``rate_limit`` is set,
+    rsync is invoked with ``--partial`` to resume the interrupted transfer.
+
+    The partial file is an incomplete ``.qcow2`` — ``qemu-img info`` fails
+    on it, so ``list()`` skips it and the snapshot is treated as missing.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Pre-create a partial file (incomplete qcow2)
+    partial_file = target.path / f"{snapshot.name}.qcow2"
+    partial_file.write_bytes(b"\x00" * 32768)
+
+    # qemu-img info on the partial file fails → list() skips it
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=False, stdout="", stderr="corrupt file",
+            returncode=1, error="corrupt file",
+        )
+    )
+    # which rsync → success (conftest)
+    # rsync → success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--partial" in rsync_cmds[0]
+
+
+def test_rsync_not_found_falls_back_to_cp(
+    make_vm_config, make_target, tmp_path, caplog
+):
+    """When ``rate_limit`` is set but rsync is not available (``which
+    rsync`` fails), the provider logs a WARNING and falls back to ``cp``.
+
+    A fresh ``MockShell`` is used (without the conftest's pre-configured
+    ``which rsync → success`` expectation) so that ``which rsync`` returns
+    failure.
+    """
+    shell = MockShell()
+    # which rsync → failure (rsync not installed)
+    shell.expect(r"which rsync").returns(
+        ShellResult(
+            success=False, stdout="", stderr="not found",
+            returncode=1, error="not found",
+        )
+    )
+    # cp → success
+    shell.expect(r"^cp").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    original_run = shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("cp "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    with patch.object(shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].bytes_transferred == 65536
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
+    assert len(cp_cmds) == 1
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 0
+
+    # WARNING logged about rsync not found
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("rsync not found" in r.message for r in warnings)
+
+
+def test_pre_transfer_info_log(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """An INFO log is emitted before the transfer, mentioning the rate
+    limit when one is configured.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.INFO, logger="qsnap.modules.backup.file_copy")
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell)
+        provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "Transferring" in msg and "rate limit: 100M" in msg
+        for msg in info_msgs
+    ), f"Expected pre-transfer INFO log mentioning rate limit, got: {info_msgs}"
+
+
+def test_post_transfer_info_log_throughput(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """An INFO log is emitted after the transfer with bytes transferred
+    and elapsed time (throughput).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.INFO, logger="qsnap.modules.backup.file_copy")
+
+    # Mock time.monotonic to guarantee a positive, deterministic elapsed
+    with patch(
+        "qsnap.modules.backup.file_copy.time.monotonic",
+        side_effect=[100.0, 101.0],
+    ):
+        with patch.object(mock_shell, "run", side_effect=spied_run):
+            provider = FileCopyBackupProvider(mock_shell)
+            provider.transfer_missing(
+                vm_config, target, [snapshot], rate_limit="100M"
+            )
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "Transferred" in msg and "bytes" in msg and "MiB/s" in msg
+        for msg in info_msgs
+    ), f"Expected post-transfer INFO log with throughput, got: {info_msgs}"
+
+
+def test_debug_log_contains_rsync_command(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """A DEBUG log is emitted with the full rsync command string."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.DEBUG, logger="qsnap.modules.backup.file_copy")
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell)
+        provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    debug_msgs = [
+        r.message for r in caplog.records if r.levelno == logging.DEBUG
+    ]
+    assert any(
+        "Transfer command: rsync" in msg and "--bwlimit=102400" in msg
+        for msg in debug_msgs
+    ), f"Expected DEBUG log with rsync command, got: {debug_msgs}"
+
+
+def test_slow_transfer_triggers_warning(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """When throughput is less than 10% of the configured rate limit, a
+    WARNING is logged mentioning ``'slower than expected'`` and
+    ``'Check target disk health'``.
+
+    Setup: ``rate_limit="100M"`` → configured 104_857_600 B/s.
+    10% threshold = 10_485_760 B/s.
+    bytes_transferred=65536, elapsed=100s → 655 B/s < threshold → WARNING.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", rate_limit="100M",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    # Mock time.monotonic: start=100.0, end=200.0 → elapsed=100.0s
+    # throughput = 65536 / 100 = 655.36 B/s < 10_485_760 → WARNING
+    with patch(
+        "qsnap.modules.backup.file_copy.time.monotonic",
+        side_effect=[100.0, 200.0],
+    ):
+        with patch.object(mock_shell, "run", side_effect=spied_run):
+            provider = FileCopyBackupProvider(mock_shell)
+            provider.transfer_missing(
+                vm_config, target, [snapshot], rate_limit="100M"
+            )
+
+    warnings = [
+        r.message for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "slower than expected" in msg and "Check target disk health" in msg
+        for msg in warnings
+    ), f"Expected slow-transfer WARNING, got: {warnings}"
+
+
+def test_full_backup_ignores_rate_limit(
+    mock_shell, make_target, tmp_path
+):
+    """``create_full_backup()`` uses ``qemu-img convert`` regardless of
+    the ``rate_limit`` setting on the target — rsync is never used for
+    full (anchor) backups.
+    """
+    target = make_target(
+        path=str(tmp_path / "backups"), rate_limit="100M",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(snapshot, target, compress=False)
+
+    assert result.success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 0
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1

@@ -26,6 +26,7 @@ from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
     CheckResult,
     DeferredBlockcommit,
+    DeferredSummary,
     FullBackupInfo,
     RestoreResult,
     RetentionItem,
@@ -34,6 +35,7 @@ from qsnap.models.results import (
     SnapshotInfo,
     SnapshotResult,
 )
+from qsnap.retention.time_based import _parse_duration
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.time import format_snapshot_timestamp
 
@@ -172,6 +174,35 @@ class Core:
             else:
                 results[vm.name] = max(snapshots, key=lambda s: s.timestamp)
         return results
+
+    def list_deferred(
+        self, vm_filter: str | None = None
+    ) -> list[DeferredSummary]:
+        """Return per-VM summaries of deferred blockcommit operations.
+
+        Each summary includes the VM name, total snapshot count across all
+        deferred operations, the reason from the oldest entry, the age of
+        the oldest deferred operation, and its ``since`` timestamp.
+        """
+        vms = self._filter_vms(vm_filter)
+        summaries: list[DeferredSummary] = []
+        now = datetime.now()
+        for vm in vms:
+            deferred = self._state.get_deferred_operations(vm.name)
+            if not deferred:
+                continue
+            oldest = min(deferred, key=lambda d: d.since)
+            snapshot_count = sum(len(d.snapshots) for d in deferred)
+            summaries.append(
+                DeferredSummary(
+                    vm_name=vm.name,
+                    snapshot_count=snapshot_count,
+                    reason=oldest.reason,
+                    age=now - oldest.since,
+                    since=oldest.since,
+                )
+            )
+        return summaries
 
     def print_schedule(self, vm_filter: str | None = None) -> dict[str, ScheduleResult]:
         """Evaluate retention for each VM without executing any deletion.
@@ -422,10 +453,46 @@ class Core:
                 status = "broken"
             else:
                 status = "ok"
+
+            # Deferred blockcommit status
+            deferred = self._state.get_deferred_operations(vm.name)
+            deferred_count = len(deferred)
+            deferred_reason: str | None = None
+            deferred_age_str: str | None = None
+            deferred_severity = "ok"
+            remediation: str | None = None
+
+            if deferred:
+                oldest = min(deferred, key=lambda d: d.since)
+                deferred_reason = oldest.reason
+                age = datetime.now() - oldest.since
+                deferred_age_str = self._format_age(age)
+
+                global_cfg = self._config.get_global()
+                try:
+                    warn_count = int(global_cfg.deferred_warn_count)
+                    crit_count = int(global_cfg.deferred_crit_count)
+                    warn_age = _parse_duration(global_cfg.deferred_warn_age)
+                    crit_age = _parse_duration(global_cfg.deferred_crit_age)
+
+                    if deferred_count >= crit_count or age >= crit_age:
+                        deferred_severity = "critical"
+                    elif deferred_count >= warn_count or age >= warn_age:
+                        deferred_severity = "warning"
+                except (ValueError, TypeError):
+                    pass
+
+                remediation = self._build_remediation(oldest.reason)
+
             results[vm.name] = CheckResult(
                 vm_name=vm.name,
                 status=status,
                 broken_snapshots=broken,
+                deferred_count=deferred_count,
+                deferred_reason=deferred_reason,
+                deferred_age=deferred_age_str,
+                deferred_severity=deferred_severity,
+                remediation=remediation,
             )
         return results
 
@@ -617,7 +684,77 @@ class Core:
                         error=str(exc),
                     )
                 )
+
+        # Post-pipeline: check deferred operation thresholds (non-fatal)
+        self._check_deferred_thresholds()
+
         return PipelineResult(results=results)
+
+    def _check_deferred_thresholds(self) -> None:
+        """Check deferred blockcommit thresholds across all VMs.
+
+        Compares per-VM deferred operation count and oldest age against
+        ``GlobalConfig`` thresholds.  Logs WARNING or CRITICAL but does
+        NOT change the pipeline exit code (non-fatal monitoring).
+
+        Severity:
+        - OK: below all thresholds
+        - WARNING: count >= warn_count OR age >= warn_age
+        - CRITICAL: count >= crit_count OR age >= crit_age
+        """
+        global_cfg = self._config.get_global()
+        try:
+            warn_count = int(global_cfg.deferred_warn_count)
+            crit_count = int(global_cfg.deferred_crit_count)
+            warn_age = _parse_duration(global_cfg.deferred_warn_age)
+            crit_age = _parse_duration(global_cfg.deferred_crit_age)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "Invalid deferred threshold config: %s — skipping check",
+                exc,
+            )
+            return
+
+        now = datetime.now()
+        for vm in self._config.get_vms():
+            deferred = self._state.get_deferred_operations(vm.name)
+            if not deferred:
+                continue
+
+            count = len(deferred)
+            oldest_idx = min(range(len(deferred)), key=lambda i: deferred[i].since)
+            oldest_entry = deferred[oldest_idx]
+            age = now - oldest_entry.since
+
+            severity = "ok"
+            if count >= crit_count or age >= crit_age:
+                severity = "critical"
+            elif count >= warn_count or age >= warn_age:
+                severity = "warning"
+
+            if severity == "critical":
+                logger.critical(
+                    "VM %s: %d deferred blockcommit operations pending "
+                    "(oldest age: %s, reason: %s)",
+                    vm.name,
+                    count,
+                    age,
+                    oldest_entry.reason,
+                )
+            elif severity == "warning":
+                logger.warning(
+                    "VM %s: %d deferred blockcommit operations pending "
+                    "(oldest age: %s, reason: %s)",
+                    vm.name,
+                    count,
+                    age,
+                    oldest_entry.reason,
+                )
+
+                # Update last_warned_at on the oldest deferred entry
+                self._state.update_deferred_warning(
+                    vm.name, oldest_idx, now
+                )
 
     def _filter_vms(self, vm_filter: str | None) -> list[VMConfig]:
         vms = self._config.get_vms()
@@ -705,6 +842,21 @@ class Core:
                     broken.append(
                         f"target directory not found: {target.path}"
                     )
+
+        # (f) rsync availability when rate limiting is configured
+        needs_rsync = any(t.rate_limit != "no" for t in vm_config.targets)
+        if needs_rsync:
+            rsync_check = self._shell.run(
+                ["which", "rsync"], timeout=10, check=True,
+            )
+            if not rsync_check.success:
+                for target in vm_config.targets:
+                    if target.rate_limit != "no":
+                        logger.warning(
+                            "rsync not found — rate limiting disabled "
+                            "for target %s",
+                            target.path,
+                        )
 
         if broken:
             return CheckResult(
@@ -1064,7 +1216,9 @@ class Core:
 
         # Transfer missing snapshots
         if not self._dry_run:
-            results = provider.transfer_missing(vm_config, target, snapshots)
+            results = provider.transfer_missing(
+                vm_config, target, snapshots, rate_limit=target.rate_limit
+            )
             if any(not r.success for r in results):
                 backup_failed = True
 
@@ -1214,3 +1368,43 @@ class Core:
             counts[unit_map[unit]] = count
 
         return RetentionPolicy(**counts, preserve_min=effective_min)
+
+    @staticmethod
+    def _format_age(age: timedelta) -> str:
+        """Format a ``timedelta`` as a human-readable age string.
+
+        Returns strings like ``"3d"``, ``"2h"``, ``"5m"``.
+        """
+        total_seconds = int(age.total_seconds())
+        if total_seconds >= 86400:
+            return f"{total_seconds // 86400}d"
+        if total_seconds >= 3600:
+            return f"{total_seconds // 3600}h"
+        if total_seconds >= 60:
+            return f"{total_seconds // 60}m"
+        return f"{total_seconds}s"
+
+    @staticmethod
+    def _build_remediation(reason: str) -> str:
+        """Build remediation guidance for a deferred blockcommit reason.
+
+        Provides actionable suggestions for AppArmor and SELinux blocks.
+        """
+        reason_lower = reason.lower()
+        if "apparmor" in reason_lower:
+            return (
+                "Merge blocked by AppArmor. Consider: "
+                "aa-disable /etc/apparmor.d/libvirt/libvirt-<uuid>. "
+                "Or: shut down the VM to allow automatic merge."
+            )
+        if "selinux" in reason_lower:
+            return (
+                "Merge blocked by SELinux. Consider: "
+                "setenforce 0 (temporarily) or "
+                "audit2allow -w to generate a policy. "
+                "Or: shut down the VM to allow automatic merge."
+            )
+        return (
+            f"Deferred blockcommit blocked by: {reason}. "
+            "Consider: shut down the VM to allow automatic merge."
+        )

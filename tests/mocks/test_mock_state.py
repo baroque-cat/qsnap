@@ -124,3 +124,45 @@ def test_inmemory_state_manager_content_hash_persists():
     snapshots = state_manager.get_snapshots("testvm")
     assert len(snapshots) == 1
     assert snapshots[0].content_hash == "abc123"
+
+
+def test_in_memory_state_manager_deferred_last_warned_at_defaults_none():
+    """add_deferred_blockcommit creates entries with last_warned_at=None."""
+    state_manager = InMemoryStateManager()
+
+    state_manager.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+
+    deferred = state_manager.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].last_warned_at is None
+
+
+def test_in_memory_state_manager_update_deferred_warning():
+    """update_deferred_warning correctly updates last_warned_at on the right entry."""
+    state_manager = InMemoryStateManager()
+
+    state_manager.add_deferred_blockcommit("vm1", ["snap1"], "apparmor")
+    state_manager.add_deferred_blockcommit("vm1", ["snap2"], "selinux")
+
+    warned = datetime(2025, 6, 1, 10, 0, 0)
+    state_manager.update_deferred_warning("vm1", 1, warned)
+
+    deferred = state_manager.get_deferred_operations("vm1")
+    assert len(deferred) == 2
+    # Index 0 unchanged.
+    assert deferred[0].last_warned_at is None
+    # Index 1 updated.
+    assert deferred[1].last_warned_at == warned
+
+
+def test_in_memory_state_manager_get_deferred_carries_last_warned_at():
+    """get_deferred_operations returns entries that carry last_warned_at."""
+    state_manager = InMemoryStateManager()
+
+    state_manager.add_deferred_blockcommit("vm1", ["snap1"], "apparmor")
+    warned = datetime(2025, 6, 1, 10, 0, 0)
+    state_manager.update_deferred_warning("vm1", 0, warned)
+
+    deferred = state_manager.get_deferred_operations("vm1")
+    assert len(deferred) == 1
+    assert deferred[0].last_warned_at == warned

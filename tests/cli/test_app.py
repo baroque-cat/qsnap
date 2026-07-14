@@ -34,6 +34,11 @@ def test_help_text_lists_subcommands_and_flags(capsys):
         "-L",
     ):
         assert flag in text
+    # The 'deferred' sub-subcommand appears in the 'list' subcommand help
+    with pytest.raises(SystemExit):
+        parser.parse_args(["list", "--help"])
+    captured = capsys.readouterr()
+    assert "deferred" in captured.out
 
 
 def test_explicit_config_path_passed_to_configfacade():
@@ -210,3 +215,18 @@ def test_print_schedule_short_flag_S_parsed(cli_app):
     """-S short flag sets args.print_schedule to True."""
     ns = cli_app.parse_args(["run", "myvm", "-S"])
     assert ns.print_schedule is True
+
+
+# ── list deferred sub-subcommand tests ─────────────────────────────────
+
+
+def test_list_deferred_sub_subcommand(cli_app):
+    """'list deferred' sets list_subcommand to 'deferred'."""
+    ns = cli_app.parse_args(["list", "deferred"])
+    assert ns.list_subcommand == "deferred"
+
+
+def test_list_deferred_with_vm_arg(cli_app):
+    """'list deferred myvm' sets vm to ['myvm']."""
+    ns = cli_app.parse_args(["list", "deferred", "myvm"])
+    assert ns.vm == ["myvm"]

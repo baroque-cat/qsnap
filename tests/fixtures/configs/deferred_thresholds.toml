@@ -1,0 +1,13 @@
+# deferred_thresholds — overrides deferred_warn_count and deferred_crit_age
+
+deferred_warn_count = "3"
+deferred_crit_age = "30d"
+
+[[vm]]
+name = "testvm"
+base_image = "/var/lib/libvirt/images/testvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"
+  incremental = true

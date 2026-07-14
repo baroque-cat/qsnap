@@ -1,0 +1,12 @@
+# rate_limit_global — global rate_limit = "100M", target has no override
+
+rate_limit = "100M"
+
+[[vm]]
+name = "testvm"
+base_image = "/var/lib/libvirt/images/testvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"
+  incremental = true

@@ -55,3 +55,21 @@ def test_istate_manager_full_backup_methods_abstract():
     abstract_methods = IStateManager.__abstractmethods__
     assert "get_last_full_backup" in abstract_methods
     assert "set_last_full_backup" in abstract_methods
+
+
+def test_istate_manager_update_deferred_warning_abstract(tmp_path):
+    """IStateManager declares update_deferred_warning as abstract.
+
+    The method ``update_deferred_warning`` must be in
+    ``IStateManager.__abstractmethods__`` so that every concrete
+    implementation is forced to provide it.  Both ``JsonStateManager``
+    and ``InMemoryStateManager`` must implement it.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "update_deferred_warning" in abstract_methods
+
+    # Both concrete implementations implement the method.
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+    assert callable(json_mgr.update_deferred_warning)
+    assert callable(inmemory_mgr.update_deferred_warning)

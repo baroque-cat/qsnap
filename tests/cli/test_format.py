@@ -1,4 +1,13 @@
-from qsnap.cli.format import format_output, format_raw, format_table
+from datetime import datetime, timedelta
+
+from qsnap.cli.format import (
+    format_deferred_raw,
+    format_deferred_table,
+    format_output,
+    format_raw,
+    format_table,
+)
+from qsnap.models.results import DeferredSummary
 
 
 def test_format_table_produces_aligned_columns_uppercase_headers():
@@ -110,3 +119,104 @@ def test_format_col_invalid_column_produces_empty_cells():
     # Data rows contain empty cells (no actual values)
     for line in output.split("\n")[1:]:
         assert line.strip() == ""
+
+
+# ── deferred blockcommit format tests ───────────────────────────────────
+
+
+def test_format_deferred_table_with_summaries():
+    """format_deferred_table() produces a table with VM, SNAPSHOTS, REASON, AGE columns."""
+    summaries = [
+        DeferredSummary(
+            vm_name="vm-home",
+            snapshot_count=3,
+            reason="apparmor",
+            age=timedelta(hours=2),
+            since=datetime(2025, 7, 14, 10, 0),
+        ),
+    ]
+    output = format_deferred_table(summaries)
+
+    lines = output.split("\n")
+    header = lines[0]
+    assert "VM" in header
+    assert "SNAPSHOTS" in header
+    assert "REASON" in header
+    assert "AGE" in header
+
+    # Data row contains the VM name, snapshot count, reason, and age
+    data_line = lines[1]
+    assert "vm-home" in data_line
+    assert "3" in data_line
+    assert "apparmor" in data_line
+    assert "2h" in data_line
+
+
+def test_format_deferred_table_empty():
+    """format_deferred_table() with empty list returns the no-operations message."""
+    output = format_deferred_table([])
+    assert output == "No deferred blockcommit operations"
+
+
+def test_format_deferred_table_sorted_by_age_desc():
+    """format_deferred_table() sorts summaries by age descending (oldest first)."""
+    summaries = [
+        DeferredSummary(
+            vm_name="vm-young",
+            snapshot_count=1,
+            reason="apparmor",
+            age=timedelta(minutes=5),
+            since=datetime(2025, 7, 14, 15, 0),
+        ),
+        DeferredSummary(
+            vm_name="vm-old",
+            snapshot_count=2,
+            reason="selinux",
+            age=timedelta(days=3),
+            since=datetime(2025, 7, 11, 10, 0),
+        ),
+        DeferredSummary(
+            vm_name="vm-middle",
+            snapshot_count=1,
+            reason="apparmor",
+            age=timedelta(hours=2),
+            since=datetime(2025, 7, 14, 10, 0),
+        ),
+    ]
+    output = format_deferred_table(summaries)
+
+    lines = output.split("\n")
+    # Header is line 0; data rows are lines 1, 2, 3
+    # Sorted by age descending: vm-old (3d) > vm-middle (2h) > vm-young (5m)
+    assert "vm-old" in lines[1]
+    assert "vm-middle" in lines[2]
+    assert "vm-young" in lines[3]
+
+
+def test_format_deferred_raw_with_summaries():
+    """format_deferred_raw() produces vm_name=... snapshots=... reason=... since=... rows."""
+    since_dt = datetime(2025, 7, 14, 10, 0)
+    summaries = [
+        DeferredSummary(
+            vm_name="vm-home",
+            snapshot_count=3,
+            reason="apparmor",
+            age=timedelta(hours=2),
+            since=since_dt,
+        ),
+    ]
+    output = format_deferred_raw(summaries)
+
+    lines = output.split("\n")
+    assert len(lines) == 1
+    line = lines[0]
+    assert "vm_name=vm-home" in line
+    assert "snapshots=3" in line
+    assert "reason=apparmor" in line
+    assert f"since={since_dt.isoformat()}" in line
+
+
+def test_format_deferred_raw_empty():
+    """format_deferred_raw() with empty list returns the no-operations message."""
+    output = format_deferred_raw([])
+    assert output == "No deferred blockcommit operations"

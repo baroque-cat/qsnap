@@ -53,6 +53,13 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
+    def update_deferred_warning(
+        self, vm_name: str, index: int, timestamp: datetime
+    ) -> None:
+        """Update ``last_warned_at`` on the deferred operation at *index*."""
+        ...
+
+    @abstractmethod
     def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
         """Return the last recorded full backup for *target_path*, or None."""
         ...

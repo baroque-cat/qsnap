@@ -68,6 +68,7 @@ class MockBackupProvider(IBackupProvider):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        rate_limit: str = "no",
     ) -> list[BackupResult]:
         return [
             BackupResult(
@@ -126,6 +127,7 @@ class MockBitmapBackupProvider(IBackupProvider):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        rate_limit: str = "no",
     ) -> list[BackupResult]:
         return [
             BackupResult(

@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Backup transfer to external storage via file copy (`cp`) with backing chain rebase (`qemu-img rebase -u`).
+Backup transfer to external storage via file copy (`cp` or `rsync --bwlimit`) with backing chain rebase (`qemu-img rebase -u`).
 Copies missing snapshots to a target directory on a separate filesystem (e.g. XFS), maintaining incremental backup semantics.
+Supports optional bandwidth control via `rate_limit` config field using `rsync --bwlimit`.
 
 ## Requirements
 
@@ -11,12 +12,21 @@ Copies missing snapshots to a target directory on a separate filesystem (e.g. XF
 
 The system SHALL copy snapshots missing from the target storage into the `target.path` directory. Before copying, the system SHALL determine which snapshots already exist on the target (via `list()`). For incremental backups (`target.incremental == True`) the system SHALL execute `qemu-img rebase -u -b <new_backing_path>` to rebuild the backing file path on the target.
 
+When `rate_limit` is set to a value other than `"no"`, the system SHALL use `rsync --bwlimit=<limit_kib> --partial --progress` instead of `cp` for snapshot file transfers. When `rate_limit` is `"no"`, the system SHALL use `cp` as before. If `rate_limit` is set but `rsync` is unavailable, the system SHALL log a WARNING and fall back to `cp`.
+
 #### Scenario: New snapshot copied to empty target
 
 - **WHEN** target is empty (list() returns [])
 - **AND** there is one snapshot to copy
+- **AND** `rate_limit` is `"no"` (default)
 - **THEN** the snapshot is copied (`cp`) to `target.path/<snapshot.name>.qcow2`
 - **AND** `BackupResult(success=True, bytes_transferred=<file_size>)` is returned
+
+#### Scenario: Transfer with rate limit uses rsync
+
+- **WHEN** `rate_limit` is `"100M"`
+- **AND** `transfer_missing()` is called for a snapshot
+- **THEN** the shell executes `rsync --bwlimit=102400 --partial --progress <source> <target>`
 
 #### Scenario: Snapshot already exists on target — skipped
 
@@ -44,6 +54,12 @@ The system SHALL copy snapshots missing from the target storage into the `target
 - **WHEN** `target.incremental == False`
 - **THEN** the snapshot is copied without calling `qemu-img rebase`
 - **AND** the backing path remains as-is (absolute source path)
+
+#### Scenario: Fallback to cp when rsync unavailable with rate_limit set
+
+- **WHEN** `rate_limit` is `"100M"` and `which rsync` returns non-zero
+- **THEN** a WARNING is logged: "rsync not found — rate limiting disabled for target <path>"
+- **AND** the transfer proceeds using `cp`
 
 #### Scenario: Copy fails — disk full or permission error
 

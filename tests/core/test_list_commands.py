@@ -15,12 +15,38 @@ from unittest.mock import patch
 
 from qsnap.core import Core
 from qsnap.models.results import (
+    DeferredBlockcommit,
     RetentionResult,
     ScheduleResult,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
+
+
+def _add_deferred_with_since(
+    state,
+    vm_name: str,
+    snapshots: list[str],
+    reason: str,
+    since: datetime,
+) -> None:
+    """Add a deferred blockcommit with a specific ``since`` timestamp.
+
+    Unlike ``InMemoryStateManager.add_deferred_blockcommit`` which always
+    uses ``datetime.now()``, this helper lets tests control the ``since``
+    timestamp for age-based assertions.
+    """
+    if vm_name not in state._state:
+        state._state[vm_name] = {}
+    deferred = state._state[vm_name].setdefault("deferred_operations", [])
+    deferred.append(
+        DeferredBlockcommit(
+            snapshots=list(snapshots),
+            reason=reason,
+            since=since,
+        )
+    )
 
 # ── test_list_snapshots_returns_all_vms_sorted_ascending ──────────────────
 
@@ -692,3 +718,247 @@ def test_check_deep_clean_image_reports_ok(
     assert "testvm" in result
     assert result["testvm"].status == "ok"
     assert result["testvm"].broken_snapshots == []
+
+
+# ── test_list_deferred_returns_all_vm_summaries ───────────────────────────
+
+
+def test_list_deferred_returns_all_vm_summaries(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_deferred()`` returns a summary per VM with deferred operations."""
+    vm1 = make_vm_config(name="vm1", disks=["vda"])
+    vm2 = make_vm_config(name="vm2", disks=["vda"])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_state.add_deferred_blockcommit("vm1", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("vm2", ["snap2"], "selinux")
+
+    result = core.list_deferred()
+
+    assert len(result) == 2
+    names = {s.vm_name for s in result}
+    assert names == {"vm1", "vm2"}
+    for s in result:
+        assert s.snapshot_count == 1
+        assert s.reason in ("apparmor", "selinux")
+        assert isinstance(s.age, timedelta)
+        assert isinstance(s.since, datetime)
+
+
+# ── test_list_deferred_with_vm_filter ─────────────────────────────────────
+
+
+def test_list_deferred_with_vm_filter(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_deferred(vm_filter="vm1")`` returns only vm1's summary."""
+    vm1 = make_vm_config(name="vm1", disks=["vda"])
+    vm2 = make_vm_config(name="vm2", disks=["vda"])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_state.add_deferred_blockcommit("vm1", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("vm2", ["snap2"], "selinux")
+
+    result = core.list_deferred(vm_filter="vm1")
+
+    assert len(result) == 1
+    assert result[0].vm_name == "vm1"
+
+
+# ── test_list_deferred_no_deferred_operations ──────────────────────────────
+
+
+def test_list_deferred_no_deferred_operations(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_deferred()`` returns an empty list when no deferred ops exist."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.list_deferred()
+
+    assert result == []
+
+
+# ── test_list_deferred_filtered_by_vm_name ────────────────────────────────
+
+
+def test_list_deferred_filtered_by_vm_name(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_deferred(vm_filter="vm2")`` returns only vm2's summary."""
+    vm1 = make_vm_config(name="vm1", disks=["vda"])
+    vm2 = make_vm_config(name="vm2", disks=["vda"])
+    vm3 = make_vm_config(name="vm3", disks=["vda"])
+    config = MockConfigFacade(vms=[vm1, vm2, vm3])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_state.add_deferred_blockcommit("vm1", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("vm2", ["snap2"], "selinux")
+    mock_state.add_deferred_blockcommit("vm3", ["snap3"], "apparmor")
+
+    result = core.list_deferred(vm_filter="vm2")
+
+    assert len(result) == 1
+    assert result[0].vm_name == "vm2"
+    assert result[0].reason == "selinux"
+
+
+# ── test_list_deferred_returns_per_vm_summaries ───────────────────────────
+
+
+def test_list_deferred_returns_per_vm_summaries(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """``list_deferred()`` summary fields: vm_name, snapshot_count, reason,
+    age, since — all populated correctly."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(hours=3)
+    _add_deferred_with_since(
+        mock_state, "testvm", ["snap1", "snap2"], "apparmor", since
+    )
+
+    with frozen_clock(frozen_dt):
+        result = core.list_deferred()
+
+    assert len(result) == 1
+    summary = result[0]
+    assert summary.vm_name == "testvm"
+    assert summary.snapshot_count == 2
+    assert summary.reason == "apparmor"
+    assert summary.age == timedelta(hours=3)
+    assert summary.since == since
+
+
+# ── test_check_deferred_apparmor_remediation ───────────────────────────────
+
+
+def test_check_deferred_apparmor_remediation(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check()`` with apparmor-deferred ops → remediation mentions AppArmor."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    result = core.check()
+
+    assert result["testvm"].deferred_count == 5
+    assert result["testvm"].deferred_severity == "warning"
+    assert result["testvm"].remediation is not None
+    assert "AppArmor" in result["testvm"].remediation
+
+
+# ── test_check_deferred_selinux_remediation ────────────────────────────────
+
+
+def test_check_deferred_selinux_remediation(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check()`` with selinux-deferred ops → remediation mentions SELinux."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "selinux")
+
+    result = core.check()
+
+    assert result["testvm"].deferred_count == 5
+    assert result["testvm"].deferred_severity == "warning"
+    assert result["testvm"].remediation is not None
+    assert "SELinux" in result["testvm"].remediation
+
+
+# ── test_check_healthy_vm_no_remediation ──────────────────────────────────
+
+
+def test_check_healthy_vm_no_remediation(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check()`` with no deferred ops → deferred_count=0, remediation=None."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.check()
+
+    assert result["testvm"].deferred_count == 0
+    assert result["testvm"].remediation is None

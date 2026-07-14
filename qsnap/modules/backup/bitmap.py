@@ -87,10 +87,14 @@ class BitmapBackupProvider(IBackupProvider):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        rate_limit: str = "no",
     ) -> list[BackupResult]:
         """Transfer missing snapshots via NBD pull-model.
 
         See module docstring for the NBD backup lifecycle.
+
+        ``rate_limit`` is accepted for interface compatibility but ignored
+        — NBD-based transfers cannot be throttled via ``rsync --bwlimit``.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}

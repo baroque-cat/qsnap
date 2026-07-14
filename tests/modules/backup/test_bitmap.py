@@ -500,3 +500,77 @@ def test_constructor_rejects_unsupported_libvirt_version(mock_shell):
 
     with pytest.raises(RuntimeError, match="libvirt 6.0\\+ required"):
         BitmapBackupProvider(mock_shell)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 9. Rate limit is accepted but ignored (NBD cannot be throttled)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_bitmap_backup_ignores_rate_limit(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """``BitmapBackupProvider.transfer_missing()`` accepts a ``rate_limit``
+    parameter for interface compatibility but ignores it — NBD-based
+    transfers cannot be throttled via ``rsync --bwlimit``.
+
+    No ``rsync`` command is issued; ``qemu-img convert`` (NBD pull) is
+    used instead.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), verify="off",
+        rate_limit="100M",
+    )
+    snapshot = _make_snapshot()
+
+    # Constructor version check
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    # rm -f stale socket
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # checkpoint-list returns empty (no prior checkpoint)
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh backup-begin succeeds
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # qemu-img convert -n nbd:unix:... succeeds
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # checkpoint-create-as succeeds
+    mock_shell.expect("checkpoint-create-as").returns(_ok_result())
+    # rm -f socket (cleanup in finally)
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="100M"
+        )
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].snapshot_name == snapshot.name
+    assert results[0].error is None
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # No rsync command should be issued
+    rsync_cmds = [cmd for cmd in all_cmds if "rsync" in cmd]
+    assert len(rsync_cmds) == 0, (
+        "BitmapBackupProvider should not use rsync even when rate_limit "
+        "is set — NBD transfers cannot be throttled"
+    )
+
+    # qemu-img convert (NBD pull) should be used
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]

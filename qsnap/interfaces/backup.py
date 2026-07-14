@@ -17,8 +17,14 @@ class IBackupProvider(ABC):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        rate_limit: str = "no",
     ) -> list[BackupResult]:
-        """Transfer snapshots not yet present at *target*."""
+        """Transfer snapshots not yet present at *target*.
+
+        ``rate_limit`` is a rate-limit string (e.g. ``"500K"``, ``"100M"``)
+        or ``"no"`` for unlimited.  Implementations that support throttling
+        should apply it; others may ignore it.
+        """
         ...
 
     @abstractmethod

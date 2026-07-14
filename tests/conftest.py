@@ -54,6 +54,15 @@ def _setup_validation_expectations(shell: MockShell) -> None:
             error=None,
         )
     )
+    shell.expect("which rsync").returns(
+        ShellResult(
+            success=True,
+            stdout="/usr/bin/rsync\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     shell.expect("virsh dominfo").returns(
         ShellResult(
             success=True,
@@ -119,11 +128,13 @@ def make_target():
     def _make(
         path: str = "/mnt/backup/testvm",
         incremental: bool = True,
+        rate_limit: str = "no",
         **kwargs: object,
     ) -> TargetConfig:
         defaults: dict[str, object] = {
             "path": Path(path),
             "incremental": incremental,
+            "rate_limit": rate_limit,
         }
         defaults.update(kwargs)
         return TargetConfig(**defaults)  # type: ignore[arg-type]
@@ -144,6 +155,11 @@ def make_global_config():
         target_preserve: str | None = None,
         snapshot_preserve_min: str | None = None,
         target_preserve_min: str | None = None,
+        rate_limit: str = "no",
+        deferred_warn_count: str = "5",
+        deferred_crit_count: str = "10",
+        deferred_warn_age: str = "7d",
+        deferred_crit_age: str = "14d",
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -154,6 +170,11 @@ def make_global_config():
             target_preserve=target_preserve,
             snapshot_preserve_min=snapshot_preserve_min,
             target_preserve_min=target_preserve_min,
+            rate_limit=rate_limit,
+            deferred_warn_count=deferred_warn_count,
+            deferred_crit_count=deferred_crit_count,
+            deferred_warn_age=deferred_warn_age,
+            deferred_crit_age=deferred_crit_age,
         )
 
     return _make

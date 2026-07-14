@@ -44,6 +44,11 @@ class GlobalConfig:
     target_preserve: str | None = None
     snapshot_preserve_min: str | None = None
     target_preserve_min: str | None = None
+    rate_limit: str = "no"
+    deferred_warn_count: str = "5"
+    deferred_crit_count: str = "10"
+    deferred_warn_age: str = "7d"
+    deferred_crit_age: str = "14d"
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ class TargetConfig:
     target_preserve_min: str | None = None
     full_every: str = "0d"
     full_compress: bool = False
+    rate_limit: str = "no"
 
 
 @dataclass(frozen=True)

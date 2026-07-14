@@ -9,6 +9,8 @@ Supports four output formats (mirroring btrbk):
 
 from __future__ import annotations
 
+from qsnap.models.results import DeferredSummary
+
 
 def format_table(rows: list[dict[str, str]], columns: list[str]) -> str:
     """Format *rows* as an aligned table with uppercase headers."""
@@ -58,3 +60,59 @@ def format_output(
         cols = [c.strip() for c in col_spec.split(",")]
         return format_table(rows, cols)
     return format_table(rows, columns)
+
+
+def _format_age(age_td) -> str:
+    """Format a timedelta as a short human-readable age string."""
+    total_seconds = int(age_td.total_seconds())
+    if total_seconds >= 86400:
+        return f"{total_seconds // 86400}d"
+    if total_seconds >= 3600:
+        return f"{total_seconds // 3600}h"
+    if total_seconds >= 60:
+        return f"{total_seconds // 60}m"
+    return f"{total_seconds}s"
+
+
+def format_deferred_table(summaries: list[DeferredSummary]) -> str:
+    """Format deferred blockcommit summaries as a table.
+
+    Columns: VM, SNAPSHOTS, REASON, AGE — sorted by age descending
+    (oldest deferred operation first).
+    """
+    if not summaries:
+        return "No deferred blockcommit operations"
+
+    sorted_summaries = sorted(summaries, key=lambda s: s.age, reverse=True)
+    rows: list[dict[str, str]] = []
+    for s in sorted_summaries:
+        rows.append(
+            {
+                "vm": s.vm_name,
+                "snapshots": str(s.snapshot_count),
+                "reason": s.reason,
+                "age": _format_age(s.age),
+            }
+        )
+    columns = ["vm", "snapshots", "reason", "age"]
+    return format_table(rows, columns)
+
+
+def format_deferred_raw(summaries: list[DeferredSummary]) -> str:
+    """Format deferred blockcommit summaries as raw key=value pairs.
+
+    Format: ``vm_name=... snapshots=... reason=... since=...``
+    """
+    if not summaries:
+        return "No deferred blockcommit operations"
+
+    sorted_summaries = sorted(summaries, key=lambda s: s.age, reverse=True)
+    lines: list[str] = []
+    for s in sorted_summaries:
+        lines.append(
+            f"vm_name={s.vm_name} "
+            f"snapshots={s.snapshot_count} "
+            f"reason={s.reason} "
+            f"since={s.since.isoformat()}"
+        )
+    return "\n".join(lines)

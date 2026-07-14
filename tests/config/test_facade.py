@@ -167,3 +167,63 @@ def test_facade_parses_target_full_compress() -> None:
         if t.path == Path("/mnt/backup/vm_with_full")
     )
     assert target.full_compress is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# rate_limit parsing (global default + target override + validation)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_global_rate_limit_parsed() -> None:
+    """ConfigFacade parses a top-level rate_limit='100M' into GlobalConfig."""
+    facade = ConfigFacade(FIXTURES / "rate_limit_global.toml")
+    assert facade.get_global().rate_limit == "100M"
+
+
+@pytest.mark.unit
+def test_invalid_rate_limit_raises_config_error() -> None:
+    """An invalid global rate_limit='abc' raises ConfigError."""
+    with pytest.raises(ConfigError, match="Invalid global rate_limit"):
+        ConfigFacade(FIXTURES / "rate_limit_invalid.toml")
+
+
+@pytest.mark.unit
+def test_target_overrides_global_rate_limit() -> None:
+    """A target-level rate_limit='500K' overrides the global '100M'."""
+    facade = ConfigFacade(FIXTURES / "rate_limit_target_override.toml")
+    vm = facade.get_vm("testvm")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/testvm")
+    )
+    assert target.rate_limit == "500K"
+
+
+@pytest.mark.unit
+def test_target_inherits_global_rate_limit() -> None:
+    """A target with no rate_limit inherits the global '100M'."""
+    facade = ConfigFacade(FIXTURES / "rate_limit_global.toml")
+    vm = facade.get_vm("testvm")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/testvm")
+    )
+    assert target.rate_limit == "100M"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# deferred-monitoring thresholds parsing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_deferred_thresholds_overridden() -> None:
+    """ConfigFacade parses overridden deferred thresholds from TOML."""
+    facade = ConfigFacade(FIXTURES / "deferred_thresholds.toml")
+    global_cfg = facade.get_global()
+    assert global_cfg.deferred_warn_count == "3"
+    # Unset values fall back to defaults.
+    assert global_cfg.deferred_crit_count == "10"
+    assert global_cfg.deferred_warn_age == "7d"
+    assert global_cfg.deferred_crit_age == "30d"

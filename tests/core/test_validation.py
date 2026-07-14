@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 from qsnap.core import Core, VMRunResult
@@ -141,6 +142,117 @@ def test_validate_environment_vm_not_defined(
 
     assert result.status == "validation_failed"
     assert any("VM not defined" in b for b in result.broken_snapshots)
+
+
+# ── test_rsync_available_no_warning ─────────────────────────────────────
+
+
+def test_rsync_available_no_warning(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """rate_limit set, ``which rsync`` succeeds → no WARNING, status ok."""
+    target = make_target(rate_limit="100M")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+        result = core._validate_environment(vm)
+
+    assert result.status == "ok"
+    assert result.broken_snapshots == []
+    assert not any("rsync not found" in r.message for r in caplog.records)
+
+
+# ── test_rsync_unavailable_warning ───────────────────────────────────────
+
+
+def test_rsync_unavailable_warning(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """rate_limit set, ``which rsync`` fails → WARNING, status still ok.
+
+    The rsync check is non-blocking: a missing rsync logs a WARNING per
+    rate-limited target but does NOT add to ``broken`` and does NOT
+    fail validation.
+    """
+    _override(mock_shell, "which rsync", _FAIL)
+    target = make_target(rate_limit="100M")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+        result = core._validate_environment(vm)
+
+    # Non-blocking: validation still passes.
+    assert result.status == "ok"
+    assert result.broken_snapshots == []
+    # WARNING logged mentioning rsync.
+    assert any(
+        "rsync not found" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
+# ── test_rsync_check_skipped_when_rate_limit_no ─────────────────────────
+
+
+def test_rsync_check_skipped_when_rate_limit_no(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """rate_limit='no' → ``which rsync`` is never invoked.
+
+    When every target has ``rate_limit == "no"``, the rsync availability
+    check is skipped entirely — ``which rsync`` must not be called.
+    """
+    target = make_target(rate_limit="no")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        result = core._validate_environment(vm)
+
+    # Validation passes.
+    assert result.status == "ok"
+    assert result.broken_snapshots == []
+
+    # ``which rsync`` was never called.
+    rsync_calls = [
+        call for call in run_spy.call_args_list
+        if call.args and "rsync" in call.args[0]
+    ]
+    assert rsync_calls == []
 
 
 # ── test_validate_environment_ondemand_target_missing_skipped ──────────────

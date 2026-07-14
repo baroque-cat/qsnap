@@ -150,6 +150,8 @@ def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
     assert op.snapshots == ["snap1.qcow2"]
     assert op.reason == "apparmor"
     assert isinstance(op.since, datetime)
+    # New entries have no warning timestamp yet.
+    assert op.last_warned_at is None
 
 
 def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
@@ -211,7 +213,7 @@ def test_deferred_operations_persisted_to_json(tmp_path: Path) -> None:
 
 
 def test_deferred_blockcommit_dataclass_fields() -> None:
-    """DeferredBlockcommit is a frozen dataclass with snapshots, reason, since fields."""
+    """DeferredBlockcommit is a frozen dataclass with snapshots, reason, since, last_warned_at fields."""
     item = DeferredBlockcommit(
         snapshots=["snap1.qcow2"],
         reason="apparmor",
@@ -222,10 +224,75 @@ def test_deferred_blockcommit_dataclass_fields() -> None:
     assert item.snapshots == ["snap1.qcow2"]
     assert item.reason == "apparmor"
     assert item.since == datetime(2024, 1, 1, 12, 0, 0)
+    # last_warned_at defaults to None when not provided.
+    assert item.last_warned_at is None
+
+    # The last_warned_at field exists on the dataclass.
+    field_names = {f.name for f in dataclasses.fields(DeferredBlockcommit)}
+    assert "last_warned_at" in field_names
 
     # Frozen: mutation raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         item.reason = "selinux"  # type: ignore[misc]
+
+
+def test_state_round_trips_last_warned_at(tmp_path: Path) -> None:
+    """_deferred_to_dict / _dict_to_deferred preserve last_warned_at."""
+    warned = datetime(2025, 6, 1, 10, 0, 0)
+    original = DeferredBlockcommit(
+        snapshots=["snap1.qcow2"],
+        reason="apparmor",
+        since=datetime(2024, 1, 1, 12, 0, 0),
+        last_warned_at=warned,
+    )
+
+    d = JsonStateManager._deferred_to_dict(original)
+    assert d["last_warned_at"] == warned.isoformat()
+
+    restored = JsonStateManager._dict_to_deferred(d)
+    assert restored.last_warned_at == warned
+
+
+def test_old_state_file_backward_compatible(tmp_path: Path) -> None:
+    """Old state files without last_warned_at key load with last_warned_at=None."""
+    # Direct test of _dict_to_deferred with a dict missing last_warned_at.
+    raw_dict: dict[str, object] = {
+        "snapshots": ["snap1.qcow2"],
+        "reason": "apparmor",
+        "since": "2024-01-01T12:00:00",
+    }
+    restored = JsonStateManager._dict_to_deferred(raw_dict)
+    assert restored.last_warned_at is None
+
+    # Also verify through the full file-load path.
+    state_file = tmp_path / "vm1.json"
+    state_file.write_text(
+        json.dumps({"deferred_operations": [raw_dict]}),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+    assert ops[0].last_warned_at is None
+
+
+def test_update_deferred_warning(tmp_path: Path) -> None:
+    """update_deferred_warning sets last_warned_at on the deferred entry at index."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+
+    # Initially None.
+    ops = manager.get_deferred_operations("vm1")
+    assert ops[0].last_warned_at is None
+
+    # Update warning timestamp.
+    warned = datetime(2025, 6, 1, 10, 0, 0)
+    manager.update_deferred_warning("vm1", 0, warned)
+
+    ops = manager.get_deferred_operations("vm1")
+    assert ops[0].last_warned_at == warned
 
 
 # ── content_hash persistence tests ───────────────────────────────────────

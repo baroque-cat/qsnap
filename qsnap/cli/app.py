@@ -132,6 +132,8 @@ def build_argparser() -> argparse.ArgumentParser:
         list_sub = list_subparsers.add_parser(list_cmd)
         list_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
     list_subparsers.add_parser("config")
+    deferred_sub = list_subparsers.add_parser("deferred")
+    deferred_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
 
     # stats subcommand
     stats_parser = subparsers.add_parser("stats", help="Show snapshot/backup counts and sizes")

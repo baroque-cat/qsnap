@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from argparse import Namespace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -19,6 +19,7 @@ from qsnap.cli.commands import (
     handle_backup,
     handle_check,
     handle_list,
+    handle_list_deferred,
     handle_prune,
     handle_restore,
     handle_run,
@@ -28,7 +29,7 @@ from qsnap.cli.commands import (
 from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import RestoreResult, SnapshotInfo
+from qsnap.models.results import DeferredSummary, RestoreResult, SnapshotInfo
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -401,3 +402,134 @@ def test_timer_invocation_logs_schedule_at_info(caplog):
     # The schedule was logged at INFO level
     info_records = [r for r in caplog.records if r.levelno == logging.INFO]
     assert any("TIMER SCHEDULE" in r.getMessage() for r in info_records)
+
+
+# ── list deferred subcommand dispatch tests ─────────────────────────────
+
+
+def _make_deferred_summary(
+    vm_name: str = "vm-home",
+    snapshot_count: int = 3,
+    reason: str = "apparmor",
+    age_hours: int = 2,
+    since: datetime | None = None,
+) -> DeferredSummary:
+    """Create a DeferredSummary for tests."""
+    if since is None:
+        since = datetime(2025, 7, 14, 10, 0)
+    return DeferredSummary(
+        vm_name=vm_name,
+        snapshot_count=snapshot_count,
+        reason=reason,
+        age=timedelta(hours=age_hours),
+        since=since,
+    )
+
+
+def test_list_deferred_dispatches_to_core():
+    """handle_list with subcommand='deferred' calls core.list_deferred(None)."""
+    mock_core = _make_mock_core()
+    mock_core.list_deferred.return_value = []
+    args = _make_list_args(list_subcommand="deferred")
+    handle_list(mock_core, args)
+    mock_core.list_deferred.assert_called_once_with(None)
+
+
+def test_list_deferred_with_vm_filter_dispatches():
+    """handle_list with subcommand='deferred' and a VM filter calls core.list_deferred(vm)."""
+    mock_core = _make_mock_core()
+    mock_core.list_deferred.return_value = []
+    args = _make_list_args(list_subcommand="deferred", vm=["vm-home"])
+    handle_list(mock_core, args)
+    mock_core.list_deferred.assert_called_once_with("vm-home")
+
+
+def test_list_deferred_format_raw(capsys):
+    """handle_list_deferred with --format raw produces raw key=value output."""
+    since_dt = datetime(2025, 7, 14, 10, 0)
+    mock_core = _make_mock_core()
+    mock_core.list_deferred.return_value = [
+        _make_deferred_summary(
+            vm_name="vm-home",
+            snapshot_count=3,
+            reason="apparmor",
+            since=since_dt,
+        )
+    ]
+    args = _make_list_args(list_subcommand="deferred", format="raw")
+    result = handle_list_deferred(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "vm_name=vm-home" in captured.out
+    assert "snapshots=3" in captured.out
+    assert "reason=apparmor" in captured.out
+    assert f"since={since_dt.isoformat()}" in captured.out
+
+
+def test_list_deferred_all_operations(capsys):
+    """handle_list_deferred with multiple VMs produces a table with all columns."""
+    mock_core = _make_mock_core()
+    mock_core.list_deferred.return_value = [
+        _make_deferred_summary(
+            vm_name="vm-home",
+            snapshot_count=3,
+            reason="apparmor",
+            age_hours=2,
+        ),
+        _make_deferred_summary(
+            vm_name="vm-work",
+            snapshot_count=1,
+            reason="selinux",
+            age_hours=5,
+        ),
+    ]
+    args = _make_list_args(list_subcommand="deferred")
+    result = handle_list_deferred(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    output = captured.out
+    # Table headers present
+    assert "VM" in output
+    assert "SNAPSHOTS" in output
+    assert "REASON" in output
+    assert "AGE" in output
+    # Both VMs present
+    assert "vm-home" in output
+    assert "vm-work" in output
+
+
+def test_list_deferred_filtered_by_vm(capsys):
+    """handle_list_deferred with a VM filter shows only the matching VM."""
+    mock_core = _make_mock_core()
+    # Core.list_deferred is expected to already filter; return only the filtered VM
+    mock_core.list_deferred.return_value = [
+        _make_deferred_summary(
+            vm_name="vm-home",
+            snapshot_count=3,
+            reason="apparmor",
+            age_hours=2,
+        ),
+    ]
+    args = _make_list_args(list_subcommand="deferred", vm=["vm-home"])
+    result = handle_list_deferred(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    mock_core.list_deferred.assert_called_once_with("vm-home")
+    captured = capsys.readouterr()
+    assert "vm-home" in captured.out
+    # The other VM is not present (Core filtered it out)
+    assert "vm-work" not in captured.out
+
+
+def test_list_deferred_no_operations(capsys):
+    """handle_list_deferred with no deferred ops prints the empty message."""
+    mock_core = _make_mock_core()
+    mock_core.list_deferred.return_value = []
+    args = _make_list_args(list_subcommand="deferred")
+    result = handle_list_deferred(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "No deferred blockcommit operations" in captured.out

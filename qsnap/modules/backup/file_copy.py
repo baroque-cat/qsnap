@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -19,7 +20,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.verification import verify_backup
-from qsnap.utils.parsing import parse_timestamp
+from qsnap.utils.parsing import parse_rate_limit, parse_timestamp, rate_limit_to_kib
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +53,30 @@ class FileCopyBackupProvider(IBackupProvider):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        rate_limit: str = "no",
     ) -> list[BackupResult]:
         """Copy snapshots not yet present at *target*.
 
         1. Determine existing backups via ``list()``.
-        2. For each missing snapshot: ``cp`` to ``target.path/<name>.qcow2``.
+        2. For each missing snapshot: ``rsync --bwlimit`` (when rate
+           limiting is configured and rsync is available) or ``cp`` to
+           ``target.path/<name>.qcow2``.
         3. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}
+
+        # Determine whether rsync is available for rate-limited transfers.
+        use_rsync = rate_limit != "no"
+        rsync_available = False
+        if use_rsync:
+            rsync_check = self._shell.run(["which", "rsync"], timeout=10)
+            rsync_available = rsync_check.success
+            if not rsync_available:
+                logger.warning(
+                    "rsync not found — falling back to cp for "
+                    "rate-limited transfer"
+                )
 
         results: list[BackupResult] = []
 
@@ -70,10 +86,46 @@ class FileCopyBackupProvider(IBackupProvider):
 
             target_file = target.path / f"{snapshot.name}.qcow2"
 
-            # Step 2: Copy file
-            cp_cmd = ["cp", str(snapshot.path), str(target_file)]
-            cp_result = self._shell.run(cp_cmd, timeout=600)
-            if not cp_result.success:
+            # Step 2: Transfer file (rsync or cp)
+            if use_rsync and rsync_available:
+                bwlimit = rate_limit_to_kib(rate_limit)
+                transfer_cmd = [
+                    "rsync",
+                    f"--bwlimit={bwlimit}",
+                    "--partial",
+                    "--progress",
+                    str(snapshot.path),
+                    str(target_file),
+                ]
+                logger.info(
+                    "Transferring %s to %s (rate limit: %s)",
+                    snapshot.name,
+                    target_file,
+                    rate_limit,
+                )
+            else:
+                transfer_cmd = ["cp", str(snapshot.path), str(target_file)]
+                if rate_limit != "no" and not rsync_available:
+                    logger.info(
+                        "Transferring %s to %s (rate limit disabled — "
+                        "rsync unavailable)",
+                        snapshot.name,
+                        target_file,
+                    )
+                else:
+                    logger.info(
+                        "Transferring %s to %s",
+                        snapshot.name,
+                        target_file,
+                    )
+
+            logger.debug("Transfer command: %s", " ".join(transfer_cmd))
+
+            start_time = time.monotonic()
+            transfer_result = self._shell.run(transfer_cmd, timeout=3600)
+            elapsed = time.monotonic() - start_time
+
+            if not transfer_result.success:
                 results.append(
                     BackupResult(
                         success=False,
@@ -81,7 +133,7 @@ class FileCopyBackupProvider(IBackupProvider):
                         source_path=snapshot.path,
                         target_path=target_file,
                         bytes_transferred=0,
-                        error=cp_result.error,
+                        error=transfer_result.error,
                     )
                 )
                 continue
@@ -91,6 +143,33 @@ class FileCopyBackupProvider(IBackupProvider):
                 bytes_transferred = target_file.stat().st_size
             except OSError:
                 bytes_transferred = 0
+
+            # Log throughput
+            if elapsed > 0 and bytes_transferred > 0:
+                throughput_bps = int(bytes_transferred / elapsed)
+                throughput_mib = throughput_bps / (1024 * 1024)
+                logger.info(
+                    "Transferred %s: %d bytes in %.1fs (%.1f MiB/s)",
+                    snapshot.name,
+                    bytes_transferred,
+                    elapsed,
+                    throughput_mib,
+                )
+
+                # Warn if throughput is less than 10% of configured rate limit
+                if rate_limit != "no" and rsync_available:
+                    configured_bps = parse_rate_limit(rate_limit)
+                    if configured_bps > 0:
+                        ten_pct = configured_bps * 0.1
+                        if throughput_bps < ten_pct:
+                            logger.warning(
+                                "Transfer of %s slower than expected: "
+                                "%d B/s (limit: %d B/s). "
+                                "Check target disk health.",
+                                snapshot.name,
+                                throughput_bps,
+                                configured_bps,
+                            )
 
             # Step 3: If incremental, rebase backing path (design D5)
             if target.incremental:

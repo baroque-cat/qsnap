@@ -12,13 +12,14 @@ Covers:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core
 from qsnap.models.results import (
     CommitResult,
+    DeferredBlockcommit,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
@@ -50,6 +51,31 @@ def _set_vm_state(shell, state: str) -> None:
             stderr="",
             returncode=0,
             error=None,
+        )
+    )
+
+
+def _add_deferred_with_since(
+    state,
+    vm_name: str,
+    snapshots: list[str],
+    reason: str,
+    since: datetime,
+) -> None:
+    """Add a deferred blockcommit with a specific ``since`` timestamp.
+
+    Unlike ``InMemoryStateManager.add_deferred_blockcommit`` which always
+    uses ``datetime.now()``, this helper lets tests control the ``since``
+    timestamp for age-based threshold tests.
+    """
+    if vm_name not in state._state:
+        state._state[vm_name] = {}
+    deferred = state._state[vm_name].setdefault("deferred_operations", [])
+    deferred.append(
+        DeferredBlockcommit(
+            snapshots=list(snapshots),
+            reason=reason,
+            since=since,
         )
     )
 
@@ -368,3 +394,425 @@ def test_risk_deferred_queue_grows_across_runs(
 
     # Blockcommit was called at least twice (once per run).
     assert bc_spy.call_count >= 2
+
+
+# ── test_deferred_count_below_warn_silent ─────────────────────────────────
+
+
+def test_deferred_count_below_warn_silent(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """4 deferred ops (below warn=5) → no WARNING/CRITICAL logged."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(4):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    caplog.set_level(logging.WARNING)
+    core._check_deferred_thresholds()
+
+    # No WARNING or CRITICAL logged (4 < warn threshold of 5).
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 0
+
+
+# ── test_deferred_count_meets_warn_threshold ──────────────────────────────
+
+
+def test_deferred_count_meets_warn_threshold(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """5 deferred ops (==warn=5) → WARNING logged."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    caplog.set_level(logging.WARNING)
+    core._check_deferred_thresholds()
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+# ── test_deferred_count_meets_crit_threshold ──────────────────────────────
+
+
+def test_deferred_count_meets_crit_threshold(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """10 deferred ops (==crit=10) → CRITICAL logged."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(10):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    caplog.set_level(logging.CRITICAL)
+    core._check_deferred_thresholds()
+
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+# ── test_deferred_age_meets_warn_threshold ────────────────────────────────
+
+
+def test_deferred_age_meets_warn_threshold(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+    caplog,
+):
+    """1 deferred op aged 7d (==warn_age=7d) → WARNING logged."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(days=7)
+    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+
+    caplog.set_level(logging.WARNING)
+    with frozen_clock(frozen_dt):
+        core._check_deferred_thresholds()
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+# ── test_deferred_age_meets_crit_threshold ─────────────────────────────────
+
+
+def test_deferred_age_meets_crit_threshold(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+    caplog,
+):
+    """1 deferred op aged 14d (==crit_age=14d) → CRITICAL logged."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(days=14)
+    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+
+    caplog.set_level(logging.CRITICAL)
+    with frozen_clock(frozen_dt):
+        core._check_deferred_thresholds()
+
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+# ── test_threshold_check_exit_code_unchanged ──────────────────────────────
+
+
+def test_threshold_check_exit_code_unchanged(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """CRITICAL threshold breached during core.run() → PipelineResult.success
+    is still True (monitoring is non-fatal)."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(10):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    # VM is running → deferred ops skipped (remain in queue for threshold check).
+    _set_vm_state(mock_shell, "running")
+
+    caplog.set_level(logging.CRITICAL)
+    result = core.run()
+
+    # CRITICAL was logged (threshold breached).
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+    # But pipeline success is unchanged (monitoring is non-fatal).
+    assert result.success is True
+
+
+# ── test_deferred_status_ok_below_thresholds ───────────────────────────────
+
+
+def test_deferred_status_ok_below_thresholds(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Below all thresholds → check() reports deferred_severity 'ok'."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(4):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    result = core.check()
+
+    assert result["testvm"].deferred_count == 4
+    assert result["testvm"].deferred_severity == "ok"
+
+
+# ── test_deferred_status_warning_count ────────────────────────────────────
+
+
+def test_deferred_status_warning_count(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Count at warn threshold → check() reports deferred_severity 'warning'."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    result = core.check()
+
+    assert result["testvm"].deferred_count == 5
+    assert result["testvm"].deferred_severity == "warning"
+
+
+# ── test_deferred_status_critical_age ──────────────────────────────────────
+
+
+def test_deferred_status_critical_age(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """Age at crit threshold → check() reports deferred_severity 'critical'."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(days=14)
+    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+
+    with frozen_clock(frozen_dt):
+        result = core.check()
+
+    assert result["testvm"].deferred_count == 1
+    assert result["testvm"].deferred_severity == "critical"
+
+
+# ── test_deferred_threshold_warning_logged ─────────────────────────────────
+
+
+def test_deferred_threshold_warning_logged(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify WARNING log message format for deferred threshold breach."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+
+    caplog.set_level(logging.WARNING)
+    core._check_deferred_thresholds()
+
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) > 0
+    msg = warning_records[0].getMessage()
+    assert "testvm" in msg
+    assert "5 deferred blockcommit" in msg
+    assert "apparmor" in msg
+
+
+# ── test_deferred_threshold_critical_logged ───────────────────────────────
+
+
+def test_deferred_threshold_critical_logged(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify CRITICAL log message format for deferred threshold breach."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(10):
+        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "selinux")
+
+    caplog.set_level(logging.CRITICAL)
+    core._check_deferred_thresholds()
+
+    critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(critical_records) > 0
+    msg = critical_records[0].getMessage()
+    assert "testvm" in msg
+    assert "10 deferred blockcommit" in msg
+    assert "selinux" in msg

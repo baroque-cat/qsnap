@@ -107,18 +107,26 @@ class JsonStateManager(IStateManager):
 
     @staticmethod
     def _deferred_to_dict(item: DeferredBlockcommit) -> dict[str, object]:
-        return {
+        d: dict[str, object] = {
             "snapshots": list(item.snapshots),
             "reason": item.reason,
             "since": item.since.isoformat(),
         }
+        if item.last_warned_at is not None:
+            d["last_warned_at"] = item.last_warned_at.isoformat()
+        return d
 
     @staticmethod
     def _dict_to_deferred(d: dict[str, object]) -> DeferredBlockcommit:
+        last_warned_at: datetime | None = None
+        raw_lwa = d.get("last_warned_at")
+        if raw_lwa is not None:
+            last_warned_at = datetime.fromisoformat(str(raw_lwa))
         return DeferredBlockcommit(
             snapshots=list(d.get("snapshots", [])),  # type: ignore[arg-type]
             reason=str(d["reason"]),
             since=datetime.fromisoformat(str(d["since"])),
+            last_warned_at=last_warned_at,
         )
 
     def get_deferred_operations(self, vm_name: str) -> list[DeferredBlockcommit]:
@@ -152,6 +160,17 @@ class JsonStateManager(IStateManager):
         data = self._load(vm_name)
         data["deferred_operations"] = []
         self._save(vm_name, data)
+
+    def update_deferred_warning(
+        self, vm_name: str, index: int, timestamp: datetime
+    ) -> None:
+        """Update ``last_warned_at`` on the deferred operation at *index*."""
+        data = self._load(vm_name)
+        raw_list: list[dict[str, object]] = list(data.get("deferred_operations", []))  # type: ignore[arg-type]
+        if 0 <= index < len(raw_list):
+            raw_list[index]["last_warned_at"] = timestamp.isoformat()
+            data["deferred_operations"] = raw_list
+            self._save(vm_name, data)
 
     # ── Full backup tracking ──────────────────────────────────────────
 

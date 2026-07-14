@@ -18,6 +18,7 @@ from qsnap.models.results import (
     BackupResult,
     ChangeResult,
     CommitResult,
+    DeferredBlockcommit,
     FullBackupInfo,
     RestoreResult,
     RetentionResult,
@@ -244,3 +245,28 @@ def test_full_backup_info_dataclass_fields_and_frozen():
         info.path = Path("/other")
     with pytest.raises(dataclasses.FrozenInstanceError):
         info.timestamp = datetime(2025, 1, 2, 12, 0, 0)
+
+
+# ── DeferredBlockcommit (last_warned_at) ──────────────────────────────────
+
+
+def test_deferred_blockcommit_defaults_last_warned_at_none():
+    """DeferredBlockcommit.last_warned_at defaults to None when not provided."""
+    item = DeferredBlockcommit(
+        snapshots=[],
+        reason="test",
+        since=datetime.now(),
+    )
+    assert item.last_warned_at is None
+
+
+def test_deferred_blockcommit_explicit_last_warned_at():
+    """DeferredBlockcommit stores an explicit last_warned_at value."""
+    warned = datetime(2025, 1, 1, 12, 0, 0)
+    item = DeferredBlockcommit(
+        snapshots=["snap1.qcow2"],
+        reason="apparmor",
+        since=datetime(2024, 1, 1, 12, 0, 0),
+        last_warned_at=warned,
+    )
+    assert item.last_warned_at == warned

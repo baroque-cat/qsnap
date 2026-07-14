@@ -15,7 +15,11 @@ from argparse import Namespace
 from pathlib import Path
 
 from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
-from qsnap.cli.format import format_output
+from qsnap.cli.format import (
+    format_deferred_raw,
+    format_deferred_table,
+    format_output,
+)
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo
@@ -258,6 +262,8 @@ def handle_list(core: Core, args: Namespace) -> int:
         data = core.list_latest(vm_filter)
         rows = _latest_to_rows(data)
         columns = ["vm", "name", "timestamp", "allocation"]
+    elif sub == "deferred":
+        return handle_list_deferred(core, args)
     else:
         return EXIT_GENERIC
 
@@ -317,3 +323,23 @@ def handle_restore(core: Core, args: Namespace) -> int:
     else:
         print(f"Error: {result.error}", file=sys.stderr)
         return EXIT_GENERIC
+
+
+def handle_list_deferred(core: Core, args: Namespace) -> int:
+    """List deferred blockcommit operations per VM.
+
+    Calls ``Core.list_deferred()`` and formats the output as a table
+    (default) or raw key=value pairs.
+    """
+    vm_filter = _get_vm_filter(args)
+    fmt: str = getattr(args, "format", "table")
+    summaries = core.list_deferred(vm_filter)
+
+    if fmt == "raw":
+        output = format_deferred_raw(summaries)
+    else:
+        output = format_deferred_table(summaries)
+
+    if output:
+        print(output)
+    return EXIT_SUCCESS
