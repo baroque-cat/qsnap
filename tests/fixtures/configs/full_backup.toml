@@ -1,0 +1,30 @@
+# full_backup config — tests full_every and full_compress parsing
+
+timestamp_format = "long"
+preserve_day_of_week = "monday"
+state_dir = "/var/lib/qsnap/state"
+
+snapshot_preserve = "24h 7d 4w 12m 1y"
+target_preserve = "48h 14d 8w 12m 1y"
+
+[[vm]]
+name = "vm_with_full"
+base_image = "/var/lib/libvirt/images/vm_with_full.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_with_full"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_with_full"
+  incremental = true
+  verify = "hash"
+  full_every = "7d"
+  full_compress = true
+
+[[vm]]
+name = "vm_no_full"
+base_image = "/var/lib/libvirt/images/vm_no_full.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_full"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_no_full"
+  incremental = true
+  # full_every and full_compress use defaults ("0d" and false)

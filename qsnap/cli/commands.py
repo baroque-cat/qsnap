@@ -9,6 +9,7 @@ or ``qsnap.state``.
 
 from __future__ import annotations
 
+import logging
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -18,6 +19,8 @@ from qsnap.cli.format import format_output
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo
+
+logger = logging.getLogger(__name__)
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -178,38 +181,52 @@ def _format_pipeline_result(result: PipelineResult) -> int:
 # ── action subcommands ───────────────────────────────────────────────────
 
 
-def handle_run(core: Core, args: Namespace) -> int:
+def _handle_schedule_and_timer(core: Core, args: Namespace) -> bool:
+    """Print schedule summary if --print-schedule, log if --timer.
+
+    Returns ``True`` if the pipeline should be skipped (i.e. when
+    ``--print-schedule`` was set without ``--dry-run``).
+    """
     vm_filter = _get_vm_filter(args)
+    if getattr(args, "timer", False):
+        summary = core.schedule_summary(vm_filter)
+        logger.info("Schedule summary:\n%s", summary)
     if getattr(args, "print_schedule", False):
-        schedule = core.print_schedule(vm_filter)
-        _print_schedule(schedule)
+        summary = core.schedule_summary(vm_filter)
+        print(summary)
+        if not getattr(args, "dry_run", False):
+            return True
+    return False
+
+
+def handle_run(core: Core, args: Namespace) -> int:
+    if _handle_schedule_and_timer(core, args):
+        return EXIT_SUCCESS
+    vm_filter = _get_vm_filter(args)
     result = core.run(vm_filter)
     return _format_pipeline_result(result)
 
 
 def handle_snapshot(core: Core, args: Namespace) -> int:
+    if _handle_schedule_and_timer(core, args):
+        return EXIT_SUCCESS
     vm_filter = _get_vm_filter(args)
-    if getattr(args, "print_schedule", False):
-        schedule = core.print_schedule(vm_filter)
-        _print_schedule(schedule)
     result = core.snapshot(vm_filter)
     return _format_pipeline_result(result)
 
 
 def handle_backup(core: Core, args: Namespace) -> int:
+    if _handle_schedule_and_timer(core, args):
+        return EXIT_SUCCESS
     vm_filter = _get_vm_filter(args)
-    if getattr(args, "print_schedule", False):
-        schedule = core.print_schedule(vm_filter)
-        _print_schedule(schedule)
     result = core.backup(vm_filter)
     return _format_pipeline_result(result)
 
 
 def handle_prune(core: Core, args: Namespace) -> int:
+    if _handle_schedule_and_timer(core, args):
+        return EXIT_SUCCESS
     vm_filter = _get_vm_filter(args)
-    if getattr(args, "print_schedule", False):
-        schedule = core.print_schedule(vm_filter)
-        _print_schedule(schedule)
     result = core.prune(vm_filter)
     return _format_pipeline_result(result)
 

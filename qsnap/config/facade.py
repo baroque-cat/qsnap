@@ -53,6 +53,8 @@ class ConfigFacade(IConfigFacade):
             "lockfile",
             "snapshot_preserve",
             "target_preserve",
+            "snapshot_preserve_min",
+            "target_preserve_min",
         ):
             if key in raw:
                 global_kwargs[key] = str(raw[key])
@@ -120,6 +122,20 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve = global_cfg.target_preserve
 
+        # snapshot_preserve_min: VM overrides global.
+        snapshot_preserve_min: str | None
+        if "snapshot_preserve_min" in vm_raw:
+            snapshot_preserve_min = str(vm_raw["snapshot_preserve_min"])
+        else:
+            snapshot_preserve_min = global_cfg.snapshot_preserve_min
+
+        # target_preserve_min: VM overrides global (target may override VM).
+        target_preserve_min: str | None
+        if "target_preserve_min" in vm_raw:
+            target_preserve_min = str(vm_raw["target_preserve_min"])
+        else:
+            target_preserve_min = global_cfg.target_preserve_min
+
         # disks: optional explicit list of disk targets.
         disks_raw = vm_raw.get("disks")
         if disks_raw is not None:
@@ -136,7 +152,9 @@ class ConfigFacade(IConfigFacade):
 
         targets: list[TargetConfig] = []
         for tgt_raw in target_sections:
-            targets.append(ConfigFacade._build_target(tgt_raw, target_preserve))
+            targets.append(
+                ConfigFacade._build_target(tgt_raw, target_preserve, target_preserve_min)
+            )
 
         return VMConfig(
             name=name,
@@ -145,6 +163,8 @@ class ConfigFacade(IConfigFacade):
             snapshot_create=snapshot_create,
             snapshot_preserve=snapshot_preserve,
             target_preserve=target_preserve,
+            snapshot_preserve_min=snapshot_preserve_min,
+            target_preserve_min=target_preserve_min,
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,
@@ -156,6 +176,7 @@ class ConfigFacade(IConfigFacade):
     def _build_target(
         tgt_raw: dict[str, object],
         vm_target_preserve: str | None,
+        vm_target_preserve_min: str | None = None,
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -171,7 +192,20 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve = vm_target_preserve
 
-        # verify: "metadata" (default), "full", or "off".
+        # target_preserve_min: target overrides VM.
+        target_preserve_min: str | None
+        if "target_preserve_min" in tgt_raw:
+            target_preserve_min = str(tgt_raw["target_preserve_min"])
+        else:
+            target_preserve_min = vm_target_preserve_min
+
+        # full_every: target-level, default "0d" (never).
+        full_every = str(tgt_raw.get("full_every", "0d"))
+
+        # full_compress: target-level, default False.
+        full_compress = bool(tgt_raw.get("full_compress", False))
+
+        # verify: "metadata" (default), "hash", "full", or "off".
         verify = str(tgt_raw.get("verify", "metadata"))
 
         return TargetConfig(
@@ -180,6 +214,9 @@ class ConfigFacade(IConfigFacade):
             incremental_mode=incremental_mode,
             target_preserve=target_preserve,
             verify=verify,
+            target_preserve_min=target_preserve_min,
+            full_every=full_every,
+            full_compress=full_compress,
         )
 
     # ── IConfigFacade implementation ──────────────────────────────────

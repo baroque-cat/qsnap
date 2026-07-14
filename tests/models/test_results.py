@@ -8,6 +8,7 @@ semantics, and frozen immutability where specified.
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -17,9 +18,11 @@ from qsnap.models.results import (
     BackupResult,
     ChangeResult,
     CommitResult,
+    FullBackupInfo,
     RestoreResult,
     RetentionResult,
     ShellResult,
+    SnapshotInfo,
     SnapshotResult,
 )
 
@@ -175,3 +178,69 @@ def test_vm_run_result_backup_failed_field():
     # Verify mutation raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.backup_failed = True
+
+
+def test_snapshot_result_content_hash_defaults_none():
+    """SnapshotResult.content_hash defaults to None when not provided."""
+    result = SnapshotResult(
+        success=True,
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+        new_allocation=1024,
+        error=None,
+    )
+    assert result.content_hash is None
+
+
+def test_snapshot_result_content_hash_set():
+    """SnapshotResult.content_hash can be set to a hash string."""
+    result = SnapshotResult(
+        success=True,
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+        new_allocation=1024,
+        error=None,
+        content_hash="abc123",
+    )
+    assert result.content_hash == "abc123"
+
+
+def test_snapshot_info_content_hash_defaults_none():
+    """SnapshotInfo.content_hash defaults to None when not provided."""
+    info = SnapshotInfo(
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+        timestamp=datetime(2025, 1, 1, 12, 0, 0),
+        allocation=1024,
+    )
+    assert info.content_hash is None
+
+
+def test_full_backup_info_dataclass_fields_and_frozen():
+    """FullBackupInfo has name (str), path (Path), timestamp (datetime) and is frozen."""
+    ts = datetime(2025, 1, 1, 12, 0, 0)
+    info = FullBackupInfo(
+        name="full-backup-20250101",
+        path=Path("/mnt/backup/full-backup-20250101.qcow2"),
+        timestamp=ts,
+    )
+    # Verify field values.
+    assert info.name == "full-backup-20250101"
+    assert info.path == Path("/mnt/backup/full-backup-20250101.qcow2")
+    assert info.timestamp == ts
+    # Verify field types via isinstance on the actual values.
+    assert isinstance(info.name, str)
+    assert isinstance(info.path, Path)
+    assert isinstance(info.timestamp, datetime)
+    # Verify the exact set of field names.
+    field_names = {f.name for f in dataclasses.fields(FullBackupInfo)}
+    assert field_names == {"name", "path", "timestamp"}
+    # Verify the dataclass is declared frozen.
+    assert info.__dataclass_params__.frozen is True
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.path = Path("/other")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.timestamp = datetime(2025, 1, 2, 12, 0, 0)

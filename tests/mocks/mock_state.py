@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 
 
 class InMemoryStateManager(IStateManager):
@@ -16,6 +16,7 @@ class InMemoryStateManager(IStateManager):
 
     def __init__(self) -> None:
         self._state: dict[str, dict[str, object]] = {}
+        self._full_backups: dict[str, FullBackupInfo] = {}
 
     def get_last_allocation(self, vm_name: str) -> int | None:
         vm_state = self._state.get(vm_name)
@@ -73,3 +74,19 @@ class InMemoryStateManager(IStateManager):
         if vm_name not in self._state:
             return
         self._state[vm_name]["deferred_operations"] = []
+
+    # ── Full backup tracking ──────────────────────────────────────────
+
+    def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
+        return self._full_backups.get(target_path)
+
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime
+    ) -> None:
+        from pathlib import Path
+
+        self._full_backups[target_path] = FullBackupInfo(
+            name=name,
+            path=Path(target_path) / name,
+            timestamp=timestamp,
+        )

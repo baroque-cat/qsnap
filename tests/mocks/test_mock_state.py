@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from tests.mocks.mock_state import InMemoryStateManager
 
 
@@ -81,3 +81,46 @@ def test_in_memory_state_manager_add_get_clear_deferred():
     # Clear and verify empty.
     state_manager.clear_deferred_operations("testvm")
     assert state_manager.get_deferred_operations("testvm") == []
+
+
+def test_inmemory_state_manager_full_backup_methods():
+    """InMemoryStateManager implements get_last_full_backup and
+    set_last_full_backup.  set then get returns a FullBackupInfo with the
+    same values.  get on an unknown path returns None."""
+    state_manager = InMemoryStateManager()
+
+    # Unknown path returns None.
+    assert state_manager.get_last_full_backup("/mnt/backup/testvm") is None
+
+    # Set and get.
+    ts = datetime.now()
+    state_manager.set_last_full_backup(
+        "/mnt/backup/testvm", "testvm.FULL.qcow2", ts
+    )
+
+    info = state_manager.get_last_full_backup("/mnt/backup/testvm")
+    assert info is not None
+    assert isinstance(info, FullBackupInfo)
+    assert info.name == "testvm.FULL.qcow2"
+    assert info.timestamp == ts
+    assert info.path == Path("/mnt/backup/testvm") / "testvm.FULL.qcow2"
+
+
+def test_inmemory_state_manager_content_hash_persists():
+    """record_snapshot with SnapshotInfo(content_hash=...) persists the
+    content_hash so that get_snapshots() returns the snapshot with the
+    same content_hash value."""
+    state_manager = InMemoryStateManager()
+
+    info = SnapshotInfo(
+        name="test",
+        path=Path("/tmp/test"),
+        timestamp=datetime.now(),
+        allocation=65536,
+        content_hash="abc123",
+    )
+    state_manager.record_snapshot("testvm", info)
+
+    snapshots = state_manager.get_snapshots("testvm")
+    assert len(snapshots) == 1
+    assert snapshots[0].content_hash == "abc123"

@@ -15,7 +15,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from qsnap.interfaces.config import IConfigFacade
@@ -26,6 +26,7 @@ from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
     CheckResult,
     DeferredBlockcommit,
+    FullBackupInfo,
     RestoreResult,
     RetentionItem,
     RetentionResult,
@@ -186,7 +187,9 @@ class Core:
             if not snapshots:
                 snap_retention = RetentionResult(keep=[], remove=[])
             else:
-                policy = self._parse_preserve(vm.snapshot_preserve)
+                policy = self._parse_preserve(
+                    vm.snapshot_preserve, vm.snapshot_preserve_min
+                )
                 engine = self._factory.create_retention_engine(policy)
                 items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
                 snap_retention = engine.evaluate(
@@ -199,7 +202,9 @@ class Core:
                 provider = self._factory.create_backup_provider(vm, target)
                 backups = provider.list(target)
                 if backups:
-                    policy = self._parse_preserve(target.target_preserve)
+                    policy = self._parse_preserve(
+                        target.target_preserve, target.target_preserve_min
+                    )
                     engine = self._factory.create_retention_engine(policy)
                     items = [RetentionItem(name=b.name, timestamp=b.timestamp) for b in backups]
                     backup_retentions[str(target.path)] = engine.evaluate(
@@ -213,6 +218,163 @@ class Core:
                 backups=backup_retentions,
             )
         return results
+
+    def schedule_summary(self, vm_filter: str | None = None) -> str:
+        """Produce a human-readable retention preview.
+
+        Simulates the retention engine against a synthetic timestamp
+        distribution (one per hour for the configured retention window
+        + 50% margin) and returns a formatted string showing expected
+        chain length, bucket breakdown, and storage estimates for each
+        VM and each target.
+        """
+        vms = self._filter_vms(vm_filter)
+        dow = self._config.get_global().preserve_day_of_week
+        now = datetime.now()
+
+        lines: list[str] = []
+
+        for vm in vms:
+            lines.append(f"=== {vm.name} ===")
+
+            # Snapshot retention
+            snap_policy = self._parse_preserve(
+                vm.snapshot_preserve, vm.snapshot_preserve_min
+            )
+            snap_window = self._retention_window(snap_policy)
+            snap_items = self._generate_synthetic_items(now, snap_window, "snap")
+            snap_engine = self._factory.create_retention_engine(snap_policy)
+            snap_result = snap_engine.evaluate(
+                snap_items, snap_policy, now, preserve_day_of_week=dow
+            )
+            snap_explain = snap_engine.explain(
+                snap_items, snap_policy, now, preserve_day_of_week=dow
+            )
+
+            lines.append("  Snapshots:")
+            lines.append(f"    Policy: hourly={snap_policy.hourly} daily={snap_policy.daily} "
+                         f"weekly={snap_policy.weekly} monthly={snap_policy.monthly} "
+                         f"yearly={snap_policy.yearly} preserve_min={snap_policy.preserve_min}")
+            lines.append(f"    Simulated items: {len(snap_items)}")
+            lines.append(f"    Expected kept:   {len(snap_result.keep)}")
+            lines.append(f"    Expected remove: {len(snap_result.remove)}")
+            for bucket in ("preserve_min", "hourly", "daily", "weekly", "monthly", "yearly"):
+                info = snap_explain.get(bucket, {})
+                count = info.get("count", 0)
+                if count > 0:
+                    lines.append(f"    {bucket}: {count}")
+
+            # Per-target backup retention
+            for target in vm.targets:
+                tgt_policy = self._parse_preserve(
+                    target.target_preserve, target.target_preserve_min
+                )
+                tgt_window = self._retention_window(tgt_policy)
+                tgt_items = self._generate_synthetic_items(now, tgt_window, "backup")
+                tgt_engine = self._factory.create_retention_engine(tgt_policy)
+                tgt_result = tgt_engine.evaluate(
+                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
+                )
+                tgt_explain = tgt_engine.explain(
+                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
+                )
+
+                lines.append(f"  Backups [{target.path}]:")
+                lines.append(f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
+                             f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
+                             f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}")
+                lines.append(f"    Simulated items: {len(tgt_items)}")
+                lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
+                lines.append(f"    Expected remove: {len(tgt_result.remove)}")
+                for bucket in ("preserve_min", "hourly", "daily", "weekly", "monthly", "yearly"):
+                    info = tgt_explain.get(bucket, {})
+                    count = info.get("count", 0)
+                    if count > 0:
+                        lines.append(f"    {bucket}: {count}")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _retention_window(policy: RetentionPolicy) -> timedelta:
+        """Calculate the total retention window from a policy.
+
+        Returns the maximum duration across all configured buckets.
+        """
+        windows: list[timedelta] = []
+
+        if policy.preserve_min not in ("all", "latest"):
+            match = re.match(r"(\d+)([hdwmy])", policy.preserve_min)
+            if match:
+                count = int(match.group(1))
+                unit = match.group(2)
+                unit_hours = {"h": 1, "d": 24, "w": 168, "m": 720, "y": 8760}
+                windows.append(timedelta(hours=count * unit_hours[unit]))
+        elif policy.preserve_min == "all":
+            windows.append(timedelta(days=365))
+
+        if policy.hourly > 0:
+            windows.append(timedelta(hours=policy.hourly))
+        if policy.daily > 0:
+            windows.append(timedelta(days=policy.daily))
+        if policy.weekly > 0:
+            windows.append(timedelta(weeks=policy.weekly))
+        if policy.monthly > 0:
+            windows.append(timedelta(days=policy.monthly * 30))
+        if policy.yearly > 0:
+            windows.append(timedelta(days=policy.yearly * 365))
+
+        if not windows:
+            return timedelta(days=7)
+
+        return max(windows)
+
+    @staticmethod
+    def _generate_synthetic_items(
+        now: datetime, window: timedelta, prefix: str = "item"
+    ) -> list[RetentionItem]:
+        """Generate synthetic RetentionItems, one per hour for window + 50% margin."""
+        total_hours = int(window.total_seconds() / 3600)
+        total_hours = int(total_hours * 1.5)
+        total_hours = max(total_hours, 1)
+
+        items: list[RetentionItem] = []
+        for i in range(total_hours):
+            ts = now - timedelta(hours=total_hours - i)
+            items.append(RetentionItem(name=f"{prefix}_{i:04d}", timestamp=ts))
+
+        return items
+
+    @staticmethod
+    def _should_create_full(
+        target: TargetConfig,
+        last_full: FullBackupInfo | None,
+    ) -> bool:
+        """Check if a full backup should be created based on ``full_every``.
+
+        Returns ``True`` when ``full_every`` is non-zero and either no
+        previous full backup exists or the configured interval has elapsed.
+        """
+        if target.full_every == "0d":
+            return False
+
+        match = re.match(r"(\d+)([hdwmy])", target.full_every)
+        if not match:
+            return False
+
+        count = int(match.group(1))
+        if count == 0:
+            return False
+
+        if last_full is None:
+            return True
+
+        unit = match.group(2)
+        unit_hours = {"h": 1, "d": 24, "w": 168, "m": 720, "y": 8760}
+        interval = timedelta(hours=count * unit_hours[unit])
+        elapsed = datetime.now() - last_full.timestamp
+        return elapsed >= interval
 
     def check(
         self,
@@ -734,6 +896,7 @@ class Core:
                     path=result.path,
                     timestamp=datetime.now(),
                     allocation=result.new_allocation,
+                    content_hash=result.content_hash,
                 )
                 self._state.record_snapshot(vm_config.name, info)
                 self._state.set_last_allocation(vm_config.name, result.new_allocation)
@@ -785,7 +948,9 @@ class Core:
         if not snapshots:
             return None
 
-        policy = self._parse_preserve(vm_config.snapshot_preserve)
+        policy = self._parse_preserve(
+            vm_config.snapshot_preserve, vm_config.snapshot_preserve_min
+        )
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         dow = self._config.get_global().preserve_day_of_week
@@ -867,6 +1032,36 @@ class Core:
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
 
+        # Check for full backup necessity (full_every interval)
+        if not self._dry_run and snapshots:
+            last_full = self._state.get_last_full_backup(str(target.path))
+            if self._should_create_full(target, last_full):
+                most_recent = max(snapshots, key=lambda s: s.timestamp)
+                full_result = provider.create_full_backup(
+                    most_recent, target, compress=target.full_compress
+                )
+                if full_result.success:
+                    full_name = full_result.target_path.stem
+                    self._state.set_last_full_backup(
+                        str(target.path),
+                        f"{full_name}.qcow2",
+                        most_recent.timestamp,
+                    )
+                    logger.info(
+                        "Created full backup for VM %s target %s: %s",
+                        vm_config.name,
+                        target.path,
+                        full_name,
+                    )
+                else:
+                    logger.warning(
+                        "Full backup failed for VM %s target %s: %s",
+                        vm_config.name,
+                        target.path,
+                        full_result.error,
+                    )
+                    backup_failed = True
+
         # Transfer missing snapshots
         if not self._dry_run:
             results = provider.transfer_missing(vm_config, target, snapshots)
@@ -917,7 +1112,9 @@ class Core:
         if not backups:
             return [], None
 
-        policy = self._parse_preserve(target.target_preserve)
+        policy = self._parse_preserve(
+            target.target_preserve, target.target_preserve_min
+        )
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=b.name, timestamp=b.timestamp) for b in backups]
         dow = self._config.get_global().preserve_day_of_week
@@ -978,17 +1175,30 @@ class Core:
         return name
 
     @staticmethod
-    def _parse_preserve(preserve_str: str | None) -> RetentionPolicy:
+    def _parse_preserve(
+        preserve_str: str | None,
+        preserve_min_str: str | None = None,
+    ) -> RetentionPolicy:
         """Parse a preserve string like ``"24h 2d"`` into a RetentionPolicy.
 
         If *preserve_str* is None, returns the default policy (all zeros,
         ``preserve_min="all"`` — keep everything).
-        """
-        if preserve_str is None:
-            return RetentionPolicy()
 
-        if preserve_str == "latest":
-            return RetentionPolicy(preserve_min="latest")
+        If *preserve_min_str* is non-None, it overrides the default
+        ``preserve_min`` value in the returned policy.
+        """
+        # Determine the effective preserve_min.
+        if preserve_min_str is not None:
+            effective_min = preserve_min_str
+        elif preserve_str is None:
+            effective_min = "all"
+        elif preserve_str == "latest":
+            effective_min = "latest"
+        else:
+            effective_min = "0h"
+
+        if preserve_str is None or preserve_str == "latest":
+            return RetentionPolicy(preserve_min=effective_min)
 
         counts: dict[str, int] = {
             "hourly": 0,
@@ -1003,4 +1213,4 @@ class Core:
             unit = match.group(2)
             counts[unit_map[unit]] = count
 
-        return RetentionPolicy(**counts, preserve_min="0h")
+        return RetentionPolicy(**counts, preserve_min=effective_min)

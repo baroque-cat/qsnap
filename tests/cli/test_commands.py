@@ -9,6 +9,7 @@ and that call ordering is correct.
 
 from __future__ import annotations
 
+import logging
 from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ def _make_action_args(**overrides) -> Namespace:
         "command": "run",
         "vm": [],
         "print_schedule": False,
+        "timer": False,
         "dry_run": False,
         "preserve": False,
         "preserve_snapshots": False,
@@ -81,6 +83,7 @@ def _make_mock_core() -> Mock:
         results=[VMRunResult(vm_name="vm1", success=True)]
     )
     core.print_schedule.return_value = {}
+    core.schedule_summary.return_value = ""
     core.list_snapshots.return_value = {}
     core.list_backups.return_value = {}
     core.list_config.return_value = []
@@ -217,14 +220,14 @@ def test_preserve_snapshots_flag_sets_only_preserve_snapshots(
 # ── print-schedule and vm-filter tests ─────────────────────────────────
 
 
-def test_print_schedule_flag_dispatches_to_core_print_schedule():
+def test_print_schedule_flag_dispatches_to_core_schedule_summary():
     mock_core = _make_mock_core()
-    args = _make_action_args(print_schedule=True)
+    args = _make_action_args(print_schedule=True, dry_run=True)
     handle_run(mock_core, args)
-    mock_core.print_schedule.assert_called_once_with(None)
+    mock_core.schedule_summary.assert_called_once_with(None)
     mock_core.run.assert_called_once_with(None)
     call_names = [c[0] for c in mock_core.mock_calls]
-    assert call_names.index("print_schedule") < call_names.index("run")
+    assert call_names.index("schedule_summary") < call_names.index("run")
 
 
 def test_vm_filter_positional_passed_to_core_method():
@@ -331,3 +334,70 @@ def test_list_snapshots_tree_dispatches_to_core_list_snapshots(capsys):
     assert "=== testvm ===" in captured.out
     assert "testvm.qcow2" in captured.out
     assert "  testvm.snap1.qcow2" in captured.out
+
+
+# ── --print-schedule and --timer behavior tests ─────────────────────────
+
+
+def test_print_schedule_with_run_prints_before_pipeline(capsys):
+    """When --print-schedule is set with --dry-run, schedule_summary is called
+    and printed BEFORE the pipeline executes in dry-run mode.
+    """
+    mock_core = _make_mock_core()
+    mock_core.schedule_summary.return_value = "SCHEDULE SUMMARY"
+    args = _make_action_args(command="run", print_schedule=True, dry_run=True)
+
+    handle_run(mock_core, args)
+
+    # schedule_summary was called
+    mock_core.schedule_summary.assert_called_once_with(None)
+
+    # The summary was printed to stdout
+    captured = capsys.readouterr()
+    assert "SCHEDULE SUMMARY" in captured.out
+
+    # The pipeline DID execute (not skipped, because --dry-run was set)
+    mock_core.run.assert_called_once_with(None)
+
+    # schedule_summary was called BEFORE run
+    call_names = [c[0] for c in mock_core.mock_calls]
+    assert call_names.index("schedule_summary") < call_names.index("run")
+
+
+def test_standalone_print_schedule_exits_without_snapshots(capsys):
+    """When --print-schedule is set WITHOUT --dry-run, the handler prints
+    the schedule and exits without creating snapshots.
+
+    Per the test-plan, --print-schedule should act as a standalone preview:
+    print the schedule and return without invoking the pipeline.
+    """
+    mock_core = _make_mock_core()
+    mock_core.schedule_summary.return_value = "SCHEDULE OUTPUT"
+    args = _make_action_args(command="run", print_schedule=True, dry_run=False)
+
+    handle_run(mock_core, args)
+
+    # Schedule should be printed to stdout
+    captured = capsys.readouterr()
+    assert "SCHEDULE OUTPUT" in captured.out
+
+    # Pipeline should NOT run — no snapshots created
+    mock_core.run.assert_not_called()
+
+
+def test_timer_invocation_logs_schedule_at_info(caplog):
+    """When --timer is set, _handle_schedule_and_timer logs the schedule
+    summary at INFO level via logger.info."""
+    mock_core = _make_mock_core()
+    mock_core.schedule_summary.return_value = "TIMER SCHEDULE"
+    args = _make_action_args(command="run", timer=True)
+
+    with caplog.at_level(logging.INFO, logger="qsnap.cli.commands"):
+        handle_run(mock_core, args)
+
+    # schedule_summary was called for the timer
+    mock_core.schedule_summary.assert_called_once_with(None)
+
+    # The schedule was logged at INFO level
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("TIMER SCHEDULE" in r.getMessage() for r in info_records)

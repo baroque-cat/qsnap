@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 
-from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 
 
 class IStateManager(ABC):
@@ -49,4 +50,16 @@ class IStateManager(ABC):
     @abstractmethod
     def clear_deferred_operations(self, vm_name: str) -> None:
         """Clear all deferred blockcommit operations for *vm_name*."""
+        ...
+
+    @abstractmethod
+    def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
+        """Return the last recorded full backup for *target_path*, or None."""
+        ...
+
+    @abstractmethod
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime
+    ) -> None:
+        """Record a full backup for *target_path* with the given *name* and *timestamp*."""
         ...

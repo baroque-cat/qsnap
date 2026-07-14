@@ -44,6 +44,7 @@ class MockSnapshotProvider(ISnapshotProvider):
             path=snapshot_path,
             new_allocation=65536,
             error=None,
+            content_hash="a" * 64,
         )
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
@@ -92,6 +93,21 @@ class MockBackupProvider(IBackupProvider):
             error=None,
         )
 
+    def create_full_backup(
+        self,
+        source_snapshot: SnapshotInfo,
+        target: TargetConfig,
+        compress: bool = False,
+    ) -> BackupResult:
+        return BackupResult(
+            success=True,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target.path / f"{source_snapshot.name}.FULL.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+        )
+
 
 class MockBitmapBackupProvider(IBackupProvider):
     """Mock bitmap backup provider returning valid result types.
@@ -132,6 +148,21 @@ class MockBitmapBackupProvider(IBackupProvider):
             stdout="",
             stderr="",
             returncode=0,
+            error=None,
+        )
+
+    def create_full_backup(
+        self,
+        source_snapshot: SnapshotInfo,
+        target: TargetConfig,
+        compress: bool = False,
+    ) -> BackupResult:
+        return BackupResult(
+            success=True,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target.path / f"{source_snapshot.name}.FULL.qcow2",
+            bytes_transferred=1048576,
             error=None,
         )
 

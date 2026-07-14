@@ -112,6 +112,11 @@ def build_argparser() -> argparse.ArgumentParser:
             action="store_true",
             help="Print retention schedule before executing",
         )
+        sub.add_argument(
+            "--timer",
+            action="store_true",
+            help="Indicate timer invocation (logs schedule summary at INFO)",
+        )
 
     # list subcommand with sub-subcommands
     list_parser = subparsers.add_parser("list", help="List snapshots, backups, config, or latest")

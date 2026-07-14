@@ -474,3 +474,112 @@ def test_preserve_min_latest_keeps_only_most_recent():
 
     # No item appears in both lists.
     assert not (set(result.keep) & set(result.remove))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 8. explain() — structured per-bucket breakdown
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_explain_returns_per_bucket_counts():
+    """``explain()`` returns a dict keyed by bucket name, where each value
+    is a dict with ``"count"`` (int) and, when count > 0, ``"range"``
+    (a 2-tuple of datetimes: earliest and latest kept timestamps).
+    """
+    items = _load_fixture("daily_set.json")
+    assert len(items) == 28
+
+    now = items[-1].timestamp  # 2025-01-14T12:00:00
+    policy = RetentionPolicy(
+        hourly=0,
+        daily=7,
+        weekly=0,
+        monthly=0,
+        yearly=0,
+        preserve_min="0h",
+    )
+
+    engine = TimeBasedRetention(policy)
+    explanation = engine.explain(items, policy, now=now)
+
+    # Returns a dict
+    assert isinstance(explanation, dict)
+
+    # All expected bucket names are present as keys
+    expected_keys = {"preserve_min", "hourly", "daily", "weekly", "monthly", "yearly"}
+    assert expected_keys.issubset(set(explanation.keys()))
+
+    # Every value is a dict containing an integer "count"
+    for bucket_name, bucket_info in explanation.items():
+        assert isinstance(bucket_info, dict), f"{bucket_name} value is not a dict"
+        assert "count" in bucket_info, f"{bucket_name} missing 'count' key"
+        assert isinstance(bucket_info["count"], int), (
+            f"{bucket_name} count is not an int"
+        )
+
+    # daily=7 → 7 kept items with a range tuple
+    assert explanation["daily"]["count"] == 7
+    assert "range" in explanation["daily"]
+    daily_range = explanation["daily"]["range"]
+    assert isinstance(daily_range, tuple)
+    assert len(daily_range) == 2
+    start, end = daily_range
+    assert isinstance(start, datetime)
+    assert isinstance(end, datetime)
+    assert start <= end
+
+    # preserve_min="0h" keeps exactly 1 item (the one at `now`)
+    assert explanation["preserve_min"]["count"] == 1
+    assert "range" in explanation["preserve_min"]
+
+    # hourly=0 → count 0, no range key
+    assert explanation["hourly"]["count"] == 0
+    assert "range" not in explanation["hourly"]
+
+    # weekly=0 → count 0, no range key
+    assert explanation["weekly"]["count"] == 0
+    assert "range" not in explanation["weekly"]
+
+
+def test_explain_is_pure_function():
+    """Calling ``explain()`` twice with identical inputs returns identical
+    results — the engine is deterministic (no I/O, no side effects).
+    """
+    items = _load_fixture("mixed_set.json")
+    now = items[-1].timestamp  # 2025-01-08T00:00:00
+
+    policy = RetentionPolicy(
+        hourly=6,
+        daily=3,
+        weekly=0,
+        monthly=0,
+        yearly=0,
+        preserve_min="0h",
+    )
+
+    engine = TimeBasedRetention(policy)
+    result1 = engine.explain(items, policy, now=now)
+    result2 = engine.explain(items, policy, now=now)
+
+    # Top-level dict equality
+    assert result1 == result2
+
+    # Deep equality on every bucket: counts and ranges match
+    for key in result1:
+        assert result1[key]["count"] == result2[key]["count"], (
+            f"Bucket '{key}' count differs between calls"
+        )
+        if "range" in result1[key]:
+            assert "range" in result2[key]
+            assert result1[key]["range"] == result2[key]["range"], (
+                f"Bucket '{key}' range differs between calls"
+            )
+
+    # Also verify with preserve_day_of_week for good measure
+    result3 = engine.explain(
+        items, policy, now=now, preserve_day_of_week="wednesday"
+    )
+    result4 = engine.explain(
+        items, policy, now=now, preserve_day_of_week="wednesday"
+    )
+    assert result3 == result4

@@ -8,16 +8,37 @@ Verification levels (``TargetConfig.verify``):
 - ``"off"``: no verification.
 - ``"metadata"``: ``qemu-img info`` consistency check (format, virtual-size,
   actual-size tolerance).
+- ``"hash"``: SHA-256 hash comparison (computed at snapshot creation time,
+  stored in ``SnapshotInfo.content_hash``, validated on target after transfer).
 - ``"full"``: metadata check + ``qemu-img compare -q`` byte-level comparison.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
 
 _VERIFY_COMPARE_TIMEOUT = 7200  # 2 hours
+
+_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
+
+
+def _file_sha256(path: Path) -> str:
+    """Compute the SHA-256 hash of a file, reading 8 MB chunks.
+
+    Returns the hex digest string.
+    """
+    sha = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 def verify_backup(
@@ -25,6 +46,7 @@ def verify_backup(
     source_path: str,
     target_path: str,
     verify_mode: str,
+    expected_hash: str | None = None,
 ) -> str | None:
     """Verify a backup file against its source.
 
@@ -32,7 +54,10 @@ def verify_backup(
         shell: IShell instance for running qemu-img commands.
         source_path: Path to the source qcow2 file.
         target_path: Path to the target (backup) qcow2 file.
-        verify_mode: One of ``"off"``, ``"metadata"``, ``"full"``.
+        verify_mode: One of ``"off"``, ``"metadata"``, ``"hash"``, ``"full"``.
+        expected_hash: SHA-256 hex digest of the source file, required
+            for ``"hash"`` mode.  If ``None`` in ``"hash"`` mode, hash
+            verification is skipped.
 
     Returns:
         ``None`` on success, or an error string starting with
@@ -99,6 +124,16 @@ def verify_backup(
                 f"verification failed: actual-size out of tolerance "
                 f"(source={source_asize}, target={target_asize})"
             )
+
+    # ── Hash verification (mid-level between metadata and full) ──────
+
+    if verify_mode == "hash" and expected_hash is not None:
+        try:
+            actual_hash = _file_sha256(Path(target_path))
+        except OSError as exc:
+            return f"verification failed: cannot read target file for hashing: {exc}"
+        if actual_hash != expected_hash:
+            return "verification failed: hash mismatch"
 
     # ── Full verification ────────────────────────────────────────────
 

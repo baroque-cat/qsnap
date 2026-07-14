@@ -15,11 +15,12 @@ Verification levels (``TargetConfig.verify``):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import patch
 
 from qsnap.models.results import ShellResult
-from qsnap.modules.backup.verification import verify_backup
+from qsnap.modules.backup.verification import _file_sha256, verify_backup
 
 # ── Constants ─────────────────────────────────────────────────────────────
 
@@ -216,3 +217,128 @@ def test_risk_full_verification_not_default(make_target):
 
     assert target.verify == "metadata"
     assert target.verify != "full"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Hash verification (verify_mode="hash")
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_hash_verification_match_passes(mock_shell, tmp_path):
+    """When ``verify_mode="hash"`` and the target file's SHA-256 matches
+    ``expected_hash``, ``verify_backup`` returns ``None`` (pass).
+
+    A real temp file is created with known content so ``_file_sha256`` can
+    compute its actual digest.  The ``qemu-img info`` mock returns valid
+    qcow2 metadata so the preceding metadata check also passes.
+    """
+    target_file = tmp_path / "target.qcow2"
+    content = b"qsnap backup hash verification test content"
+    target_file.write_bytes(content)
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    mock_shell.expect(r"qemu-img info").returns(
+        _ok_result(stdout=json.dumps(_QCOW2_INFO))
+    )
+
+    result = verify_backup(
+        mock_shell,
+        _SOURCE_PATH,
+        str(target_file),
+        "hash",
+        expected_hash=expected_hash,
+    )
+
+    assert result is None
+
+
+def test_hash_verification_mismatch_fails(mock_shell, tmp_path):
+    """When ``verify_mode="hash"`` and the target file's SHA-256 does NOT
+    match ``expected_hash``, ``verify_backup`` returns an error string
+    containing ``"hash"``.
+    """
+    target_file = tmp_path / "target.qcow2"
+    target_file.write_bytes(b"actual backup content")
+
+    wrong_hash = "b" * 64  # does not match the real hash
+
+    mock_shell.expect(r"qemu-img info").returns(
+        _ok_result(stdout=json.dumps(_QCOW2_INFO))
+    )
+
+    result = verify_backup(
+        mock_shell,
+        _SOURCE_PATH,
+        str(target_file),
+        "hash",
+        expected_hash=wrong_hash,
+    )
+
+    assert result is not None
+    assert "hash" in result.lower()
+
+
+def test_hash_verification_skipped_when_no_expected_hash(mock_shell):
+    """When ``verify_mode="hash"`` but ``expected_hash`` is ``None``, hash
+    verification is skipped — ``verify_backup`` returns ``None`` after the
+    metadata check passes.
+
+    No real file is needed because ``_file_sha256`` is never called.
+    """
+    mock_shell.expect(r"qemu-img info").returns(
+        _ok_result(stdout=json.dumps(_QCOW2_INFO))
+    )
+
+    result = verify_backup(
+        mock_shell,
+        _SOURCE_PATH,
+        _TARGET_PATH,
+        "hash",
+        expected_hash=None,
+    )
+
+    assert result is None
+
+
+def test_file_sha256_computes_hash(tmp_path):
+    """``_file_sha256(path)`` returns a 64-character lowercase hex string
+    matching the SHA-256 digest of the file's contents.
+
+    Uses a real temp file with known content to verify the actual hash
+    computation (no mocking).
+    """
+    test_file = tmp_path / "test_data.bin"
+    content = b"qsnap test content for sha256 hashing"
+    test_file.write_bytes(content)
+
+    result = _file_sha256(test_file)
+
+    assert len(result) == 64
+    assert all(c in "0123456789abcdef" for c in result)
+    assert result == hashlib.sha256(content).hexdigest()
+
+
+def test_metadata_mode_unchanged_after_hash_addition(mock_shell):
+    """``verify_backup(verify_mode="metadata")`` still works as before —
+    the hash branch is NOT entered even when ``expected_hash`` is provided.
+
+    Patches ``_file_sha256`` and asserts it was never called, proving the
+    hash code path is exclusive to ``verify_mode="hash"``.
+    """
+    mock_shell.expect(r"qemu-img info").returns(
+        _ok_result(stdout=json.dumps(_QCOW2_INFO))
+    )
+
+    with patch(
+        "qsnap.modules.backup.verification._file_sha256"
+    ) as mock_sha:
+        result = verify_backup(
+            mock_shell,
+            _SOURCE_PATH,
+            _TARGET_PATH,
+            "metadata",
+            expected_hash="a" * 64,  # provided but must be ignored
+        )
+
+    assert result is None
+    mock_sha.assert_not_called()

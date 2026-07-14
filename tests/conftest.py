@@ -142,6 +142,8 @@ def make_global_config():
         lockfile: str | None = None,
         snapshot_preserve: str | None = None,
         target_preserve: str | None = None,
+        snapshot_preserve_min: str | None = None,
+        target_preserve_min: str | None = None,
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -150,6 +152,8 @@ def make_global_config():
             lockfile=lockfile,
             snapshot_preserve=snapshot_preserve,
             target_preserve=target_preserve,
+            snapshot_preserve_min=snapshot_preserve_min,
+            target_preserve_min=target_preserve_min,
         )
 
     return _make

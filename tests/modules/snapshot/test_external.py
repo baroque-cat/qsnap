@@ -756,3 +756,76 @@ def test_external_snapshot_provider_imports_shared_parsers():
         "external.py should NOT have a local _parse_timestamp; "
         "it must use the shared parser from qsnap.utils.parsing"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 9. Content hash (SHA-256) on snapshot creation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
+    """When snapshot creation succeeds, ``create()`` returns a
+    ``SnapshotResult`` whose ``content_hash`` is a 64-character hex string
+    (SHA-256 digest).
+
+    The ``_file_sha256`` call reads the snapshot file on disk; since no real
+    file exists in the unit test, we patch ``_file_sha256`` in the
+    ``external`` module to return a known 64-char hex digest.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    _expect_successful_create(mock_shell)
+
+    fake_hash = "a" * 64  # 64-char hex string simulating a SHA-256 digest
+
+    with patch(
+        "qsnap.modules.snapshot.external._file_sha256", return_value=fake_hash
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    assert result.success is True
+    assert result.content_hash is not None
+    assert len(result.content_hash) == 64
+    # All characters are valid lowercase hex
+    assert all(c in "0123456789abcdef" for c in result.content_hash)
+    assert result.content_hash == fake_hash
+
+
+def test_create_snapshot_failure_content_hash_none(mock_shell, make_vm_config):
+    """When snapshot creation fails (virsh returns an error),
+    ``SnapshotResult.content_hash`` is ``None``.
+
+    The provider short-circuits before the hash computation step, so
+    ``content_hash`` must be its default value of ``None``.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    stderr_msg = "error: internal error: snapshot creation failed"
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert result.content_hash is None
+    assert result.error == stderr_msg

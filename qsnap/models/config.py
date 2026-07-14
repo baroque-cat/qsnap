@@ -42,6 +42,8 @@ class GlobalConfig:
     lockfile: str | None = None
     snapshot_preserve: str | None = None
     target_preserve: str | None = None
+    snapshot_preserve_min: str | None = None
+    target_preserve_min: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,9 @@ class TargetConfig:
     incremental_mode: str = "file-copy"
     target_preserve: str | None = None
     verify: str = "metadata"
+    target_preserve_min: str | None = None
+    full_every: str = "0d"
+    full_compress: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,8 @@ class VMConfig:
     snapshot_create: str = "always"
     snapshot_preserve: str | None = None
     target_preserve: str | None = None
+    snapshot_preserve_min: str | None = None
+    target_preserve_min: str | None = None
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-size"

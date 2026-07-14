@@ -93,3 +93,77 @@ def test_preserve_day_of_week_all_seven_days_accepted(day: str, tmp_path: Path) 
     )
     facade = ConfigFacade(config_file)
     assert facade.get_global().preserve_day_of_week == day
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# snapshot_preserve_min / target_preserve_min inheritance (global → VM → target)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_inherits_global_snapshot_preserve_min() -> None:
+    """VM 'vm_inherit' inherits global snapshot_preserve_min='2h'."""
+    facade = ConfigFacade(FIXTURES / "preserve_min.toml")
+    vm = facade.get_vm("vm_inherit")
+    assert vm.snapshot_preserve_min == "2h"
+
+
+@pytest.mark.unit
+def test_vm_overrides_global_snapshot_preserve_min() -> None:
+    """VM 'vm_override' has snapshot_preserve_min='6h' (overrides global '2h')."""
+    facade = ConfigFacade(FIXTURES / "preserve_min.toml")
+    vm = facade.get_vm("vm_override")
+    assert vm.snapshot_preserve_min == "6h"
+
+
+@pytest.mark.unit
+def test_target_inherits_vm_target_preserve_min() -> None:
+    """Target 'vm_override_inherit' inherits VM's target_preserve_min='12h'."""
+    facade = ConfigFacade(FIXTURES / "preserve_min.toml")
+    vm = facade.get_vm("vm_override")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/vm_override_inherit")
+    )
+    assert target.target_preserve_min == "12h"
+
+
+@pytest.mark.unit
+def test_target_overrides_vm_target_preserve_min() -> None:
+    """Target 'vm_override_override' has target_preserve_min='24h' (overrides VM's '12h')."""
+    facade = ConfigFacade(FIXTURES / "preserve_min.toml")
+    vm = facade.get_vm("vm_override")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/vm_override_override")
+    )
+    assert target.target_preserve_min == "24h"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# full_every / full_compress parsing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_parses_target_full_every() -> None:
+    """ConfigFacade parses full_every='7d' from a [[vm.target]] section."""
+    facade = ConfigFacade(FIXTURES / "full_backup.toml")
+    vm = facade.get_vm("vm_with_full")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/vm_with_full")
+    )
+    assert target.full_every == "7d"
+
+
+@pytest.mark.unit
+def test_facade_parses_target_full_compress() -> None:
+    """ConfigFacade parses full_compress=True from a [[vm.target]] section."""
+    facade = ConfigFacade(FIXTURES / "full_backup.toml")
+    vm = facade.get_vm("vm_with_full")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/vm_with_full")
+    )
+    assert target.full_compress is True

@@ -148,3 +148,78 @@ def test_file_copy_backup_provider_requires_shell():
     """FileCopyBackupProvider requires an IShell constructor argument."""
     with pytest.raises(TypeError):
         FileCopyBackupProvider()  # type: ignore[call-arg]
+
+
+def test_ibackup_provider_create_full_backup_abstract():
+    """create_full_backup is a non-abstract method on IBackupProvider.
+
+    It has a default implementation that raises ``NotImplementedError``, so
+    it is NOT in ``__abstractmethods__`` — concrete implementations are not
+    forced to override it.  However, a bare subclass that does not override it
+    must raise ``NotImplementedError`` when the method is called.
+    """
+    # The method exists on the ABC and is callable.
+    assert hasattr(IBackupProvider, "create_full_backup")
+    assert callable(getattr(IBackupProvider, "create_full_backup"))
+
+    # It is NOT abstract — subclasses are not forced to override it.
+    assert "create_full_backup" not in IBackupProvider.__abstractmethods__
+
+    # A bare subclass (implements only the abstract methods) inherits the
+    # default implementation that raises NotImplementedError.
+    class _BareBackupProvider(IBackupProvider):
+        def transfer_missing(self, vm_config, target, snapshots):
+            return []
+
+        def list(self, target):
+            return []
+
+        def delete(self, backup):
+            return ShellResult(
+                success=True, stdout="", stderr="", returncode=0, error=None
+            )
+
+    bare = _BareBackupProvider()
+    with pytest.raises(NotImplementedError):
+        bare.create_full_backup(
+            source_snapshot=SnapshotInfo(
+                name="test-snap",
+                path=Path("/tmp/snap.qcow2"),
+                timestamp=datetime.now(),
+                allocation=65536,
+            ),
+            target=TargetConfig(path=Path("/mnt/backup/testvm")),
+            compress=False,
+        )
+
+    # Concrete implementations that override it expose the method.
+    assert callable(getattr(FileCopyBackupProvider, "create_full_backup"))
+    assert callable(getattr(MockBackupProvider, "create_full_backup"))
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (FileCopyBackupProvider, {"shell": MockShell()}),
+        (MockBackupProvider, {}),
+    ],
+    ids=["file_copy", "mock"],
+)
+def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwargs):
+    """create_full_backup() returns a BackupResult instance.
+
+    For ``FileCopyBackupProvider`` the bare ``MockShell`` causes the
+    ``qemu-img convert`` step to fail, but the provider still returns a
+    ``BackupResult`` (with ``success=False``).  ``MockBackupProvider``
+    returns a successful ``BackupResult``.
+    """
+    provider = cls(**init_kwargs)
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    result = provider.create_full_backup(source_snapshot, target, compress=False)
+    assert isinstance(result, BackupResult)

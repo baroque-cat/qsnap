@@ -189,3 +189,24 @@ def test_long_flag_with_list(cli_app):
     """--long flag (long form of -L) sets ns.long_format to True."""
     ns = cli_app.parse_args(["--long", "list", "snapshots"])
     assert ns.long_format is True
+
+
+# ── --timer and --print-schedule flag tests ────────────────────────────
+
+
+def test_timer_flag_parsed(cli_app):
+    """--timer flag on 'run' subcommand sets args.timer to True."""
+    ns = cli_app.parse_args(["run", "myvm", "--timer"])
+    assert ns.timer is True
+
+
+def test_timer_flag_defaults_false(cli_app):
+    """Without --timer, args.timer is False."""
+    ns = cli_app.parse_args(["run", "myvm"])
+    assert ns.timer is False
+
+
+def test_print_schedule_short_flag_S_parsed(cli_app):
+    """-S short flag sets args.print_schedule to True."""
+    ns = cli_app.parse_args(["run", "myvm", "-S"])
+    assert ns.print_schedule is True

@@ -264,3 +264,51 @@ def test_retention_policy_preserve_min_latest():
     """RetentionPolicy(preserve_min='latest') stores 'latest'."""
     policy = RetentionPolicy(preserve_min="latest")
     assert policy.preserve_min == "latest"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.snapshot_preserve_min / target_preserve_min
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_preserve_min_defaults_none(make_global_config):
+    """GlobalConfig() has snapshot_preserve_min=None and target_preserve_min=None by default."""
+    cfg = make_global_config()
+    assert cfg.snapshot_preserve_min is None
+    assert cfg.target_preserve_min is None
+
+
+def test_global_config_preserve_min_set_from_constructor(make_global_config):
+    """GlobalConfig(snapshot_preserve_min='2h', target_preserve_min='4h') sets the values."""
+    cfg = make_global_config(snapshot_preserve_min="2h", target_preserve_min="4h")
+    assert cfg.snapshot_preserve_min == "2h"
+    assert cfg.target_preserve_min == "4h"
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.full_every / full_compress — full backup scheduling
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_full_every_defaults_zero_d(make_target):
+    """TargetConfig() has full_every='0d' by default (never schedule full backups)."""
+    target = make_target()
+    assert target.full_every == "0d"
+
+
+def test_target_config_full_compress_defaults_false(make_target):
+    """TargetConfig() has full_compress=False by default."""
+    target = make_target()
+    assert target.full_compress is False
+
+
+# ---------------------------------------------------------------------------
+# VMConfig.snapshot_preserve_min / target_preserve_min
+# ---------------------------------------------------------------------------
+
+
+def test_vm_config_preserve_min_fields_exist(make_vm_config):
+    """VMConfig has snapshot_preserve_min and target_preserve_min fields, defaulting to None."""
+    vm = make_vm_config()
+    assert vm.snapshot_preserve_min is None
+    assert vm.target_preserve_min is None

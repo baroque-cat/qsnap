@@ -52,11 +52,23 @@ The system SHALL accept `--verbose` / `-v` (DEBUG level), `--quiet` / `-q` (ERRO
 - **THEN** log level is set to ERROR
 
 ### Requirement: Global flag --print-schedule / -S
-The system SHALL accept a `--print-schedule` / `-S` flag that prints detailed retention schedule information: which snapshots and backups will be kept or removed by the configured retention policy. Schedule printing SHALL NOT mutate any files.
+The system SHALL accept a `--print-schedule` / `-S` flag that invokes `Core.schedule_summary()` and prints the result to stdout. Schedule printing SHALL NOT mutate any files. When used without `--dry-run`, the command SHALL exit after printing the schedule without executing the pipeline.
 
 #### Scenario: Schedule output
 - **WHEN** `qsnap -S run` is executed
-- **THEN** output shows each VM's snapshots grouped by retention bucket (hourly/daily/weekly) with keep/remove status for each
+- **THEN** output shows each VM's retention schedule and the command exits without creating snapshots
+
+#### Scenario: --print-schedule with --dry-run
+- **WHEN** `qsnap run --print-schedule --dry-run` is executed
+- **THEN** the schedule summary is printed before the dry-run pipeline output, and the pipeline runs in dry-run mode
+
+### Requirement: Global flag --timer
+
+The system SHALL accept a `--timer` flag on action subcommands (`run`, `snapshot`, `backup`, `prune`) that logs the schedule summary at INFO level before executing the pipeline normally. Designed for cron/systemd timer use.
+
+#### Scenario: Timer invocation logs summary
+- **WHEN** `qsnap run --timer` is executed
+- **THEN** the schedule summary output appears in the log at INFO level, then the pipeline executes normally
 
 ### Requirement: Global flag --format
 The system SHALL accept a `--format` flag with values `table` (default), `long`, `raw`, and `col:<columns>`. `table` SHALL produce human-readable columns. `raw` SHALL produce `key=value` pairs for machine consumption. `col:` SHALL allow custom column selection.

@@ -42,3 +42,16 @@ def test_istate_manager_deferred_operations_methods_exist():
     assert "get_deferred_operations" in abstract_methods
     assert "add_deferred_blockcommit" in abstract_methods
     assert "clear_deferred_operations" in abstract_methods
+
+
+def test_istate_manager_full_backup_methods_abstract():
+    """IStateManager declares full-backup tracking methods as abstract.
+
+    The methods ``get_last_full_backup`` and ``set_last_full_backup`` must
+    be in ``IStateManager.__abstractmethods__`` so that every concrete
+    implementation (e.g. ``JsonStateManager``, ``InMemoryStateManager``)
+    is forced to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_last_full_backup" in abstract_methods
+    assert "set_last_full_backup" in abstract_methods

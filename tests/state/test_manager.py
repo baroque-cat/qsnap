@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from qsnap.state.json_manager import JsonStateManager
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -26,12 +26,14 @@ def _make_snapshot(
     ts: datetime,
     allocation: int = 1024,
     path: str = "/tmp/snap.qcow2",
+    content_hash: str | None = None,
 ) -> SnapshotInfo:
     return SnapshotInfo(
         name=name,
         path=Path(path),
         timestamp=ts,
         allocation=allocation,
+        content_hash=content_hash,
     )
 
 
@@ -224,3 +226,92 @@ def test_deferred_blockcommit_dataclass_fields() -> None:
     # Frozen: mutation raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         item.reason = "selinux"  # type: ignore[misc]
+
+
+# ── content_hash persistence tests ───────────────────────────────────────
+
+
+def test_record_snapshot_with_content_hash_restored(tmp_path: Path) -> None:
+    """record_snapshot stores content_hash; get_snapshots returns it preserved."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    snap = _make_snapshot(
+        "snap_hash",
+        datetime(2024, 1, 1, 12, 0, 0),
+        content_hash="abc123",
+    )
+    manager.record_snapshot("testvm", snap)
+
+    snapshots = manager.get_snapshots("testvm")
+
+    assert len(snapshots) == 1
+    assert snapshots[0].content_hash == "abc123"
+
+
+def test_snapshot_content_hash_persists_across_runs(tmp_path: Path) -> None:
+    """content_hash survives across JsonStateManager instances (disk reload)."""
+    manager1 = JsonStateManager(state_dir=tmp_path)
+    snap = _make_snapshot(
+        "snap_persist",
+        datetime(2024, 1, 1, 12, 0, 0),
+        content_hash="deadbeef",
+    )
+    manager1.record_snapshot("testvm", snap)
+
+    # New manager instance, same state directory — must load persisted data.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    snapshots = manager2.get_snapshots("testvm")
+
+    assert len(snapshots) == 1
+    assert snapshots[0].content_hash == "deadbeef"
+
+
+# ── full backup tracking tests ───────────────────────────────────────────
+
+
+def test_set_and_get_last_full_backup(tmp_path: Path) -> None:
+    """set_last_full_backup then get_last_full_backup round-trips the values."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    name = "full-2024-01-01"
+    ts = datetime(2024, 1, 1, 12, 0, 0)
+
+    manager.set_last_full_backup(target, name, ts)
+
+    result = manager.get_last_full_backup(target)
+
+    assert result is not None
+    assert isinstance(result, FullBackupInfo)
+    assert result.name == name
+    assert result.timestamp == ts
+    assert result.path == Path(target) / name
+
+
+def test_full_backup_state_saved_and_retrieved(tmp_path: Path) -> None:
+    """Full backup state survives across JsonStateManager instances (disk reload)."""
+    target = "/mnt/backup/testvm"
+    name = "full-2024-06-01"
+    ts = datetime(2024, 6, 1, 9, 30, 0)
+
+    manager1 = JsonStateManager(state_dir=tmp_path)
+    manager1.set_last_full_backup(target, name, ts)
+
+    # New manager instance, same state directory — must load persisted data.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    result = manager2.get_last_full_backup(target)
+
+    assert result is not None
+    assert isinstance(result, FullBackupInfo)
+    assert result.name == name
+    assert result.timestamp == ts
+    assert result.path == Path(target) / name
+
+
+def test_get_last_full_backup_returns_none_when_empty(tmp_path: Path) -> None:
+    """get_last_full_backup on a target with no full backup returns None."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    result = manager.get_last_full_backup("/mnt/backup/never_used")
+
+    assert result is None

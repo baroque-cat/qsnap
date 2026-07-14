@@ -1,0 +1,34 @@
+# preserve_min config — tests snapshot_preserve_min and target_preserve_min inheritance
+
+# Global defaults
+snapshot_preserve = "24h 7d 4w 12m 1y"
+snapshot_preserve_min = "2h"
+target_preserve = "48h 14d 8w 12m 1y"
+target_preserve_min = "4h"
+
+[[vm]]
+name = "vm_override"
+base_image = "/var/lib/libvirt/images/vm_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+# VM overrides global preserve_min values
+snapshot_preserve_min = "6h"
+target_preserve_min = "12h"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_inherit"
+  # Target inherits VM's target_preserve_min (no override)
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_override"
+  # Target overrides VM's target_preserve_min
+  target_preserve_min = "24h"
+
+[[vm]]
+name = "vm_inherit"
+base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+# VM inherits global preserve_min values (no override)
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_inherit"
+  # Target inherits global target_preserve_min (via VM inheritance)

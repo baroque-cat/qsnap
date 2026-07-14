@@ -31,6 +31,14 @@ The system SHALL copy snapshots missing from the target storage into the `target
 - **THEN** after copying, `qemu-img rebase -u -b <new_relative_path> <target_file>` is executed
 - **AND** `<new_relative_path>` is the backing file name (without path) in the same target directory
 
+#### Scenario: Rebase to FULL anchor when present
+- **WHEN** target directory contains a FULL anchor file `vm.FULL.*.qcow2`
+- **THEN** newly transferred incrementals are rebased to `./vm.FULL.YYYYMMDD.qcow2` instead of the source backing filename
+
+#### Scenario: No FULL anchor preserves existing behavior
+- **WHEN** target directory has no `vm.FULL.*.qcow2` files
+- **THEN** incremental rebase uses the source backing filename as before
+
 #### Scenario: Non-incremental backup — no rebase
 
 - **WHEN** `target.incremental == False`
@@ -166,3 +174,15 @@ The system SHALL determine which snapshots are missing on the target and for eac
 #### Scenario: Verification failure produces error
 - **WHEN** verification detects wrong format or size mismatch
 - **THEN** `BackupResult(success=False, error="verification failed: ...")` is returned
+
+### Requirement: FileCopyBackupProvider.create_full_backup creates standalone qcow2 on target
+
+`FileCopyBackupProvider.create_full_backup(source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False) -> BackupResult` SHALL run `qemu-img convert -f qcow2 -O qcow2 <source> <target_path>/vm.FULL.YYYYMMDD.qcow2`. When `compress=True`, the `-c` flag SHALL be added. The result SHALL report success/failure and the created file path. The operation SHALL be atomic: convert to a `.tmp` path, then rename to the final name on success.
+
+#### Scenario: Uncompressed full backup succeeds
+- **WHEN** `create_full_backup(snapshot, target, compress=False)` is called
+- **THEN** `qemu-img convert` is invoked WITHOUT `-c` and `BackupResult(success=True)` is returned
+
+#### Scenario: Compressed full backup succeeds
+- **WHEN** `create_full_backup(snapshot, target, compress=True)` is called
+- **THEN** `qemu-img convert -c` is invoked

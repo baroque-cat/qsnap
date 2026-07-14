@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
+from typing import Any
 
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.models.config import RetentionPolicy
@@ -152,3 +153,66 @@ class TimeBasedRetention(IRetentionEngine):
         # Take the first *count* buckets.
         selected_keys = sorted_keys[:count]
         return [groups[key] for key in selected_keys]
+
+    def explain(
+        self,
+        items: list[RetentionItem],
+        policy: RetentionPolicy,
+        now: datetime,
+        preserve_day_of_week: str = "monday",
+    ) -> dict[str, dict[str, Any]]:
+        """Return a structured per-bucket breakdown of the retention policy.
+
+        Each bucket name maps to a dict with ``"count"`` (number of items
+        kept by that bucket) and optionally ``"range"`` (earliest and
+        latest timestamps of kept items).
+        """
+        if not items:
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+
+        sorted_items = sorted(items, key=lambda it: it.timestamp)
+
+        # preserve_min bucket
+        if policy.preserve_min == "all":
+            pm_items = list(sorted_items)
+        elif policy.preserve_min == "latest":
+            pm_items = [sorted_items[-1]] if sorted_items else []
+        else:
+            min_delta = _parse_duration(policy.preserve_min)
+            threshold = now - min_delta
+            pm_items = [it for it in sorted_items if it.timestamp >= threshold]
+
+        if pm_items:
+            result["preserve_min"] = {
+                "count": len(pm_items),
+                "range": (pm_items[0].timestamp, pm_items[-1].timestamp),
+            }
+        else:
+            result["preserve_min"] = {"count": 0}
+
+        # Time-bucket retention
+        buckets = [
+            ("hourly", policy.hourly),
+            ("daily", policy.daily),
+            ("weekly", policy.weekly),
+            ("monthly", policy.monthly),
+            ("yearly", policy.yearly),
+        ]
+        for bucket_name, count in buckets:
+            if count <= 0:
+                result[bucket_name] = {"count": 0}
+                continue
+            kept = self._select_by_bucket(
+                sorted_items, bucket_name, count, preserve_day_of_week
+            )
+            if kept:
+                result[bucket_name] = {
+                    "count": len(kept),
+                    "range": (kept[-1].timestamp, kept[0].timestamp),
+                }
+            else:
+                result[bucket_name] = {"count": 0}
+
+        return result

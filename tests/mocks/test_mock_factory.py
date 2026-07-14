@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
-from qsnap.models.results import RetentionItem, RetentionResult
+from qsnap.models.results import (
+    BackupResult,
+    RetentionItem,
+    RetentionResult,
+    SnapshotInfo,
+    SnapshotResult,
+)
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBackupProvider,
@@ -108,3 +117,43 @@ def test_mock_factory_create_lifecycle_manager_default_mode():
     manager = factory.create_lifecycle_manager()
     assert isinstance(manager, MockLifecycleManager)
     assert isinstance(manager, ILifecycleManager)
+
+
+def test_mock_backup_provider_has_create_full_backup(make_vm_config, make_target):
+    """MockVMModuleFactory.create_backup_provider() returns a provider that
+    has a create_full_backup method.  Calling it returns a BackupResult."""
+    factory = MockVMModuleFactory()
+    provider = factory.create_backup_provider(make_vm_config(), make_target())
+    assert isinstance(provider, IBackupProvider)
+    assert hasattr(provider, "create_full_backup")
+    assert callable(provider.create_full_backup)
+
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/test-snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    result = provider.create_full_backup(source_snapshot, make_target())
+    assert isinstance(result, BackupResult)
+
+
+def test_mock_snapshot_provider_returns_content_hash(make_vm_config):
+    """MockVMModuleFactory.create_snapshot_provider() returns a provider
+    whose create() returns a SnapshotResult with content_hash being a
+    64-char hex string (not None)."""
+    factory = MockVMModuleFactory()
+    provider = factory.create_snapshot_provider(make_vm_config())
+    assert isinstance(provider, ISnapshotProvider)
+
+    result = provider.create(
+        make_vm_config(),
+        "test-snap",
+        "vda",
+        Path("/tmp/test-snap.qcow2"),
+    )
+    assert isinstance(result, SnapshotResult)
+    assert result.content_hash is not None
+    assert len(result.content_hash) == 64
+    # Verify it is a valid hex string (0-9, a-f).
+    int(result.content_hash, 16)

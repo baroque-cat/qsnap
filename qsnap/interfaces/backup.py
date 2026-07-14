@@ -30,3 +30,18 @@ class IBackupProvider(ABC):
     def delete(self, backup: SnapshotInfo) -> ShellResult:
         """Delete a backup."""
         ...
+
+    def create_full_backup(
+        self,
+        source_snapshot: SnapshotInfo,
+        target: TargetConfig,
+        compress: bool = False,
+    ) -> BackupResult:
+        """Create a standalone full (anchor) backup via ``qemu-img convert``.
+
+        Default implementation raises ``NotImplementedError``.  Concrete
+        providers that support full backups should override this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support full backups"
+        )

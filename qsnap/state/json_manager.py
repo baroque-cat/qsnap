@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
+from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 
 
 class JsonStateManager(IStateManager):
@@ -48,13 +48,16 @@ class JsonStateManager(IStateManager):
         os.replace(tmp, self._state_path(vm_name))
 
     @staticmethod
-    def _snapshot_to_dict(info: SnapshotInfo) -> dict[str, str | int]:
-        return {
+    def _snapshot_to_dict(info: SnapshotInfo) -> dict[str, str | int | None]:
+        d: dict[str, str | int | None] = {
             "name": info.name,
             "path": str(info.path),
             "timestamp": info.timestamp.isoformat(),
             "allocation": info.allocation,
         }
+        if info.content_hash is not None:
+            d["content_hash"] = info.content_hash
+        return d
 
     @staticmethod
     def _dict_to_snapshot(d: dict[str, object]) -> SnapshotInfo:
@@ -63,6 +66,7 @@ class JsonStateManager(IStateManager):
             path=Path(str(d["path"])),
             timestamp=datetime.fromisoformat(str(d["timestamp"])),
             allocation=int(d["allocation"]),
+            content_hash=str(d["content_hash"]) if "content_hash" in d else None,
         )
 
     # ── IStateManager implementation ──────────────────────────────────
@@ -148,3 +152,45 @@ class JsonStateManager(IStateManager):
         data = self._load(vm_name)
         data["deferred_operations"] = []
         self._save(vm_name, data)
+
+    # ── Full backup tracking ──────────────────────────────────────────
+
+    def _full_backups_path(self) -> Path:
+        return self._state_dir / "_full_backups.json"
+
+    def _load_full_backups(self) -> dict[str, dict[str, str]]:
+        path = self._full_backups_path()
+        if not path.exists():
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            data: dict[str, dict[str, str]] = json.load(fh)
+        return data
+
+    def _save_full_backups(self, data: dict[str, dict[str, str]]) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_dir / "_full_backups.json.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+        os.replace(tmp, self._full_backups_path())
+
+    def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
+        data = self._load_full_backups()
+        entry = data.get(target_path)
+        if entry is None:
+            return None
+        return FullBackupInfo(
+            name=str(entry["name"]),
+            path=Path(str(entry["path"])),
+            timestamp=datetime.fromisoformat(str(entry["timestamp"])),
+        )
+
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime
+    ) -> None:
+        data = self._load_full_backups()
+        data[target_path] = {
+            "name": name,
+            "path": str(Path(target_path) / name),
+            "timestamp": timestamp.isoformat(),
+        }
+        self._save_full_backups(data)

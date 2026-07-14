@@ -37,6 +37,7 @@ class SnapshotResult:
     path: Path
     new_allocation: int
     error: str | None
+    content_hash: str | None = None
 
 
 # ── Backup ───────────────────────────────────────────────────────────────
@@ -97,6 +98,24 @@ class SnapshotInfo:
     path: Path
     timestamp: datetime
     allocation: int
+    content_hash: str | None = None
+
+
+# ── Full backup info (state record) ───────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FullBackupInfo:
+    """A recorded full (anchor) backup in persistent state.
+
+    Used by ``IStateManager`` to track when the last full backup was
+    created for a given target, so that incremental backups can rebase
+    to the correct anchor.
+    """
+
+    name: str
+    path: Path
+    timestamp: datetime
 
 
 # ── Retention ────────────────────────────────────────────────────────────

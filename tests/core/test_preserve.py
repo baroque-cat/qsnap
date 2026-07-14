@@ -362,3 +362,113 @@ def test_preserve_snapshots_retention_still_evaluated(
         core.run()
 
     assert retention_spy.called
+
+
+# ── test_parse_preserve_explicit_min_overrides_default ────────────────────
+
+
+def test_parse_preserve_explicit_min_overrides_default():
+    """An explicit preserve_min_str overrides the default ``0h`` value."""
+    policy = Core._parse_preserve("24h 7d", preserve_min_str="2h")
+    assert policy.preserve_min == "2h"
+    assert policy.hourly == 24
+    assert policy.daily == 7
+
+
+# ── test_parse_preserve_none_uses_default_zero_h ──────────────────────────
+
+
+def test_parse_preserve_none_uses_default_zero_h():
+    """When preserve_min_str is None and preserve_str is non-None, default is ``0h``."""
+    policy = Core._parse_preserve("24h 7d")
+    assert policy.preserve_min == "0h"
+    assert policy.hourly == 24
+    assert policy.daily == 7
+
+
+# ── test_evaluate_snapshot_retention_uses_vm_preserve_min ────────────────
+
+
+def test_evaluate_snapshot_retention_uses_vm_preserve_min(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VMConfig.snapshot_preserve_min is passed through to _parse_preserve."""
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_preserve="24h",
+        snapshot_preserve_min="2h",
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    with patch.object(
+        mock_factory,
+        "create_retention_engine",
+        wraps=mock_factory.create_retention_engine,
+    ) as retention_spy:
+        core._evaluate_snapshot_retention(vm)
+
+    assert retention_spy.called
+    policy = retention_spy.call_args.args[0]
+    assert policy.preserve_min == "2h"
+
+
+# ── test_evaluate_backup_retention_uses_target_preserve_min ──────────────
+
+
+def test_evaluate_backup_retention_uses_target_preserve_min(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """TargetConfig.target_preserve_min is passed through to _parse_preserve."""
+    target = make_target(target_preserve="48h", target_preserve_min="4h")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    backups = [
+        SnapshotInfo(
+            name="backup1",
+            path=Path("/mnt/backup/backup1.qcow2"),
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+        ),
+    ]
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=backups),
+        patch.object(
+            mock_factory,
+            "create_retention_engine",
+            wraps=mock_factory.create_retention_engine,
+        ) as retention_spy,
+    ):
+        core._evaluate_backup_retention(vm, target)
+
+    assert retention_spy.called
+    policy = retention_spy.call_args.args[0]
+    assert policy.preserve_min == "4h"

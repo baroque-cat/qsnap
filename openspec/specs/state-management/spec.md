@@ -21,6 +21,11 @@ The system SHALL provide a `JsonStateManager` that persists per-VM state as JSON
 #### Scenario: Record and list snapshots
 - **WHEN** `record_snapshot("myvm", SnapshotInfo(...))` is called for two snapshots
 - **THEN** `get_snapshots("myvm")` returns a list with both entries, sorted by creation time
+- **AND** `SnapshotInfo.content_hash` is preserved across write and read when non-None
+
+#### Scenario: Hash persists across runs
+- **WHEN** `record_snapshot("vm", SnapshotInfo(content_hash="abc123"))` is called and then `get_snapshots("vm")` is called
+- **THEN** the returned `SnapshotInfo.content_hash` is `"abc123"`
 
 ### Requirement: Atomic file writes
 JsonStateManager SHALL use atomic write pattern: write to a temporary file, then rename over the target, to prevent corruption on crash.
@@ -48,3 +53,15 @@ JsonStateManager SHALL use atomic write pattern: write to a temporary file, then
 #### Scenario: No deferred operations — empty list
 - **WHEN** `get_deferred_operations("vm_new")` is called for a VM with no deferred state
 - **THEN** the method returns an empty list
+
+### Requirement: IStateManager tracks last full backup per target
+
+`IStateManager` SHALL provide `get_last_full_backup(target_path: str) -> FullBackupInfo | None` and `set_last_full_backup(target_path: str, name: str, timestamp: datetime) -> None` methods. `JsonStateManager` SHALL persist this under the `"target_full_backups"` key in a per-VM JSON file.
+
+#### Scenario: Full backup state saved and retrieved
+- **WHEN** `set_last_full_backup("/mnt/backup/vm", "FULL.20250714", ts)` is called then `get_last_full_backup("/mnt/backup/vm")` is called
+- **THEN** the returned `FullBackupInfo.name` is `"FULL.20250714"` and `timestamp` equals `ts`
+
+#### Scenario: No full backup returns None
+- **WHEN** `get_last_full_backup("/mnt/backup/nonexistent")` is called with no prior `set_last_full_backup`
+- **THEN** the function returns `None`

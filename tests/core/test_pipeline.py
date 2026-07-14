@@ -12,7 +12,7 @@ Covers:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -820,3 +820,100 @@ def test_pipeline_onchange_no_changes_validation_first(
 
     # Pipeline succeeded (skipping a snapshot is not an error).
     assert result.success is True
+
+
+# ── test_backup_target_first_run_creates_full_backup ──────────────────────
+
+
+def test_backup_target_first_run_creates_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When full_every is set and no previous full backup exists, create_full_backup
+    is called and state.set_last_full_backup records the result."""
+    target = make_target(full_every="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch.object(
+            backup_provider,
+            "create_full_backup",
+            wraps=backup_provider.create_full_backup,
+        ) as full_spy,
+        patch.object(
+            mock_state,
+            "set_last_full_backup",
+            wraps=mock_state.set_last_full_backup,
+        ) as set_full_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, "create_full_backup should be called on first run"
+    assert set_full_spy.called, "set_last_full_backup should be called after full backup"
+
+
+# ── test_backup_target_interval_not_elapsed_skips_full ────────────────────
+
+
+def test_backup_target_interval_not_elapsed_skips_full(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When full_every interval has not elapsed, create_full_backup is NOT called."""
+    target = make_target(full_every="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Set a recent full backup (1 hour ago, well within the 7d interval)
+    recent = datetime.now() - timedelta(hours=1)
+    mock_state.set_last_full_backup(str(target.path), "snap1.FULL.qcow2", recent)
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert not full_spy.called, (
+        "create_full_backup should NOT be called when interval has not elapsed"
+    )

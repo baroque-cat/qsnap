@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from typing import Any
 
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import RetentionItem, RetentionResult
@@ -43,3 +44,21 @@ class IRetentionEngine(ABC):
             ``RetentionResult`` with ``keep`` and ``remove`` name lists.
         """
         ...
+
+    def explain(
+        self,
+        items: list[RetentionItem],
+        policy: RetentionPolicy,
+        now: datetime,
+        preserve_day_of_week: str = "monday",
+    ) -> dict[str, dict[str, Any]]:
+        """Return a structured per-bucket breakdown of the retention policy.
+
+        Each bucket name maps to a dict with ``"count"`` (number of items
+        kept by that bucket) and optionally ``"range"`` (earliest and
+        latest timestamps of kept items).
+
+        Default implementation returns an empty dict.  Concrete
+        implementations should override this to provide real breakdowns.
+        """
+        return {}
