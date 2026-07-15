@@ -61,6 +61,8 @@ def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
                 "snapshot_dir": str(vm.snapshot_dir),
                 "snapshot_create": vm.snapshot_create,
                 "targets": str(len(vm.targets)),
+                "blockcommit_deep_verify": "ON" if vm.blockcommit_deep_verify else "OFF",
+                "snapshot_deep_verify": "ON" if vm.snapshot_deep_verify else "OFF",
             }
         )
     return rows
@@ -257,7 +259,18 @@ def handle_list(core: Core, args: Namespace) -> int:
     elif sub == "config":
         vms = core.list_config()
         rows = _config_to_rows(vms)
-        columns = ["name", "base_image", "snapshot_dir", "snapshot_create", "targets"]
+        columns = [
+            "name", "base_image", "snapshot_dir", "snapshot_create",
+            "targets", "blockcommit_deep_verify", "snapshot_deep_verify",
+        ]
+        # Print global safety settings header
+        global_cfg = core._config.get_global()
+        print("Global safety settings:")
+        print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
+        print(f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}")
+        print(f"  chain_verify_after_commit: {'ON' if global_cfg.chain_verify_after_commit else 'OFF'}")
+        print(f"  deep_check_schedule: {global_cfg.deep_check_schedule}")
+        print()
     elif sub == "latest":
         data = core.list_latest(vm_filter)
         rows = _latest_to_rows(data)
@@ -291,11 +304,28 @@ def handle_check(core: Core, args: Namespace) -> int:
     fmt: str = getattr(args, "format", "table")
     deep: bool = getattr(args, "deep", False)
     data = core.check(vm_filter, deep=deep)
+
+    # Print safety configuration summary
+    global_cfg = core._config.get_global()
+    print("Safety configuration:")
+    print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
+    print(f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}")
+    print(f"  chain_verify_after_commit: {'ON' if global_cfg.chain_verify_after_commit else 'OFF'}")
+    print(f"  Deep check schedule: {core.get_deep_check_schedule_info()}")
+    print()
+
     rows = _check_to_rows(data)
     columns = ["vm", "status", "broken_snapshots"]
+
+    # Determine exit code: 1 if any VM has unreadable images, 0 otherwise
+    has_critical = any(r.status == "broken" for r in data.values())
+
     output = format_output(rows, columns, fmt)
     if output:
         print(output)
+
+    if deep and has_critical:
+        return EXIT_GENERIC
     return EXIT_SUCCESS
 
 

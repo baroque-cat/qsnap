@@ -36,12 +36,16 @@ class QemuImgCommitManager(ILifecycleManager):
         self,
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
+        *,
+        deep_verify: bool = False,
     ) -> CommitResult:
         """Merge snapshots into the base image via ``qemu-img commit``.
 
         1. If the list is empty → no-op success.
         2. For each snapshot (oldest first): ``qemu-img commit -b <base>
            -d <top>``.  Short-circuit on first failure (design D4).
+        3. When *deep_verify* is True, run ``qemu-img check`` on the
+           base image after a successful commit.
         """
         # Step 1: Empty list → no-op
         if not snapshots_to_merge:
@@ -67,6 +71,35 @@ class QemuImgCommitManager(ILifecycleManager):
                     error=result.error,
                 )
             last_merged = snapshot.name
+
+        # Deep verify: run qemu-img check on base image after commit
+        if deep_verify:
+            import json
+            chk = self._shell.run(
+                ["qemu-img", "check", "--output=json", str(vm_config.base_image)],
+                timeout=3600,
+            )
+            if not chk.success:
+                return CommitResult(
+                    success=False,
+                    committed_snapshot="",
+                    error=f"deep verify: qemu-img check failed: {chk.error}",
+                )
+            try:
+                data = json.loads(chk.stdout)
+                corruptions = data.get("corruptions", 0)
+                if corruptions > 0:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=f"deep verify: {corruptions} corruptions in base image",
+                    )
+            except json.JSONDecodeError:
+                return CommitResult(
+                    success=False,
+                    committed_snapshot="",
+                    error="deep verify: failed to parse qemu-img check output",
+                )
 
         return CommitResult(
             success=True,

@@ -382,3 +382,210 @@ def test_get_last_full_backup_returns_none_when_empty(tmp_path: Path) -> None:
     result = manager.get_last_full_backup("/mnt/backup/never_used")
 
     assert result is None
+
+
+# ── Fault tolerance & safety: state file corruption and rotation ──────────
+
+
+def test_corrupt_state_file_renamed_and_empty_state_returned(
+    tmp_path: Path,
+) -> None:
+    """Corrupt JSON file is renamed and empty state is returned.
+
+    Write a corrupt JSON file (e.g. ``{ broken json``) to
+    ``{tmp_path}/testvm.json``.  Create ``JsonStateManager``, call
+    ``get_last_allocation("testvm")``.  Assert: returns None.  Assert:
+    the corrupt file was renamed to ``testvm.json.broken.{timestamp}``
+    (check it starts with "testvm.json.broken.").  Assert: the original
+    ``testvm.json`` no longer exists.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text("{ broken json", encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    result = manager.get_last_allocation("testvm")
+
+    assert result is None
+
+    # Original state file must no longer exist.
+    assert not state_file.exists(), (
+        "Original state file should be renamed away after corruption"
+    )
+
+    # A broken file should exist.
+    broken_files = list(tmp_path.glob("testvm.json.broken.*"))
+    assert len(broken_files) == 1, (
+        f"Expected exactly one broken file, got {len(broken_files)}: "
+        f"{[f.name for f in broken_files]}"
+    )
+    assert broken_files[0].name.startswith("testvm.json.broken."), (
+        f"Broken file name should start with 'testvm.json.broken.', "
+        f"got {broken_files[0].name}"
+    )
+
+
+def test_clean_state_file_loads_normally(tmp_path: Path) -> None:
+    """Valid JSON state file loads without corruption handling.
+
+    Write valid JSON ``{"last_allocation": 4096}`` to
+    ``{tmp_path}/testvm.json``.  Create ``JsonStateManager``.  Assert
+    ``get_last_allocation("testvm")`` returns 4096.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps({"last_allocation": 4096}),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    assert manager.get_last_allocation("testvm") == 4096
+
+
+def test_missing_state_file_returns_none_gracefully(tmp_path: Path) -> None:
+    """No state file → get_last_allocation returns None without raising.
+
+    This covers the same scenario as ``test_missing_state_returns_none``
+    but with explicit emphasis on graceful handling (no exception, no
+    side effects on the filesystem).
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Verify the directory is empty.
+    assert not any(tmp_path.iterdir()), "State directory should be empty"
+
+    # Should return None gracefully for any non-existent VM.
+    result = manager.get_last_allocation("nonexistent")
+    assert result is None
+
+    # Also check a second non-existent VM for confidence.
+    assert manager.get_last_allocation("another_vm") is None
+
+
+def test_first_save_creates_state_file_only(tmp_path: Path) -> None:
+    """First save: only the state file is created, no backup files.
+
+    Create ``JsonStateManager(state_dir=tmp_path, state_backup_count=3)``.
+    Call ``set_last_allocation("testvm", 4096)``.  Assert: ``testvm.json``
+    exists.  Assert: NO backup files exist (``testvm.json.1``,
+    ``testvm.json.2``, ``testvm.json.3`` should NOT exist).  First save
+    has no previous file to rotate.
+    """
+    manager = JsonStateManager(state_dir=tmp_path, state_backup_count=3)
+
+    manager.set_last_allocation("testvm", 4096)
+
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists(), "State file should be created on first save"
+
+    # No backup files should exist — nothing to rotate.
+    for i in range(1, 4):
+        backup = tmp_path / f"testvm.json.{i}"
+        assert not backup.exists(), (
+            f"Backup file {backup.name} should NOT exist on first save"
+        )
+
+    # Verify content is correct.
+    assert manager.get_last_allocation("testvm") == 4096
+
+
+def test_subsequent_saves_rotate_state_files(tmp_path: Path) -> None:
+    """Subsequent saves rotate previous state into numbered backups.
+
+    Create ``JsonStateManager(state_dir=tmp_path, state_backup_count=3)``.
+    Call ``set_last_allocation("testvm", 100)`` then
+    ``set_last_allocation("testvm", 200)``.  Assert: ``testvm.json``
+    contains 200.  Assert: ``testvm.json.1`` contains 100 (previous version).
+    Call ``set_last_allocation("testvm", 300)``.  Assert: ``testvm.json.1``
+    now contains 200, ``testvm.json.2`` contains 100.
+    """
+    manager = JsonStateManager(state_dir=tmp_path, state_backup_count=3)
+
+    # First save — no rotation.
+    manager.set_last_allocation("testvm", 100)
+
+    # Second save — rotates 100 → testvm.json.1.
+    manager.set_last_allocation("testvm", 200)
+
+    assert manager.get_last_allocation("testvm") == 200
+
+    backup1 = tmp_path / "testvm.json.1"
+    assert backup1.exists(), "testvm.json.1 should exist after second save"
+    with open(backup1, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["last_allocation"] == 100, (
+        f"testvm.json.1 should contain previous value (100), got {data}"
+    )
+
+    # Third save — pushes 200 → .1, 100 → .2.
+    manager.set_last_allocation("testvm", 300)
+
+    assert manager.get_last_allocation("testvm") == 300
+
+    with open(tmp_path / "testvm.json.1", encoding="utf-8") as fh:
+        assert json.load(fh)["last_allocation"] == 200
+    with open(tmp_path / "testvm.json.2", encoding="utf-8") as fh:
+        assert json.load(fh)["last_allocation"] == 100
+
+
+def test_backup_count_limit_enforced(tmp_path: Path) -> None:
+    """Backup count limit is enforced — oldest entries discarded.
+
+    Create ``JsonStateManager(state_dir=tmp_path, state_backup_count=2)``.
+    Write 4 times: set_last_allocation("testvm", 100), 200, 300, 400.
+    Assert: ``testvm.json`` exists (400).  ``testvm.json.1`` exists (300).
+    ``testvm.json.2`` exists (200).  ``testvm.json.3`` does NOT exist
+    (limit is 2, so oldest 100 is discarded).
+    """
+    manager = JsonStateManager(state_dir=tmp_path, state_backup_count=2)
+
+    manager.set_last_allocation("testvm", 100)
+    manager.set_last_allocation("testvm", 200)
+    manager.set_last_allocation("testvm", 300)
+    manager.set_last_allocation("testvm", 400)
+
+    assert manager.get_last_allocation("testvm") == 400
+
+    # Backup 1 should contain 300
+    backup1 = tmp_path / "testvm.json.1"
+    assert backup1.exists()
+    with open(backup1, encoding="utf-8") as fh:
+        assert json.load(fh)["last_allocation"] == 300
+
+    # Backup 2 should contain 200
+    backup2 = tmp_path / "testvm.json.2"
+    assert backup2.exists()
+    with open(backup2, encoding="utf-8") as fh:
+        assert json.load(fh)["last_allocation"] == 200
+
+    # Backup 3 must NOT exist — limit is 2, oldest (100) discarded.
+    backup3 = tmp_path / "testvm.json.3"
+    assert not backup3.exists(), (
+        "testvm.json.3 should NOT exist — backup count limit is 2"
+    )
+
+
+def test_state_backup_count_zero_disables_rotation(tmp_path: Path) -> None:
+    """``state_backup_count=0`` disables backup rotation entirely.
+
+    Create ``JsonStateManager(state_dir=tmp_path, state_backup_count=0)``.
+    Call ``set_last_allocation("testvm", 100)`` then
+    ``set_last_allocation("testvm", 200)``.  Assert: ``testvm.json``
+    exists (contains 200).  Assert: NO backup files exist.
+    """
+    manager = JsonStateManager(state_dir=tmp_path, state_backup_count=0)
+
+    manager.set_last_allocation("testvm", 100)
+    manager.set_last_allocation("testvm", 200)
+
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists()
+    with open(state_file, encoding="utf-8") as fh:
+        assert json.load(fh)["last_allocation"] == 200
+
+    # No backup files should exist.
+    for i in range(1, 5):
+        backup = tmp_path / f"testvm.json.{i}"
+        assert not backup.exists(), (
+            f"Backup file {backup.name} should NOT exist when "
+            f"state_backup_count=0"
+        )

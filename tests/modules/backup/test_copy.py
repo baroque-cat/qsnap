@@ -1661,3 +1661,123 @@ def test_full_backup_ignores_rate_limit(
     assert len(rsync_cmds) == 0
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Retry-unawareness (fault-tolerance-and-safety)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_provider_remains_retry_unaware(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """The ``FileCopyBackupProvider`` does NOT perform any retry logic
+    on its own — that is Core's responsibility.
+
+    When ``transfer_missing()`` encounters a transient failure (e.g.
+    "Connection refused"), the transfer command is attempted exactly ONCE
+    and the error is returned in the ``BackupResult`` without retrying.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    error_msg = "Connection refused"
+    mock_shell.expect(r"^cp ").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=error_msg,
+            returncode=1,
+            error=error_msg,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    # Assert failure result with the original error string
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "Connection refused" in results[0].error
+    assert results[0].bytes_transferred == 0
+    assert results[0].snapshot_name == snapshot.name
+    assert results[0].source_path == snapshot.path
+    assert results[0].target_path == expected_target_file
+
+    # The transfer command (cp) was attempted exactly ONCE — no retry loop
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
+    assert len(cp_cmds) == 1, (
+        f"Expected exactly 1 cp attempt (no retry), got {len(cp_cmds)}"
+    )
+
+
+def test_backup_result_error_structured_for_retry_detection(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """The ``BackupResult.error`` field returned by ``transfer_missing()``
+    is a plain string (not None, not an exception), which can be passed
+    directly to ``is_retryable()`` for pattern-matching.
+
+    This ensures the error format produced by the provider is compatible
+    with Core's retry logic.
+    """
+    from qsnap.utils.retry import is_retryable
+
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    error_msg = "No route to host"
+    mock_shell.expect(r"^cp ").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=error_msg,
+            returncode=1,
+            error=error_msg,
+        )
+    )
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(
+        vm_config, target, [snapshot], rate_limit="no"
+    )
+
+    # Assert error field is a proper string
+    assert len(results) == 1
+    assert results[0].success is False
+    assert results[0].error is not None
+    assert isinstance(results[0].error, str)
+
+    # The error string is structured so that is_retryable() can
+    # pattern-match it (Core's responsibility to act on the result)
+    assert is_retryable(results[0].error) is True

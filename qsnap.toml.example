@@ -31,6 +31,48 @@ snapshot_preserve = "24h 7d 4w 12m 1y"
 # Default retention policy for backup targets.
 target_preserve = "48h 14d 8w 12m 1y"
 
+# Minimum retention period for snapshots.  Snapshots younger than this
+# are never removed regardless of bucket policy.  Duration string like
+# "6h", "2d", "1w", or "all" (default — keep everything).
+# snapshot_preserve_min = "all"
+
+# Minimum retention period for backup targets.  Same format as
+# snapshot_preserve_min.
+# target_preserve_min = "all"
+
+# Rate limit for backup transfers.  "no" (default) disables rate limiting.
+# Format: "<number><unit>" where unit is k, m, or g (KB/s, MB/s, GB/s).
+# Example: "500k" limits to 500 KB/s.
+# rate_limit = "no"
+
+# Deferred blockcommit monitoring thresholds.  When the number or age of
+# deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
+# deferred_warn_count = "5"
+# deferred_crit_count = "10"
+# deferred_warn_age = "7d"
+# deferred_crit_age = "14d"
+
+# ── Fault-tolerance & safety controls (global) ──────────────────────────
+# T0/T1: Fast operations, ON by default — safe to keep enabled.
+# T3:    Heavy operations, OFF by default — opt in explicitly.
+
+# T0 — Remove stale .tmp/.partial files and NBD sockets before each run.
+# auto_cleanup = true
+
+# T0 — Number of rotated state file backups to keep (vm.json → .1 → .2).
+# state_backup_count = 2
+
+# T1 — Verify backing chain integrity before blockcommit (~1 second).
+# chain_verify_before_commit = true
+
+# T1 — Verify chain length decreased after blockcommit (~1 second).
+# chain_verify_after_commit = true
+
+# T3 — Deep check schedule for qsnap check --deep reporting.
+# Accepted: "off" (default), "weekly", "monthly".
+# Does NOT control the systemd timer — only used for schedule reporting.
+# deep_check_schedule = "off"
+
 
 # ── VM definitions ──────────────────────────────────────────────────────
 
@@ -51,28 +93,95 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   "qemu-img" — use qemu-img commit (works without libvirt)
 # lifecycle_mode = "virsh"
 
+# Change detection mode for "onchange" snapshot_create:
+#   "allocation-size" — compare qemu-img info actual-size (default)
+#   "allocation-map"   — compare qemu-img map allocated regions
+# change_detection_mode = "allocation-size"
+
+# Explicit list of disk targets (e.g. ["vda", "vdb"]).  When unset,
+# qsnap auto-discovers all disks via virsh domblklist.
+# disks = ["vda"]
+
 # Override snapshot retention for this VM
 # snapshot_preserve = "48h 14d 8w 12m 1y"
 
 # Override backup retention for this VM's targets
 # target_preserve = "96h 30d 16w 12m 2y"
 
+# Override minimum snapshot retention for this VM
+# snapshot_preserve_min = "6h"
+
+# Override minimum backup retention for this VM's targets
+# target_preserve_min = "12h"
+
+# ── Fault-tolerance & safety controls (per-VM) ──────────────────────────
+# T2: Heavy operations, OFF by default — enable per-VM for critical VMs.
+
+# T2 — Run qemu-img check after blockcommit on shut-off VMs (deferred).
+# blockcommit_deep_verify = false
+
+# T2 — Run qemu-img check on snapshots during deep check.
+# snapshot_deep_verify = false
+
   # ── Backup targets ───────────────────────────────────────────────────
   [[vm.target]]
   path = "/mnt/backup/debiantest"
   incremental = true
+
+  # Incremental backup mode:
+  #   "file-copy" — whole-file copy (default)
+  #   "bitmap"    — dirty-block extraction via checkpoint
+  # incremental_mode = "file-copy"
+
   # Override backup retention for this target only
   # target_preserve = "72h 21d 12w 18m 3y"
+
+  # Override minimum backup retention for this target only
+  # target_preserve_min = "6h"
+
+  # Full backup interval.  Create a full backup when this interval has
+  # elapsed since the last full backup.  "0d" (default) disables.
+  # full_every = "7d"
+
+  # Compress full backup files.
+  # full_compress = false
+
   # Backup verification level:
   #   "metadata" — verify qcow2 format + virtual-size match (default)
   #   "full"     — metadata check + qemu-img compare
   #   "off"      — no verification
   # verify = "metadata"
 
+  # Rate limit for this target only (overrides global rate_limit).
+  # rate_limit = "no"
+
+  # ── Backup retry controls (per-target) ───────────────────────────────
+  # Retry transient backup failures with exponential backoff.
+  # Transient errors: "Connection refused", "No route to host",
+  # "timed out", "broken pipe", "EOF".
+  # Non-retryable: "No space left on device", "Permission denied".
+  # backup_retry_max = 3
+  # backup_retry_base = "2s"
+
+
+# ── Critical VM example (T2 deep verification enabled) ─────────────────
+# Uncomment and adapt for VMs that require maximum safety.
+#
 # [[vm]]
-# name = "centos9"
-# base_image = "/var/lib/libvirt/images/centos9.qcow2"
-# snapshot_dir = "/var/lib/libvirt/snapshots/centos9"
+# name = "critical-db"
+# base_image = "/var/lib/libvirt/images/critical-db.qcow2"
+# snapshot_dir = "/var/lib/libvirt/snapshots/critical-db"
+# snapshot_create = "onchange"
+# snapshot_quiesce = true
+# blockcommit_deep_verify = true
+# snapshot_deep_verify = true
 #
 #   [[vm.target]]
-#   path = "/mnt/backup/centos9"
+#   path = "/mnt/backup/critical-db"
+#   incremental = true
+#   incremental_mode = "bitmap"
+#   verify = "full"
+#   full_every = "7d"
+#   full_compress = true
+#   backup_retry_max = 5
+#   backup_retry_base = "10s"

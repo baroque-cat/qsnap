@@ -16,6 +16,12 @@ class ILifecycleManager(ABC):
         self,
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
+        *,
+        deep_verify: bool = False,
     ) -> CommitResult:
-        """Merge snapshots into their backing file via ``virsh blockcommit``."""
+        """Merge snapshots into their backing file via ``virsh blockcommit``.
+
+        When *deep_verify* is True, run ``qemu-img check`` on the base
+        image after a successful commit and report corruptions.
+        """
         ...

@@ -1,0 +1,53 @@
+# Test fixture: all fault-tolerance safety fields set explicitly.
+# Used by config-parsing tests to verify ConfigFacade parses them correctly.
+
+timestamp_format = "long"
+preserve_day_of_week = "monday"
+state_dir = "/var/lib/qsnap/state"
+snapshot_preserve = "24h 2d"
+target_preserve = "48h 7d"
+snapshot_preserve_min = "6h"
+target_preserve_min = "12h"
+rate_limit = "no"
+deferred_warn_count = "5"
+deferred_crit_count = "10"
+deferred_warn_age = "7d"
+deferred_crit_age = "14d"
+
+# Fault-tolerance safety fields
+auto_cleanup = true
+state_backup_count = 3
+chain_verify_before_commit = true
+chain_verify_after_commit = false
+deep_check_schedule = "weekly"
+
+[[vm]]
+name = "critical-vm"
+base_image = "/var/lib/libvirt/images/critical.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/critical"
+snapshot_create = "always"
+snapshot_preserve = "48h 7d"
+blockcommit_deep_verify = true
+snapshot_deep_verify = true
+
+[[vm.target]]
+path = "/mnt/backup/critical"
+incremental = true
+incremental_mode = "file-copy"
+verify = "full"
+full_every = "7d"
+backup_retry_max = 5
+backup_retry_base = "5s"
+
+[[vm]]
+name = "standard-vm"
+base_image = "/var/lib/libvirt/images/standard.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/standard"
+blockcommit_deep_verify = false
+snapshot_deep_verify = false
+
+[[vm.target]]
+path = "/mnt/backup/standard"
+incremental = true
+backup_retry_max = 2
+backup_retry_base = "1s"

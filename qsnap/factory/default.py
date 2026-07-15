@@ -44,9 +44,12 @@ class DefaultFactory(IVMModuleFactory):
         self._state = state
 
     @staticmethod
-    def create_state_manager(state_dir: str | Path) -> IStateManager:
+    def create_state_manager(
+        state_dir: str | Path,
+        state_backup_count: int = 2,
+    ) -> IStateManager:
         """Create the default concrete ``IStateManager`` (JSON file-backed)."""
-        return JsonStateManager(state_dir)
+        return JsonStateManager(state_dir, state_backup_count=state_backup_count)
 
     def create_snapshot_provider(self, vm_config: VMConfig) -> ISnapshotProvider:
         return ExternalSnapshotProvider(self._shell)

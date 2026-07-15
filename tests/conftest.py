@@ -26,6 +26,10 @@ def _setup_validation_expectations(shell: MockShell) -> None:
     ``test -f``, ``which virsh``, ``which qemu-img``, and
     ``virsh dominfo``.  These expectations ensure validation passes
     for any VM name.
+
+    Also pre-configures expectations for pre-flight cleanup (``find``
+    commands) and chain verification (``qemu-img info --backing-chain``)
+    so that existing tests are not broken by the new safety steps.
     """
     shell.expect("test -d").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -71,6 +75,10 @@ def _setup_validation_expectations(shell: MockShell) -> None:
             returncode=0,
             error=None,
         )
+    )
+    # Pre-flight cleanup: find commands return empty (no stale files)
+    shell.expect("find").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
 
@@ -160,6 +168,11 @@ def make_global_config():
         deferred_crit_count: str = "10",
         deferred_warn_age: str = "7d",
         deferred_crit_age: str = "14d",
+        auto_cleanup: bool = True,
+        state_backup_count: int = 2,
+        chain_verify_before_commit: bool = True,
+        chain_verify_after_commit: bool = True,
+        deep_check_schedule: str = "off",
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -175,6 +188,11 @@ def make_global_config():
             deferred_crit_count=deferred_crit_count,
             deferred_warn_age=deferred_warn_age,
             deferred_crit_age=deferred_crit_age,
+            auto_cleanup=auto_cleanup,
+            state_backup_count=state_backup_count,
+            chain_verify_before_commit=chain_verify_before_commit,
+            chain_verify_after_commit=chain_verify_after_commit,
+            deep_check_schedule=deep_check_schedule,
         )
 
     return _make

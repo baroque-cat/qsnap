@@ -202,7 +202,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_GENERIC
 
     shell = SubprocessShell()
-    state = DefaultFactory.create_state_manager(config.get_global().state_dir)
+    state = DefaultFactory.create_state_manager(
+        config.get_global().state_dir,
+        state_backup_count=config.get_global().state_backup_count,
+    )
     factory = DefaultFactory(shell, state)
     core = Core(config, factory, state, shell)
 

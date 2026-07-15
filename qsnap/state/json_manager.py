@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+
+logger = logging.getLogger(__name__)
 
 
 class JsonStateManager(IStateManager):
@@ -17,10 +21,24 @@ class JsonStateManager(IStateManager):
     State files live at ``{state_dir}/{vm_name}.json``.  Writes are
     atomic: data is written to a ``.tmp`` file, then ``os.rename`` is
     used to replace the target file atomically.
+
+    On ``_load`` corruption (``json.JSONDecodeError``), the corrupt file
+    is renamed to ``{vm_name}.json.broken.{timestamp}`` and an empty
+    state dict is returned (with a CRITICAL log).
+
+    On ``_save``, previous state file versions are rotated up to
+    ``state_backup_count`` backups: ``vm.json`` → ``vm.json.1`` →
+    ``vm.json.2``.  When ``state_backup_count`` is 0, no rotation
+    occurs.
     """
 
-    def __init__(self, state_dir: str | Path = "/var/lib/qsnap/state") -> None:
+    def __init__(
+        self,
+        state_dir: str | Path = "/var/lib/qsnap/state",
+        state_backup_count: int = 2,
+    ) -> None:
         self._state_dir = Path(state_dir)
+        self._state_backup_count = state_backup_count
 
     # ── internal helpers ───────────────────────────────────────────────
 
@@ -30,22 +48,95 @@ class JsonStateManager(IStateManager):
     def _tmp_path(self, vm_name: str) -> Path:
         return self._state_dir / f"{vm_name}.json.tmp"
 
+    def _backup_path(self, vm_name: str, n: int) -> Path:
+        return self._state_dir / f"{vm_name}.json.{n}"
+
     def _load(self, vm_name: str) -> dict[str, object]:
-        """Load the state dict for *vm_name*, or empty dict if no file."""
+        """Load the state dict for *vm_name*, or empty dict if no file.
+
+        On ``json.JSONDecodeError`` (corrupt file), the file is renamed
+        to ``{vm_name}.json.broken.{timestamp}``, a CRITICAL log is
+        emitted, and an empty dict is returned.
+        """
         path = self._state_path(vm_name)
         if not path.exists():
             return {}
-        with open(path, encoding="utf-8") as fh:
-            data: dict[str, object] = json.load(fh)
-        return data
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data: dict[str, object] = json.load(fh)
+            return data
+        except json.JSONDecodeError:
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            broken_path = (
+                self._state_dir / f"{vm_name}.json.broken.{timestamp}"
+            )
+            try:
+                shutil.move(str(path), str(broken_path))
+            except OSError as exc:
+                logger.critical(
+                    "State file for VM %s is corrupt and could not be "
+                    "renamed: %s",
+                    vm_name,
+                    exc,
+                )
+                return {}
+            logger.critical(
+                "State file for VM %s was corrupt — renamed to %s. "
+                "Starting with empty state.",
+                vm_name,
+                broken_path,
+            )
+            return {}
 
     def _save(self, vm_name: str, data: dict[str, object]) -> None:
-        """Atomically write *data* to the state file for *vm_name*."""
+        """Atomically write *data* to the state file for *vm_name*.
+
+        Before writing, previous state file versions are rotated up to
+        ``state_backup_count`` backups.  When ``state_backup_count`` is
+        0, no rotation occurs.
+        """
         self._state_dir.mkdir(parents=True, exist_ok=True)
+        state_path = self._state_path(vm_name)
+
+        # Rotate previous versions (only if the main file exists).
+        if self._state_backup_count > 0 and state_path.exists():
+            self._rotate_backups(vm_name)
+
         tmp = self._tmp_path(vm_name)
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, default=str)
-        os.replace(tmp, self._state_path(vm_name))
+        os.replace(tmp, state_path)
+
+    def _rotate_backups(self, vm_name: str) -> None:
+        """Rotate ``vm.json`` → ``vm.json.1`` → … up to backup count.
+
+        Uses ``shutil.move`` for shifting ``.N`` → ``.N+1`` (atomic).
+        The initial ``vm.json`` → ``vm.json.1`` uses ``shutil.copy2`` to
+        preserve the original file (atomic write guarantee: if the
+        subsequent ``os.replace`` fails, the original ``vm.json`` still
+        exists).
+        """
+        n = self._state_backup_count
+        state_path = self._state_path(vm_name)
+
+        # Shift from highest to lowest to avoid overwriting.
+        for i in range(n, 0, -1):
+            dst = self._backup_path(vm_name, i)
+            if i > n:
+                # Discard oldest beyond limit.
+                if dst.exists():
+                    dst.unlink()
+                continue
+
+            if i == 1:
+                # vm.json → vm.json.1: COPY (not move) to preserve original.
+                if state_path.exists():
+                    shutil.copy2(str(state_path), str(dst))
+            else:
+                # .N-1 → .N: MOVE (atomic shift).
+                src = self._backup_path(vm_name, i - 1)
+                if src.exists():
+                    shutil.move(str(src), str(dst))
 
     @staticmethod
     def _snapshot_to_dict(info: SnapshotInfo) -> dict[str, str | int | None]:

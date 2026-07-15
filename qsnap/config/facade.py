@@ -7,6 +7,7 @@ target), and produces immutable frozen dataclasses.  Implements
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -17,6 +18,11 @@ from qsnap.utils.parsing import parse_rate_limit
 
 class ConfigError(Exception):
     """Raised when the configuration is invalid (malformed TOML, missing fields)."""
+
+
+def _is_valid_duration(raw: str) -> bool:
+    """Check whether *raw* is a valid duration string like ``"2s"`` or ``"10s"``."""
+    return bool(re.match(r"^\d+s$", raw))
 
 
 class ConfigFacade(IConfigFacade):
@@ -46,7 +52,7 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(f"Invalid TOML in {self._config_path}: {exc}") from exc
 
         # Build global config from top-level keys.
-        global_kwargs: dict[str, str | None] = {}
+        global_kwargs: dict[str, str | int | bool | None] = {}
         for key in (
             "timestamp_format",
             "preserve_day_of_week",
@@ -64,6 +70,24 @@ class ConfigFacade(IConfigFacade):
         ):
             if key in raw:
                 global_kwargs[key] = str(raw[key])
+
+        # Parse fault-tolerance safety fields (T0/T1 fast ON by default,
+        # T3 heavy OFF by default).
+        if "auto_cleanup" in raw:
+            global_kwargs["auto_cleanup"] = bool(raw["auto_cleanup"])
+        if "state_backup_count" in raw:
+            global_kwargs["state_backup_count"] = int(raw["state_backup_count"])
+        if "chain_verify_before_commit" in raw:
+            global_kwargs["chain_verify_before_commit"] = bool(
+                raw["chain_verify_before_commit"]
+            )
+        if "chain_verify_after_commit" in raw:
+            global_kwargs["chain_verify_after_commit"] = bool(
+                raw["chain_verify_after_commit"]
+            )
+        if "deep_check_schedule" in raw:
+            global_kwargs["deep_check_schedule"] = str(raw["deep_check_schedule"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate rate_limit format.
@@ -78,6 +102,14 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(
                 f"Invalid preserve_day_of_week: {self._global.preserve_day_of_week!r}. "
                 f"Must be one of: {', '.join(sorted(valid_days))}"
+            )
+
+        # Validate deep_check_schedule.
+        valid_schedules = {"off", "weekly", "monthly"}
+        if self._global.deep_check_schedule.lower() not in valid_schedules:
+            raise ConfigError(
+                f"Invalid deep_check_schedule: {self._global.deep_check_schedule!r}. "
+                f"Must be one of: {', '.join(sorted(valid_schedules))}"
             )
 
         # Build VM configs.
@@ -118,6 +150,14 @@ class ConfigFacade(IConfigFacade):
         # change_detection_mode: "allocation-size" (default) or "allocation-map".
         change_detection_mode = str(
             vm_raw.get("change_detection_mode", "allocation-size")
+        )
+
+        # Deep verification fields (T2 — per-VM, default OFF).
+        blockcommit_deep_verify = bool(
+            vm_raw.get("blockcommit_deep_verify", False)
+        )
+        snapshot_deep_verify = bool(
+            vm_raw.get("snapshot_deep_verify", False)
         )
 
         # snapshot_preserve: VM overrides global.
@@ -186,6 +226,8 @@ class ConfigFacade(IConfigFacade):
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,
             disks=disks,
+            blockcommit_deep_verify=blockcommit_deep_verify,
+            snapshot_deep_verify=snapshot_deep_verify,
             targets=targets,
         )
 
@@ -233,6 +275,17 @@ class ConfigFacade(IConfigFacade):
         except ValueError as exc:
             raise ConfigError(f"Invalid target rate_limit: {exc}") from exc
 
+        # Backup retry fields (target-level — network reliability varies).
+        backup_retry_max = int(tgt_raw.get("backup_retry_max", 3))
+        backup_retry_base = str(tgt_raw.get("backup_retry_base", "2s"))
+
+        # Validate backup_retry_base — must be a duration string like "2s".
+        if not _is_valid_duration(backup_retry_base):
+            raise ConfigError(
+                f"Invalid backup_retry_base: {backup_retry_base!r}. "
+                "Must be a duration string like '1s', '5s', '10s'."
+            )
+
         return TargetConfig(
             path=path,
             incremental=incremental,
@@ -243,6 +296,8 @@ class ConfigFacade(IConfigFacade):
             full_every=full_every,
             full_compress=full_compress,
             rate_limit=rate_limit,
+            backup_retry_max=backup_retry_max,
+            backup_retry_base=backup_retry_base,
         )
 
     # ── IConfigFacade implementation ──────────────────────────────────

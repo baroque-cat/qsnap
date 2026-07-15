@@ -355,6 +355,18 @@ def test_risk_deferred_queue_grows_across_runs(
     # Set VM state to "running" so deferred ops are skipped, not retried.
     _set_vm_state(mock_shell, "running")
 
+    # Chain verification: return a valid single-element chain so that
+    # pre-commit verification passes and blockcommit is attempted.
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     lifecycle_manager = mock_factory._lifecycle_manager
 
     # Patch retention to remove "snap1" and blockcommit to fail with apparmor.

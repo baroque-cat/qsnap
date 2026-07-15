@@ -89,5 +89,5 @@ def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
             allocation=65536,
         )
     ]
-    result = manager.blockcommit(vm_config, snapshots)
+    result = manager.blockcommit(vm_config, snapshots, deep_verify=True)
     assert isinstance(result, CommitResult)

@@ -11,16 +11,20 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core, PipelineResult
-from qsnap.models.config import VMConfig
+from qsnap.models.config import GlobalConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
+    CommitResult,
+    DeferredBlockcommit,
+    RetentionResult,
     ShellResult,
     SnapshotInfo,
     SnapshotResult,
@@ -934,4 +938,800 @@ def test_backup_target_interval_not_elapsed_skips_full(
 
     assert not full_spy.called, (
         "create_full_backup should NOT be called when interval has not elapsed"
+    )
+
+
+# ── Chain Integrity Verification (pre-commit) ──────────────────────────────
+
+
+def _load_fixture(filename: str) -> str:
+    """Load a JSON fixture file from tests/fixtures/shell_outputs/."""
+    fixture_path = Path(__file__).parent.parent / "fixtures" / "shell_outputs" / filename
+    with open(fixture_path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _add_snapshots_for_chain(state, vm_name: str) -> None:
+    """Add snapshots matching the intact backing-chain fixture to state."""
+    state.record_snapshot(
+        vm_name,
+        SnapshotInfo(
+            name="snap1",
+            path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+            timestamp=datetime(2025, 7, 13, 8, 0),
+            allocation=1048576,
+        ),
+    )
+    state.record_snapshot(
+        vm_name,
+        SnapshotInfo(
+            name="snap4",
+            path=Path("/var/lib/libvirt/snapshots/testvm/snap4.qcow2"),
+            timestamp=datetime(2025, 7, 13, 14, 0),
+            allocation=4194304,
+        ),
+    )
+
+
+_OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+
+
+def test_chain_verify_intact_chain_blockcommit_proceeds(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Intact chain → pre-commit verification passes → blockcommit called.
+
+    Set ``chain_verify_before_commit=True`` and ``chain_verify_after_commit=False``
+    so the test focuses on pre-commit behaviour.  The chain is intact so
+    verification passes and blockcommit proceeds.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # qemu-img info --backing-chain returns the intact chain fixture
+    intact_json = _load_fixture("backing_chain_intact.json")
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=intact_json, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should proceed when chain is intact"
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_chain_verify_missing_file_blockcommit_skipped(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Broken chain (missing file) → pre-commit verification fails → blockcommit skipped.
+
+    The broken-chain fixture references a MISSING_FILE.qcow2.  ``test -f``
+    is pre-configured to return success, so we replace it with a specific
+    failure for the missing file followed by a generic success for all
+    other files.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Broken chain fixture: MISSING_FILE.qcow2 is referenced but missing
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+
+    # Replace generic test -f with specific MISSING_FILE failure + generic success
+    mock_shell._expectations = [
+        e for e in mock_shell._expectations if e.pattern != "test -f"
+    ]
+    mock_shell.expect("test -f.*MISSING_FILE").returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
+    )
+    mock_shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert not bc_spy.called, "blockcommit should be skipped when chain is broken"
+
+
+def test_chain_verify_non_qcow2_blockcommit_skipped(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Chain entry with ``format: raw`` → pre-commit verification fails → blockcommit skipped."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Chain with a non-qcow2 format entry
+    raw_chain = json.dumps([
+        {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
+        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "raw"},
+    ])
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=raw_chain, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert not bc_spy.called, "blockcommit should be skipped when non-qcow2 format detected"
+
+
+def test_chain_verify_cyclic_reference_blockcommit_skipped(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Chain with a cycle (same file appears twice) → verification fails → blockcommit skipped."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Chain where snap1 appears twice (cycle)
+    cyclic_chain = json.dumps([
+        {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
+        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+    ])
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=cyclic_chain, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert not bc_spy.called, "blockcommit should be skipped when cyclic reference detected"
+
+
+def test_chain_verify_broken_chain_does_not_defer(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Broken chain must NOT produce deferred operations — it needs operator intervention."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Broken chain
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+
+    # MISSING_FILE → test -f fails
+    mock_shell._expectations = [
+        e for e in mock_shell._expectations if e.pattern != "test -f"
+    ]
+    mock_shell.expect("test -f.*MISSING_FILE").returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
+    )
+    mock_shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+
+    core._blockcommit_snapshots(vm, retention)
+
+    # Broken chains must never be deferred — operator must fix the chain.
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_chain_verify_inconsistent_backing_filename_blockcommit_skipped(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Backing-filename mismatch → pre-commit verification fails → blockcommit skipped."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Chain where snap4's backing-filename does NOT match the next entry.
+    inconsistent_chain = json.dumps([
+        {
+            "image": "/var/lib/libvirt/snapshots/testvm/snap4.qcow2",
+            "format": "qcow2",
+            "backing-filename": "/var/lib/libvirt/snapshots/testvm/WRONG.qcow2",
+        },
+        {
+            "image": "/var/lib/libvirt/snapshots/testvm/snap3.qcow2",
+            "format": "qcow2",
+            "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
+        },
+        {
+            "image": "/var/lib/libvirt/images/testvm.qcow2",
+            "format": "qcow2",
+        },
+    ])
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=inconsistent_chain, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert not bc_spy.called, (
+        "blockcommit should be skipped when backing-filename mismatch detected"
+    )
+
+
+# ── Chain Integrity Verification (post-commit) ─────────────────────────────
+
+
+def test_post_commit_chain_shortened_as_expected(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Post-commit verification: chain shortened → blockcommit completes without CRITICAL."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=True,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch.object(core, "_get_chain_length", side_effect=[5, 4]),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should proceed when chain is intact"
+
+
+def test_post_commit_chain_length_unchanged_critical(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Post-commit verification: chain length unchanged → CRITICAL logged."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=True,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+    caplog.set_level(logging.CRITICAL)
+
+    with (
+        patch.object(core, "_get_chain_length", return_value=5),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should be called before post-commit check"
+    assert "chain length mismatch" in caplog.text
+
+
+def test_post_commit_verification_fails_snapshots_preserved(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Post-commit verification: chain length increased → CRITICAL, snapshots preserved."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=True,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+    caplog.set_level(logging.CRITICAL)
+
+    with (
+        patch.object(core, "_get_chain_length", side_effect=[3, 4]),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should be called before post-commit check"
+    assert "chain length mismatch" in caplog.text
+
+
+# ── Chain Verify Disabled ──────────────────────────────────────────────────
+
+
+def test_chain_verify_disabled_skips_pre_commit_check(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """With chain_verify_before_commit=False, _verify_backing_chain is NOT called.
+
+    The blockcommit proceeds without the pre-commit integrity check even
+    though _get_chain_length (used for post-commit comparison) still runs.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Provide a broken chain — but verification is disabled so it shouldn't matter
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch.object(core, "_verify_backing_chain") as verify_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert not verify_spy.called, (
+        "_verify_backing_chain should NOT be called when disabled"
+    )
+    assert bc_spy.called, "blockcommit should proceed when verify is disabled"
+
+
+# ── Backup Retry ───────────────────────────────────────────────────────────
+
+
+def test_backup_retry_transient_error_retried_successfully(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Transient error on first attempt → retried → succeeds on second attempt."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=3, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+    success_result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=1048576,
+        error=None,
+    )
+
+    provider = mock_factory._backup_provider
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch("qsnap.core.time.sleep"),
+        patch.object(
+            provider,
+            "transfer_missing",
+            side_effect=[[fail_result], [success_result]],
+        ) as transfer_spy,
+    ):
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 2, "transfer_missing should be retried once"
+    assert all(r.success for r in results), "all results should succeed after retry"
+    assert "succeeded on retry" in caplog.text
+
+
+def test_backup_retry_all_retries_exhausted(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All retries exhausted → return failed results after max_retries attempts."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=2, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+
+    provider = mock_factory._backup_provider
+
+    with (
+        patch("qsnap.core.time.sleep"),
+        patch.object(
+            provider,
+            "transfer_missing",
+            return_value=[fail_result],
+        ) as transfer_spy,
+    ):
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 2, (
+        "transfer_missing should be called max_retries times"
+    )
+    assert any(not r.success for r in results), "results should indicate failure"
+
+
+def test_backup_retry_non_retryable_fails_immediately(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Non-retryable error → fail immediately (one call only)."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=3, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="No space left on device",
+    )
+
+    provider = mock_factory._backup_provider
+
+    with patch.object(
+        provider,
+        "transfer_missing",
+        return_value=[fail_result],
+    ) as transfer_spy:
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 1, (
+        "non-retryable error should fail immediately (one call)"
+    )
+    assert any(not r.success for r in results), "results should indicate failure"
+
+
+def test_backup_retry_disabled_when_max_zero(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """retry_max=0 → retry is disabled, single call only."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=0, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+
+    provider = mock_factory._backup_provider
+
+    with patch.object(
+        provider,
+        "transfer_missing",
+        return_value=[fail_result],
+    ) as transfer_spy:
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 1, (
+        "retry disabled (max=0) → only one call"
+    )
+    assert any(not r.success for r in results), "results should indicate failure"
+
+
+# ── Deferred Blockcommit with deep_verify ──────────────────────────────────
+
+
+def test_deferred_blockcommit_passes_deep_verify_true(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When ``blockcommit_deep_verify=True``, deferred blockcommit passes it."""
+    vm = make_vm_config(
+        name="testvm",
+        disks=["vda"],
+        blockcommit_deep_verify=True,
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with a deferred blockcommit and matching snapshot.
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="snap1",
+            path=Path("/tmp/snap1.qcow2"),
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+        ),
+    )
+    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+
+    # VM is shut off → deferred commit should execute.
+    mock_shell.expect("domstate").returns(
+        ShellResult(success=True, stdout="shut off", stderr="", returncode=0, error=None)
+    )
+
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(
+        manager,
+        "blockcommit",
+        wraps=manager.blockcommit,
+    ) as bc_spy:
+        core._check_deferred_operations(vm)
+
+    assert bc_spy.called, "blockcommit should be called for deferred operation"
+    # Verify deep_verify=True was passed to blockcommit
+    call_kwargs = bc_spy.call_args.kwargs
+    assert call_kwargs.get("deep_verify") is True, (
+        "deep_verify=True should be passed to blockcommit"
     )

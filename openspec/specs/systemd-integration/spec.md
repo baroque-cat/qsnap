@@ -26,8 +26,28 @@ System administrators SHALL be able to create multiple timer/service pairs point
 - **THEN** `qsnap-hourly.service` runs with one config, `qsnap-weekly.service` runs with a different config, without conflict
 
 ### Requirement: Example config file
-The system SHALL ship an example TOML configuration file with comments explaining each option.
+The system SHALL ship an example TOML configuration file with comments explaining each option, including all fault-tolerance and safety fields.
 
 #### Scenario: Example config is parseable
 - **WHEN** `qsnap -c /usr/share/doc/qsnap/qsnap.toml.example list config` is executed
 - **THEN** the config is parsed successfully and shows the documented VM definitions
+
+#### Scenario: Example config documents preserve_min fields
+- **WHEN** the example config is read
+- **THEN** `snapshot_preserve_min` and `target_preserve_min` are documented with usage examples
+
+#### Scenario: Example config documents all safety fields
+- **WHEN** the example config is read
+- **THEN** `auto_cleanup`, `state_backup_count`, `chain_verify_before_commit`, `chain_verify_after_commit`, `deep_check_schedule`, `blockcommit_deep_verify`, `snapshot_deep_verify`, `backup_retry_max`, and `backup_retry_base` are all documented
+
+### Requirement: Deep verification systemd timer and service
+The system SHALL ship a `qsnap-check.timer` systemd timer unit that triggers `qsnap-check.service` on a weekly schedule (Sunday at 03:00), with `Persistent=True` and `RandomizedDelaySec=1800`. The service SHALL execute `qsnap -c /etc/qsnap/qsnap.toml check --deep`. See `specs/deep-verification-circuit/spec.md`.
+
+#### Scenario: Deep check timer ships with correct defaults
+- **WHEN** the qsnap package is installed
+- **THEN** `qsnap-check.timer` and `qsnap-check.service` are present in the systemd unit directory
+- **AND** the timer is NOT enabled by default (operator must enable explicitly)
+
+#### Scenario: Enabling the deep check timer
+- **WHEN** `systemctl enable --now qsnap-check.timer` is executed
+- **THEN** deep checks run weekly at the configured time

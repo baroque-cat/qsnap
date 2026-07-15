@@ -73,3 +73,38 @@ def test_istate_manager_update_deferred_warning_abstract(tmp_path):
     inmemory_mgr = InMemoryStateManager()
     assert callable(json_mgr.update_deferred_warning)
     assert callable(inmemory_mgr.update_deferred_warning)
+
+
+def test_json_state_manager_passes_isinstance_after_corruption_recovery(
+    tmp_path,
+) -> None:
+    """JsonStateManager remains an IStateManager after corruption recovery.
+
+    Create a ``JsonStateManager``, verify ``isinstance(manager,
+    IStateManager)`` is True.  Then trigger corruption recovery (write
+    a corrupt file, load), and verify ``isinstance`` is still True.
+    """
+    import json as _json
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Before corruption — passes isinstance.
+    assert isinstance(manager, IStateManager), (
+        "JsonStateManager should be an IStateManager before corruption"
+    )
+
+    # Write corrupt file and trigger recovery.
+    state_file = tmp_path / "testvm_corrupt.json"
+    state_file.write_text("{ this is not valid json", encoding="utf-8")
+
+    # Loading triggers corruption recovery (rename + empty state).
+    last_alloc = manager.get_last_allocation("testvm_corrupt")
+    assert last_alloc is None, (
+        "Corrupt state should return None after recovery"
+    )
+
+    # After corruption recovery — still passes isinstance.
+    assert isinstance(manager, IStateManager), (
+        "JsonStateManager should still be an IStateManager "
+        "after corruption recovery"
+    )

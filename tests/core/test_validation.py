@@ -432,3 +432,409 @@ def test_pipeline_returns_failure_on_missing_snapshot_dir(
     assert result.results[0].success is False
     assert result.results[0].error is not None
     assert "snapshot_dir not found" in result.results[0].error
+
+
+# ── Pre-flight cleanup: stale .tmp/.partial files ────────────────────────
+
+
+def _fresh_shell_with_cleanup_defaults() -> MockShell:
+    """Return a MockShell with cleanup expectations that return empty results.
+
+    The generic ``find`` and ``rm`` patterns are at the END of the
+    expectations list so that specific patterns inserted BEFORE them will
+    be matched first.
+    """
+    shell = MockShell()
+    shell.expect("rm").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    shell.expect("find").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    return shell
+
+
+def _insert_specific_find(
+    shell: MockShell, pattern: str, stdout: str
+) -> None:
+    """Insert a specific ``find`` expectation at the front of *shell*."""
+    exp = MockShell.__dict__["expect"](shell, pattern)
+    exp.returns(
+        ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None)
+    )
+    # Move the just-added expectation to the front
+    shell._expectations.insert(0, shell._expectations.pop())
+
+
+def test_preflight_cleanup_tmp_files_in_snapshot_dir_removed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+):
+    """``find`` returns a .tmp file in snapshot_dir → ``rm -f`` is called."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"snapshots/testvm.*\.tmp",
+        "/var/lib/libvirt/snapshots/testvm/stale.tmp\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with patch.object(shell, "run", wraps=shell.run) as run_spy:
+        core._preflight_cleanup(vm)
+
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 1
+    assert "stale.tmp" in str(rm_calls[0].args)
+
+
+def test_preflight_cleanup_tmp_files_in_target_dirs_removed(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+):
+    """``find`` returns a .tmp file in a target dir → ``rm -f`` is called."""
+    target = make_target(path="/mnt/backup/testvm")
+    vm = make_vm_config(name="testvm", targets=[target])
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"backup/testvm.*\.tmp",
+        "/mnt/backup/testvm/incomplete.tmp\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with patch.object(shell, "run", wraps=shell.run) as run_spy:
+        core._preflight_cleanup(vm)
+
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 1
+    assert "incomplete.tmp" in str(rm_calls[0].args)
+
+
+# ── Pre-flight cleanup: stale NBD sockets ───────────────────────────────
+
+
+def test_preflight_cleanup_stale_nbd_sockets_removed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+):
+    """``find /tmp`` returns a qsnap-backup-*.sock → ``rm -f`` called on it."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"qsnap-backup-.*\.sock",
+        "/tmp/qsnap-backup-abc123.sock\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with patch.object(shell, "run", wraps=shell.run) as run_spy:
+        core._preflight_cleanup(vm)
+
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 1
+    assert "qsnap-backup-abc123.sock" in str(rm_calls[0].args)
+
+
+# ── Pre-flight cleanup: no stale files → no action ───────────────────────
+
+
+def test_preflight_cleanup_no_stale_files_no_action(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+):
+    """No stale files found by any find → ``rm -f`` is never called."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    # All finds return empty — no inserts needed, defaults suffice.
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with patch.object(shell, "run", wraps=shell.run) as run_spy:
+        core._preflight_cleanup(vm)
+
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 0
+
+
+# ── Pre-flight cleanup: orphan .qcow2 detection ──────────────────────────
+
+
+def test_preflight_cleanup_orphan_snapshot_detected(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """Orphan .qcow2 in snapshot_dir → WARNING logged, file NOT deleted."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from qsnap.models.results import SnapshotInfo
+
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    # Record a known snapshot whose path.name does NOT match the orphan
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="testvm.known_vda",
+            path=Path("/var/lib/libvirt/snapshots/testvm/testvm.known_vda.qcow2"),
+            timestamp=datetime(2025, 1, 1),
+            allocation=1024,
+        ),
+    )
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"snapshots/testvm.*\.qcow2",
+        "/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+        with patch.object(shell, "run", wraps=shell.run) as run_spy:
+            core._preflight_cleanup(vm)
+
+    # The orphan .qcow2 must NOT be deleted
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 0  # no rm calls at all (no tmp/partial/sock either)
+
+    # Orphan WARNING logged
+    assert any(
+        "Orphan snapshot file detected" in r.message
+        and "testvm.20250101T120000.qcow2" in r.message
+        for r in caplog.records
+    ), f"Expected orphan warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_preflight_cleanup_non_matching_qcow2_not_orphan(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """A .qcow2 file that does NOT match the qsnap naming pattern is skipped."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    # File matches find pattern "testvm.*.qcow2" but NOT the regex
+    # ^testvm\.\d{8}T\d{6}\.qcow2$
+    _insert_specific_find(
+        shell,
+        r"snapshots/testvm.*\.qcow2",
+        "/var/lib/libvirt/snapshots/testvm/testvm.backup.qcow2\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+        core._preflight_cleanup(vm)
+
+    # No orphan WARNING — file doesn't match qsnap naming pattern
+    orphan_warnings = [
+        r for r in caplog.records if "Orphan" in r.message
+    ]
+    assert len(orphan_warnings) == 0
+
+
+def test_preflight_cleanup_all_snapshots_accounted_no_warning(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """All .qcow2 files are in state → no orphan WARNING, no deletion."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from qsnap.models.results import SnapshotInfo
+
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    # Record a snapshot that matches the "found" .qcow2 file
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="testvm.20250101T120000",
+            path=Path("/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2"),
+            timestamp=datetime(2025, 1, 1),
+            allocation=1024,
+        ),
+    )
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"snapshots/testvm.*\.qcow2",
+        "/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2\n",
+    )
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+        with patch.object(shell, "run", wraps=shell.run) as run_spy:
+            core._preflight_cleanup(vm)
+
+    # No rm calls for .qcow2 files
+    rm_calls = [
+        c for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 0
+
+    # No orphan WARNING
+    orphan_warnings = [
+        r for r in caplog.records if "Orphan" in r.message
+    ]
+    assert len(orphan_warnings) == 0
+
+
+# ── Pre-flight cleanup: auto_cleanup disabled ────────────────────────────
+
+
+def test_preflight_cleanup_auto_cleanup_disabled(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """``auto_cleanup=False`` → cleanup skipped, no ``find`` calls at all."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=False)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=shell
+    )
+
+    with caplog.at_level(logging.INFO, logger="qsnap.core"):
+        with patch.object(shell, "run", wraps=shell.run) as run_spy:
+            core._preflight_cleanup(vm)
+
+    # No shell commands at all — cleanup was skipped immediately
+    assert len(run_spy.call_args_list) == 0
+
+    # INFO log about disabled cleanup
+    info_messages = [r.message for r in caplog.records]
+    assert any(
+        "auto_cleanup is disabled" in msg for msg in info_messages
+    ), f"Expected 'auto_cleanup is disabled' in: {info_messages}"
+
+
+# ── validate_environment: cleanup integration ────────────────────────────
+
+
+def test_validate_env_cleanup_before_main_checks(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``_validate_environment`` calls ``_preflight_cleanup`` before main checks."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=mock_shell,
+    )
+
+    with patch.object(core, "_preflight_cleanup") as mock_cleanup:
+        result = core._validate_environment(vm)
+
+    # _preflight_cleanup was invoked (and before returning, checking succeeded)
+    mock_cleanup.assert_called_once_with(vm)
+    assert result.status == "ok"
+
+
+def test_validate_env_cleanup_skipped_when_auto_cleanup_false(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``auto_cleanup=False`` → validation proceeds, ``_preflight_cleanup``
+    still invoked (but does nothing), main checks still pass."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=False)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    core = Core(
+        config=config, factory=mock_factory, state=mock_state, shell=mock_shell,
+    )
+
+    with patch.object(core, "_preflight_cleanup") as mock_cleanup:
+        result = core._validate_environment(vm)
+
+    # _preflight_cleanup was still called (step 0)
+    mock_cleanup.assert_called_once_with(vm)
+
+    # Main validation still passes — cleanup being disabled is not a failure
+    assert result.status == "ok"

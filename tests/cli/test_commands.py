@@ -28,8 +28,13 @@ from qsnap.cli.commands import (
 )
 from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
-from qsnap.models.config import VMConfig
-from qsnap.models.results import DeferredSummary, RestoreResult, SnapshotInfo
+from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.results import (
+    CheckResult,
+    DeferredSummary,
+    RestoreResult,
+    SnapshotInfo,
+)
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -533,3 +538,193 @@ def test_list_deferred_no_operations(capsys):
     assert result == EXIT_SUCCESS
     captured = capsys.readouterr()
     assert "No deferred blockcommit operations" in captured.out
+
+
+# ── list config safety transparency tests ───────────────────────────────
+
+
+def test_list_config_shows_off_for_default_deep_verify(capsys):
+    """handle_list with sub=config shows OFF for blockcommit_deep_verify
+    and snapshot_deep_verify when both are disabled (default).
+
+    Also verifies the "Global safety settings" header is printed.
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig(
+        auto_cleanup=True,
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=True,
+        deep_check_schedule="off",
+    )
+    mock_core.list_config.return_value = [
+        VMConfig(
+            name="testvm",
+            base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+            snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+            blockcommit_deep_verify=False,
+            snapshot_deep_verify=False,
+        )
+    ]
+
+    args = _make_list_args(list_subcommand="config")
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "Global safety settings" in captured.out
+    # Column headers are uppercased by format_output
+    assert "BLOCKCOMMIT_DEEP_VERIFY" in captured.out
+    assert "SNAPSHOT_DEEP_VERIFY" in captured.out
+    # Verify OFF appears in the output (it appears in the table row)
+    assert "OFF" in captured.out
+
+
+def test_list_config_shows_on_for_enabled_deep_verify(capsys):
+    """handle_list with sub=config shows ON for blockcommit_deep_verify
+    and snapshot_deep_verify when both are enabled.
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig(
+        auto_cleanup=True,
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=True,
+        deep_check_schedule="off",
+    )
+    mock_core.list_config.return_value = [
+        VMConfig(
+            name="critical-db",
+            base_image=Path("/var/lib/libvirt/images/critical-db.qcow2"),
+            snapshot_dir=Path("/var/lib/libvirt/snapshots/critical-db"),
+            blockcommit_deep_verify=True,
+            snapshot_deep_verify=True,
+        )
+    ]
+
+    args = _make_list_args(list_subcommand="config")
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "Global safety settings" in captured.out
+    # Column headers are uppercased by format_output
+    assert "BLOCKCOMMIT_DEEP_VERIFY" in captured.out
+    assert "SNAPSHOT_DEEP_VERIFY" in captured.out
+    assert "ON" in captured.out
+
+
+# ── check safety transparency tests ─────────────────────────────────────
+
+
+def test_check_output_shows_disabled_safety_features(capsys):
+    """handle_check prints all safety features as OFF when they are
+    disabled in the global config and deep_check_schedule is "off".
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig(
+        auto_cleanup=False,
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+        deep_check_schedule="off",
+    )
+    mock_core.check.return_value = {}
+    mock_core.get_deep_check_schedule_info.return_value = "OFF"
+
+    args = _make_action_args(command="check")
+    result = handle_check(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "auto_cleanup: OFF" in captured.out
+    assert "chain_verify_before_commit: OFF" in captured.out
+    assert "chain_verify_after_commit: OFF" in captured.out
+    assert "Deep check schedule: OFF" in captured.out
+
+
+def test_check_deep_all_images_pass_exit_zero(capsys):
+    """handle_check with --deep returns EXIT_SUCCESS (0) when all
+    CheckResults have status="ok".
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.get_deep_check_schedule_info.return_value = "OFF"
+    mock_core.check.return_value = {
+        "vm1": CheckResult(vm_name="vm1", status="ok"),
+        "vm2": CheckResult(vm_name="vm2", status="ok"),
+    }
+
+    args = _make_action_args(command="check", deep=True)
+    result = handle_check(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+
+
+def test_check_deep_corruption_detected_exit_zero_warning(capsys):
+    """handle_check with --deep returns EXIT_SUCCESS (0) when a
+    CheckResult has status="corrupted" — corruptions are warnings,
+    not critical errors.
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.get_deep_check_schedule_info.return_value = "OFF"
+    mock_core.check.return_value = {
+        "vm1": CheckResult(
+            vm_name="vm1",
+            status="corrupted",
+            broken_snapshots=["snap1"],
+        ),
+    }
+
+    args = _make_action_args(command="check", deep=True)
+    result = handle_check(mock_core, args)
+
+    # "corrupted" is not "broken" — exit 0
+    assert result == EXIT_SUCCESS
+
+
+def test_check_deep_image_unreadable_exit_one(capsys):
+    """handle_check with --deep returns EXIT_GENERIC (1) when a
+    CheckResult has status="broken" — unreadable images are critical.
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.get_deep_check_schedule_info.return_value = "OFF"
+    mock_core.check.return_value = {
+        "vm1": CheckResult(
+            vm_name="vm1",
+            status="broken",
+            broken_snapshots=["snap1"],
+        ),
+    }
+
+    args = _make_action_args(command="check", deep=True)
+    result = handle_check(mock_core, args)
+
+    assert result == EXIT_GENERIC
+
+
+def test_check_output_displays_deep_check_schedule_overdue(capsys):
+    """handle_check prints the deep check schedule info containing
+    "OVERDUE" when the schedule is overdue.
+    """
+    mock_core = _make_mock_core()
+    mock_core._config = Mock()
+    mock_core._config.get_global.return_value = GlobalConfig(
+        deep_check_schedule="weekly",
+    )
+    mock_core.check.return_value = {}
+    mock_core.get_deep_check_schedule_info.return_value = (
+        "WEEKLY — OVERDUE (never checked)"
+    )
+
+    args = _make_action_args(command="check")
+    result = handle_check(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "OVERDUE" in captured.out

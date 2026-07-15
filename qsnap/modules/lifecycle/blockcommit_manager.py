@@ -48,6 +48,8 @@ class BlockCommitManager(ILifecycleManager):
         self,
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
+        *,
+        deep_verify: bool = False,
     ) -> CommitResult:
         """Merge snapshots into the base image via ``virsh blockcommit``.
 
@@ -55,6 +57,9 @@ class BlockCommitManager(ILifecycleManager):
         2. Resolve the disk target via ``virsh domblklist``.
         3. For each snapshot (oldest first): ``virsh blockcommit --delete
            --verbose --wait``.  Short-circuit on first failure (design D4).
+        4. When *deep_verify* is True, run ``qemu-img check`` on the base
+           image after a successful commit.  If corruptions are detected,
+           return ``CommitResult(success=False)``.
         """
         # Step 1: Empty list → no-op
         if not snapshots_to_merge:
@@ -114,6 +119,35 @@ class BlockCommitManager(ILifecycleManager):
                     error=result.error,
                 )
             last_merged = snapshot.name
+
+        # Deep verify: run qemu-img check on base image after commit
+        if deep_verify:
+            import json
+            chk = self._shell.run(
+                ["qemu-img", "check", "--output=json", str(vm_config.base_image)],
+                timeout=3600,
+            )
+            if not chk.success:
+                return CommitResult(
+                    success=False,
+                    committed_snapshot="",
+                    error=f"deep verify: qemu-img check failed: {chk.error}",
+                )
+            try:
+                data = json.loads(chk.stdout)
+                corruptions = data.get("corruptions", 0)
+                if corruptions > 0:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=f"deep verify: {corruptions} corruptions in base image",
+                    )
+            except json.JSONDecodeError:
+                return CommitResult(
+                    success=False,
+                    committed_snapshot="",
+                    error="deep verify: failed to parse qemu-img check output",
+                )
 
         return CommitResult(
             success=True,

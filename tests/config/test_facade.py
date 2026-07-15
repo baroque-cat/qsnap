@@ -227,3 +227,122 @@ def test_deferred_thresholds_overridden() -> None:
     assert global_cfg.deferred_crit_count == "10"
     assert global_cfg.deferred_warn_age == "7d"
     assert global_cfg.deferred_crit_age == "30d"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Fault-tolerance safety fields — facade integration tests
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_parses_global_safety_fields(tmp_path: Path) -> None:
+    """ConfigFacade parses all global fault-tolerance safety fields from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'auto_cleanup = false\n'
+        'state_backup_count = 5\n'
+        'chain_verify_before_commit = false\n'
+        'chain_verify_after_commit = true\n'
+        'deep_check_schedule = "monthly"\n'
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+
+    assert global_cfg.auto_cleanup is False
+    assert global_cfg.state_backup_count == 5
+    assert global_cfg.chain_verify_before_commit is False
+    assert global_cfg.chain_verify_after_commit is True
+    assert global_cfg.deep_check_schedule == "monthly"
+
+
+@pytest.mark.unit
+def test_facade_parses_vm_deep_verify_fields(tmp_path: Path) -> None:
+    """ConfigFacade parses blockcommit_deep_verify and snapshot_deep_verify from a VM section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'blockcommit_deep_verify = true\n'
+        'snapshot_deep_verify = true\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.blockcommit_deep_verify is True
+    assert vm.snapshot_deep_verify is True
+
+
+@pytest.mark.unit
+def test_facade_parses_target_retry_fields(tmp_path: Path) -> None:
+    """ConfigFacade parses backup_retry_max and backup_retry_base from a [[vm.target]] section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+        '  backup_retry_max = 5\n'
+        '  backup_retry_base = "10s"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    target = vm.targets[0]
+    assert target.backup_retry_max == 5
+    assert target.backup_retry_base == "10s"
+
+
+@pytest.mark.unit
+def test_facade_parses_target_retry_overrides() -> None:
+    """Full safety_fields.toml fixture: critical-vm has deep-verify ON and retry=5/5s;
+    standard-vm has deep-verify OFF and retry=2/1s."""
+    facade = ConfigFacade(FIXTURES / "safety_fields.toml")
+
+    critical = facade.get_vm("critical-vm")
+    assert critical.blockcommit_deep_verify is True
+    assert critical.snapshot_deep_verify is True
+    assert len(critical.targets) == 1
+    assert critical.targets[0].backup_retry_max == 5
+    assert critical.targets[0].backup_retry_base == "5s"
+
+    standard = facade.get_vm("standard-vm")
+    assert standard.blockcommit_deep_verify is False
+    assert standard.snapshot_deep_verify is False
+    assert len(standard.targets) == 1
+    assert standard.targets[0].backup_retry_max == 2
+    assert standard.targets[0].backup_retry_base == "1s"
+
+
+@pytest.mark.unit
+def test_facade_invalid_retry_base_raises_config_error(tmp_path: Path) -> None:
+    """ConfigFacade raises ConfigError when backup_retry_base is not a valid duration string."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+        '  backup_retry_base = "abc"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid backup_retry_base"):
+        ConfigFacade(config_file)

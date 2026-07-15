@@ -25,6 +25,7 @@ import pytest
 
 from qsnap.models.results import ChangeResult, ShellResult
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
+from qsnap.state.json_manager import JsonStateManager
 from tests.mocks.mock_shell import MockShell
 
 # ── Call-tracking MockShell subclass ──────────────────────────────────────
@@ -440,3 +441,47 @@ def test_allocation_detector_imports_shared_parsers():
 
     assert hasattr(allocation_detector, "parse_domblklist_disks")
     assert allocation_detector.parse_domblklist_disks is parse_domblklist_disks
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 8. State recovery triggers first-run changed=True
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_state_recovery_triggers_first_run_changed_true(
+    tmp_path, make_vm_config
+):
+    """Corrupt state file → recovered state returns None → first-run behavior.
+
+    When ``get_last_allocation`` returns ``None`` (due to corruption
+    recovery), ``has_changed()`` returns ``ChangeResult(changed=True,
+    last_allocation=0, current_allocation=0)`` without calling any shell
+    commands — the same as a true first run.
+    """
+    import json as _json
+
+    # Write corrupt state that JsonStateManager will recover from.
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text("{ broken json", encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Verify corruption recovery: get_last_allocation returns None.
+    assert manager.get_last_allocation("testvm") is None
+
+    # Feed the recovered state manager to AllocationSizeDetector.
+    # Use a MockShell with no expectations — no shell commands should run.
+    shell = MockShell()
+    detector = AllocationSizeDetector(shell=shell, state=manager)
+
+    vm_config = make_vm_config(name="testvm")
+    result = detector.has_changed(vm_config)
+
+    assert result == ChangeResult(
+        changed=True,
+        last_allocation=0,
+        current_allocation=0,
+    ), (
+        "Corrupt state recovery should trigger first-run behavior "
+        "(changed=True, allocations=0)"
+    )

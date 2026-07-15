@@ -166,3 +166,15 @@ def test_in_memory_state_manager_get_deferred_carries_last_warned_at():
     deferred = state_manager.get_deferred_operations("vm1")
     assert len(deferred) == 1
     assert deferred[0].last_warned_at == warned
+
+
+def test_in_memory_state_manager_passes_isinstance():
+    """Contract verification: InMemoryStateManager is an IStateManager.
+
+    Assert ``isinstance(InMemoryStateManager(), IStateManager)`` is True
+    after all interface changes (e.g. deferred ops, full backups, etc.).
+    """
+    state_manager = InMemoryStateManager()
+    assert isinstance(state_manager, IStateManager), (
+        "InMemoryStateManager must satisfy IStateManager contract"
+    )

@@ -13,18 +13,22 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
+    BackupResult,
     CheckResult,
+    ChainVerifyResult,
     DeferredBlockcommit,
     DeferredSummary,
     FullBackupInfo,
@@ -37,6 +41,7 @@ from qsnap.models.results import (
 )
 from qsnap.retention.time_based import _parse_duration
 from qsnap.utils.parsing import parse_domblklist_disks
+from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
 
 logger = logging.getLogger(__name__)
@@ -418,18 +423,27 @@ class Core:
         ``qemu-img info --backing-chain``.  When *deep* is True, also runs
         ``qemu-img check --output=json`` on each snapshot and backup file;
         files with ``corruptions > 0`` are reported as broken with status
-        ``"corrupted"``.
+        ``"warning"`` (or ``"critical"`` if unreadable).
+
+        Per-VM status aggregation for deep check:
+        - ``"ok"`` — 0 corruptions
+        - ``"warning"`` — >0 corruptions but readable
+        - ``"critical"`` — images missing or unreadable
         """
         vms = self._filter_vms(vm_filter)
         results: dict[str, CheckResult] = {}
         for vm in vms:
             broken: list[str] = []
             corrupted = False
+            unreadable = False
             snapshots = self._state.get_snapshots(vm.name)
             for snap in snapshots:
                 if deep:
-                    if self._deep_check_file(snap.path, snap.name, broken):
+                    status = self._deep_check_file(snap.path, snap.name, broken)
+                    if status == "warning":
                         corrupted = True
+                    elif status == "critical":
+                        unreadable = True
                 else:
                     result = self._shell.run(
                         ["qemu-img", "info", "--backing-chain", str(snap.path)],
@@ -444,10 +458,20 @@ class Core:
                     provider = self._factory.create_backup_provider(vm, target)
                     backups = provider.list(target)
                     for backup in backups:
-                        if self._deep_check_file(backup.path, backup.name, broken):
+                        status = self._deep_check_file(backup.path, backup.name, broken)
+                        if status == "warning":
                             corrupted = True
+                        elif status == "critical":
+                            unreadable = True
 
-            if corrupted:
+            if deep:
+                if unreadable:
+                    status = "broken"
+                elif corrupted:
+                    status = "corrupted"
+                else:
+                    status = "ok"
+            elif corrupted:
                 status = "corrupted"
             elif broken:
                 status = "broken"
@@ -494,15 +518,21 @@ class Core:
                 deferred_severity=deferred_severity,
                 remediation=remediation,
             )
+
+        # Record last deep check time
+        if deep:
+            self._set_last_deep_check_time()
+
         return results
 
     def _deep_check_file(
         self, path: Path, name: str, broken: list[str]
-    ) -> bool:
+    ) -> str:
         """Run ``qemu-img check`` on a single file.
 
         Appends *name* to *broken* if the file is corrupt or unreadable.
-        Returns ``True`` when ``corruptions > 0`` was detected.
+        Returns ``"ok"`` when clean, ``"warning"`` when ``corruptions > 0``,
+        ``"critical"`` when unreadable.
         """
         chk = self._shell.run(
             ["qemu-img", "check", "--output=json", str(path)],
@@ -510,15 +540,67 @@ class Core:
         )
         if not chk.success:
             broken.append(name)
-            return False
+            return "critical"
         try:
             data = json.loads(chk.stdout)
             if data.get("corruptions", 0) > 0:
                 broken.append(name)
-                return True
+                return "warning"
         except json.JSONDecodeError:
             broken.append(name)
-        return False
+            return "critical"
+        return "ok"
+
+    def _get_last_deep_check_time(self) -> datetime | None:
+        """Read the last deep check timestamp from the state directory."""
+        state_dir = Path(self._config.get_global().state_dir)
+        path = state_dir / "_last_deep_check.json"
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            ts = data.get("last_deep_check")
+            if ts:
+                return datetime.fromisoformat(ts)
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+        return None
+
+    def _set_last_deep_check_time(self) -> None:
+        """Write the current timestamp as the last deep check time."""
+        state_dir = Path(self._config.get_global().state_dir)
+        path = state_dir / "_last_deep_check.json"
+        data = {"last_deep_check": datetime.now().isoformat()}
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+        except OSError:
+            pass
+
+    def get_deep_check_schedule_info(self) -> str:
+        """Return a human-readable deep check schedule status string.
+
+        When ``deep_check_schedule`` is ``"off"``, returns ``"OFF"``.
+        Otherwise, computes days since the last deep check and reports
+        ``"OVERDUE"`` if the schedule interval has been exceeded.
+        """
+        schedule = self._config.get_global().deep_check_schedule
+        if schedule == "off":
+            return "OFF"
+
+        last_check = self._get_last_deep_check_time()
+        if last_check is None:
+            return f"{schedule.upper()} — OVERDUE (never checked)"
+
+        days_since = (datetime.now() - last_check).days
+        if schedule == "weekly" and days_since > 7:
+            return f"Last deep check: {days_since} days ago (expected: weekly) — OVERDUE"
+        elif schedule == "monthly" and days_since > 30:
+            return f"Last deep check: {days_since} days ago (expected: monthly) — OVERDUE"
+        else:
+            return f"Last deep check: {days_since} days ago (expected: {schedule})"
 
     def restore(
         self,
@@ -764,6 +846,117 @@ class Core:
 
     # ── full pipeline ──────────────────────────────────────────────────
 
+    def _preflight_cleanup(self, vm_config: VMConfig) -> None:
+        """Remove stale temporary files and detect orphan snapshots.
+
+        Defensive step — failures do NOT block pipeline execution.
+
+        Actions (when ``auto_cleanup`` is True):
+        (a) Remove ``*.tmp`` and ``*.partial`` files in ``snapshot_dir``
+            and each ``target.path`` directory.
+        (b) Remove ``/tmp/qsnap-backup-*.sock`` stale NBD sockets.
+        (c) Detect orphan ``.qcow2`` files in ``snapshot_dir`` not
+            recorded in ``IStateManager`` — log WARNING, do NOT delete.
+        """
+        global_cfg = self._config.get_global()
+        if not global_cfg.auto_cleanup:
+            logger.info(
+                "auto_cleanup is disabled — skipping stale file cleanup"
+            )
+            return
+
+        try:
+            # (a) Remove stale .tmp and .partial files
+            dirs_to_clean: list[Path] = [vm_config.snapshot_dir]
+            dirs_to_clean.extend(t.path for t in vm_config.targets)
+
+            removed_count = 0
+            for directory in dirs_to_clean:
+                for pattern in ("*.tmp", "*.partial"):
+                    result = self._shell.run(
+                        [
+                            "find", str(directory),
+                            "-maxdepth", "1",
+                            "-name", pattern,
+                            "-print",
+                        ],
+                        timeout=10, check=True,
+                    )
+                    if result.success and result.stdout.strip():
+                        for line in result.stdout.strip().splitlines():
+                            filepath = line.strip()
+                            if filepath:
+                                self._shell.run(
+                                    ["rm", "-f", filepath],
+                                    timeout=10, check=True,
+                                )
+                                removed_count += 1
+
+            # (b) Remove stale NBD sockets
+            sock_result = self._shell.run(
+                [
+                    "find", "/tmp",
+                    "-maxdepth", "1",
+                    "-name", "qsnap-backup-*.sock",
+                    "-print",
+                ],
+                timeout=10, check=True,
+            )
+            if sock_result.success and sock_result.stdout.strip():
+                for line in sock_result.stdout.strip().splitlines():
+                    sockpath = line.strip()
+                    if sockpath:
+                        self._shell.run(
+                            ["rm", "-f", sockpath],
+                            timeout=10, check=True,
+                        )
+                        removed_count += 1
+
+            if removed_count > 0:
+                logger.info(
+                    "Pre-flight cleanup: removed %d stale file(s)",
+                    removed_count,
+                )
+
+            # (c) Detect orphan .qcow2 files (warning only, do NOT delete)
+            # Only consider files matching the qsnap naming pattern:
+            # {vm_name}.{timestamp}.qcow2
+            recorded_names = {
+                s.path.name for s in self._state.get_snapshots(vm_config.name)
+            }
+            orphan_pattern = f"{vm_config.name}.*.qcow2"
+            orphan_result = self._shell.run(
+                [
+                    "find", str(vm_config.snapshot_dir),
+                    "-maxdepth", "1",
+                    "-name", orphan_pattern,
+                    "-print",
+                ],
+                timeout=10, check=True,
+            )
+            if orphan_result.success and orphan_result.stdout.strip():
+                qsnap_re = re.compile(
+                    rf"^{re.escape(vm_config.name)}\.\d{{8}}T\d{{6}}\.qcow2$"
+                )
+                for line in orphan_result.stdout.strip().splitlines():
+                    filepath = line.strip()
+                    if filepath:
+                        filename = Path(filepath).name
+                        if not qsnap_re.match(filename):
+                            continue
+                        if filename not in recorded_names:
+                            logger.warning(
+                                "Orphan snapshot file detected: %s",
+                                filepath,
+                            )
+
+        except Exception as exc:
+            # Cleanup failures must NOT block pipeline execution
+            logger.warning(
+                "Pre-flight cleanup encountered an error (non-blocking): %s",
+                exc,
+            )
+
     def _validate_environment(self, vm_config: VMConfig) -> CheckResult:
         """Pre-flight environment validation before pipeline execution.
 
@@ -778,6 +971,9 @@ class Core:
         ``status="validation_failed"``.
         """
         broken: list[str] = []
+
+        # Step 0: Pre-flight cleanup (stale files, orphan detection)
+        self._preflight_cleanup(vm_config)
 
         # (a) snapshot_dir exists and is writable
         dir_check = self._shell.run(
@@ -979,7 +1175,10 @@ class Core:
                     )
                     failed_entries.append(entry)
                     continue
-                result = manager.blockcommit(vm_config, snapshots)
+                result = manager.blockcommit(
+                    vm_config, snapshots,
+                    deep_verify=vm_config.blockcommit_deep_verify,
+                )
                 if result.success:
                     logger.info(
                         "Deferred blockcommit succeeded for VM %s "
@@ -1108,12 +1307,189 @@ class Core:
         dow = self._config.get_global().preserve_day_of_week
         return engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
 
+    def _verify_backing_chain(self, vm_config: VMConfig) -> ChainVerifyResult:
+        """Verify backing chain integrity of the active disk image.
+
+        Calls ``qemu-img info --backing-chain --output=json`` on the
+        most recent snapshot (or base image if no snapshots).  Verifies:
+        (a) every file referenced in the chain exists, (b) every file
+        has format ``"qcow2"``, (c) backing-filename references are
+        consistent, (d) no file appears twice (no cycles).
+
+        Returns ``ChainVerifyResult`` — never raises.
+        """
+        snapshots = self._state.get_snapshots(vm_config.name)
+        # Use the most recent snapshot as the chain entry point, or
+        # fall back to the base image if no snapshots exist.
+        if snapshots:
+            active_path = max(snapshots, key=lambda s: s.timestamp).path
+        else:
+            active_path = vm_config.base_image
+
+        result = self._shell.run(
+            [
+                "qemu-img", "info",
+                "--backing-chain",
+                "--output=json",
+                str(active_path),
+            ],
+            timeout=30,
+        )
+        if not result.success:
+            return ChainVerifyResult(
+                success=False,
+                error=f"qemu-img info failed: {result.error}",
+                broken_file=None,
+            )
+
+        try:
+            chain_data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return ChainVerifyResult(
+                success=False,
+                error=f"Failed to parse qemu-img output: {exc}",
+                broken_file=None,
+            )
+
+        if not isinstance(chain_data, list) or not chain_data:
+            return ChainVerifyResult(
+                success=False,
+                error="Empty or invalid backing chain data",
+                broken_file=None,
+            )
+
+        seen_files: set[str] = set()
+        for i, item in enumerate(chain_data):
+            image = item.get("image")
+            if not image:
+                return ChainVerifyResult(
+                    success=False,
+                    error=f"Missing 'image' field in chain entry {i}",
+                    broken_file=None,
+                )
+
+            image_path = Path(image)
+
+            # (d) Check for cycles
+            if str(image_path) in seen_files:
+                return ChainVerifyResult(
+                    success=False,
+                    error=f"Backing chain contains a cycle at {image_path}",
+                    broken_file=image_path,
+                )
+            seen_files.add(str(image_path))
+
+            # (a) Check file exists (via IShell for mockability)
+            existence = self._shell.run(
+                ["test", "-f", str(image_path)],
+                timeout=10, check=True,
+            )
+            if not existence.success:
+                return ChainVerifyResult(
+                    success=False,
+                    error=f"Backing chain broken: missing file {image_path}",
+                    broken_file=image_path,
+                )
+
+            # (b) Check format is qcow2
+            fmt = item.get("format", "")
+            if fmt != "qcow2":
+                return ChainVerifyResult(
+                    success=False,
+                    error=(
+                        f"Unexpected format '{fmt}' for {image_path} "
+                        f"(expected 'qcow2')"
+                    ),
+                    broken_file=image_path,
+                )
+
+            # (c) Check backing-filename consistency
+            backing = item.get("backing-filename")
+            if backing is not None:
+                backing_path = Path(backing)
+                backing_existence = self._shell.run(
+                    ["test", "-f", str(backing_path)],
+                    timeout=10, check=True,
+                )
+                if not backing_existence.success:
+                    return ChainVerifyResult(
+                        success=False,
+                        error=(
+                            f"Backing chain broken: backing file "
+                            f"{backing_path} does not exist"
+                        ),
+                        broken_file=backing_path,
+                    )
+
+                # Cross-check: backing-filename must match the next
+                # entry's image in the chain array.
+                if i + 1 < len(chain_data):
+                    next_image = chain_data[i + 1].get("image")
+                    if next_image is not None and str(backing_path) != next_image:
+                        return ChainVerifyResult(
+                            success=False,
+                            error=(
+                                f"Backing-filename mismatch for {image_path}: "
+                                f"expected {next_image}, got {backing_path}"
+                            ),
+                            broken_file=image_path,
+                        )
+
+        return ChainVerifyResult(success=True, error=None, broken_file=None)
+
+    def _get_chain_length(
+        self, vm_config: VMConfig, *, use_base_image: bool = False,
+    ) -> int | None:
+        """Get the backing chain length.
+
+        When *use_base_image* is True, query ``vm_config.base_image``
+        (used for post-commit verification).  Otherwise query the active
+        disk (the most recent snapshot, or the base image if no
+        snapshots exist).
+
+        Returns the number of files in the backing chain, or ``None``
+        if the chain could not be queried.
+        """
+        if use_base_image:
+            active_path = vm_config.base_image
+        else:
+            snapshots = self._state.get_snapshots(vm_config.name)
+            if snapshots:
+                active_path = max(snapshots, key=lambda s: s.timestamp).path
+            else:
+                active_path = vm_config.base_image
+
+        result = self._shell.run(
+            [
+                "qemu-img", "info",
+                "--backing-chain",
+                "--output=json",
+                str(active_path),
+            ],
+            timeout=30,
+        )
+        if not result.success:
+            return None
+
+        try:
+            chain_data = json.loads(result.stdout)
+            if isinstance(chain_data, list):
+                return len(chain_data)
+        except json.JSONDecodeError:
+            pass
+        return None
+
     def _blockcommit_snapshots(
         self,
         vm_config: VMConfig,
         retention_result: RetentionResult,
     ) -> None:
-        """Step 4: Blockcommit removed snapshots."""
+        """Step 4: Blockcommit removed snapshots.
+
+        Includes pre-commit chain verification (when
+        ``chain_verify_before_commit`` is True) and post-commit chain
+        length verification (when ``chain_verify_after_commit`` is True).
+        """
         snapshots = self._state.get_snapshots(vm_config.name)
         to_merge = [s for s in snapshots if s.name in retention_result.remove]
         if not to_merge:
@@ -1134,6 +1510,31 @@ class Core:
                 vm_config.name,
             )
             return
+
+        global_cfg = self._config.get_global()
+
+        # Pre-commit chain verification
+        if global_cfg.chain_verify_before_commit:
+            verify_result = self._verify_backing_chain(vm_config)
+            if not verify_result.success:
+                logger.critical(
+                    "Pre-commit chain verification failed for VM %s: %s. "
+                    "Check file existence, run qemu-img check, or "
+                    "restore from backup.",
+                    vm_config.name,
+                    verify_result.error,
+                )
+                # Do NOT defer — broken chain needs operator intervention
+                return
+        else:
+            logger.info(
+                "chain_verify_before_commit is disabled — "
+                "skipping pre-commit chain check for VM %s",
+                vm_config.name,
+            )
+
+        # Get chain length before commit for post-commit comparison
+        chain_length_before = self._get_chain_length(vm_config)
 
         manager = self._factory.create_lifecycle_manager(
             mode=vm_config.lifecycle_mode,
@@ -1156,6 +1557,45 @@ class Core:
                     reason,
                     vm_config.name,
                 )
+                return
+
+        if not result.success:
+            logger.error(
+                "Blockcommit failed for VM %s: %s",
+                vm_config.name,
+                result.error,
+            )
+            return
+
+        # Post-commit chain verification
+        if global_cfg.chain_verify_after_commit:
+            chain_length_after = self._get_chain_length(
+                vm_config, use_base_image=True,
+            )
+            if chain_length_before is not None and chain_length_after is not None:
+                expected_length = chain_length_before - len(to_merge)
+                if chain_length_after != expected_length:
+                    logger.critical(
+                        "Blockcommit may have failed for VM %s: "
+                        "chain length mismatch (expected %d, got %d). "
+                        "Snapshot paths for manual recovery: %s",
+                        vm_config.name,
+                        expected_length,
+                        chain_length_after,
+                        ", ".join(str(s.path) for s in to_merge),
+                    )
+                    # Preserve snapshots in state — do NOT remove
+                    return
+            logger.info(
+                "Post-commit chain verification passed for VM %s",
+                vm_config.name,
+            )
+        else:
+            logger.info(
+                "chain_verify_after_commit is disabled — "
+                "skipping post-commit chain check for VM %s",
+                vm_config.name,
+            )
 
     # ── backup steps (5) ───────────────────────────────────────────────
 
@@ -1170,6 +1610,89 @@ class Core:
             if self._backup_target(vm_config, target, snapshots):
                 backup_failed = True
         return backup_failed
+
+    def _transfer_with_retry(
+        self,
+        provider: IBackupProvider,
+        vm_config: VMConfig,
+        target: TargetConfig,
+        snapshots: list[SnapshotInfo],
+    ) -> list[BackupResult]:
+        """Transfer missing snapshots with exponential backoff retry.
+
+        When ``target.backup_retry_max > 0``, wraps the provider's
+        ``transfer_missing()`` call in a retry loop.  Only retries on
+        transient errors (determined by ``is_retryable()``).  Non-
+        retryable errors fail immediately.
+
+        Returns the list of ``BackupResult`` objects from the last
+        attempt.
+        """
+        max_retries = target.backup_retry_max
+        base_seconds = parse_retry_duration(target.backup_retry_base)
+
+        if max_retries <= 0:
+            return provider.transfer_missing(
+                vm_config, target, snapshots, rate_limit=target.rate_limit
+            )
+
+        results: list[BackupResult] = []
+        for attempt in range(1, max_retries + 1):
+            results = provider.transfer_missing(
+                vm_config, target, snapshots, rate_limit=target.rate_limit
+            )
+
+            # Check if all transfers succeeded
+            failed = [r for r in results if not r.success]
+            if not failed:
+                if attempt > 1:
+                    logger.info(
+                        "Backup transfer for VM %s target %s "
+                        "succeeded on retry attempt %d/%d",
+                        vm_config.name,
+                        target.path,
+                        attempt,
+                        max_retries,
+                    )
+                return results
+
+            # Check if any failure is retryable
+            retryable_errors = [
+                r for r in failed if r.error and is_retryable(r.error)
+            ]
+            non_retryable = [
+                r for r in failed if r.error and not is_retryable(r.error)
+            ]
+
+            # If any non-retryable error, fail immediately
+            if non_retryable:
+                return results
+
+            # If this was the last attempt, log exhaustion
+            if attempt >= max_retries:
+                logger.warning(
+                    "Backup transfer for VM %s target %s failed "
+                    "after %d retries",
+                    vm_config.name,
+                    target.path,
+                    max_retries,
+                )
+                return results
+
+            # Sleep and retry
+            backoff = compute_backoff(base_seconds, attempt)
+            logger.info(
+                "Retrying backup transfer for VM %s target %s "
+                "(attempt %d/%d, backoff %.1fs)",
+                vm_config.name,
+                target.path,
+                attempt + 1,
+                max_retries,
+                backoff,
+            )
+            time.sleep(backoff)
+
+        return results
 
     def _backup_target(
         self,
@@ -1214,10 +1737,10 @@ class Core:
                     )
                     backup_failed = True
 
-        # Transfer missing snapshots
+        # Transfer missing snapshots (with retry when configured)
         if not self._dry_run:
-            results = provider.transfer_missing(
-                vm_config, target, snapshots, rate_limit=target.rate_limit
+            results = self._transfer_with_retry(
+                provider, vm_config, target, snapshots
             )
             if any(not r.success for r in results):
                 backup_failed = True

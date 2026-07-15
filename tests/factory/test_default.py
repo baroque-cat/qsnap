@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +15,7 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
-from qsnap.models.results import ShellResult
+from qsnap.models.results import CommitResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
@@ -287,3 +289,67 @@ def test_risk_factory_fallback_logs_warning(
 
     assert isinstance(provider, FileCopyBackupProvider)
     assert "falling back" in caplog.text or "FileCopyBackupProvider" in caplog.text
+
+
+# ── deep_verify factory test ──────────────────────────────────────────
+
+# Standard domblklist output used by lifecycle manager tests.
+_DOMBLKLIST_OUTPUT = (
+    " Target   Source\n"
+    "------------------------------------\n"
+    " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+)
+
+
+def test_factory_create_lifecycle_manager_accepts_deep_verify(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+):
+    """Factory's create_lifecycle_manager() returns an ILifecycleManager
+    whose blockcommit() accepts the deep_verify kwarg.
+
+    deep_verify is a method parameter on ILifecycleManager.blockcommit(),
+    not a factory concern — the factory does not need modification.
+    This test verifies that the returned manager from
+    ``create_lifecycle_manager(mode="virsh")`` can be called with
+    ``deep_verify=True`` and returns a ``CommitResult``.
+    """
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    manager = factory.create_lifecycle_manager(mode="virsh")
+    assert isinstance(manager, BlockCommitManager)
+
+    vm_config = make_vm_config()
+    snap = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/snap.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("qemu-img check").returns(ShellResult(
+        success=True,
+        stdout='{"corruptions": 0}',
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    assert isinstance(result, CommitResult)
+    assert result.success is True
+    assert result.error is None

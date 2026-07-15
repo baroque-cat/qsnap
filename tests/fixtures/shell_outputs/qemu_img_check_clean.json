@@ -1,0 +1,10 @@
+{
+  "image-end-offset": 21474836480,
+  "total-clusters": 327680,
+  "allocated-clusters": 16384,
+  "fragmented-clusters": 0,
+  "compressed-clusters": 0,
+  "corruptions": 0,
+  "leaks": 0,
+  "image-end-offset": 21474836480
+}

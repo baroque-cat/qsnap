@@ -580,3 +580,129 @@ def test_blockcommit_normal_failure_no_deferral(
     assert "blocked by" not in result.error
     # committed_snapshot reflects the snapshot that failed (normal path).
     assert result.committed_snapshot == snap.name
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 11. Deep verify — qemu-img check on base image after commit
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
+    """deep_verify=True with clean qemu-img check returns success.
+
+    - domblklist and blockcommit both succeed.
+    - qemu-img check returns JSON with ``{"corruptions": 0}``.
+    - Result: ``CommitResult(success=True, error=None)``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("qemu-img check").returns(ShellResult(
+        success=True,
+        stdout='{"corruptions": 0}',
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    manager = BlockCommitManager(shell=mock_shell)
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert result.success is True
+    assert result.error is None
+    assert result.committed_snapshot == snap.name
+
+
+def test_blockcommit_deep_verify_fails_corruptions(
+    mock_shell: MockShell, make_vm_config
+):
+    """deep_verify=True with corruptions > 0 returns failure.
+
+    - domblklist and blockcommit both succeed.
+    - qemu-img check returns JSON with ``{"corruptions": 5}``.
+    - Result: ``CommitResult(success=False)`` with "deep verify" and
+      "5" in the error message.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("qemu-img check").returns(ShellResult(
+        success=True,
+        stdout='{"corruptions": 5}',
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    manager = BlockCommitManager(shell=mock_shell)
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert result.success is False
+    assert "deep verify" in result.error
+    assert "5" in result.error
+
+
+def test_blockcommit_deep_verify_false_no_check(
+    mock_shell: MockShell, make_vm_config
+):
+    """deep_verify=False does NOT call qemu-img check.
+
+    - domblklist and blockcommit both succeed.
+    - No ``qemu-img check`` expectation is configured.
+    - If qemu-img check were called, ``MockShell`` would return
+      ``"No mock configured"`` and cause a failure.
+    - Result: ``CommitResult(success=True)``.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    # Intentionally NO qemu-img check expectation set.
+
+    manager = BlockCommitManager(shell=mock_shell)
+    result = manager.blockcommit(vm_config, [snap], deep_verify=False)
+
+    assert result.success is True
+    assert result.error is None
+    assert result.committed_snapshot == snap.name

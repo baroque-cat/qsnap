@@ -185,6 +185,22 @@ class DeferredSummary:
 
 
 @dataclass(frozen=True)
+class ChainVerifyResult:
+    """Outcome of a backing-chain integrity verification.
+
+    ``success`` is True when the chain is intact (all files exist, all
+    are qcow2, references are consistent, no cycles).  ``error`` is
+    non-None when ``success`` is False, describing the problem.
+    ``broken_file`` is the path of the first problematic file, or None
+    when the verification passes or the error is not file-specific.
+    """
+
+    success: bool
+    error: str | None
+    broken_file: Path | None = None
+
+
+@dataclass(frozen=True)
 class CheckResult:
     """Outcome of a backing-chain integrity check for a single VM.
 

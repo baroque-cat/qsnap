@@ -33,6 +33,14 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.rate_limit = "100M"  # type: ignore[misc]
 
+    # Mutating new fault-tolerance fields also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.auto_cleanup = False  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.state_backup_count = 5  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deep_check_schedule = "weekly"  # type: ignore[misc]
+
 
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
@@ -48,6 +56,12 @@ def test_global_config_defaults():
     assert cfg.deferred_crit_count == "10"
     assert cfg.deferred_warn_age == "7d"
     assert cfg.deferred_crit_age == "14d"
+    # Fault-tolerance safety fields (T0/T1 fast ON by default, T3 OFF).
+    assert cfg.auto_cleanup is True
+    assert cfg.state_backup_count == 2
+    assert cfg.chain_verify_before_commit is True
+    assert cfg.chain_verify_after_commit is True
+    assert cfg.deep_check_schedule == "off"
 
 
 def test_vm_config_required_fields():
@@ -62,6 +76,9 @@ def test_vm_config_required_fields():
     assert vm.snapshot_dir == Path("/var/lib/libvirt/images/snapshots")
     assert vm.snapshot_create == "always"
     assert vm.targets == []
+    # Deep verification fields (T2) default to False.
+    assert vm.blockcommit_deep_verify is False
+    assert vm.snapshot_deep_verify is False
 
 
 def test_vm_config_with_targets():
@@ -116,6 +133,10 @@ def test_target_config_incremental():
 
     # rate_limit defaults to "no" on TargetConfig.
     assert default_target.rate_limit == "no"
+
+    # Backup retry fields use their documented defaults.
+    assert default_target.backup_retry_max == 3
+    assert default_target.backup_retry_base == "2s"
 
 
 def test_retention_policy_hourly_daily():
@@ -423,3 +444,48 @@ def test_make_target_accepts_rate_limit_kwarg(make_target):
     """make_target fixture forwards the rate_limit kwarg to TargetConfig."""
     target = make_target(rate_limit="500K")
     assert target.rate_limit == "500K"
+
+
+# ---------------------------------------------------------------------------
+# Fault-tolerance safety fields — standalone default value tests
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_default_auto_cleanup_true():
+    """GlobalConfig().auto_cleanup defaults to True (T0 safe fast-ON)."""
+    assert GlobalConfig().auto_cleanup is True
+
+
+def test_global_config_default_state_backup_count():
+    """GlobalConfig().state_backup_count defaults to 2."""
+    assert GlobalConfig().state_backup_count == 2
+
+
+def test_global_config_chain_verify_defaults_true():
+    """GlobalConfig().chain_verify_before_commit and chain_verify_after_commit default to True."""
+    cfg = GlobalConfig()
+    assert cfg.chain_verify_before_commit is True
+    assert cfg.chain_verify_after_commit is True
+
+
+def test_global_config_default_deep_check_schedule_off():
+    """GlobalConfig().deep_check_schedule defaults to 'off' (T3 heavy-OFF)."""
+    assert GlobalConfig().deep_check_schedule == "off"
+
+
+def test_vm_config_deep_verify_defaults_false():
+    """VMConfig blockcommit_deep_verify and snapshot_deep_verify default to False (T2)."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    assert vm.blockcommit_deep_verify is False
+    assert vm.snapshot_deep_verify is False
+
+
+def test_target_config_default_retry_values():
+    """TargetConfig().backup_retry_max defaults to 3 and backup_retry_base to '2s'."""
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.backup_retry_max == 3
+    assert target.backup_retry_base == "2s"

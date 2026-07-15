@@ -1,0 +1,11 @@
+[Unit]
+Description=qsnap — weekly deep verification timer
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=1800
+Unit=qsnap-check.service
+
+[Install]
+WantedBy=timers.target

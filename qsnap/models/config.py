@@ -49,6 +49,13 @@ class GlobalConfig:
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
     deferred_crit_age: str = "14d"
+    # Fault-tolerance safety controls (T0/T1 — fast, ON by default;
+    # T3 — heavy, OFF by default).
+    auto_cleanup: bool = True
+    state_backup_count: int = 2
+    chain_verify_before_commit: bool = True
+    chain_verify_after_commit: bool = True
+    deep_check_schedule: str = "off"
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,10 @@ class TargetConfig:
     full_every: str = "0d"
     full_compress: bool = False
     rate_limit: str = "no"
+    # Backup retry controls (target-level — network reliability varies
+    # per target).
+    backup_retry_max: int = 3
+    backup_retry_base: str = "2s"
 
 
 @dataclass(frozen=True)
@@ -118,6 +129,9 @@ class VMConfig:
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-size"
     disks: list[str] | None = None
+    # Deep verification controls (T2 — per-VM because disk sizes differ).
+    blockcommit_deep_verify: bool = False
+    snapshot_deep_verify: bool = False
     targets: list[TargetConfig] = field(default_factory=list)
 
     def __post_init__(self) -> None:

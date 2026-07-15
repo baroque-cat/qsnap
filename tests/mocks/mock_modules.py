@@ -203,6 +203,8 @@ class MockLifecycleManager(ILifecycleManager):
         self,
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
+        *,
+        deep_verify: bool = False,
     ) -> CommitResult:
         if not snapshots_to_merge:
             return CommitResult(success=True, committed_snapshot="", error=None)
