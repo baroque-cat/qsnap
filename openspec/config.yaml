@@ -1,20 +1,83 @@
 schema: qa-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Tech stack: Python >=3.11, <4.0, zero runtime PyPI dependencies (pure stdlib)
+  Package manager: Poetry (primary) / uv (secondary), build-backend poetry-core
+  Runtime deps: tomllib (stdlib), argparse (stdlib), subprocess (stdlib)
+  External binaries: virsh, qemu-img (QEMU/KVM management stack)
+  CLI framework: argparse with subcommands (run, snapshot, backup, prune, list, stats, check, restore, estimate, fork, deploy)
+  Linting: ruff (E, F, W, I, B, C4, SIM, TID, UP, YTT), ignore E501
+  Formatting: ruff format (double quotes, 4 spaces, 100-char line length)
+  Type checker: pyright (strict mode), per-file __future__ annotations, PEP 604 union syntax (str | None)
+  Docstrings: Sphinx/reStructuredText style, verbose step-by-step algorithm descriptions
+  Imports: absolute from qsnap.*, no relative imports, __init__.py re-exports with __all__ in interfaces/ and models/
+  Architecture: Dependency Injection with ABC interfaces — the core paradigm
+  Config: IConfigFacade (root of truth) → ConfigFacade parses TOML, resolves inheritance, produces frozen dataclasses (VMConfig, TargetConfig, RetentionPolicy, GlobalConfig)
+  Orchestrator: Core receives IConfigFacade, IVMModuleFactory, IStateManager, IShell via constructor DI; runs pipeline in fixed order
+  Factory: IVMModuleFactory / DefaultFactory creates all module instances per VM+target; injected into Core
+  Domain modules: ISnapshotProvider (ExternalSnapshotProvider), IBackupProvider (FileCopyBackupProvider, BitmapBackupProvider), IChangeDetector (AllocationSizeDetector, MapChangeDetector), ILifecycleManager (BlockCommitManager, QemuImgCommitManager), IRetentionEngine (TimeBasedRetention — pure function, no I/O)
+  Patterns: Result monads (*Result frozen dataclasses, never exceptions for expected failures), Immutable Config (frozen=True), Pipeline (template method in Core), Abstract Factory, Ports & Adapters
+  State: IStateManager / JsonStateManager persists cross-run data as JSON under /var/lib/qsnap/state/; tests use InMemoryStateManager
+  Shell: IShell / SubprocessShell wraps all virsh, qemu-img, filesystem calls; enables timeout enforcement and full mockability
+  CLI layer: thin translation (CLI args → Core call → formatted output), zero business logic
+  Modules are stateless workers — implement ABC directly, do NOT inherit Core (design D1), receive config as method parameters (not stored), never call other modules directly
+  Naming: ABC interfaces I-prefix (ISnapshotProvider), concrete DescriptiveNoun (ExternalSnapshotProvider), results *Result suffix (SnapshotResult), config *Config suffix frozen=True (VMConfig), private methods _prefix, classes PascalCase, functions/files snake_case, packages lowercase
+  Testing: pytest >=9.0.2 with pytest-cov, pytest-timeout, pytest-random-order
+  Test markers: unit, mock, contract, integration (requires libvirt), stress, e2e — use --strict-markers
+  Test location: tests/ mirrors production hierarchy exactly
+  Mock strategy: custom mock classes implementing ABCs (MockShell with .expect().returns(), MockVMModuleFactory, InMemoryStateManager, MockConfigFacade); unittest.mock.patch only for spying and datetime freezing; NO pytest-mock
+  Contract tests: parametrized over ALL concrete implementations (production + mock) in tests/interfaces/
+  Fixtures: mock_shell, mock_state, mock_config, mock_factory, make_vm_config (factory function), make_target (factory function), frozen_clock, cli_app
+  Coverage: pytest --cov=qsnap --cov-report=html, no hard thresholds configured
+  Domain concepts: VM (qcow2 base image + snapshot dir), snapshot (external disk-only overlay), backing chain (linked qcow2 images), target (backup destination), retention policy (24h 7d 4w 12m 1y), preserve_min (safety floor), FULL backup (standalone qcow2 anchor via qemu-img convert), incremental backup (rebased qcow2 chain), blockcommit (merge deltas into base), deferred operations (AppArmor/SELinux blocked blockcommits queued in state), change detection (allocation-size or allocation-map mode), backup verification (off/metadata/hash/full)
+  Active specs: 43 specs in openspec/specs/ covering all modules, CLI, config, locking, systemd
+  Archived changes: 5 completed changes in openspec/changes/archive/
+  All code, comments, and documentation MUST be in English
+  Source lives under qsnap/ (interfaces/, config/, models/, core/, factory/, modules/, retention/, shell/, state/, cli/, utils/)
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Always identify affected modules from qsnap/ structure (interfaces, config, models, core, factory, modules/snapshot, modules/backup, modules/change, modules/lifecycle, retention, shell, state, cli)
+    - Each new capability listed must reference existing specs if modifying them — check openspec/specs/ before listing modified capabilities
+    - Mark changes that alter any ABC interface (I-prefix) with **BREAKING** — interface changes force all implementations and mocks to update
+    - Include migration path when changing IStateManager schema (JSON state files under /var/lib/qsnap/state/)
+    - Identify whether IVMModuleFactory.create_* methods need new branches (adding strategies) or existing branches change
+    - Reference relevant archived changes by date if building on prior work
+  specs:
+    - Use WHEN/THEN format for all scenarios (#### Scenario: with 4 hashtags exactly)
+    - Every public method on every ABC interface that is affected MUST have at least one scenario
+    - Every module's error paths MUST have scenarios: virsh/qemu-img failure, timeout, disk full, permission denied, state corruption
+    - Scenarios for IShell-dependent modules must cover: success, command failure (non-zero exit), timeout, binary not found
+    - For retention changes: scenarios must cover boundary cases (bucket edges, preserve_min interactions, empty snapshot sets)
+    - For config changes: scenarios must cover inheritance overlap (global → VM → target), missing fields, invalid values
+    - MODIFIED requirements MUST include full updated requirement block (not just the diff) — copy from openspec/specs/<capability>/spec.md
+    - Delta spec sections: ## ADDED, ## MODIFIED, ## REMOVED, ## RENAMED
+  design:
+    - Every design decision must follow the Decisions format with rationale: why X over Y, alternatives considered
+    - Document which AGENTS.md anti-patterns are relevant and how they're avoided
+    - If adding a new ABC interface: justify why existing interfaces can't be extended, specify the new interface's place in the DI graph
+    - If adding a new concrete implementation: specify the factory branch in DefaultFactory, list all contract test parametrizations to update
+    - If changing IStateManager JSON schema: document forward/backward compatibility strategy, state migration path
+    - For runtime dependencies on external binaries (virsh, qemu-img): specify minimum version requirements and fallback behavior
+    - Include rollback strategy for any change to Core._execute_pipeline() ordering
+    - Document which test markers (unit/mock/contract/integration/stress/e2e) apply to the change
+    - Risks section must use [Risk] → Mitigation format with concrete mitigations
+  test-plan:
+    - Every spec scenario must appear in the Coverage Map with: Spec Capability, Requirement, Scenario, Test File, Test Name, Group
+    - Test files must mirror production hierarchy: if module lives at qsnap/modules/snapshot/external.py, test lives at tests/modules/snapshot/test_external.py
+    - Delegation Groups must NOT overlap — each test file belongs to exactly one group
+    - Group names in kebab-case by spec area or module (e.g., snapshot-unit, backup-contract, retention-pure)
+    - For changes to ABC interfaces: include a contract test group covering tests/interfaces/ parametrized over both production and mock implementations
+    - For changes to Core pipeline ordering: include a pipeline test group covering tests/core/test_pipeline.py
+    - Mock tests must verify mocks satisfy ABC contracts (isinstance checks, valid result types, no None returns)
+    - Risk-specific tests must be prefixed test_risk_ as per project convention
+    - Extract edge cases from design.md Risks section and add to Coverage Map
+  tasks:
+    - Group tasks by layer: 1. Git & Environment, 2. Interfaces/Models (if changed), 3. Domain Implementation (by module), 4. Factory & Core wiring, 5. Testing (by delegation group), 6. Docs & cleanup
+    - Order tasks by dependency: interfaces before implementations, implementations before factory wiring, factory before Core, unit tests before contract tests
+    - For new ABC implementations: separate "implement ABC" and "register in DefaultFactory" as distinct tasks
+    - For new concrete implementations: include task to add parametrization entry in tests/interfaces/ contract tests
+    - For mocks: include task to create/update mock in tests/mocks/ and add mock self-test
+    - Test tasks: one per Delegation Group from test-plan.md, delegating to @Mr.Tester with exact scope
+    - Include verification task: run poetry run pytest tests/ -m "not integration and not stress and not e2e"
+    - Never skip the Git & Environment section (create branch, verify baseline tests pass)
