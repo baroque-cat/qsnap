@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from qsnap.models.config import RetentionPolicy
-from qsnap.models.results import RetentionItem
+from qsnap.models.results import RetentionItem, RetentionResult
 from qsnap.retention.time_based import TimeBasedRetention
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "timestamps"
@@ -583,3 +583,87 @@ def test_explain_is_pure_function():
         items, policy, now=now, preserve_day_of_week="wednesday"
     )
     assert result3 == result4
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 9. Contract test — pure function returning keep/remove
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_retention_engine_returns_pure_keep_remove():
+    """Contract test: the retention engine returns a ``RetentionResult`` with
+    ``keep`` and ``remove`` lists of names, and is a pure function with no
+    I/O, no side effects, and no awareness of backup types or dependencies.
+
+    Design D1: dependency-aware cascade deletion is handled by Core after
+    post-processing the retention engine's output.  The engine itself is a
+    pure function — it evaluates timestamps against a ``RetentionPolicy``
+    and returns which items to keep and remove.  It does NOT understand
+    FULL vs incremental backups, nor does it track dependencies.
+    """
+    items = [
+        RetentionItem(name="snap-a", timestamp=datetime(2025, 6, 1, 12, 0)),
+        RetentionItem(name="snap-b", timestamp=datetime(2025, 6, 1, 13, 0)),
+        RetentionItem(name="snap-c", timestamp=datetime(2025, 6, 1, 14, 0)),
+    ]
+    now = datetime(2025, 6, 1, 14, 0)
+    policy = RetentionPolicy(
+        hourly=1, daily=0, weekly=0, monthly=0, yearly=0, preserve_min="0h",
+    )
+    engine = TimeBasedRetention(policy)
+
+    # ── Contract: returns RetentionResult ──────────────────────────────
+    result = engine.evaluate(items, policy, now=now)
+    assert isinstance(result, RetentionResult)
+
+    # ── Contract: keep and remove are list[str] ─────────────────────────
+    assert isinstance(result.keep, list)
+    assert isinstance(result.remove, list)
+    assert all(isinstance(name, str) for name in result.keep)
+    assert all(isinstance(name, str) for name in result.remove)
+
+    # Every item name appears in exactly one of keep or remove.
+    all_names = {it.name for it in items}
+    assert all_names == (set(result.keep) | set(result.remove))
+    assert not (set(result.keep) & set(result.remove))
+
+    # ── Contract: pure function — deterministic, no side effects ───────
+    result2 = engine.evaluate(items, policy, now=now)
+    assert result.keep == result2.keep
+    assert result.remove == result2.remove
+    assert result == result2
+
+    # Calling evaluate() repeatedly on the same engine instance produces
+    # identical results (no accumulated internal state / no mutation).
+    result3 = engine.evaluate(items, policy, now=now)
+    assert result == result3
+
+    # ── Contract: unaware of backup types or dependency metadata ───────
+    # The engine evaluates items purely by timestamp.  Items named "FULL"
+    # or "INCR" receive no special treatment — the engine does not
+    # differentiate by name content.
+    typed_items = [
+        RetentionItem(name="FULL-backup", timestamp=datetime(2025, 6, 1, 13, 0)),
+        RetentionItem(name="INCR-backup", timestamp=datetime(2025, 6, 1, 13, 0)),
+    ]
+    typed_now = datetime(2025, 6, 1, 14, 0)
+    # All bucket counts at 0, preserve_min="0h": with both items at 13:00
+    # and now at 14:00, the preserve window threshold is 14:00.  Neither
+    # item falls within it, and no buckets can rescue them, so both are
+    # removed — no special treatment for "FULL" naming.
+    typed_policy = RetentionPolicy(preserve_min="0h")
+    typed_result = TimeBasedRetention(typed_policy).evaluate(
+        typed_items, typed_policy, now=typed_now
+    )
+    assert len(typed_result.remove) == 2
+    assert "FULL-backup" in typed_result.remove
+    assert "INCR-backup" in typed_result.remove
+    assert typed_result.keep == []
+
+    # When preserve_min="all", both are kept — again, no name-based logic.
+    all_policy = RetentionPolicy(preserve_min="all")
+    all_result = TimeBasedRetention(all_policy).evaluate(
+        typed_items, all_policy, now=typed_now
+    )
+    assert set(all_result.keep) == {"FULL-backup", "INCR-backup"}
+    assert all_result.remove == []

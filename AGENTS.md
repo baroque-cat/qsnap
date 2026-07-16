@@ -91,9 +91,16 @@ Core._execute_pipeline(vm):
   2. if detector.has_changed(vm): snapshot.create(...)
   3. retention.evaluate(snapshots) → keep/remove → lifecycle.commit(...)
   4. for each target:
+       _log_size_estimate(vm, target)           # design D5
        backup = factory.create_backup_provider(...)
-       transfer missing snapshots
-       retention.evaluate(backups) → remove old
+       _should_create_bucket_full(target, policy, last_full, snapshot_ts)
+         → if new period of highest active bucket: create_full_backup(...)
+       transfer missing snapshots (rsync only — design D3)
+       record_incremental_dependency(target, incremental, full)
+       retention.evaluate(backups) → keep/remove
+       _cleanup_backups() → cascade deletion (design D2):
+         FULL with dependents in keep-set → ghost retention (skip)
+         FULL with no dependents → delete + cascade-delete orphans
 ```
 
 Modules never know which step they are; Core owns the sequence.

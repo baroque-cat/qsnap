@@ -3,6 +3,9 @@
 Covers the ``config-parsing`` spec requirements:
 - Multiple VMs from a single config.
 - VM lookup by name (existing and non-existent).
+- Example config parseable with all fields documented.
+- preserve_min validation without buckets.
+- compress / copy_base parsing (bucket-driven model).
 """
 
 from __future__ import annotations
@@ -146,27 +149,42 @@ def test_target_overrides_vm_target_preserve_min() -> None:
 
 
 @pytest.mark.unit
-def test_facade_parses_target_full_every() -> None:
-    """ConfigFacade parses full_every='7d' from a [[vm.target]] section."""
+def test_facade_parses_target_compress() -> None:
+    """ConfigFacade parses compress=True from a [[vm.target]] section."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vm = facade.get_vm("vm_with_full")
     target = next(
         t for t in vm.targets
         if t.path == Path("/mnt/backup/vm_with_full")
     )
-    assert target.full_every == "7d"
+    assert target.compress is True
 
 
 @pytest.mark.unit
-def test_facade_parses_target_full_compress() -> None:
-    """ConfigFacade parses full_compress=True from a [[vm.target]] section."""
+def test_facade_parses_target_copy_base() -> None:
+    """ConfigFacade parses copy_base=False from a [[vm.target]] section."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vm = facade.get_vm("vm_with_full")
     target = next(
         t for t in vm.targets
         if t.path == Path("/mnt/backup/vm_with_full")
     )
-    assert target.full_compress is True
+    assert target.copy_base is False
+
+
+@pytest.mark.unit
+def test_facade_target_compress_defaults_to_global() -> None:
+    """When no compress is set on a target, it inherits the global default (True)."""
+    facade = ConfigFacade(FIXTURES / "full_backup.toml")
+    vm = facade.get_vm("vm_no_full")
+    target = next(
+        t for t in vm.targets
+        if t.path == Path("/mnt/backup/vm_no_full")
+    )
+    # vm_no_full does not set compress, so inherits global default True.
+    assert target.compress is True
+    # copy_base defaults to False.
+    assert target.copy_base is False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -346,3 +364,110 @@ def test_facade_invalid_retry_base_raises_config_error(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="Invalid backup_retry_base"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: Example config parseable
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_example_config_parseable_all_fields() -> None:
+    """The project's qsnap.toml.example is parseable with all fields documented."""
+    example_path = (
+        Path(__file__).resolve().parent.parent.parent / "qsnap.toml.example"
+    )
+    facade = ConfigFacade(example_path)
+
+    # Should have at least one VM (debiantest).
+    vms = facade.get_vms()
+    assert len(vms) >= 1
+
+    # Verify global defaults.
+    global_cfg = facade.get_global()
+    assert global_cfg.timestamp_format == "long"
+    assert global_cfg.preserve_day_of_week == "monday"
+
+    # Verify VM de facto.
+    vm = facade.get_vm("debiantest")
+    assert vm.name == "debiantest"
+    assert len(vm.targets) >= 1
+    target = vm.targets[0]
+    assert target.path == Path("/mnt/backup/debiantest")
+    # Defaults.
+    assert target.incremental is True
+    assert target.compress is True
+    assert target.copy_base is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: preserve_min validation without buckets
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_preserve_min_without_buckets_rejected(tmp_path: Path) -> None:
+    """preserve_min without any non-zero bucket counts raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "6h"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    with pytest.raises(ConfigError, match="nothing would be retained"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
+    """preserve_min='all' with all-zero bucket counts is allowed (no error)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "all"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    # Should not raise — preserve_min='all' bypasses the all-zero check.
+    facade = ConfigFacade(config_file)
+    assert facade.get_vm("testvm").target_preserve_min == "all"
+
+
+@pytest.mark.unit
+def test_preserve_min_with_buckets_allowed(tmp_path: Path) -> None:
+    """preserve_min with non-zero bucket counts is allowed (no error)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "24h 7d 0w 0m 0y"\n'
+        'target_preserve_min = "6h"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    # Should not raise — there are non-zero bucket counts (24h, 7d).
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    assert vm.target_preserve_min == "6h"
+    target = vm.targets[0]
+    assert target.target_preserve == "24h 7d 0w 0m 0y"

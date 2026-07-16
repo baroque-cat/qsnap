@@ -20,7 +20,7 @@ def test_help_text_lists_subcommands_and_flags(capsys):
         parser.parse_args(["--help"])
     captured = capsys.readouterr()
     text = captured.out
-    for subcommand in ("run", "snapshot", "backup", "prune", "list", "stats", "check"):
+    for subcommand in ("run", "snapshot", "backup", "prune", "list", "stats", "check", "restore", "estimate"):
         assert subcommand in text
     for flag in (
         "--config",
@@ -230,3 +230,28 @@ def test_list_deferred_with_vm_arg(cli_app):
     """'list deferred myvm' sets vm to ['myvm']."""
     ns = cli_app.parse_args(["list", "deferred", "myvm"])
     assert ns.vm == ["myvm"]
+
+
+# ── estimate subcommand tests ────────────────────────────────────────────
+
+
+def test_estimate_subcommand_registered_in_argparser(cli_app):
+    """'estimate' subcommand is registered with optional VM positional arg."""
+    ns = cli_app.parse_args(["estimate"])
+    assert ns.command == "estimate"
+    assert ns.vm == []
+    assert ns.format == "table"
+
+
+def test_estimate_subcommand_with_specific_vm(cli_app):
+    """'estimate myvm' sets command='estimate' and vm=['myvm']."""
+    ns = cli_app.parse_args(["estimate", "myvm"])
+    assert ns.command == "estimate"
+    assert ns.vm == ["myvm"]
+
+
+def test_estimate_subcommand_with_multiple_vms(cli_app):
+    """'estimate vm1 vm2' sets vm=['vm1', 'vm2']."""
+    ns = cli_app.parse_args(["estimate", "vm1", "vm2"])
+    assert ns.command == "estimate"
+    assert ns.vm == ["vm1", "vm2"]

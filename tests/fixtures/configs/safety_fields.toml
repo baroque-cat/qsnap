@@ -35,7 +35,8 @@ path = "/mnt/backup/critical"
 incremental = true
 incremental_mode = "file-copy"
 verify = "full"
-full_every = "7d"
+compress = true
+copy_base = false
 backup_retry_max = 5
 backup_retry_base = "5s"
 

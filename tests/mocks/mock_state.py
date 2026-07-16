@@ -16,7 +16,8 @@ class InMemoryStateManager(IStateManager):
 
     def __init__(self) -> None:
         self._state: dict[str, dict[str, object]] = {}
-        self._full_backups: dict[str, FullBackupInfo] = {}
+        self._full_backups: dict[str, list[FullBackupInfo]] = {}
+        self._dependencies: dict[str, dict[str, list[str]]] = {}
 
     def get_last_allocation(self, vm_name: str) -> int | None:
         vm_state = self._state.get(vm_name)
@@ -96,15 +97,48 @@ class InMemoryStateManager(IStateManager):
     # ── Full backup tracking ──────────────────────────────────────────
 
     def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
-        return self._full_backups.get(target_path)
+        entries = self._full_backups.get(target_path)
+        if not entries:
+            return None
+        return entries[-1]
 
     def set_last_full_backup(
         self, target_path: str, name: str, timestamp: datetime
     ) -> None:
+        self.record_full_backup(target_path, name, timestamp, "monthly")
+
+    def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
+        return list(self._full_backups.get(target_path, []))
+
+    def record_full_backup(
+        self,
+        target_path: str,
+        name: str,
+        timestamp: datetime,
+        bucket_level: str,
+    ) -> None:
         from pathlib import Path
 
-        self._full_backups[target_path] = FullBackupInfo(
-            name=name,
-            path=Path(target_path) / name,
-            timestamp=timestamp,
+        entries = self._full_backups.setdefault(target_path, [])
+        entries.append(
+            FullBackupInfo(
+                name=name,
+                path=Path(target_path) / name,
+                timestamp=timestamp,
+                bucket_level=bucket_level,
+            )
         )
+
+    def record_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> None:
+        target_deps = self._dependencies.setdefault(target_path, {})
+        deps = target_deps.setdefault(full_name, [])
+        if incremental_name not in deps:
+            deps.append(incremental_name)
+
+    def get_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> list[str]:
+        target_deps = self._dependencies.get(target_path, {})
+        return list(target_deps.get(full_name, []))

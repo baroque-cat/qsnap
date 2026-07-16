@@ -56,6 +56,8 @@ class GlobalConfig:
     chain_verify_before_commit: bool = True
     chain_verify_after_commit: bool = True
     deep_check_schedule: str = "off"
+    # Compress full backups (global default, overridden per-VM/target).
+    compress: bool = True
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,13 @@ class TargetConfig:
     ``verify`` controls post-transfer verification: ``"metadata"``
     (default) checks qcow2 format and virtual-size match, ``"full"``
     additionally runs ``qemu-img compare``, ``"off"`` skips verification.
+
+    ``compress`` controls whether full backups are compressed (default
+    ``True``).  Inherited from global → VM → target.
+
+    ``copy_base`` controls whether the base image is copied to the
+    target on first backup (default ``False`` — first backup is always
+    a FULL via ``qemu-img convert``).
     """
 
     path: Path
@@ -80,8 +89,8 @@ class TargetConfig:
     target_preserve: str | None = None
     verify: str = "metadata"
     target_preserve_min: str | None = None
-    full_every: str = "0d"
-    full_compress: bool = False
+    compress: bool = True
+    copy_base: bool = False
     rate_limit: str = "no"
     # Backup retry controls (target-level — network reliability varies
     # per target).

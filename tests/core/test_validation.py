@@ -3,7 +3,8 @@
 Covers:
 - All validation checks pass → CheckResult(status="ok").
 - Individual check failures: snapshot_dir missing, virsh not in PATH,
-  VM not defined in libvirt.
+  VM not defined in libvirt, rsync not found (hard error, design D3).
+- rsync check always runs (no longer conditional on rate_limit).
 - Pipeline-level behaviour: validation passes → pipeline continues;
   validation fails → VMRunResult(success=False).
 - ondemand mode with no reachable target → snapshot skipped (validation
@@ -144,10 +145,10 @@ def test_validate_environment_vm_not_defined(
     assert any("VM not defined" in b for b in result.broken_snapshots)
 
 
-# ── test_rsync_available_no_warning ─────────────────────────────────────
+# ── test_rsync_available_validation_passes ────────────────────────────────
 
 
-def test_rsync_available_no_warning(
+def test_rsync_available_validation_passes(
     make_vm_config,
     make_target,
     mock_factory,
@@ -155,7 +156,11 @@ def test_rsync_available_no_warning(
     mock_shell,
     caplog,
 ):
-    """rate_limit set, ``which rsync`` succeeds → no WARNING, status ok."""
+    """``which rsync`` succeeds → validation passes, no warnings.
+
+    rsync check is always run (design D3).  When rsync is available,
+    validation passes with status ``"ok"`` and no broken snapshots.
+    """
     target = make_target(rate_limit="100M")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -174,22 +179,21 @@ def test_rsync_available_no_warning(
     assert not any("rsync not found" in r.message for r in caplog.records)
 
 
-# ── test_rsync_unavailable_warning ───────────────────────────────────────
+# ── test_rsync_unavailable_pipeline_aborts ─────────────────────────────
 
 
-def test_rsync_unavailable_warning(
+def test_rsync_unavailable_pipeline_aborts(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
-    caplog,
 ):
-    """rate_limit set, ``which rsync`` fails → WARNING, status still ok.
+    """``which rsync`` fails → validation_failed (hard error, not a warning).
 
-    The rsync check is non-blocking: a missing rsync logs a WARNING per
-    rate-limited target but does NOT add to ``broken`` and does NOT
-    fail validation.
+    rsync is now a hard requirement (design D3).  Missing rsync causes
+    ``validation_failed`` status and adds "rsync not found" to the
+    broken list — the pipeline will not proceed.
     """
     _override(mock_shell, "which rsync", _FAIL)
     target = make_target(rate_limit="100M")
@@ -202,33 +206,28 @@ def test_rsync_unavailable_warning(
         shell=mock_shell,
     )
 
-    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-        result = core._validate_environment(vm)
+    result = core._validate_environment(vm)
 
-    # Non-blocking: validation still passes.
-    assert result.status == "ok"
-    assert result.broken_snapshots == []
-    # WARNING logged mentioning rsync.
-    assert any(
-        "rsync not found" in r.message and r.levelno == logging.WARNING
-        for r in caplog.records
-    )
+    # Hard error: validation fails.
+    assert result.status == "validation_failed"
+    assert any("rsync not found" in b for b in result.broken_snapshots)
 
 
-# ── test_rsync_check_skipped_when_rate_limit_no ─────────────────────────
+# ── test_rsync_check_always_runs_regardless_of_rate_limit ─────────────
 
 
-def test_rsync_check_skipped_when_rate_limit_no(
+def test_rsync_check_always_runs_regardless_of_rate_limit(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """rate_limit='no' → ``which rsync`` is never invoked.
+    """rate_limit='no' → ``which rsync`` still runs (always checked).
 
-    When every target has ``rate_limit == "no"``, the rsync availability
-    check is skipped entirely — ``which rsync`` must not be called.
+    rsync availability is now a hard requirement (design D3).  The check
+    runs unconditionally — even when every target has ``rate_limit == "no"``,
+    ``which rsync`` must be invoked.
     """
     target = make_target(rate_limit="no")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -243,16 +242,16 @@ def test_rsync_check_skipped_when_rate_limit_no(
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         result = core._validate_environment(vm)
 
-    # Validation passes.
+    # Validation passes (rsync is available in mock_shell fixture).
     assert result.status == "ok"
     assert result.broken_snapshots == []
 
-    # ``which rsync`` was never called.
+    # ``which rsync`` WAS called — the check always runs.
     rsync_calls = [
         call for call in run_spy.call_args_list
         if call.args and "rsync" in call.args[0]
     ]
-    assert rsync_calls == []
+    assert len(rsync_calls) > 0, "which rsync must always run regardless of rate_limit"
 
 
 # ── test_validate_environment_ondemand_target_missing_skipped ──────────────

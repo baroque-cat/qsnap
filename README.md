@@ -139,6 +139,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_preserve_min` | string | `"all"` | Minimum retention floor for snapshots, e.g. `"2h"`. Keeps recent snapshots regardless of bucket counts |
 | `target_preserve` | string | none | Retention policy for backups on targets, e.g. `"48h 14d 8w 12m 1y"` |
 | `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
+| `compress` | bool | `true` | Compress full backups with zlib (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
 
 ### VM Keys
 
@@ -167,8 +168,8 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
 | `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"` |
-| `full_every` | string | `"0d"` (disabled) | Interval for periodic full backups, e.g. `"7d"` for weekly. See [Full Backups](#full-backups) |
-| `full_compress` | bool | `false` | Compress full backup with zlib (`-c` flag on `qemu-img convert`) |
+| `compress` | bool | `true` | Compress full backups with zlib. Inherits from global → VM → target |
+| `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is always a FULL via `qemu-img convert` |
 
 ## Retention Policy Guide
 
@@ -253,14 +254,27 @@ qsnap run --timer
 
 By default, qsnap creates **incremental** backups: each backup file references the previous one via the qcow2 backing chain. This is storage-efficient but means restoring requires the entire chain.
 
-**Periodic full backups** create a standalone qcow2 file with no backing dependencies, using `qemu-img convert`. This provides:
+**Bucket-driven full backups** create a standalone qcow2 file with no backing dependencies, using `qemu-img convert`. This provides:
 - A self-contained restore point independent of the incremental chain
 - A new backing anchor for subsequent incrementals
 - Protection against chain corruption
 
-### Configuration
+### How FULL Creation Is Triggered
 
-Set `full_every` on a target to enable periodic full backups:
+FULL backups are triggered by the **highest active retention bucket** in the target's retention policy. The first snapshot that falls in a new period of the highest bucket triggers a FULL backup via `qemu-img convert`.
+
+| Highest Active Bucket | FULL Frequency | Period Key |
+|---|---|---|
+| `yearly` | Once per year | `YYYY` |
+| `monthly` | Once per month | `YYYYMM` |
+| `weekly` | Once per ISO week | `YYYY-WNN` |
+| `daily` | Once per day | `YYYYMMDD` |
+| `hourly` | Once per hour | `YYYYMMDDHH` |
+| (none — all zero) | No FULL backups | — |
+
+For example, if `target_preserve = "48h 14d 8w 12m 1y"`, the highest active bucket is `yearly`, so a FULL backup is created once per year. If `target_preserve = "48h 14d 8w"`, the highest active bucket is `weekly`, so a FULL is created once per ISO week.
+
+### Configuration
 
 ```toml
 [[vm]]
@@ -271,30 +285,32 @@ snapshot_dir = "/var/lib/libvirt/snapshots/myvm"
   [[vm.target]]
   path = "/mnt/backup/myvm"
   incremental = true
-  full_every = "7d"          # create a full backup every 7 days
-  full_compress = true       # compress with zlib (smaller, slower)
+  compress = true           # compress full backups with zlib (default)
+  copy_base = false         # don't copy base.qcow2; first backup is FULL (default)
 ```
 
 | Key | Default | Description |
 |---|---|---|
-| `full_every` | `"0d"` (disabled) | Interval between full backups. Format: `<count><unit>` where unit is `h` (hours), `d` (days), `w` (weeks), `m` (months), `y` (years). `"0d"` disables full backups. |
-| `full_compress` | `false` | When `true`, passes `-c` to `qemu-img convert` for zlib compression. Reduces file size at the cost of conversion time. |
+| `compress` | `true` | When `true`, passes `-c` to `qemu-img convert` for zlib compression. Reduces file size at the cost of conversion time. Inherited from global → VM → target. |
+| `copy_base` | `false` | When `false` (default), the base image is never copied to the target — the first backup is always a FULL via `qemu-img convert`. When `true`, the base image is copied to the target on first backup. |
 
 ### How It Works
 
-1. Before each incremental transfer, qsnap checks the last full backup timestamp via `IStateManager`.
-2. If the `full_every` interval has elapsed (or no previous full backup exists), qsnap calls `qemu-img convert` to create a standalone qcow2.
-3. The full backup is named `vm.FULL.YYYYMMDD.qcow2` (with `_N` suffix on same-day collisions).
+1. Before each incremental transfer, qsnap checks the last FULL backup timestamp and the retention policy.
+2. If the snapshot falls in a new period of the highest active bucket, qsnap calls `qemu-img convert` to create a standalone qcow2.
+3. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
 4. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
 5. The conversion is atomic: `qemu-img convert` writes to a `.tmp` file, which is renamed only on success.
+6. After creation, the FULL is recorded in state with its bucket level for cascade deletion tracking.
 
-### When to Enable
+### Cascade Deletion
 
-- **Long-running VMs with many incrementals** — a full backup every 1-2 weeks prevents chain bloat
-- **Compliance/audit requirements** — a standalone full backup is easier to verify and restore
-- **Unreliable backup targets** — if the target might lose files, a periodic full reduces chain dependency
+When a FULL backup falls out of all retention buckets, qsnap checks whether any incremental backups still depend on it (via `IStateManager.get_incremental_dependencies()`):
 
-### `full_compress` Trade-off
+- **If dependents exist in the keep-set** — the FULL is retained as a "ghost" (kept but not counted by retention). This prevents breaking the incremental chain.
+- **If no dependents remain** — the FULL is deleted, and any orphaned incrementals (not in the keep-set) are cascade-deleted.
+
+### `compress` Trade-off
 
 | | Uncompressed (`false`) | Compressed (`true`) |
 |---|---|---|
@@ -335,7 +351,7 @@ To restore a backup chain to a directory:
 qsnap restore <snapshot_name> <restore_dir> [vm]
 ```
 
-This copies the backup chain (full or incremental) from the target to the specified directory, resolving backing file references.
+This copies the backup chain (full or incremental) from the target to the specified directory, resolving backing file references. The target directory contains a **FULL anchor** (`*.FULL.*.qcow2`) that serves as the base of the incremental chain. Incremental backups are rebased to this FULL anchor, so the chain structure on the target is: `FULL → incremental1 → incremental2 → ...`.
 
 ### Manual Restore
 
@@ -403,8 +419,7 @@ snapshot_quiesce = true        # filesystem-consistent snapshots
   path = "/mnt/usb-backup/desktop-vm"
   incremental = true
   verify = "hash"              # SHA-256 verification
-  full_every = "14d"           # full backup every 2 weeks
-  full_compress = false        # USB is slow, skip compression overhead
+  compress = false             # USB is slow, skip compression overhead
 ```
 
 ### Server with Persistent Network Target
@@ -435,8 +450,7 @@ lifecycle_mode = "virsh"
   path = "/mnt/nas-backup/prod-server"
   incremental = true
   verify = "full"              # maximum integrity via qemu-img compare
-  full_every = "7d"            # weekly full backup
-  full_compress = true         # compress to save NAS space
+  compress = true              # compress to save NAS space
 
 [[vm]]
 name = "db-server"
@@ -449,8 +463,7 @@ snapshot_quiesce = true
   path = "/mnt/nas-backup/db-server"
   incremental = true
   verify = "hash"
-  full_every = "7d"
-  full_compress = true
+  compress = true
 ```
 
 ### Minimal Configuration
@@ -467,9 +480,47 @@ snapshot_dir = "/var/lib/libvirt/snapshots/test-vm"
   path = "/tmp/backups/test-vm"
 ```
 
+## Size Estimation
+
+qsnap logs projected backup size estimates on every run (including dry-run). The estimate includes:
+
+- **Base image actual-size** — obtained via `qemu-img info`
+- **Average incremental size** — computed from state history (past snapshot allocations)
+- **Projected FULL count** — based on the number of active retention buckets
+- **Projected total size** — `num_fulls × full_size + num_incs × inc_size`
+- **Compressed FULL size** — when `compress = true` (default), estimated as `base_size × 0.3`
+- **Current target size** — obtained via `du -sb`
+
+### `qsnap estimate` Command
+
+Use the `estimate` subcommand to preview projected storage usage without running the pipeline:
+
+```bash
+qsnap estimate [vm]
+```
+
+Example output:
+
+```
+=== prod-server ===
+  Base image actual-size: 53687091200 B
+  Avg incremental size:   524288000 B
+  Backups [/mnt/nas-backup/prod-server]:
+    Policy: hourly=0 daily=7 weekly=4 monthly=12 yearly=2 preserve_min=4h
+    Expected kept:   25
+    Expected remove: 0
+    Projected FULLs: 1
+    Projected incrementals: 24
+    Projected total size: 22548578304 B
+    Current target size: 0 B
+```
+
+The size estimate is also logged at INFO level during every pipeline run (including `--dry-run`), allowing monitoring systems to track projected storage growth.
+
 ## Requirements
 
 - Python 3.11+
 - libvirt + virsh (libvirt 6.0+ for NBD bitmap backup)
 - qemu-img
+- rsync (hard requirement for all backup transfers)
 - QEMU/KVM hypervisor

@@ -218,7 +218,8 @@ def test_snapshot_info_content_hash_defaults_none():
 
 
 def test_full_backup_info_dataclass_fields_and_frozen():
-    """FullBackupInfo has name (str), path (Path), timestamp (datetime) and is frozen."""
+    """FullBackupInfo has name (str), path (Path), timestamp (datetime),
+    bucket_level (str) and is frozen."""
     ts = datetime(2025, 1, 1, 12, 0, 0)
     info = FullBackupInfo(
         name="full-backup-20250101",
@@ -229,13 +230,15 @@ def test_full_backup_info_dataclass_fields_and_frozen():
     assert info.name == "full-backup-20250101"
     assert info.path == Path("/mnt/backup/full-backup-20250101.qcow2")
     assert info.timestamp == ts
+    assert info.bucket_level == "monthly"  # default value
     # Verify field types via isinstance on the actual values.
     assert isinstance(info.name, str)
     assert isinstance(info.path, Path)
     assert isinstance(info.timestamp, datetime)
+    assert isinstance(info.bucket_level, str)
     # Verify the exact set of field names.
     field_names = {f.name for f in dataclasses.fields(FullBackupInfo)}
-    assert field_names == {"name", "path", "timestamp"}
+    assert field_names == {"name", "path", "timestamp", "bucket_level"}
     # Verify the dataclass is declared frozen.
     assert info.__dataclass_params__.frozen is True
     # Verify mutation raises FrozenInstanceError.
@@ -245,6 +248,8 @@ def test_full_backup_info_dataclass_fields_and_frozen():
         info.path = Path("/other")
     with pytest.raises(dataclasses.FrozenInstanceError):
         info.timestamp = datetime(2025, 1, 2, 12, 0, 0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.bucket_level = "yearly"
 
 
 # ── DeferredBlockcommit (last_warned_at) ──────────────────────────────────

@@ -373,3 +373,14 @@ def handle_list_deferred(core: Core, args: Namespace) -> int:
     if output:
         print(output)
     return EXIT_SUCCESS
+
+
+def handle_estimate(core: Core, args: Namespace) -> int:
+    """Print projected backup sizes and retention schedule.
+
+    Calls ``Core.estimate()`` and prints the result to stdout.
+    """
+    vm_filter = _get_vm_filter(args)
+    output = core.estimate(vm_filter)
+    print(output)
+    return EXIT_SUCCESS

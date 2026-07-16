@@ -4,10 +4,15 @@ Covers the ``config-parsing`` spec requirements:
 - Minimal valid config parses into a VMConfig with required fields.
 - Missing required VM field raises ConfigError.
 - Malformed TOML raises ConfigError.
+- Global fault-tolerance safety fields parsed.
+- Target compress and copy_base parsed.
+- full_every deprecation warning.
+- full_compress mapped to compress with warning.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -90,3 +95,72 @@ def test_config_parser_timestamp_format_defaults_to_long() -> None:
     """When no ``timestamp_format`` is set, it defaults to 'long'."""
     facade = ConfigFacade(FIXTURES / "minimal.toml")
     assert facade.get_global().timestamp_format == "long"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: Global fault-tolerance safety fields
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_config_parser_reads_auto_cleanup_state_backup_count() -> None:
+    """Global safety fields auto_cleanup and state_backup_count are parsed from TOML."""
+    facade = ConfigFacade(FIXTURES / "safety_fields.toml")
+    global_cfg = facade.get_global()
+
+    assert global_cfg.auto_cleanup is True
+    assert global_cfg.state_backup_count == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: Target compress and copy_base parsing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_parse_target_compress_and_copy_base() -> None:
+    """Target-level compress and copy_base fields are parsed correctly."""
+    facade = ConfigFacade(FIXTURES / "bucket_driven.toml")
+
+    # vm_bucket: compress=True, copy_base=False (explicit)
+    vm1 = facade.get_vm("vm_bucket")
+    t1 = next(t for t in vm1.targets if t.path == Path("/mnt/backup/vm_bucket"))
+    assert t1.compress is True
+    assert t1.copy_base is False
+
+    # vm_no_compress: compress=False, copy_base=True (explicit)
+    vm2 = facade.get_vm("vm_no_compress")
+    t2 = next(t for t in vm2.targets if t.path == Path("/mnt/backup/vm_no_compress"))
+    assert t2.compress is False
+    assert t2.copy_base is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: Deprecated field handling
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_full_every_deprecation_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """full_every in config triggers a deprecation WARNING log."""
+    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
+        ConfigFacade(FIXTURES / "deprecated_fields.toml")
+
+    assert "full_every is deprecated and ignored" in caplog.text
+
+
+@pytest.mark.unit
+def test_full_compress_mapped_to_compress_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """full_compress is mapped to compress with a deprecation WARNING."""
+    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
+        facade = ConfigFacade(FIXTURES / "deprecated_fields.toml")
+
+    # vm_deprecated has full_compress=true; compress should be True.
+    vm = facade.get_vm("vm_deprecated")
+    t = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_deprecated"))
+    assert t.compress is True
+
+    assert "full_compress is deprecated" in caplog.text
+    assert "compress" in caplog.text

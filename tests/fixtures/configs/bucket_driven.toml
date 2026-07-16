@@ -1,0 +1,33 @@
+# bucket_driven config — tests bucket-driven FULL backup model
+# Uses compress and copy_base, no deprecated full_every/full_compress.
+
+timestamp_format = "long"
+preserve_day_of_week = "monday"
+state_dir = "/var/lib/qsnap/state"
+compress = true
+
+snapshot_preserve = "24h 7d 4w 12m 1y"
+target_preserve = "48h 14d 8w 12m 1y"
+
+[[vm]]
+name = "vm_bucket"
+base_image = "/var/lib/libvirt/images/vm_bucket.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_bucket"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_bucket"
+  incremental = true
+  verify = "metadata"
+  compress = true
+  copy_base = false
+
+[[vm]]
+name = "vm_no_compress"
+base_image = "/var/lib/libvirt/images/vm_no_compress.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_compress"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_no_compress"
+  incremental = true
+  compress = false
+  copy_base = true

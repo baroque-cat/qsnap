@@ -273,6 +273,31 @@ class Core:
         for vm in vms:
             lines.append(f"=== {vm.name} ===")
 
+            # Get base image actual-size for size projections
+            base_size = 0
+            info_cmd = [
+                "qemu-img", "info", "--output=json",
+                str(vm.base_image),
+            ]
+            info_result = self._shell.run(info_cmd, timeout=60)
+            if info_result.success:
+                try:
+                    info = json.loads(info_result.stdout)
+                    base_size = int(info.get("actual-size", 0))
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # Get average incremental size from state history
+            snapshots = self._state.get_snapshots(vm.name)
+            avg_inc_size = 0
+            if snapshots:
+                sizes = [s.allocation for s in snapshots if s.allocation > 0]
+                if sizes:
+                    avg_inc_size = sum(sizes) // len(sizes)
+
+            lines.append(f"  Base image actual-size: {base_size} B")
+            lines.append(f"  Avg incremental size:   {avg_inc_size} B")
+
             # Snapshot retention
             snap_policy = self._parse_preserve(
                 vm.snapshot_preserve, vm.snapshot_preserve_min
@@ -327,6 +352,122 @@ class Core:
                     count = info.get("count", 0)
                     if count > 0:
                         lines.append(f"    {bucket}: {count}")
+
+                # Size projections (design D5)
+                full_size = int(base_size * 0.3) if target.compress else base_size
+                active_buckets = sum(1 for c in (
+                    tgt_policy.hourly, tgt_policy.daily, tgt_policy.weekly,
+                    tgt_policy.monthly, tgt_policy.yearly,
+                ) if c > 0)
+                total_kept = (
+                    tgt_policy.hourly + tgt_policy.daily + tgt_policy.weekly
+                    + tgt_policy.monthly + tgt_policy.yearly
+                )
+                projected_fulls = max(1, active_buckets)
+                projected_incs = max(0, total_kept - projected_fulls)
+                projected_total = (
+                    projected_fulls * full_size + projected_incs * avg_inc_size
+                )
+                lines.append(f"    Projected FULLs: {projected_fulls}")
+                lines.append(f"    Projected incrementals: {projected_incs}")
+                lines.append(f"    Projected total size: {projected_total} B")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def estimate(self, vm_filter: str | None = None) -> str:
+        """Produce a human-readable size estimation report.
+
+        Same as ``schedule_summary()`` but includes real size projections:
+        base image actual-size, average incremental size, projected
+        FULL count, projected total size, and current target size.
+        """
+        vms = self._filter_vms(vm_filter)
+        dow = self._config.get_global().preserve_day_of_week
+        now = datetime.now()
+
+        lines: list[str] = []
+
+        for vm in vms:
+            lines.append(f"=== {vm.name} ===")
+
+            # Get base image actual-size
+            base_size = 0
+            info_cmd = [
+                "qemu-img", "info", "--output=json",
+                str(vm.base_image),
+            ]
+            info_result = self._shell.run(info_cmd, timeout=60)
+            if info_result.success:
+                try:
+                    info = json.loads(info_result.stdout)
+                    base_size = int(info.get("actual-size", 0))
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # Get average incremental size from state history
+            snapshots = self._state.get_snapshots(vm.name)
+            avg_inc_size = 0
+            if snapshots:
+                sizes = [s.allocation for s in snapshots if s.allocation > 0]
+                if sizes:
+                    avg_inc_size = sum(sizes) // len(sizes)
+
+            lines.append(f"  Base image actual-size: {base_size} B")
+            lines.append(f"  Avg incremental size:   {avg_inc_size} B")
+
+            # Per-target backup retention + size projections
+            for target in vm.targets:
+                tgt_policy = self._parse_preserve(
+                    target.target_preserve, target.target_preserve_min
+                )
+                tgt_window = self._retention_window(tgt_policy)
+                tgt_items = self._generate_synthetic_items(now, tgt_window, "backup")
+                tgt_engine = self._factory.create_retention_engine(tgt_policy)
+                tgt_result = tgt_engine.evaluate(
+                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
+                )
+
+                # Size projections
+                full_size = int(base_size * 0.3) if target.compress else base_size
+                active_buckets = sum(1 for c in (
+                    tgt_policy.hourly, tgt_policy.daily, tgt_policy.weekly,
+                    tgt_policy.monthly, tgt_policy.yearly,
+                ) if c > 0)
+                total_kept = (
+                    tgt_policy.hourly + tgt_policy.daily + tgt_policy.weekly
+                    + tgt_policy.monthly + tgt_policy.yearly
+                )
+                projected_fulls = max(1, active_buckets)
+                projected_incs = max(0, total_kept - projected_fulls)
+                projected_total = (
+                    projected_fulls * full_size + projected_incs * avg_inc_size
+                )
+
+                # Current target size
+                current_target_size = 0
+                du_result = self._shell.run(
+                    ["du", "-sb", str(target.path)], timeout=60,
+                )
+                if du_result.success:
+                    parts = du_result.stdout.split()
+                    if parts:
+                        try:
+                            current_target_size = int(parts[0])
+                        except ValueError:
+                            pass
+
+                lines.append(f"  Backups [{target.path}]:")
+                lines.append(f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
+                             f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
+                             f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}")
+                lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
+                lines.append(f"    Expected remove: {len(tgt_result.remove)}")
+                lines.append(f"    Projected FULLs: {projected_fulls}")
+                lines.append(f"    Projected incrementals: {projected_incs}")
+                lines.append(f"    Projected total size: {projected_total} B")
+                lines.append(f"    Current target size: {current_target_size} B")
 
             lines.append("")
 
@@ -383,34 +524,61 @@ class Core:
         return items
 
     @staticmethod
-    def _should_create_full(
+    def _should_create_bucket_full(
         target: TargetConfig,
+        policy: RetentionPolicy,
         last_full: FullBackupInfo | None,
-    ) -> bool:
-        """Check if a full backup should be created based on ``full_every``.
+        snapshot_ts: datetime,
+    ) -> tuple[bool, str]:
+        """Check if a bucket-driven FULL backup should be created.
 
-        Returns ``True`` when ``full_every`` is non-zero and either no
-        previous full backup exists or the configured interval has elapsed.
+        Identifies the highest active retention bucket (yearly > monthly >
+        weekly > daily > hourly).  Returns ``(True, bucket_level)`` when
+        the snapshot falls in a new period of that bucket relative to the
+        last FULL.  Returns ``(False, "")`` otherwise.
+
+        When no bucket is active (all counts 0), returns ``(False, "")``.
         """
-        if target.full_every == "0d":
-            return False
+        # Determine the highest active bucket.
+        if policy.yearly > 0:
+            bucket_level = "yearly"
+            period_key = snapshot_ts.strftime("%Y")
+        elif policy.monthly > 0:
+            bucket_level = "monthly"
+            period_key = snapshot_ts.strftime("%Y%m")
+        elif policy.weekly > 0:
+            bucket_level = "weekly"
+            # ISO week number
+            period_key = f"{snapshot_ts.isocalendar().year}-W{snapshot_ts.isocalendar().week:02d}"
+        elif policy.daily > 0:
+            bucket_level = "daily"
+            period_key = snapshot_ts.strftime("%Y%m%d")
+        elif policy.hourly > 0:
+            bucket_level = "hourly"
+            period_key = snapshot_ts.strftime("%Y%m%d%H")
+        else:
+            return False, ""
 
-        match = re.match(r"(\d+)([hdwmy])", target.full_every)
-        if not match:
-            return False
-
-        count = int(match.group(1))
-        if count == 0:
-            return False
-
+        # No previous FULL — create one.
         if last_full is None:
-            return True
+            return True, bucket_level
 
-        unit = match.group(2)
-        unit_hours = {"h": 1, "d": 24, "w": 168, "m": 720, "y": 8760}
-        interval = timedelta(hours=count * unit_hours[unit])
-        elapsed = datetime.now() - last_full.timestamp
-        return elapsed >= interval
+        # Check if the snapshot is in a new period of the highest bucket.
+        if bucket_level == "yearly":
+            last_key = last_full.timestamp.strftime("%Y")
+        elif bucket_level == "monthly":
+            last_key = last_full.timestamp.strftime("%Y%m")
+        elif bucket_level == "weekly":
+            cal = last_full.timestamp.isocalendar()
+            last_key = f"{cal.year}-W{cal.week:02d}"
+        elif bucket_level == "daily":
+            last_key = last_full.timestamp.strftime("%Y%m%d")
+        elif bucket_level == "hourly":
+            last_key = last_full.timestamp.strftime("%Y%m%d%H")
+        else:
+            return False, ""
+
+        return period_key != last_key, bucket_level
 
     def check(
         self,
@@ -1039,20 +1207,12 @@ class Core:
                         f"target directory not found: {target.path}"
                     )
 
-        # (f) rsync availability when rate limiting is configured
-        needs_rsync = any(t.rate_limit != "no" for t in vm_config.targets)
-        if needs_rsync:
-            rsync_check = self._shell.run(
-                ["which", "rsync"], timeout=10, check=True,
-            )
-            if not rsync_check.success:
-                for target in vm_config.targets:
-                    if target.rate_limit != "no":
-                        logger.warning(
-                            "rsync not found — rate limiting disabled "
-                            "for target %s",
-                            target.path,
-                        )
+        # (f) rsync availability — hard requirement (design D3)
+        rsync_check = self._shell.run(
+            ["which", "rsync"], timeout=10, check=True,
+        )
+        if not rsync_check.success:
+            broken.append("rsync not found — rsync is a hard requirement")
 
         if broken:
             return CheckResult(
@@ -1694,6 +1854,95 @@ class Core:
 
         return results
 
+    def _log_size_estimate(
+        self,
+        vm_config: VMConfig,
+        target: TargetConfig,
+    ) -> None:
+        """Log projected backup size estimates (design D5).
+
+        Gathers:
+        - Base image actual-size via ``qemu-img info``
+        - Average incremental size from state history
+        - Projected FULL count from retention policy
+        - Current target size via ``du -sh``
+
+        Formula: ``num_fulls × full_size + num_incs × inc_size``.
+        Compressed FULL ≈ base_size × 0.3.
+        """
+        # Get base image actual-size
+        base_size = 0
+        info_cmd = [
+            "qemu-img", "info", "--output=json",
+            str(vm_config.base_image),
+        ]
+        info_result = self._shell.run(info_cmd, timeout=60)
+        if info_result.success:
+            try:
+                info = json.loads(info_result.stdout)
+                base_size = int(info.get("actual-size", 0))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+        # Compute projected FULL size (compressed ≈ base × 0.3)
+        full_size = int(base_size * 0.3) if target.compress else base_size
+
+        # Get average incremental size from state history
+        snapshots = self._state.get_snapshots(vm_config.name)
+        avg_inc_size = 0
+        if snapshots:
+            sizes = [s.allocation for s in snapshots if s.allocation > 0]
+            if sizes:
+                avg_inc_size = sum(sizes) // len(sizes)
+
+        # Projected FULL count and incremental count from retention policy
+        policy = self._parse_preserve(
+            target.target_preserve, target.target_preserve_min
+        )
+        # Count active buckets for FULL projection
+        active_buckets = sum(1 for c in (
+            policy.hourly, policy.daily, policy.weekly,
+            policy.monthly, policy.yearly,
+        ) if c > 0)
+        # Project: 1 FULL per highest bucket period, incrementals fill the rest
+        total_kept = (
+            policy.hourly + policy.daily + policy.weekly
+            + policy.monthly + policy.yearly
+        )
+        projected_fulls = max(1, active_buckets)
+        projected_incs = max(0, total_kept - projected_fulls)
+        projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
+
+        # Current target size
+        current_target_size = 0
+        du_result = self._shell.run(
+            ["du", "-sb", str(target.path)], timeout=60,
+        )
+        if du_result.success:
+            parts = du_result.stdout.split()
+            if parts:
+                try:
+                    current_target_size = int(parts[0])
+                except ValueError:
+                    pass
+
+        logger.info(
+            "Size estimate for VM %s target %s: "
+            "base=%d B, full(compressed=%s)=%d B, avg_inc=%d B, "
+            "projected_fulls=%d, projected_incs=%d, "
+            "projected_total=%d B, current_target=%d B",
+            vm_config.name,
+            target.path,
+            base_size,
+            target.compress,
+            full_size,
+            avg_inc_size,
+            projected_fulls,
+            projected_incs,
+            projected_total,
+            current_target_size,
+        )
+
     def _backup_target(
         self,
         vm_config: VMConfig,
@@ -1707,23 +1956,30 @@ class Core:
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
 
-        # Check for full backup necessity (full_every interval)
+        # Size estimation logging (design D5 — runs even in dry-run)
+        self._log_size_estimate(vm_config, target)
+
+        # Check for bucket-driven FULL backup necessity (design D1)
         if not self._dry_run and snapshots:
             last_full = self._state.get_last_full_backup(str(target.path))
-            if self._should_create_full(target, last_full):
+            policy = self._parse_preserve(
+                target.target_preserve, target.target_preserve_min
+            )
+            should_full, bucket_level = self._should_create_bucket_full(
+                target, policy, last_full, snapshots[-1].timestamp
+            )
+            if should_full:
                 most_recent = max(snapshots, key=lambda s: s.timestamp)
                 full_result = provider.create_full_backup(
-                    most_recent, target, compress=target.full_compress
+                    most_recent, target,
+                    compress=target.compress,
+                    bucket_level=bucket_level,
                 )
                 if full_result.success:
                     full_name = full_result.target_path.stem
-                    self._state.set_last_full_backup(
-                        str(target.path),
-                        f"{full_name}.qcow2",
-                        most_recent.timestamp,
-                    )
                     logger.info(
-                        "Created full backup for VM %s target %s: %s",
+                        "Created %s-bucket FULL backup for VM %s target %s: %s",
+                        bucket_level,
                         vm_config.name,
                         target.path,
                         full_name,
@@ -1810,20 +2066,70 @@ class Core:
         """Delete backups flagged for removal by retention.
 
         Honours ``_preserve_backups`` and ``_dry_run``.
+
+        Cascade deletion (design D2):
+        - Before deleting a FULL (name matches ``*.FULL.*``), check
+          ``state.get_incremental_dependencies()``.  If any dependent
+          incremental is in the keep-set, skip deletion (ghost retention).
+        - After deleting a FULL with no dependents in keep-set,
+          cascade-delete orphaned incrementals not in keep-set.
         """
         if not retention_result or not retention_result.remove:
             return
 
+        keep_set = set(retention_result.keep)
         to_delete = [b for b in backups if b.name in retention_result.remove]
+
         if self._preserve_backups:
             logger.info(
                 "[preserve] Skipping deletion of %d backups for VM %s",
                 len(to_delete),
                 vm_config.name,
             )
-        elif not self._dry_run:
-            provider = self._factory.create_backup_provider(vm_config, target)
+            return
+
+        if self._dry_run:
             for backup in to_delete:
+                logger.info(
+                    "[dry-run] Would delete backup: %s", backup.name
+                )
+            return
+
+        provider = self._factory.create_backup_provider(vm_config, target)
+        for backup in to_delete:
+            is_full = ".FULL." in backup.name
+            if is_full:
+                # Check for dependent incrementals in keep-set (ghost retention)
+                dependents = self._state.get_incremental_dependencies(
+                    str(target.path), backup.name
+                )
+                ghosted = [d for d in dependents if d in keep_set]
+                if ghosted:
+                    logger.info(
+                        "Ghost retention: FULL %s has %d dependent(s) "
+                        "in keep-set — skipping deletion",
+                        backup.name,
+                        len(ghosted),
+                    )
+                    continue
+                # No dependents in keep-set — delete FULL
+                provider.delete(backup)
+                logger.info("Deleted FULL backup: %s", backup.name)
+                # Cascade-delete orphaned incrementals not in keep-set
+                for dep_name in dependents:
+                    if dep_name not in keep_set:
+                        dep_backup = SnapshotInfo(
+                            name=dep_name,
+                            path=target.path / f"{dep_name}.qcow2",
+                            timestamp=datetime.now(),
+                            allocation=0,
+                        )
+                        provider.delete(dep_backup)
+                        logger.info(
+                            "Cascade-deleted orphaned incremental: %s",
+                            dep_name,
+                        )
+            else:
                 provider.delete(backup)
 
     def _generate_snapshot_name(self, vm_config: VMConfig, disk: str) -> str:

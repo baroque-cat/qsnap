@@ -1,22 +1,27 @@
-"""FileCopyBackupProvider — file-copy backup transfer with qemu-img rebase.
+"""FileCopyBackupProvider — rsync-based backup transfer with qemu-img rebase.
 
 Implements ``IBackupProvider``.  Does NOT inherit from Core (design D1).
-Dependency: ``IShell`` only.
+Dependencies: ``IShell`` (required), ``IStateManager`` (optional — needed
+for FULL backup tracking and incremental→FULL dependency recording).
 
 For incremental backups (``target.incremental == True``), the backing
 file path is rebased to a bare filename in the target directory using
 ``qemu-img rebase -u`` (design D5: metadata-only update, no data copy).
+
+All transfers use ``rsync`` (design D3: no ``cp`` fallback).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
+from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.verification import verify_backup
@@ -26,10 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 class FileCopyBackupProvider(IBackupProvider):
-    """File-copy backup provider using ``cp`` + ``qemu-img rebase``."""
+    """File-copy backup provider using ``rsync`` + ``qemu-img rebase``."""
 
-    def __init__(self, shell: IShell) -> None:
+    def __init__(
+        self,
+        shell: IShell,
+        state: IStateManager | None = None,
+    ) -> None:
         self._shell = shell
+        self._state = state
 
     # ── IBackupProvider implementation ────────────────────────────────
 
@@ -37,16 +47,22 @@ class FileCopyBackupProvider(IBackupProvider):
     def _find_full_anchor(target: TargetConfig) -> Path | None:
         """Find the most recent FULL anchor file in the target directory.
 
-        Looks for ``*.FULL.*.qcow2`` files.  Returns the path to the
-        most recent one (by modification time), or ``None`` if none exist.
+        Looks for ``*.FULL.*.qcow2`` files.  Parses the date from the
+        filename (``YYYYMMDD``) and returns the most recent by date,
+        or ``None`` if none exist.
         """
         if not target.path.exists():
             return None
         full_files = list(target.path.glob("*.FULL.*.qcow2"))
         if not full_files:
             return None
-        # Most recent by mtime
-        return max(full_files, key=lambda f: f.stat().st_mtime)
+        # Parse date from filename and return most recent by date.
+        def _extract_date(path: Path) -> str:
+            # Filename pattern: <vm>.FULL.<YYYYMMDD>.qcow2
+            match = re.search(r"\.FULL\.(\d{8})\.", path.name)
+            return match.group(1) if match else ""
+
+        return max(full_files, key=_extract_date)
 
     def transfer_missing(
         self,
@@ -55,30 +71,36 @@ class FileCopyBackupProvider(IBackupProvider):
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
     ) -> list[BackupResult]:
-        """Copy snapshots not yet present at *target*.
+        """Copy snapshots not yet present at *target* using ``rsync``.
 
         1. Determine existing backups via ``list()``.
-        2. For each missing snapshot: ``rsync --bwlimit`` (when rate
-           limiting is configured and rsync is available) or ``cp`` to
-           ``target.path/<name>.qcow2``.
-        3. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
+        2. When ``copy_base`` is False (default) and target is empty,
+           trigger ``create_full_backup()`` for the first snapshot
+           instead of rsync (design D4).
+        3. For each missing snapshot: ``rsync --partial`` (or
+           ``rsync --bwlimit=<kib> --partial`` when rate limiting).
+        4. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
+        5. After rebase, record incremental→FULL dependency in state.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}
 
-        # Determine whether rsync is available for rate-limited transfers.
-        use_rsync = rate_limit != "no"
-        rsync_available = False
-        if use_rsync:
-            rsync_check = self._shell.run(["which", "rsync"], timeout=10)
-            rsync_available = rsync_check.success
-            if not rsync_available:
-                logger.warning(
-                    "rsync not found — falling back to cp for "
-                    "rate-limited transfer"
-                )
-
         results: list[BackupResult] = []
+
+        # Design D4: When copy_base is False and target is empty, create
+        # a FULL backup for the first snapshot instead of rsync.
+        if not target.copy_base and not existing and snapshots:
+            most_recent = max(snapshots, key=lambda s: s.timestamp)
+            full_result = self.create_full_backup(
+                most_recent, target,
+                compress=target.compress,
+                bucket_level="monthly",
+            )
+            results.append(full_result)
+            if not full_result.success:
+                return results
+            # Mark the FULL as existing so it's not re-transferred.
+            existing_names.add(full_result.target_path.stem)
 
         for snapshot in snapshots:
             if snapshot.name in existing_names:
@@ -86,8 +108,8 @@ class FileCopyBackupProvider(IBackupProvider):
 
             target_file = target.path / f"{snapshot.name}.qcow2"
 
-            # Step 2: Transfer file (rsync or cp)
-            if use_rsync and rsync_available:
+            # Step 3: Transfer file (always rsync — design D3)
+            if rate_limit != "no":
                 bwlimit = rate_limit_to_kib(rate_limit)
                 transfer_cmd = [
                     "rsync",
@@ -104,20 +126,18 @@ class FileCopyBackupProvider(IBackupProvider):
                     rate_limit,
                 )
             else:
-                transfer_cmd = ["cp", str(snapshot.path), str(target_file)]
-                if rate_limit != "no" and not rsync_available:
-                    logger.info(
-                        "Transferring %s to %s (rate limit disabled — "
-                        "rsync unavailable)",
-                        snapshot.name,
-                        target_file,
-                    )
-                else:
-                    logger.info(
-                        "Transferring %s to %s",
-                        snapshot.name,
-                        target_file,
-                    )
+                transfer_cmd = [
+                    "rsync",
+                    "--partial",
+                    "--progress",
+                    str(snapshot.path),
+                    str(target_file),
+                ]
+                logger.info(
+                    "Transferring %s to %s",
+                    snapshot.name,
+                    target_file,
+                )
 
             logger.debug("Transfer command: %s", " ".join(transfer_cmd))
 
@@ -157,7 +177,7 @@ class FileCopyBackupProvider(IBackupProvider):
                 )
 
                 # Warn if throughput is less than 10% of configured rate limit
-                if rate_limit != "no" and rsync_available:
+                if rate_limit != "no":
                     configured_bps = parse_rate_limit(rate_limit)
                     if configured_bps > 0:
                         ten_pct = configured_bps * 0.1
@@ -171,7 +191,7 @@ class FileCopyBackupProvider(IBackupProvider):
                                 configured_bps,
                             )
 
-            # Step 3: If incremental, rebase backing path (design D5)
+            # Step 4: If incremental, rebase backing path (design D5)
             if target.incremental:
                 # Check for FULL anchor in target directory
                 full_anchor = self._find_full_anchor(target)
@@ -198,6 +218,13 @@ class FileCopyBackupProvider(IBackupProvider):
                             )
                         )
                         continue
+                    # Record incremental→FULL dependency (Task 4.4)
+                    if self._state is not None:
+                        self._state.record_incremental_dependency(
+                            str(target.path),
+                            snapshot.name,
+                            full_anchor.stem,
+                        )
                 else:
                     # No FULL anchor — use source backing filename
                     info_cmd = [
@@ -247,7 +274,7 @@ class FileCopyBackupProvider(IBackupProvider):
                             )
                             continue
 
-            # Step 4: Verification (if enabled).
+            # Step 5: Verification (if enabled).
             verify_error = verify_backup(
                 self._shell,
                 str(snapshot.path),
@@ -286,12 +313,16 @@ class FileCopyBackupProvider(IBackupProvider):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
+        bucket_level: str = "monthly",
     ) -> BackupResult:
         """Create a standalone full (anchor) backup via ``qemu-img convert``.
 
         Runs ``qemu-img convert [-c] -f qcow2 -O qcow2`` to produce a
         self-contained qcow2 file.  Uses an atomic pattern: convert to
         a ``.tmp`` file, then rename on success.
+
+        After creation, records the FULL in state (if state manager is
+        available) via ``record_full_backup()``.
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -342,6 +373,15 @@ class FileCopyBackupProvider(IBackupProvider):
             bytes_transferred = target_file.stat().st_size
         except OSError:
             bytes_transferred = 0
+
+        # Record FULL backup in state (Task 4.5)
+        if self._state is not None:
+            self._state.record_full_backup(
+                str(target.path),
+                f"{full_name}.qcow2",
+                source_snapshot.timestamp,
+                bucket_level,
+            )
 
         return BackupResult(
             success=True,
@@ -396,6 +436,37 @@ class FileCopyBackupProvider(IBackupProvider):
         return snapshots
 
     def delete(self, backup: SnapshotInfo) -> ShellResult:
-        """Delete a backup file via ``rm -f``."""
+        """Delete a backup file via ``rm -f``.
+
+        If the backup is a FULL (name matches ``*.FULL.*``), checks for
+        dependent incrementals via ``state.get_incremental_dependencies()``.
+        If dependents exist, skips deletion (ghost retention).  Cascade
+        deletion of orphaned incrementals is handled by
+        ``Core._cleanup_backups()``, not here.
+        """
+        # Check if this is a FULL backup
+        is_full = ".FULL." in backup.name
+
+        if is_full and self._state is not None:
+            target_path = str(backup.path.parent)
+            dependents = self._state.get_incremental_dependencies(
+                target_path, backup.name
+            )
+            if dependents:
+                logger.info(
+                    "Ghost retention: skipping FULL %s — %d dependent "
+                    "incremental(s) still in keep-set",
+                    backup.name,
+                    len(dependents),
+                )
+                return ShellResult(
+                    success=True,
+                    stdout="",
+                    stderr="",
+                    returncode=0,
+                    error=None,
+                )
+
+        # Delete the backup file (FULL with no dependents, or non-FULL)
         cmd = ["rm", "-f", str(backup.path)]
         return self._shell.run(cmd, timeout=30)

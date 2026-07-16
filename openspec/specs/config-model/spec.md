@@ -1,7 +1,7 @@
 ## Requirements
 
 ### Requirement: GlobalConfig dataclass
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, preserve day of week, state directory, lockfile path, snapshot/target preserve policies, rate limit, deferred monitoring thresholds, and fault-tolerance safety controls.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, preserve day of week, state directory, lockfile path, snapshot/target preserve policies, rate limit, deferred monitoring thresholds, fault-tolerance safety controls, and compression default.
 
 #### Scenario: GlobalConfig is immutable
 - **WHEN** a GlobalConfig instance is created with `timestamp_format="long"` and `preserve_day_of_week="monday"`
@@ -9,7 +9,7 @@ The system SHALL provide an immutable `GlobalConfig` dataclass with frozen field
 
 #### Scenario: GlobalConfig default values
 - **WHEN** a GlobalConfig is created with only required fields
-- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `rate_limit="no"`, `deferred_warn_count="5"`, `deferred_crit_count="10"`, `deferred_warn_age="7d"`, `deferred_crit_age="14d"`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
+- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `rate_limit="no"`, `compress=True`, `deferred_warn_count="5"`, `deferred_crit_count="10"`, `deferred_warn_age="7d"`, `deferred_crit_age="14d"`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
 
 ### Requirement: VMConfig dataclass
 The system SHALL provide an immutable `VMConfig` dataclass representing a single VM's configuration, including its name, base image path, snapshot directory, snapshot creation mode, retention policy, optional targets, and fault-tolerance deep verification controls.
@@ -23,11 +23,11 @@ The system SHALL provide an immutable `VMConfig` dataclass representing a single
 - **THEN** `vm.targets` contains those targets in order
 
 ### Requirement: TargetConfig dataclass
-The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, its rate limit setting, verification mode, and retry controls.
+The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, its rate limit setting, verification mode, retry controls, compression setting, and base-copy behavior.
 
 #### Scenario: TargetConfig with incremental enabled
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and `incremental=True`
-- **THEN** both fields are accessible, `rate_limit` defaults to `"no"`, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, and the instance is frozen
+- **THEN** both fields are accessible, `rate_limit` defaults to `"no"`, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `copy_base` defaults to `False`, and the instance is frozen
 
 ### Requirement: RetentionPolicy dataclass
 The system SHALL provide an immutable `RetentionPolicy` dataclass with fields for hourly, daily, weekly, monthly, and yearly retention counts, plus a `preserve_min` string. The `preserve_min` field SHALL accept the value `"latest"` in addition to `"all"` and duration strings like `"6h"`, `"2d"`.
@@ -134,18 +134,6 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **WHEN** global sets `snapshot_preserve_min = "3h"` and VM omits it
 - **THEN** `VMConfig.snapshot_preserve_min` resolves to `"3h"`
 
-### Requirement: TargetConfig contains target_preserve_min, full_every, and full_compress
-
-`TargetConfig` SHALL contain fields `target_preserve_min: str | None = None`, `full_every: str = "0d"`, and `full_compress: bool = False`.
-
-#### Scenario: Target inherits from VM
-- **WHEN** VM sets `target_preserve_min = "6h"` and target omits it
-- **THEN** `TargetConfig.target_preserve_min` resolves to `"6h"`
-
-#### Scenario: full_every disabled by default
-- **WHEN** target omits `full_every`
-- **THEN** `TargetConfig.full_every` is `"0d"`
-
 ### Requirement: GlobalConfig rate_limit field
 
 `GlobalConfig` SHALL include an optional `rate_limit` field of type `str` with default `"no"`. See `specs/rate-limit/spec.md` for full semantics.
@@ -199,3 +187,36 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 #### Scenario: Default retry values
 - **WHEN** `TargetConfig` is constructed without retry fields
 - **THEN** `backup_retry_max` is `3`, `backup_retry_base` is `"2s"`
+
+### Requirement: TargetConfig compress field
+`TargetConfig` SHALL have a `compress: bool` field with default `True`. When `True`, FULL backups SHALL be created with `qemu-img convert -c` (zlib compression). The field SHALL be immutable (`frozen=True`). It SHALL inherit from `GlobalConfig.compress` when not explicitly set on the target.
+
+#### Scenario: Default compress is true
+- **WHEN** a TargetConfig is created without `compress`
+- **THEN** `target.compress` is `True`
+
+#### Scenario: Explicit compress disabled
+- **WHEN** a TargetConfig is created with `compress=False`
+- **THEN** `target.compress` is `False`
+
+### Requirement: TargetConfig copy_base field
+`TargetConfig` SHALL have a `copy_base: bool` field with default `False`. When `False`, `base.qcow2` SHALL NOT be copied to the target — the first backup is always a FULL via `qemu-img convert`. When `True`, the legacy behavior of copying `base.qcow2` to the target is preserved.
+
+#### Scenario: Default copy_base is false
+- **WHEN** a TargetConfig is created without `copy_base`
+- **THEN** `target.copy_base` is `False`
+
+#### Scenario: Explicit copy_base enabled
+- **WHEN** a TargetConfig is created with `copy_base=True`
+- **THEN** `target.copy_base` is `True`
+
+### Requirement: GlobalConfig compress field
+`GlobalConfig` SHALL have a `compress: bool` field with default `True`. This serves as the global default for `TargetConfig.compress` when the target does not explicitly set it.
+
+#### Scenario: Global compress default
+- **WHEN** `GlobalConfig` is constructed without `compress`
+- **THEN** `compress` is `True`
+
+#### Scenario: Target inherits compress from global
+- **WHEN** global config sets `compress = false` and a target does not specify `compress`
+- **THEN** `TargetConfig.compress` resolves to `False`

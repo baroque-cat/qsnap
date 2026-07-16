@@ -8,14 +8,13 @@ based on configured retention policies.
 
 from __future__ import annotations
 
+import json
 import logging
 from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
-
 from qsnap.core import Core
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_schedule_summary_empty_state_produces_simulation ────────────────
@@ -29,7 +28,8 @@ def test_schedule_summary_empty_state_produces_simulation(
     mock_shell,
 ):
     """schedule_summary() with empty state returns a non-empty string
-    containing retention info (policy, simulated items, kept/remove counts)."""
+    containing retention info (policy, simulated items, kept/remove counts)
+    and size projection fields (with zero values when no data available)."""
     vm = make_vm_config(
         name="testvm",
         targets=[make_target(target_preserve="48h")],
@@ -48,6 +48,12 @@ def test_schedule_summary_empty_state_produces_simulation(
     assert summary
     assert "testvm" in summary
     assert "Policy:" in summary
+    # Size projection fields — zero when no data (no qemu-img mock, empty state)
+    assert "Base image actual-size:" in summary
+    assert "Avg incremental size:" in summary
+    assert "Projected FULLs:" in summary
+    assert "Projected incrementals:" in summary
+    assert "Projected total size:" in summary
 
 
 # ── test_schedule_summary_logs_info_on_timer ──────────────────────────────
@@ -96,7 +102,8 @@ def test_schedule_summary_shows_snapshot_and_backup_breakdown(
     mock_state,
     mock_shell,
 ):
-    """schedule_summary output includes both snapshot and backup retention info."""
+    """schedule_summary output includes both snapshot and backup retention info
+    with size projections."""
     vm = make_vm_config(
         name="testvm",
         targets=[make_target(target_preserve="48h")],
@@ -114,6 +121,11 @@ def test_schedule_summary_shows_snapshot_and_backup_breakdown(
 
     assert "Snapshots:" in summary
     assert "Backups" in summary
+    assert "Base image actual-size:" in summary
+    # Per-target size projection fields present
+    assert "Projected FULLs:" in summary
+    assert "Projected incrementals:" in summary
+    assert "Projected total size:" in summary
 
 
 # ── test_schedule_summary_includes_all_vms ────────────────────────────────
@@ -184,3 +196,91 @@ def test_schedule_summary_filters_by_vm_name(
 
     assert "=== vm2 ===" in summary
     assert "=== vm1 ===" not in summary
+
+
+# ── test_schedule_summary_includes_base_image_size ────────────────────────
+
+
+def test_schedule_summary_includes_base_image_size(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """schedule_summary includes real base image actual-size from qemu-img info."""
+    base_image = "/var/lib/libvirt/images/testvm.qcow2"
+    vm = make_vm_config(
+        name="testvm",
+        base_image=base_image,
+        targets=[make_target(target_preserve="48h")],
+        snapshot_preserve="24h",
+    )
+    config = MockConfigFacade(vms=[vm])
+
+    # Mock qemu-img info to return a known actual-size
+    info_json = json.dumps({"actual-size": 1073741824})
+    mock_shell.expect(r"qemu-img info.*--output=json").returns(
+        ShellResult(success=True, stdout=info_json, stderr="", returncode=0, error=None)
+    )
+
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    summary = core.schedule_summary()
+
+    assert "Base image actual-size: 1073741824 B" in summary
+
+
+# ── test_schedule_summary_includes_avg_incremental_size ───────────────────
+
+
+def test_schedule_summary_includes_avg_incremental_size(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """schedule_summary includes average incremental size from state history."""
+    vm = make_vm_config(
+        name="testvm",
+        targets=[make_target(target_preserve="48h")],
+        snapshot_preserve="24h",
+    )
+    config = MockConfigFacade(vms=[vm])
+
+    # Populate state with snapshots that have known allocation sizes
+    base_path = Path("/var/lib/libvirt/snapshots/testvm")
+    snapshots = [
+        SnapshotInfo(
+            name="snap_20250101_120000",
+            path=base_path / "snap_20250101_120000.qcow2",
+            timestamp=datetime(2025, 1, 1, 12, 0),
+            allocation=1048576,
+        ),
+        SnapshotInfo(
+            name="snap_20250102_120000",
+            path=base_path / "snap_20250102_120000.qcow2",
+            timestamp=datetime(2025, 1, 2, 12, 0),
+            allocation=2097152,
+        ),
+    ]
+    for snap in snapshots:
+        mock_state.record_snapshot("testvm", snap)
+
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    summary = core.schedule_summary()
+
+    # Avg of 1048576 and 2097152 = 1572864
+    assert "Avg incremental size:   1572864 B" in summary

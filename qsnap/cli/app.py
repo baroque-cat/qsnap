@@ -35,6 +35,7 @@ _DISPATCH: dict[str, object] = {
     "stats": commands.handle_stats,
     "check": commands.handle_check,
     "restore": commands.handle_restore,
+    "estimate": commands.handle_estimate,
 }
 
 
@@ -153,6 +154,10 @@ def build_argparser() -> argparse.ArgumentParser:
     restore_parser.add_argument("snapshot_name", help="Snapshot name to restore")
     restore_parser.add_argument("target_dir", help="Target directory for restored files")
     restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
+
+    # estimate subcommand
+    estimate_parser = subparsers.add_parser("estimate", help="Show projected backup sizes and retention schedule")
+    estimate_parser.add_argument("vm", nargs="*", help="VM name(s) to filter")
 
     return parser
 

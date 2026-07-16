@@ -73,6 +73,9 @@ target_preserve = "48h 14d 8w 12m 1y"
 # Does NOT control the systemd timer — only used for schedule reporting.
 # deep_check_schedule = "off"
 
+# Compress full backups (global default, overridden per-VM/target).
+# compress = true
+
 
 # ── VM definitions ──────────────────────────────────────────────────────
 
@@ -139,12 +142,14 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # Override minimum backup retention for this target only
   # target_preserve_min = "6h"
 
-  # Full backup interval.  Create a full backup when this interval has
-  # elapsed since the last full backup.  "0d" (default) disables.
-  # full_every = "7d"
+  # Compress full backups.  When true, FULL backups are created via
+  # qemu-img convert with compression.  Default: true (inherited from
+  # global → VM → target).
+  # compress = true
 
-  # Compress full backup files.
-  # full_compress = false
+  # Copy the base image to the target on first backup.  When false
+  # (default), the first backup is always a FULL via qemu-img convert.
+  # copy_base = false
 
   # Backup verification level:
   #   "metadata" — verify qcow2 format + virtual-size match (default)
@@ -181,7 +186,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   incremental = true
 #   incremental_mode = "bitmap"
 #   verify = "full"
-#   full_every = "7d"
-#   full_compress = true
+#   compress = true
 #   backup_retry_max = 5
 #   backup_retry_base = "10s"

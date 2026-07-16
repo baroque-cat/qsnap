@@ -24,6 +24,7 @@ from qsnap.models.results import (
     ChangeResult,
     CommitResult,
     DeferredBlockcommit,
+    FullBackupInfo,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
@@ -454,8 +455,15 @@ def test_dry_run_logs_no_mutation(
     # IStateManager.record_snapshot was NEVER called.
     record_spy.assert_not_called()
 
-    # IShell.run was NEVER called (no mutating virsh/qemu-img commands).
-    shell_spy.assert_not_called()
+    # IShell.run may be called for read-only operations (_log_size_estimate
+    # runs even in dry-run mode to provide size projections via qemu-img info
+    # and du -sb).  Verify only read-only shell calls were made.
+    for call in shell_spy.call_args_list:
+        cmd = call[0][0]  # command list
+        cmd_str = " ".join(cmd)
+        assert any(p in cmd_str for p in ("qemu-img info", "du")), (
+            f"Unexpected shell call in dry-run: {cmd_str}"
+        )
 
     # Snapshot provider's create() was NOT called (dry-run skips actual
     # mutations).
@@ -844,19 +852,23 @@ def test_pipeline_onchange_no_changes_validation_first(
     assert result.success is True
 
 
-# ── test_backup_target_first_run_creates_full_backup ──────────────────────
+# ── test_first_backup_creates_full_via_bucket ─────────────────────────────
 
 
-def test_backup_target_first_run_creates_full_backup(
+def test_first_backup_creates_full_via_bucket(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """When full_every is set and no previous full backup exists, create_full_backup
-    is called and state.set_last_full_backup records the result."""
-    target = make_target(full_every="7d")
+    """First backup to target triggers FULL via bucket-driven logic.
+    
+    When no previous FULL exists on a target with bucket retention policy,
+    ``_should_create_bucket_full`` returns (True, bucket_level) and
+    ``create_full_backup`` is called with that bucket_level.
+    """
+    target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -869,43 +881,42 @@ def test_backup_target_first_run_creates_full_backup(
     snap = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
+        timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
     )
     mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
 
-    with (
-        patch.object(
-            backup_provider,
-            "create_full_backup",
-            wraps=backup_provider.create_full_backup,
-        ) as full_spy,
-        patch.object(
-            mock_state,
-            "set_last_full_backup",
-            wraps=mock_state.set_last_full_backup,
-        ) as set_full_spy,
-    ):
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called on first run"
-    assert set_full_spy.called, "set_last_full_backup should be called after full backup"
+    assert full_spy.called, "create_full_backup should be called on first backup"
+    assert full_spy.call_args.kwargs.get("bucket_level") == "daily", (
+        "bucket_level should be 'daily' for daily=7 policy"
+    )
 
 
-# ── test_backup_target_interval_not_elapsed_skips_full ────────────────────
+# ── test_new_monthly_period_triggers_full ────────────────────────────────
 
 
-def test_backup_target_interval_not_elapsed_skips_full(
+def test_new_monthly_period_triggers_full(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """When full_every interval has not elapsed, create_full_backup is NOT called."""
-    target = make_target(full_every="7d")
+    """New monthly period triggers FULL backup.
+    
+    When the highest active bucket is 'monthly' and the last FULL was
+    in a different month, a new FULL is created.
+    """
+    target = make_target(target_preserve="3m 7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -915,17 +926,77 @@ def test_backup_target_interval_not_elapsed_skips_full(
         shell=mock_shell,
     )
 
+    # Last FULL was in June
+    last_full_ts = datetime(2025, 6, 15, 10, 0)
+    mock_state.record_full_backup(
+        str(target.path), "old.FULL.monthly.qcow2", last_full_ts, "monthly"
+    )
+
+    # Current snapshot is in July — new month
     snap = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
+        timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Set a recent full backup (1 hour ago, well within the 7d interval)
-    recent = datetime.now() - timedelta(hours=1)
-    mock_state.set_last_full_backup(str(target.path), "snap1.FULL.qcow2", recent)
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, (
+        "create_full_backup should be called when entering new monthly period"
+    )
+    assert full_spy.call_args.kwargs.get("bucket_level") == "monthly", (
+        "bucket_level should be 'monthly' when monthly is highest active bucket"
+    )
+
+
+# ── test_same_bucket_period_skips_full ───────────────────────────────────
+
+
+def test_same_bucket_period_skips_full(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Same bucket period skips FULL backup.
+    
+    When the snapshot is in the same daily period as the last FULL,
+    no new FULL is created.
+    """
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Last FULL was earlier today
+    last_full_ts = datetime(2025, 7, 13, 2, 0)
+    mock_state.record_full_backup(
+        str(target.path), "today.FULL.daily.qcow2", last_full_ts, "daily"
+    )
+
+    # Snapshot also today — same daily period
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
 
@@ -937,8 +1008,164 @@ def test_backup_target_interval_not_elapsed_skips_full(
         core._backup_target(vm, target, [snap])
 
     assert not full_spy.called, (
-        "create_full_backup should NOT be called when interval has not elapsed"
+        "create_full_backup should NOT be called when in same bucket period"
     )
+
+
+# ── test_no_buckets_preserve_min_all_no_full_created ──────────────────────
+
+
+def test_no_buckets_preserve_min_all_no_full_created(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Policy with no buckets and preserve_min=all never triggers FULL."""
+    target = make_target(target_preserve_min="all")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert not full_spy.called, (
+        "create_full_backup should NOT be called when no buckets are configured"
+    )
+
+
+# ── test_should_create_bucket_full_highest_yearly ────────────────────────
+
+
+def test_should_create_bucket_full_highest_yearly(
+    make_target,
+):
+    """Highest active bucket is yearly when yearly > 0."""
+    from qsnap.models.config import RetentionPolicy
+
+    policy = RetentionPolicy(yearly=3, monthly=6)
+    target = make_target()
+
+    # No prior FULL — should create full with yearly bucket
+    should, level = Core._should_create_bucket_full(
+        target, policy, None, datetime(2025, 7, 13, 10, 0)
+    )
+    assert should is True
+    assert level == "yearly"
+
+    # Same year — should NOT create
+    should, level = Core._should_create_bucket_full(
+        target, policy,
+        FullBackupInfo(
+            name="full1.FULL.yearly.qcow2",
+            path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
+            timestamp=datetime(2025, 2, 1, 0, 0),
+            bucket_level="yearly",
+        ),
+        datetime(2025, 7, 13, 10, 0),
+    )
+    assert should is False
+
+    # New year — should create
+    should, level = Core._should_create_bucket_full(
+        target, policy,
+        FullBackupInfo(
+            name="full1.FULL.yearly.qcow2",
+            path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
+            timestamp=datetime(2024, 12, 31, 23, 59),
+            bucket_level="yearly",
+        ),
+        datetime(2025, 7, 13, 10, 0),
+    )
+    assert should is True
+    assert level == "yearly"
+
+
+# ── test_should_create_bucket_full_highest_daily ─────────────────────────
+
+
+def test_should_create_bucket_full_highest_daily(
+    make_target,
+):
+    """Highest active bucket is daily when daily > 0 and no higher bucket active."""
+    from qsnap.models.config import RetentionPolicy
+
+    policy = RetentionPolicy(daily=7, hourly=24)
+    target = make_target()
+
+    # No prior FULL
+    should, level = Core._should_create_bucket_full(
+        target, policy, None, datetime(2025, 7, 13, 10, 0)
+    )
+    assert should is True
+    assert level == "daily"
+
+    # Same day
+    should, level = Core._should_create_bucket_full(
+        target, policy,
+        FullBackupInfo(
+            name="full1.FULL.daily.qcow2",
+            path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
+            timestamp=datetime(2025, 7, 13, 2, 0),
+            bucket_level="daily",
+        ),
+        datetime(2025, 7, 13, 10, 0),
+    )
+    assert should is False
+
+    # Next day
+    should, level = Core._should_create_bucket_full(
+        target, policy,
+        FullBackupInfo(
+            name="full1.FULL.daily.qcow2",
+            path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
+            timestamp=datetime(2025, 7, 12, 8, 0),
+            bucket_level="daily",
+        ),
+        datetime(2025, 7, 13, 10, 0),
+    )
+    assert should is True
+    assert level == "daily"
+
+
+# ── test_should_create_bucket_full_no_active_buckets ─────────────────────
+
+
+def test_should_create_bucket_full_no_active_buckets(
+    make_target,
+):
+    """No active buckets returns (False, "")."""
+    from qsnap.models.config import RetentionPolicy
+
+    policy = RetentionPolicy()  # all zeros
+    target = make_target()
+
+    should, level = Core._should_create_bucket_full(
+        target, policy, None, datetime(2025, 7, 13, 10, 0)
+    )
+    assert should is False
+    assert level == ""
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────
@@ -1734,4 +1961,269 @@ def test_deferred_blockcommit_passes_deep_verify_true(
     call_kwargs = bc_spy.call_args.kwargs
     assert call_kwargs.get("deep_verify") is True, (
         "deep_verify=True should be passed to blockcommit"
+    )
+
+
+# ── Cascade Deletion: Ghost Retention ──────────────────────────────────────
+
+
+def test_full_kept_due_to_active_dependent(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """FULL backup is NOT deleted when it has dependent incrementals in keep-set (ghost retention).
+
+    When retention says to remove a FULL backup but one of its dependent
+    incrementals is in the keep-set, the FULL is ghost-retained (skipped).
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc_name = "snap2.qcow2"
+    now = datetime.now()
+
+    # Pre-populate state: FULL with dependent incremental
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+    ]
+    # Retention keeps the incremental, removes the FULL
+    retention = RetentionResult(keep=[inc_name], remove=[full_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider, "delete", wraps=backup_provider.delete
+    ) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    # FULL should NOT be deleted (ghost retention)
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert full_name not in deleted_names, (
+        "FULL with active dependent should be ghost-retained (not deleted)"
+    )
+
+
+# ── test_full_deleted_when_no_active_dependents ───────────────────────────
+
+
+def test_full_deleted_when_no_active_dependents(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """FULL backup IS deleted when no dependent incrementals are in keep-set."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    now = datetime.now()
+
+    # FULL with no dependents
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+    ]
+    retention = RetentionResult(keep=[], remove=[full_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider, "delete", wraps=backup_provider.delete
+    ) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    # FULL should be deleted
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert full_name in deleted_names, (
+        "FULL with no active dependents should be deleted"
+    )
+
+
+# ── test_orphaned_incrementals_cascade_deleted ────────────────────────────
+
+
+def test_orphaned_incrementals_cascade_deleted(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Orphaned incrementals are cascade-deleted after their FULL anchor is removed."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc1 = "snap2.qcow2"
+    inc2 = "snap3.qcow2"
+    now = datetime.now()
+
+    # FULL with two dependent incrementals
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
+    mock_state.record_incremental_dependency(str(target.path), inc2, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
+        SnapshotInfo(name=inc2, path=target.path / inc2, timestamp=now, allocation=600),
+    ]
+    # All are removed
+    retention = RetentionResult(keep=[], remove=[full_name, inc1, inc2])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider, "delete", wraps=backup_provider.delete
+    ) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert full_name in deleted_names, "FULL should be deleted"
+    assert inc1 in deleted_names, "orphaned incremental should be cascade-deleted"
+    assert inc2 in deleted_names, "orphaned incremental should be cascade-deleted"
+
+
+# ── test_kept_incremental_rebased_to_new_anchor ───────────────────────────
+
+
+def test_kept_incremental_rebased_to_new_anchor(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Kept incremental is NOT cascade-deleted when its FULL anchor is removed.
+
+    When the FULL anchor is deleted but the dependent incremental is in
+    the keep-set, the incremental is preserved (not cascade-deleted).
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc1 = "snap2.qcow2"
+    inc2 = "snap3.qcow2"
+    now = datetime.now()
+
+    # FULL with two dependents
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
+    mock_state.record_incremental_dependency(str(target.path), inc2, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
+        SnapshotInfo(name=inc2, path=target.path / inc2, timestamp=now, allocation=600),
+    ]
+    # FULL removed, inc1 kept, inc2 removed
+    retention = RetentionResult(keep=[inc1], remove=[full_name, inc2])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider, "delete", wraps=backup_provider.delete
+    ) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    # FULL has dependents in keep-set (inc1) → ghost-retained
+    assert full_name not in deleted_names, (
+        "FULL should be ghost-retained (inc1 is in keep-set)"
+    )
+    # inc1 is in keep-set → NOT deleted
+    assert inc1 not in deleted_names, (
+        "kept incremental should NOT be cascade-deleted"
+    )
+
+
+# ── test_core_post_processes_retention_for_dependencies ───────────────────
+
+
+def test_core_post_processes_retention_for_dependencies(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core post-processes retention result for dependencies.
+
+    Even when the retention engine says to remove a FULL, Core checks
+    for dependent incrementals and overrides the deletion when active
+    dependents exist.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc1 = "snap2.qcow2"
+    now = datetime.now()
+
+    # FULL with one dependent incremental in keep-set
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
+    ]
+    # Retention engine says: remove FULL, keep incremental
+    retention = RetentionResult(keep=[inc1], remove=[full_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider, "delete", wraps=backup_provider.delete
+    ) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    # Even though retention says remove FULL, Core post-processes and skips it
+    # due to active dependent (inc1 in keep-set)
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert full_name not in deleted_names, (
+        "Core should post-process retention and skip FULL with active dependents"
+    )
+    assert inc1 not in deleted_names, (
+        "inc1 is in keep-set and should not be deleted"
     )

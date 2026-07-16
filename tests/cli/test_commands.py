@@ -18,6 +18,7 @@ from unittest.mock import Mock
 from qsnap.cli.commands import (
     handle_backup,
     handle_check,
+    handle_estimate,
     handle_list,
     handle_list_deferred,
     handle_prune,
@@ -102,6 +103,7 @@ def _make_mock_core() -> Mock:
         chain_files=[],
         error=None,
     )
+    core.estimate.return_value = "ESTIMATE OUTPUT"
     return core
 
 
@@ -728,3 +730,37 @@ def test_check_output_displays_deep_check_schedule_overdue(capsys):
     assert result == EXIT_SUCCESS
     captured = capsys.readouterr()
     assert "OVERDUE" in captured.out
+
+
+# ── estimate subcommand dispatch tests ─────────────────────────────────────
+
+
+def test_estimate_subcommand_specific_vm_dispatches(cli_app):
+    """Estimate for a specific VM dispatches to core.estimate('myvm')."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["estimate", "myvm"])
+    result = handle_estimate(mock_core, args)
+    assert result == EXIT_SUCCESS
+    mock_core.estimate.assert_called_once_with("myvm")
+
+
+def test_estimate_subcommand_all_vms_dispatches(cli_app):
+    """Estimate with no VM filter dispatches to core.estimate(None)."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["estimate"])
+    result = handle_estimate(mock_core, args)
+    assert result == EXIT_SUCCESS
+    mock_core.estimate.assert_called_once_with(None)
+
+
+def test_estimate_subcommand_respects_format_flag(cli_app, capsys):
+    """Estimate with --format flag passes the format through to core.estimate
+    and prints the output to stdout."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["--format", "raw", "estimate", "myvm"])
+    assert args.format == "raw"
+    result = handle_estimate(mock_core, args)
+    assert result == EXIT_SUCCESS
+    mock_core.estimate.assert_called_once_with("myvm")
+    captured = capsys.readouterr()
+    assert "ESTIMATE OUTPUT" in captured.out

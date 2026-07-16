@@ -268,15 +268,32 @@ class JsonStateManager(IStateManager):
     def _full_backups_path(self) -> Path:
         return self._state_dir / "_full_backups.json"
 
-    def _load_full_backups(self) -> dict[str, dict[str, str]]:
+    def _load_full_backups(self) -> dict[str, list[dict[str, str]]]:
+        """Load full-backups data, auto-migrating old single-dict format.
+
+        Old format: ``{target_path: {name, path, timestamp}}``
+        New format: ``{target_path: [{name, path, timestamp, bucket_level}, ...]}``
+
+        If a value is a dict (not a list), it is wrapped in a single-element
+        list for backward compatibility.
+        """
         path = self._full_backups_path()
         if not path.exists():
             return {}
         with open(path, encoding="utf-8") as fh:
-            data: dict[str, dict[str, str]] = json.load(fh)
+            raw: dict[str, object] = json.load(fh)
+        # Auto-migrate: wrap single dicts in lists.
+        data: dict[str, list[dict[str, str]]] = {}
+        for key, val in raw.items():
+            if isinstance(val, list):
+                data[key] = val  # type: ignore[assignment]
+            elif isinstance(val, dict):
+                data[key] = [val]  # type: ignore[list-item]
+            else:
+                logger.warning("Unexpected entry in _full_backups.json for %s", key)
         return data
 
-    def _save_full_backups(self, data: dict[str, dict[str, str]]) -> None:
+    def _save_full_backups(self, data: dict[str, list[dict[str, str]]]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self._state_dir / "_full_backups.json.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -284,23 +301,107 @@ class JsonStateManager(IStateManager):
         os.replace(tmp, self._full_backups_path())
 
     def get_last_full_backup(self, target_path: str) -> FullBackupInfo | None:
+        """Return the most recent full backup for *target_path*.
+
+        Uses the new multi-FULL format.  ``set_last_full_backup`` still
+        works for backward compatibility but now appends to the list.
+        """
         data = self._load_full_backups()
-        entry = data.get(target_path)
-        if entry is None:
+        entries = data.get(target_path)
+        if not entries:
             return None
+        entry = entries[-1]  # newest is last
         return FullBackupInfo(
             name=str(entry["name"]),
             path=Path(str(entry["path"])),
             timestamp=datetime.fromisoformat(str(entry["timestamp"])),
+            bucket_level=str(entry.get("bucket_level", "monthly")),
         )
 
     def set_last_full_backup(
         self, target_path: str, name: str, timestamp: datetime
     ) -> None:
+        """Record a full backup (backward-compatible, appends to list)."""
+        self.record_full_backup(target_path, name, timestamp, "monthly")
+
+    def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
+        """Return all recorded full backups for *target_path*, oldest first."""
         data = self._load_full_backups()
-        data[target_path] = {
-            "name": name,
-            "path": str(Path(target_path) / name),
-            "timestamp": timestamp.isoformat(),
-        }
+        entries = data.get(target_path, [])
+        return [
+            FullBackupInfo(
+                name=str(e["name"]),
+                path=Path(str(e["path"])),
+                timestamp=datetime.fromisoformat(str(e["timestamp"])),
+                bucket_level=str(e.get("bucket_level", "monthly")),
+            )
+            for e in entries
+        ]
+
+    def record_full_backup(
+        self,
+        target_path: str,
+        name: str,
+        timestamp: datetime,
+        bucket_level: str,
+    ) -> None:
+        """Append a full backup record for *target_path*."""
+        data = self._load_full_backups()
+        entries = data.get(target_path, [])
+        entries.append(
+            {
+                "name": name,
+                "path": str(Path(target_path) / name),
+                "timestamp": timestamp.isoformat(),
+                "bucket_level": bucket_level,
+            }
+        )
+        data[target_path] = entries
         self._save_full_backups(data)
+
+    # ── Incremental → FULL dependency tracking ───────────────────────
+
+    def _dependencies_path(self) -> Path:
+        return self._state_dir / "_dependencies.json"
+
+    def _load_dependencies(self) -> dict[str, dict[str, list[str]]]:
+        """Load dependency data.
+
+        Format: ``{target_path: {full_name: [incremental_name, ...]}}``
+        """
+        path = self._dependencies_path()
+        if not path.exists():
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            data: dict[str, dict[str, list[str]]] = json.load(fh)
+        return data
+
+    def _save_dependencies(
+        self, data: dict[str, dict[str, list[str]]]
+    ) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_dir / "_dependencies.json.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+        os.replace(tmp, self._dependencies_path())
+
+    def record_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> None:
+        """Record that *incremental_name* depends on *full_name*."""
+        data = self._load_dependencies()
+        target_deps = data.get(target_path, {})
+        deps = target_deps.get(full_name, [])
+        if incremental_name not in deps:
+            deps.append(incremental_name)
+        target_deps[full_name] = deps
+        data[target_path] = target_deps
+        self._save_dependencies(data)
+
+    def get_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> list[str]:
+        """Return the incremental backup names that depend on *full_name*."""
+        data = self._load_dependencies()
+        target_deps = data.get(target_path, {})
+        return list(target_deps.get(full_name, []))

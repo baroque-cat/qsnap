@@ -88,6 +88,10 @@ class ConfigFacade(IConfigFacade):
         if "deep_check_schedule" in raw:
             global_kwargs["deep_check_schedule"] = str(raw["deep_check_schedule"])
 
+        # Compress full backups (global default).
+        if "compress" in raw:
+            global_kwargs["compress"] = bool(raw["compress"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate rate_limit format.
@@ -210,6 +214,7 @@ class ConfigFacade(IConfigFacade):
                     target_preserve,
                     target_preserve_min,
                     global_cfg.rate_limit,
+                    global_cfg.compress,
                 )
             )
 
@@ -237,6 +242,7 @@ class ConfigFacade(IConfigFacade):
         vm_target_preserve: str | None,
         vm_target_preserve_min: str | None = None,
         global_rate_limit: str = "no",
+        global_compress: bool = True,
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -259,11 +265,55 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve_min = vm_target_preserve_min
 
-        # full_every: target-level, default "0d" (never).
-        full_every = str(tgt_raw.get("full_every", "0d"))
+        # Validate: if target_preserve is set (not None, not "latest") and
+        # all bucket counts are 0 and target_preserve_min is not "all",
+        # the retention policy would keep nothing — raise ConfigError.
+        if (
+            target_preserve is not None
+            and target_preserve != "latest"
+            and target_preserve_min is not None
+            and target_preserve_min != "all"
+        ):
+            # Parse bucket counts from the preserve string.
+            counts = [
+                int(m.group(1))
+                for m in re.finditer(r"(\d+)([hdwmy])", target_preserve)
+            ]
+            if counts and all(c == 0 for c in counts):
+                raise ConfigError(
+                    f"target_preserve={target_preserve!r} has all zero bucket "
+                    f"counts and target_preserve_min={target_preserve_min!r} "
+                    "is not 'all' — nothing would be retained. "
+                    "Set at least one non-zero bucket count or use "
+                    "target_preserve_min='all'."
+                )
 
-        # full_compress: target-level, default False.
-        full_compress = bool(tgt_raw.get("full_compress", False))
+        # full_every is deprecated — log warning and ignore.
+        if "full_every" in tgt_raw:
+            import logging
+            logging.getLogger("qsnap.config").warning(
+                "full_every is deprecated and ignored — FULL backups are now "
+                "triggered by the retention policy's highest active bucket. "
+                "Remove full_every from your config."
+            )
+
+        # compress: target overrides global default.
+        # If full_compress (deprecated) is present and compress is not,
+        # map full_compress → compress with a warning.
+        if "compress" in tgt_raw:
+            compress = bool(tgt_raw["compress"])
+        elif "full_compress" in tgt_raw:
+            import logging
+            logging.getLogger("qsnap.config").warning(
+                "full_compress is deprecated — use 'compress' instead. "
+                "Mapping full_compress → compress for this target."
+            )
+            compress = bool(tgt_raw["full_compress"])
+        else:
+            compress = global_compress
+
+        # copy_base: target-level, default False.
+        copy_base = bool(tgt_raw.get("copy_base", False))
 
         # verify: "metadata" (default), "hash", "full", or "off".
         verify = str(tgt_raw.get("verify", "metadata"))
@@ -293,8 +343,8 @@ class ConfigFacade(IConfigFacade):
             target_preserve=target_preserve,
             verify=verify,
             target_preserve_min=target_preserve_min,
-            full_every=full_every,
-            full_compress=full_compress,
+            compress=compress,
+            copy_base=copy_base,
             rate_limit=rate_limit,
             backup_retry_max=backup_retry_max,
             backup_retry_base=backup_retry_base,

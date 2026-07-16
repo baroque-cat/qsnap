@@ -70,3 +70,29 @@ class IStateManager(ABC):
     ) -> None:
         """Record a full backup for *target_path* with the given *name* and *timestamp*."""
         ...
+
+    @abstractmethod
+    def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
+        """Return all recorded full backups for *target_path*, newest last."""
+        ...
+
+    @abstractmethod
+    def record_full_backup(
+        self, target_path: str, name: str, timestamp: datetime, bucket_level: str
+    ) -> None:
+        """Append a full backup record for *target_path* with bucket level."""
+        ...
+
+    @abstractmethod
+    def record_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> None:
+        """Record that *incremental_name* depends on *full_name* on *target_path*."""
+        ...
+
+    @abstractmethod
+    def get_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> list[str]:
+        """Return the incremental backup names that depend on *full_name*."""
+        ...

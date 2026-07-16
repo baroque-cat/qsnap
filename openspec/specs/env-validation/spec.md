@@ -2,33 +2,30 @@
 
 ## Purpose
 
-Pre-flight environment validation before pipeline execution — verifies snapshot_dir, base_image, virsh/qemu-img in PATH, VM defined in libvirt, target paths are reachable, and rsync availability when rate limiting is configured.
+Pre-flight environment validation before pipeline execution — verifies snapshot_dir, base_image, virsh/qemu-img in PATH, VM defined in libvirt, target paths are reachable, and rsync availability (hard requirement).
 
 ## Requirements
 
 ### Requirement: Pre-flight rsync availability check
 
-When `rate_limit` is set to a value other than `"no"` at the target level, the pre-flight environment validation SHALL check that the `rsync` binary is available in PATH. If `rsync` is not found, a WARNING SHALL be logged. This check SHALL NOT block pipeline execution.
+The pre-flight environment validation SHALL check that the `rsync` binary is available in PATH on every pipeline run. If `rsync` is not found, validation SHALL fail with an error and the pipeline SHALL NOT proceed. This is a hard requirement — `rsync` is the sole file transfer mechanism and no fallback exists.
 
-#### Scenario: Rsync available — no warning
+#### Scenario: Rsync available — validation passes
+- **WHEN** `which rsync` succeeds
+- **THEN** validation passes and pipeline execution continues
 
-- **WHEN** `rate_limit` is `"100M"` for a target and `which rsync` succeeds
-- **THEN** no WARNING is logged during environment validation
+#### Scenario: Rsync unavailable — pipeline aborts
+- **WHEN** `which rsync` returns non-zero
+- **THEN** validation fails with an error: "rsync is required but not found in PATH"
+- **AND** the pipeline does NOT proceed to change detection or snapshot creation
 
-#### Scenario: Rsync unavailable — warning logged
-
-- **WHEN** `rate_limit` is `"100M"` for a target and `which rsync` returns non-zero
-- **THEN** a WARNING is logged: "rsync not found — rate limiting disabled for target <path>"
-- **AND** validation does not fail
-
-#### Scenario: Rsync check skipped when rate_limit is "no"
-
-- **WHEN** `rate_limit` is `"no"` for all targets
-- **THEN** `which rsync` is never called during environment validation
+#### Scenario: Rsync check always runs
+- **WHEN** `_validate_environment()` is called
+- **THEN** `which rsync` is always called, regardless of `rate_limit` configuration
 
 ### Requirement: Pre-flight environment validation before pipeline
 
-Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) stale `.tmp`, `.partial`, and NBD socket files are cleaned up per `auto_cleanup` config, (b) orphan `.qcow2` snapshots are detected (WARNING only), (c) `snapshot_dir` exists and is a writable directory, (d) `base_image` file exists, (e) `virsh` and `qemu-img` binaries are in PATH, (f) VM is defined in libvirt (`virsh dominfo` returns 0), (g) if any target has `rate_limit != "no"`, `rsync` is in PATH (WARNING on missing, non-blocking). Failure on checks (c)-(f) SHALL return immediately — no partial pipeline execution. Cleanup steps (a)-(b) SHALL be skipped when `auto_cleanup = false`. Checks (a)-(b) SHALL NOT block pipeline execution — they are defensive, not critical.
+Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) stale `.tmp`, `.partial`, and NBD socket files are cleaned up per `auto_cleanup` config, (b) orphan `.qcow2` snapshots are detected (WARNING only), (c) `snapshot_dir` exists and is a writable directory, (d) `base_image` file exists, (e) `virsh` and `qemu-img` binaries are in PATH, (f) VM is defined in libvirt (`virsh dominfo` returns 0), (g) `rsync` is in PATH (hard requirement, pipeline aborts if missing). Failure on checks (c)-(f) SHALL return immediately — no partial pipeline execution. Cleanup steps (a)-(b) SHALL be skipped when `auto_cleanup = false`. Checks (a)-(b) SHALL NOT block pipeline execution — they are defensive, not critical.
 
 #### Scenario: Cleanup and orphan detection execute before main checks
 - **WHEN** `_validate_environment()` is called and `auto_cleanup = true`

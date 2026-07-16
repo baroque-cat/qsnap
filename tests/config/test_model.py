@@ -62,6 +62,8 @@ def test_global_config_defaults():
     assert cfg.chain_verify_before_commit is True
     assert cfg.chain_verify_after_commit is True
     assert cfg.deep_check_schedule == "off"
+    # Compress full backups defaults to True.
+    assert cfg.compress is True
 
 
 def test_vm_config_required_fields():
@@ -137,6 +139,10 @@ def test_target_config_incremental():
     # Backup retry fields use their documented defaults.
     assert default_target.backup_retry_max == 3
     assert default_target.backup_retry_base == "2s"
+
+    # New bucket-driven backup fields: compress defaults to True, copy_base to False.
+    assert default_target.compress is True
+    assert default_target.copy_base is False
 
 
 def test_retention_policy_hourly_daily():
@@ -319,20 +325,53 @@ def test_global_config_preserve_min_set_from_constructor(make_global_config):
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.full_every / full_compress — full backup scheduling
+# TargetConfig.compress / copy_base — bucket-driven backup fields
 # ---------------------------------------------------------------------------
 
 
-def test_target_config_full_every_defaults_zero_d(make_target):
-    """TargetConfig() has full_every='0d' by default (never schedule full backups)."""
+def test_target_config_compress_default_true(make_target):
+    """TargetConfig() has compress=True by default."""
     target = make_target()
-    assert target.full_every == "0d"
+    assert target.compress is True
 
 
-def test_target_config_full_compress_defaults_false(make_target):
-    """TargetConfig() has full_compress=False by default."""
+def test_target_config_compress_explicit_false(make_target):
+    """TargetConfig(compress=False) stores False."""
+    target = make_target(compress=False)
+    assert target.compress is False
+
+
+def test_target_config_copy_base_default_false(make_target):
+    """TargetConfig() has copy_base=False by default."""
     target = make_target()
-    assert target.full_compress is False
+    assert target.copy_base is False
+
+
+def test_target_config_copy_base_explicit_true(make_target):
+    """TargetConfig(copy_base=True) stores True."""
+    target = make_target(copy_base=True)
+    assert target.copy_base is True
+
+
+def test_global_config_compress_default_true():
+    """GlobalConfig() has compress=True by default."""
+    cfg = GlobalConfig()
+    assert cfg.compress is True
+
+
+def test_target_inherits_compress_from_global():
+    """TargetConfig field exists for compress; global default is True and can be
+    overridden by TargetConfig.  The inheritance is resolved by ConfigFacade,
+    but we verify the dataclass field exists and accepts the value."""
+    global_cfg = GlobalConfig(compress=False)
+    assert global_cfg.compress is False
+
+    target = TargetConfig(path=Path("/backup/testvm"), compress=True)
+    assert target.compress is True
+
+    # Default target inherits nothing directly; ConfigFacade wires inheritance.
+    target_default = TargetConfig(path=Path("/backup/testvm"))
+    assert target_default.compress is True
 
 
 # ---------------------------------------------------------------------------

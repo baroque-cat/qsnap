@@ -384,6 +384,187 @@ def test_get_last_full_backup_returns_none_when_empty(tmp_path: Path) -> None:
     assert result is None
 
 
+# ── multi-FULL tracking tests ──────────────────────────────────────
+
+
+def test_record_and_get_full_backups(tmp_path: Path) -> None:
+    """record_full_backup then get_full_backups returns the recorded FULL."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    name = "full-2024-01-01"
+    ts = datetime(2024, 1, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, name, ts, "monthly")
+
+    backups = manager.get_full_backups(target)
+
+    assert len(backups) == 1
+    assert isinstance(backups[0], FullBackupInfo)
+    assert backups[0].name == name
+    assert backups[0].timestamp == ts
+    assert backups[0].path == Path(target) / name
+    assert backups[0].bucket_level == "monthly"
+
+
+def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
+    """Multiple FULLs recorded for the same target are all returned, oldest first."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    ts1 = datetime(2024, 1, 1, 12, 0, 0)
+    ts2 = datetime(2024, 2, 1, 12, 0, 0)
+    ts3 = datetime(2024, 3, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, "full-2024-01-01", ts1, "monthly")
+    manager.record_full_backup(target, "full-2024-02-01", ts2, "monthly")
+    manager.record_full_backup(target, "full-2024-03-01", ts3, "monthly")
+
+    backups = manager.get_full_backups(target)
+
+    assert len(backups) == 3
+    assert backups[0].name == "full-2024-01-01"
+    assert backups[1].name == "full-2024-02-01"
+    assert backups[2].name == "full-2024-03-01"
+
+
+def test_full_recorded_with_bucket_level(tmp_path: Path) -> None:
+    """FULL recorded with a specific bucket_level preserves the value."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    ts = datetime(2024, 1, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, "full-2024-01-01", ts, "weekly")
+
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].bucket_level == "weekly"
+
+    # Verify that get_last_full_backup also returns the correct bucket_level.
+    last = manager.get_last_full_backup(target)
+    assert last is not None
+    assert last.bucket_level == "weekly"
+
+
+# ── incremental-to-FULL dependency tracking tests ──────────────────
+
+
+def test_dependency_recorded_after_rebase(tmp_path: Path) -> None:
+    """record_incremental_dependency then get_incremental_dependencies round-trips."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+
+    deps = manager.get_incremental_dependencies(target, "full-2024-01-01")
+    assert deps == ["incr-001"]
+
+
+def test_multiple_incrementals_depend_on_same_full(tmp_path: Path) -> None:
+    """Multiple incrementals depending on the same FULL are all returned."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-002", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-003", "full-2024-01-01")
+
+    deps = manager.get_incremental_dependencies(target, "full-2024-01-01")
+    assert len(deps) == 3
+    assert "incr-001" in deps
+    assert "incr-002" in deps
+    assert "incr-003" in deps
+
+
+def test_get_incremental_dependencies_empty(tmp_path: Path) -> None:
+    """get_incremental_dependencies on a FULL with no dependents returns empty list."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    deps = manager.get_incremental_dependencies("/mnt/backup/testvm", "full-orphan")
+    assert deps == []
+
+
+def test_duplicate_dependency_not_recorded(tmp_path: Path) -> None:
+    """Recording the same incremental dependency twice does not create duplicates."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+
+    deps = manager.get_incremental_dependencies(target, "full-2024-01-01")
+    assert deps == ["incr-001"]
+
+
+# ── _full_backups.json migration tests ──────────────────────────────
+
+
+def test_full_backups_json_old_format_auto_migrated(tmp_path: Path) -> None:
+    """Old-format _full_backups.json (dict values) is auto-migrated to list on load."""
+    # Write old format: {target_path: {name, path, timestamp}} (dict, not list)
+    old_data = {
+        "/mnt/backup/testvm": {
+            "name": "full-2024-01-01",
+            "path": "/mnt/backup/testvm/full-2024-01-01",
+            "timestamp": "2024-01-01T12:00:00",
+        },
+    }
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(old_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    # get_full_backups should auto-migrate the dict to a list.
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01"
+    assert backups[0].timestamp == datetime(2024, 1, 1, 12, 0, 0)
+    assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01")
+    # Old format had no bucket_level — should default to "monthly".
+    assert backups[0].bucket_level == "monthly"
+
+    # get_last_full_backup should also work (returns last from list).
+    last = manager.get_last_full_backup("/mnt/backup/testvm")
+    assert last is not None
+    assert last.name == "full-2024-01-01"
+
+
+def test_full_backups_json_new_format_loaded_as_is(tmp_path: Path) -> None:
+    """New-format _full_backups.json (list values) is loaded as-is."""
+    new_data = {
+        "/mnt/backup/testvm": [
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            {
+                "name": "full-2024-03-01",
+                "path": "/mnt/backup/testvm/full-2024-03-01",
+                "timestamp": "2024-03-01T12:00:00",
+                "bucket_level": "weekly",
+            },
+        ],
+    }
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(new_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+    assert len(backups) == 2
+    assert backups[0].name == "full-2024-01-01"
+    assert backups[0].bucket_level == "monthly"
+    assert backups[1].name == "full-2024-03-01"
+    assert backups[1].bucket_level == "weekly"
+
+
 # ── Fault tolerance & safety: state file corruption and rotation ──────────
 
 

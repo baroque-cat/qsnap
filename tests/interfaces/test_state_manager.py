@@ -75,6 +75,83 @@ def test_istate_manager_update_deferred_warning_abstract(tmp_path):
     assert callable(inmemory_mgr.update_deferred_warning)
 
 
+def test_istate_manager_multi_full_backup_methods_abstract():
+    """IStateManager declares multi-FULL backup tracking methods as abstract.
+
+    The methods ``get_full_backups``, ``record_full_backup``,
+    ``record_incremental_dependency``, and ``get_incremental_dependencies``
+    must be in ``IStateManager.__abstractmethods__`` so that every concrete
+    implementation is forced to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_full_backups" in abstract_methods
+    assert "record_full_backup" in abstract_methods
+    assert "record_incremental_dependency" in abstract_methods
+    assert "get_incremental_dependencies" in abstract_methods
+
+
+def test_istate_manager_concrete_implementations_have_new_methods(tmp_path):
+    """JsonStateManager and InMemoryStateManager implement new abstract methods.
+
+    Both concrete implementations must provide ``get_full_backups``,
+    ``record_full_backup``, ``record_incremental_dependency``, and
+    ``get_incremental_dependencies`` with correct signatures.
+    """
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+
+    for mgr, label in [
+        (json_mgr, "JsonStateManager"),
+        (inmemory_mgr, "InMemoryStateManager"),
+    ]:
+        assert callable(mgr.get_full_backups), f"{label} missing get_full_backups"
+        assert callable(mgr.record_full_backup), f"{label} missing record_full_backup"
+        assert callable(
+            mgr.record_incremental_dependency
+        ), f"{label} missing record_incremental_dependency"
+        assert callable(
+            mgr.get_incremental_dependencies
+        ), f"{label} missing get_incremental_dependencies"
+
+
+def test_istate_manager_new_methods_cause_typeerror_on_instantiation():
+    """Instantiating a subclass missing the new abstract methods raises TypeError.
+
+    A bare subclass that implements older abstract methods but not the four
+    new ones (``get_full_backups``, ``record_full_backup``,
+    ``record_incremental_dependency``, ``get_incremental_dependencies``)
+    must raise ``TypeError`` because the ABC enforces all abstract methods.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_full_backups" in abstract_methods
+
+    # A subclass that is missing the new methods must fail to instantiate.
+    class _MissingNewMethods(IStateManager):
+        def get_last_allocation(self, vm_name):
+            ...
+        def set_last_allocation(self, vm_name, alloc):
+            ...
+        def record_snapshot(self, vm_name, info):
+            ...
+        def get_snapshots(self, vm_name):
+            ...
+        def get_deferred_operations(self, vm_name):
+            ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason):
+            ...
+        def clear_deferred_operations(self, vm_name):
+            ...
+        def update_deferred_warning(self, vm_name, index, timestamp):
+            ...
+        def get_last_full_backup(self, target_path):
+            ...
+        def set_last_full_backup(self, target_path, name, timestamp):
+            ...
+
+    with pytest.raises(TypeError):
+        _MissingNewMethods()
+
+
 def test_json_state_manager_passes_isinstance_after_corruption_recovery(
     tmp_path,
 ) -> None:

@@ -42,8 +42,12 @@ class IBackupProvider(ABC):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
+        bucket_level: str = "monthly",
     ) -> BackupResult:
         """Create a standalone full (anchor) backup via ``qemu-img convert``.
+
+        ``bucket_level`` records which retention bucket triggered the
+        FULL (e.g. ``"yearly"``, ``"monthly"``).
 
         Default implementation raises ``NotImplementedError``.  Concrete
         providers that support full backups should override this.

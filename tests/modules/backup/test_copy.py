@@ -1,31 +1,37 @@
 """Unit tests for FileCopyBackupProvider.
 
 Tests cover the three ``IBackupProvider`` methods (``transfer_missing``,
-``list``, ``delete``) using ``MockShell`` to simulate ``cp``/``qemu-img``/
+``list``, ``delete``) using ``MockShell`` to simulate ``rsync``/``qemu-img``/
 ``rm`` commands.  No real I/O occurs — all shell calls are intercepted by
 ``MockShell``.
 
 Design decisions verified:
-- **D1**: ``FileCopyBackupProvider`` does NOT inherit from ``Core``; its only
-  dependency is ``IShell``.
+- **D1**: ``FileCopyBackupProvider`` does NOT inherit from ``Core``; its
+  dependencies are ``IShell`` (required) and ``IStateManager`` (optional).
+- **D3**: All transfers use ``rsync`` exclusively (no ``cp`` fallback).
+- **D4**: When ``copy_base`` is False (default) and target is empty,
+  ``create_full_backup()`` is called instead of rsync for the first snapshot.
 - **D5**: For incremental backups, ``qemu-img rebase -u -b <bare_filename>``
   is used to update the backing path to a bare filename in the target
   directory (metadata-only update, no data copy).
 
 Scenarios (from ``specs/backup-provider/spec.md``):
 Transfer Missing:
-1. New snapshot copied to empty target.
+1. New snapshot copied to empty target via rsync.
 2. Snapshot already exists on target — skipped.
 3. Incremental backup — rebase backing path.
 4. Non-incremental backup — no rebase.
-5. Copy fails — disk full or permission error.
+5. Transfer fails — rsync error.
+6. Rate-limited transfer via rsync --bwlimit.
+7. copy_base=false triggers create_full_backup on empty target.
+8. copy_base=true allows direct rsync transfer.
 List Backups:
-6. Target directory exists with backups.
-7. Target directory does not exist.
-8. Target directory exists but is empty.
+9. Target directory exists with backups.
+10. Target directory does not exist.
+11. Target directory exists but is empty.
 Delete Backups:
-9. Successful backup deletion.
-10. Backup file does not exist — rm -f is idempotent.
+12. Successful backup deletion.
+13. Backup file does not exist — rm -f is idempotent.
 """
 
 from __future__ import annotations
@@ -40,24 +46,28 @@ from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_shell import MockShell
 
+
 # ──────────────────────────────────────────────────────────────────────────
-# Transfer Missing
+# Transfer Missing — rsync-based (no cp fallback — design D3)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_transfer_missing_new_snapshot_empty_target(
+def test_transfer_missing_new_snapshot_rsync_empty_target(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
     """When the target path does not exist (``list()`` returns ``[]``) and
-    there is one snapshot to copy, the provider copies it via ``cp`` to
+    there is one snapshot to copy, the provider copies it via ``rsync`` to
     ``target.path/<snapshot.name>.qcow2`` and returns
     ``BackupResult(success=True, bytes_transferred=<file_size>)``.
+
+    ``copy_base=True`` is set so the empty-target FULL-creation path is
+    skipped and rsync is used directly.
     """
     vm_config = make_vm_config()
     # Target path does not exist -> list() returns [] with no shell calls
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -69,21 +79,19 @@ def test_transfer_missing_new_snapshot_empty_target(
 
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
-    # Mock cp returns success
-    mock_shell.expect("cp").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works.
-    # We wrap the original MockShell.run, creating the file on cp commands,
-    # then delegating to the expectation-based mock for the return value.
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -104,22 +112,29 @@ def test_transfer_missing_new_snapshot_empty_target(
     assert results[0].source_path == snapshot.path
     assert results[0].target_path == expected_target_file
 
-    # Assert cp command copies to target.path/<snapshot.name>.qcow2
+    # Assert rsync command copies to target.path/<snapshot.name>.qcow2
     all_cmds = [
         " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
     ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert str(snapshot.path) in rsync_cmds[0]
+    assert str(expected_target_file) in rsync_cmds[0]
+    # No rate limit → no --bwlimit
+    assert "--bwlimit" not in rsync_cmds[0]
+    # Has --partial for resumability
+    assert "--partial" in rsync_cmds[0]
+    # No cp fallback
     cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
-    assert len(cp_cmds) == 1
-    assert str(snapshot.path) in cp_cmds[0]
-    assert str(expected_target_file) in cp_cmds[0]
+    assert len(cp_cmds) == 0
 
 
 def test_transfer_missing_existing_snapshot_skipped(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
     """When the target already contains a backup with the same name as the
-    snapshot, the snapshot is NOT copied (``cp`` is NOT called) and does not
-    appear in the returned ``BackupResult`` list.
+    snapshot, the snapshot is NOT copied (``rsync`` is NOT called) and does
+    not appear in the returned ``BackupResult`` list.
     """
     vm_config = make_vm_config()
     target = make_target(path=str(tmp_path), incremental=False, verify="off")
@@ -153,12 +168,12 @@ def test_transfer_missing_existing_snapshot_skipped(
     # Snapshot is skipped — no results returned
     assert len(results) == 0
 
-    # cp is NOT called
+    # rsync is NOT called
     all_cmds = [
         " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
     ]
-    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
-    assert len(cp_cmds) == 0
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 0
 
 
 def test_transfer_incremental_rebase_backing_path(
@@ -173,11 +188,13 @@ def test_transfer_incremental_rebase_backing_path(
     - The backing path MUST be the bare filename (e.g. ``backing.qcow2``),
       NOT the full source path — because the backing file is in the same
       target directory on a different filesystem (XFS).
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=True,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -189,8 +206,8 @@ def test_transfer_incremental_rebase_backing_path(
 
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
-    # Mock cp returns success
-    mock_shell.expect("cp").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -249,11 +266,13 @@ def test_transfer_non_incremental_no_rebase(
 ):
     """When ``target.incremental`` is False, the snapshot is copied without
     calling ``qemu-img rebase``.  The backing path remains as-is.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -263,8 +282,8 @@ def test_transfer_non_incremental_no_rebase(
         allocation=65536,
     )
 
-    # Mock cp returns success
-    mock_shell.expect("cp").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -286,16 +305,18 @@ def test_transfer_non_incremental_no_rebase(
     assert len(rebase_cmds) == 0
 
 
-def test_transfer_copy_fails_disk_full(
+def test_transfer_rsync_fails_disk_full(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
-    """When ``cp`` returns a non-zero exit code (e.g. disk full), the
+    """When ``rsync`` returns a non-zero exit code (e.g. disk full), the
     provider returns ``BackupResult(success=False, error=<stderr>)``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -307,9 +328,9 @@ def test_transfer_copy_fails_disk_full(
 
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
-    # Mock cp returns failure (disk full)
+    # Mock rsync returns failure (disk full)
     error_msg = "No space left on device"
-    mock_shell.expect("cp").returns(
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=False,
             stdout="",
@@ -330,6 +351,59 @@ def test_transfer_copy_fails_disk_full(
     assert results[0].snapshot_name == snapshot.name
     assert results[0].source_path == snapshot.path
     assert results[0].target_path == expected_target_file
+
+
+def test_rsync_unavailable_transfer_fails_no_cp_fallback(
+    make_vm_config, make_target, tmp_path
+):
+    """When rsync is not available (``MockShell`` returns failure for
+    ``rsync``), the transfer fails with no ``cp`` fallback (design D3).
+
+    A fresh ``MockShell`` is used (without conftest's pre-configured
+    expectations) so the rsync command returns failure.
+    """
+    shell = MockShell()
+    # rsync → failure (not installed or unavailable)
+    error_msg = "rsync: command not found"
+    shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=False, stdout="", stderr=error_msg,
+            returncode=127, error=error_msg,
+        )
+    )
+
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    with patch.object(shell, "run", wraps=shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    # Assert failure with the rsync error
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "rsync" in results[0].error
+
+    # No cp was called — no fallback
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
+    assert len(cp_cmds) == 0, (
+        "cp should NOT be used as fallback when rsync fails (design D3)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -469,14 +543,16 @@ def test_transfer_rebase_failure_returns_backup_result_failure(
     and an error message containing ``"rebase failed"``.
 
     The rebase step is part of the incremental backup flow: after copying
-    the snapshot file, the backing path is rebased to a bare filename.
-    If the rebase command itself fails, the provider must report the
-    failure rather than silently returning success.
+    the snapshot file via rsync, the backing path is rebased.  If the
+    rebase command itself fails, the provider must report the failure
+    rather than silently returning success.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=True,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -486,8 +562,8 @@ def test_transfer_rebase_failure_returns_backup_result_failure(
         allocation=65536,
     )
 
-    # Mock cp returns success
-    mock_shell.expect("cp").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -547,16 +623,19 @@ def test_transfer_missing_metadata_verification_default(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
     """When ``target.verify`` is ``"metadata"`` (the default), after the
-    ``cp`` command, ``qemu-img info`` is called on both source and
+    ``rsync`` command, ``qemu-img info`` is called on both source and
     target to verify format, virtual-size, and actual-size.
 
     With matching metadata, ``transfer_missing`` returns
     ``BackupResult(success=True)``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "backups"),
         incremental=False,
+        copy_base=True,
         # verify defaults to "metadata"
     )
 
@@ -575,8 +654,8 @@ def test_transfer_missing_metadata_verification_default(
         }
     )
 
-    # Mock cp returns success
-    mock_shell.expect(r"^cp ").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -592,12 +671,12 @@ def test_transfer_missing_metadata_verification_default(
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works.
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -630,10 +709,13 @@ def test_transfer_missing_full_verification(
 
     With both metadata and compare succeeding, ``transfer_missing``
     returns ``BackupResult(success=True)``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "backups"), incremental=False, verify="full",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -651,8 +733,8 @@ def test_transfer_missing_full_verification(
         }
     )
 
-    # Mock cp returns success
-    mock_shell.expect(r"^cp ").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -674,12 +756,12 @@ def test_transfer_missing_full_verification(
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works.
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -708,13 +790,16 @@ def test_transfer_missing_no_verification_when_off(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
     """When ``target.verify`` is ``"off"``, no ``qemu-img`` commands are
-    called after ``cp``.  Only ``cp`` is executed (no rebase since
+    called after ``rsync``.  Only ``rsync`` is executed (no rebase since
     ``incremental=False``), and ``transfer_missing`` returns
     ``BackupResult(success=True)``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "backups"), incremental=False, verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -724,19 +809,19 @@ def test_transfer_missing_no_verification_when_off(
         allocation=65536,
     )
 
-    # Mock cp returns success
-    mock_shell.expect(r"^cp ").returns(
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works.
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -767,8 +852,9 @@ def test_transfer_missing_no_verification_when_off(
 
 
 def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
-    """``create_full_backup(compress=False)`` calls ``qemu-img convert``
-    WITHOUT the ``-c`` flag and returns ``BackupResult(success=True)``.
+    """``create_full_backup(compress=False, bucket_level="monthly")`` calls
+    ``qemu-img convert`` WITHOUT the ``-c`` flag and returns
+    ``BackupResult(success=True)``.
 
     The command pattern is ``qemu-img convert -f qcow2 -O qcow2 <src> <tmp>``.
     """
@@ -809,7 +895,9 @@ def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
         mock_shell, "run", side_effect=spied_run
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        result = provider.create_full_backup(snapshot, target, compress=False)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
 
     # Assert successful result
     assert result.success is True
@@ -835,8 +923,9 @@ def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
 
 
 def test_create_full_backup_compressed(mock_shell, make_target, tmp_path):
-    """``create_full_backup(compress=True)`` calls ``qemu-img convert``
-    WITH the ``-c`` flag and returns ``BackupResult(success=True)``.
+    """``create_full_backup(compress=True, bucket_level="monthly")`` calls
+    ``qemu-img convert`` WITH the ``-c`` flag and returns
+    ``BackupResult(success=True)``.
 
     The command pattern is ``qemu-img convert -c -f qcow2 -O qcow2 <src> <tmp>``.
     """
@@ -877,7 +966,9 @@ def test_create_full_backup_compressed(mock_shell, make_target, tmp_path):
         mock_shell, "run", side_effect=spied_run
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        result = provider.create_full_backup(snapshot, target, compress=True)
+        result = provider.create_full_backup(
+            snapshot, target, compress=True, bucket_level="monthly",
+        )
 
     # Assert successful result
     assert result.success is True
@@ -946,8 +1037,8 @@ def test_transfer_missing_rebases_to_full_anchor(
             error=None,
         )
     )
-    # cp succeeds
-    mock_shell.expect(r"^cp ").returns(
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -959,12 +1050,12 @@ def test_transfer_missing_rebases_to_full_anchor(
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works
+    # Side effect: simulate rsync creating the target file so stat() works
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
@@ -996,8 +1087,6 @@ def test_transfer_missing_rebases_to_full_anchor(
     assert " -u " in rebase_cmd
     # CRITICAL: backing path is the bare anchor filename prefixed with ./
     assert f"./{anchor_name}" in rebase_cmd
-    # The full source backing path is NOT in the rebase command
-    # (no source backing-filename query happened)
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -1024,12 +1113,14 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     This verifies that the ``qemu-img info`` call on the source snapshot
     IS made (to retrieve ``backing-filename``), and the rebase uses the
     bare basename of that backing path.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     # Target path does not exist → list() returns [], _find_full_anchor returns None
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=True,
-        verify="off",
+        verify="off", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1041,8 +1132,8 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
 
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
-    # cp succeeds
-    mock_shell.expect(r"^cp ").returns(
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=True, stdout="", stderr="", returncode=0, error=None
         )
@@ -1069,12 +1160,12 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
         )
     )
 
-    # Side effect: simulate cp creating the target file so stat() works
+    # Side effect: simulate rsync creating the target file so stat() works
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -1128,16 +1219,18 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
 def test_transfer_with_rate_limit_uses_rsync(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
-    """When ``rate_limit`` is set and rsync is available, the provider
-    uses ``rsync --bwlimit=<kib> --partial --progress`` instead of ``cp``.
+    """When ``rate_limit`` is set, the provider uses
+    ``rsync --bwlimit=<kib> --partial --progress``.
 
     ``rate_limit="100M"`` → ``rate_limit_to_kib("100M") == 102400`` →
     ``--bwlimit=102400``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1147,7 +1240,6 @@ def test_transfer_with_rate_limit_uses_rsync(
         allocation=65536,
     )
 
-    # which rsync → success (pre-configured in mock_shell fixture)
     # rsync → success
     mock_shell.expect(r"^rsync").returns(
         ShellResult(
@@ -1188,64 +1280,6 @@ def test_transfer_with_rate_limit_uses_rsync(
     assert str(snapshot.path) in rsync_cmds[0]
 
 
-def test_transfer_without_rate_limit_uses_cp(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
-    """When ``rate_limit`` is ``"no"``, the provider uses ``cp`` (not
-    rsync) and does NOT issue a ``which rsync`` check.
-    """
-    vm_config = make_vm_config()
-    target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="no",
-    )
-
-    snapshot = SnapshotInfo(
-        name="testvm.20250101T000000",
-        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
-        timestamp=datetime(2025, 1, 1, 0, 0, 0),
-        allocation=65536,
-    )
-
-    mock_shell.expect(r"^cp").returns(
-        ShellResult(
-            success=True, stdout="", stderr="", returncode=0, error=None
-        )
-    )
-
-    original_run = mock_shell.run
-
-    def spied_run(cmd, timeout):
-        cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
-            target_file = Path(cmd[-1])
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            target_file.write_bytes(b"\x00" * 65536)
-        return original_run(cmd, timeout)
-
-    with patch.object(
-        mock_shell, "run", side_effect=spied_run
-    ) as shell_spy:
-        provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], rate_limit="no"
-        )
-
-    assert len(results) == 1
-    assert results[0].success is True
-
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
-    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
-    assert len(cp_cmds) == 1
-    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
-    assert len(rsync_cmds) == 0
-    # which rsync should NOT be called when rate_limit == "no"
-    which_cmds = [cmd for cmd in all_cmds if cmd.startswith("which rsync")]
-    assert len(which_cmds) == 0
-
-
 def test_partial_file_resumes_with_rsync(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
@@ -1254,11 +1288,13 @@ def test_partial_file_resumes_with_rsync(
 
     The partial file is an incomplete ``.qcow2`` — ``qemu-img info`` fails
     on it, so ``list()`` skips it and the snapshot is treated as missing.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "backups"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
     target.path.mkdir(parents=True, exist_ok=True)
 
@@ -1280,7 +1316,6 @@ def test_partial_file_resumes_with_rsync(
             returncode=1, error="corrupt file",
         )
     )
-    # which rsync → success (conftest)
     # rsync → success
     mock_shell.expect(r"^rsync").returns(
         ShellResult(
@@ -1316,89 +1351,18 @@ def test_partial_file_resumes_with_rsync(
     assert "--partial" in rsync_cmds[0]
 
 
-def test_rsync_not_found_falls_back_to_cp(
-    make_vm_config, make_target, tmp_path, caplog
-):
-    """When ``rate_limit`` is set but rsync is not available (``which
-    rsync`` fails), the provider logs a WARNING and falls back to ``cp``.
-
-    A fresh ``MockShell`` is used (without the conftest's pre-configured
-    ``which rsync → success`` expectation) so that ``which rsync`` returns
-    failure.
-    """
-    shell = MockShell()
-    # which rsync → failure (rsync not installed)
-    shell.expect(r"which rsync").returns(
-        ShellResult(
-            success=False, stdout="", stderr="not found",
-            returncode=1, error="not found",
-        )
-    )
-    # cp → success
-    shell.expect(r"^cp").returns(
-        ShellResult(
-            success=True, stdout="", stderr="", returncode=0, error=None
-        )
-    )
-
-    vm_config = make_vm_config()
-    target = make_target(
-        path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
-    )
-
-    snapshot = SnapshotInfo(
-        name="testvm.20250101T000000",
-        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
-        timestamp=datetime(2025, 1, 1, 0, 0, 0),
-        allocation=65536,
-    )
-
-    original_run = shell.run
-
-    def spied_run(cmd, timeout):
-        cmd_str = " ".join(cmd)
-        if cmd_str.startswith("cp "):
-            target_file = Path(cmd[-1])
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            target_file.write_bytes(b"\x00" * 65536)
-        return original_run(cmd, timeout)
-
-    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
-
-    with patch.object(shell, "run", side_effect=spied_run) as shell_spy:
-        provider = FileCopyBackupProvider(shell)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], rate_limit="100M"
-        )
-
-    assert len(results) == 1
-    assert results[0].success is True
-    assert results[0].bytes_transferred == 65536
-
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
-    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
-    assert len(cp_cmds) == 1
-    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
-    assert len(rsync_cmds) == 0
-
-    # WARNING logged about rsync not found
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("rsync not found" in r.message for r in warnings)
-
-
 def test_pre_transfer_info_log(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
 ):
     """An INFO log is emitted before the transfer, mentioning the rate
     limit when one is configured.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1444,11 +1408,13 @@ def test_post_transfer_info_log_throughput(
 ):
     """An INFO log is emitted after the transfer with bytes transferred
     and elapsed time (throughput).
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1497,11 +1463,14 @@ def test_post_transfer_info_log_throughput(
 def test_debug_log_contains_rsync_command(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
 ):
-    """A DEBUG log is emitted with the full rsync command string."""
+    """A DEBUG log is emitted with the full rsync command string.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1554,11 +1523,13 @@ def test_slow_transfer_triggers_warning(
     Setup: ``rate_limit="100M"`` → configured 104_857_600 B/s.
     10% threshold = 10_485_760 B/s.
     bytes_transferred=65536, elapsed=100s → 655 B/s < threshold → WARNING.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"), incremental=False,
-        verify="off", rate_limit="100M",
+        verify="off", rate_limit="100M", copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1650,7 +1621,9 @@ def test_full_backup_ignores_rate_limit(
         mock_shell, "run", side_effect=spied_run
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        result = provider.create_full_backup(snapshot, target, compress=False)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
 
     assert result.success is True
 
@@ -1661,6 +1634,170 @@ def test_full_backup_ignores_rate_limit(
     assert len(rsync_cmds) == 0
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# copy_base behavior (design D4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_copy_base_false_prevents_base_copy(
+    mock_shell, make_vm_config, make_target, tmp_path, mock_state
+):
+    """When ``copy_base=False`` (default) and the target is empty,
+    ``transfer_missing`` triggers ``create_full_backup()`` for the
+    first (most recent) snapshot instead of rsync.  No rsync is called
+    for that snapshot.
+
+    Verifies design D4: first backup to empty target is always a FULL via
+    ``qemu-img convert``, and ``record_full_backup()`` is called on state.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"), incremental=False,
+        verify="off", copy_base=False,
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshots = [
+        SnapshotInfo(
+            name="testvm.20250101T000000",
+            path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+            timestamp=datetime(2025, 1, 1, 0, 0, 0),
+            allocation=65536,
+        ),
+    ]
+
+    # Mock qemu-img convert returns success
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # Mock mv (atomic rename) returns success
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # Mock rsync (for subsequent incremental transfer after FULL)
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        elif cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell, state=mock_state)
+        results = provider.transfer_missing(
+            vm_config, target, snapshots, rate_limit="no"
+        )
+
+    # First result is from create_full_backup
+    # Second result is from rsync of the same snapshot (FULL name ≠ snapshot name)
+    assert len(results) == 2
+    assert results[0].success is True  # FULL creation
+    assert results[1].success is True  # rsync transfer
+
+    # Both qemu-img convert and rsync were called
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1, (
+        "rsync should be called for subsequent transfer after FULL creation"
+    )
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+
+    # State was notified: record_full_backup was called
+    full_backups = mock_state.get_full_backups(str(target.path))
+    assert len(full_backups) == 1
+    assert full_backups[0].bucket_level == "monthly"
+
+
+def test_copy_base_true_allows_base_copy(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When ``copy_base=True`` and the target is empty,
+    ``transfer_missing`` uses rsync directly instead of calling
+    ``create_full_backup()``.
+
+    This verifies that setting ``copy_base=True`` preserves the legacy
+    behavior where the base disk image is copied (via rsync) rather than
+    creating a standalone FULL backup via ``qemu-img convert``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"), incremental=False,
+        verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].target_path == expected_target_file
+
+    # rsync was called (not qemu-img convert)
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, (
+        "qemu-img convert should NOT be called when copy_base=True"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1677,12 +1814,15 @@ def test_provider_remains_retry_unaware(
     When ``transfer_missing()`` encounters a transient failure (e.g.
     "Connection refused"), the transfer command is attempted exactly ONCE
     and the error is returned in the ``BackupResult`` without retrying.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
         incremental=False,
         verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1695,7 +1835,7 @@ def test_provider_remains_retry_unaware(
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
     error_msg = "Connection refused"
-    mock_shell.expect(r"^cp ").returns(
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=False,
             stdout="",
@@ -1720,13 +1860,13 @@ def test_provider_remains_retry_unaware(
     assert results[0].source_path == snapshot.path
     assert results[0].target_path == expected_target_file
 
-    # The transfer command (cp) was attempted exactly ONCE — no retry loop
+    # The transfer command (rsync) was attempted exactly ONCE — no retry loop
     all_cmds = [
         " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
     ]
-    cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
-    assert len(cp_cmds) == 1, (
-        f"Expected exactly 1 cp attempt (no retry), got {len(cp_cmds)}"
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1, (
+        f"Expected exactly 1 rsync attempt (no retry), got {len(rsync_cmds)}"
     )
 
 
@@ -1739,6 +1879,8 @@ def test_backup_result_error_structured_for_retry_detection(
 
     This ensures the error format produced by the provider is compatible
     with Core's retry logic.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
     from qsnap.utils.retry import is_retryable
 
@@ -1747,6 +1889,7 @@ def test_backup_result_error_structured_for_retry_detection(
         path=str(tmp_path / "nonexistent_target"),
         incremental=False,
         verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -1757,7 +1900,7 @@ def test_backup_result_error_structured_for_retry_detection(
     )
 
     error_msg = "No route to host"
-    mock_shell.expect(r"^cp ").returns(
+    mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=False,
             stdout="",

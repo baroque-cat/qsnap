@@ -137,12 +137,16 @@ def make_target():
         path: str = "/mnt/backup/testvm",
         incremental: bool = True,
         rate_limit: str = "no",
+        compress: bool = True,
+        copy_base: bool = False,
         **kwargs: object,
     ) -> TargetConfig:
         defaults: dict[str, object] = {
             "path": Path(path),
             "incremental": incremental,
             "rate_limit": rate_limit,
+            "compress": compress,
+            "copy_base": copy_base,
         }
         defaults.update(kwargs)
         return TargetConfig(**defaults)  # type: ignore[arg-type]
@@ -173,6 +177,7 @@ def make_global_config():
         chain_verify_before_commit: bool = True,
         chain_verify_after_commit: bool = True,
         deep_check_schedule: str = "off",
+        compress: bool = True,
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -193,6 +198,7 @@ def make_global_config():
             chain_verify_before_commit=chain_verify_before_commit,
             chain_verify_after_commit=chain_verify_after_commit,
             deep_check_schedule=deep_check_schedule,
+            compress=compress,
         )
 
     return _make

@@ -12,6 +12,7 @@ object is an instance of ``IConfigFacade``.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -23,8 +24,8 @@ from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.config import GlobalConfig
-from qsnap.models.results import BackupResult, RestoreResult, ShellResult, SnapshotInfo
+from qsnap.models.config import GlobalConfig, RetentionPolicy
+from qsnap.models.results import BackupResult, FullBackupInfo, RestoreResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
@@ -432,7 +433,7 @@ def test_core_restore_from_backup_returns_restore_result(
     mock_state,
     mock_shell,
 ):
-    """Core.restore() finds backup in target directory, copies chain, returns success."""
+    """Core.restore() finds backup in target directory, resolves chain through FULL anchors, returns success."""
     vm = make_vm_config(name="testvm", targets=[make_target()])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -449,9 +450,17 @@ def test_core_restore_from_backup_returns_restore_result(
         allocation=1000,
     )
 
+    # Chain with FULL anchor: backup1 → full.FULL.monthly.qcow2 → base
     chain_json = json.dumps(
         [
-            {"image": "/mnt/backup/backup1.qcow2"},
+            {
+                "image": "/mnt/backup/backup1.qcow2",
+                "backing-filename": "/mnt/backup/full.FULL.monthly.qcow2",
+            },
+            {
+                "image": "/mnt/backup/full.FULL.monthly.qcow2",
+                "backing-filename": "/var/lib/libvirt/images/testvm.qcow2",
+            },
             {"image": "/var/lib/libvirt/images/testvm.qcow2"},
         ]
     )
@@ -471,7 +480,7 @@ def test_core_restore_from_backup_returns_restore_result(
     assert isinstance(result, RestoreResult)
     assert result.success is True
     assert result.snapshot_name == "backup1"
-    assert len(result.chain_files) == 2
+    assert len(result.chain_files) == 3, "Chain with FULL anchor should have 3 files"
     assert result.error is None
 
 
@@ -748,3 +757,389 @@ def test_core_passes_quiesce_false_to_snapshot_provider(
 
     assert create_spy.called
     assert create_spy.call_args.kwargs.get("quiesce") is False
+
+
+# ── Size Estimation Tests ──────────────────────────────────────────────────
+
+
+def test_size_estimation_logged_during_normal_run(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Size estimation is logged during normal pipeline run."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Mock qemu-img info to return actual-size
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="524288 /mnt/backup/testvm\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+    core.run()
+
+    assert "Size estimate" in caplog.text, (
+        "Size estimation log message should appear during normal run"
+    )
+    assert "base=1048576" in caplog.text, (
+        "Base image actual-size should be logged"
+    )
+
+
+def test_size_estimation_logged_during_dry_run(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Size estimation is logged during dry-run."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="524288 /mnt/backup/testvm\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+    core.run()
+
+    assert "Size estimate" in caplog.text, (
+        "Size estimation should be logged during dry-run"
+    )
+
+
+def test_size_estimation_no_state_history(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Size estimation with no state history uses 0 for avg incremental.
+
+    Call ``_log_size_estimate`` directly so the pipeline does not
+    create any snapshots that would populate state.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 2097152}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="0 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.INFO)
+    core._log_size_estimate(vm, target)
+
+    assert "avg_inc=0" in caplog.text, (
+        "With no state history, avg_inc should be 0"
+    )
+    assert "base=2097152" in caplog.text, (
+        "Base image actual-size should be logged even with no history"
+    )
+
+
+def test_estimate_method_for_specific_vm(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.estimate() for a specific VM returns a report with size projections."""
+    target = make_target()
+    vm1 = make_vm_config(name="vm1", targets=[target])
+    vm2 = make_vm_config(name="vm2", targets=[target])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1000000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="500000 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    result = core.estimate(vm_filter="vm1")
+
+    assert "=== vm1 ===" in result
+    assert "=== vm2 ===" not in result, "filtered VM should not appear"
+    assert "Projected FULLs:" in result
+    assert "Projected total size:" in result
+    assert "Current target size:" in result
+
+
+def test_estimate_method_for_all_vms(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.estimate() without filter returns report for all VMs."""
+    target = make_target()
+    vm1 = make_vm_config(name="vm1", targets=[target])
+    vm2 = make_vm_config(name="vm2", targets=[target])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1000000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="500000 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    result = core.estimate()
+
+    assert "=== vm1 ===" in result
+    assert "=== vm2 ===" in result
+    assert "Projected FULLs:" in result
+    assert "Current target size:" in result
+
+
+def test_compressed_full_projection_30_percent(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Compressed FULL projection is base_size × 0.3 (compress=True)."""
+    target = make_target(compress=True)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1000000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="0 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.INFO)
+    core.run()
+
+    assert "base=1000000" in caplog.text
+    # full_size = int(1000000 * 0.3) = 300000
+    assert "full(compressed=True)=300000" in caplog.text, (
+        "Compressed FULL should be ~30% of base size"
+    )
+
+
+def test_uncompressed_full_projection_100_percent(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Uncompressed FULL projection is base_size × 1.0 (compress=False)."""
+    target = make_target(compress=False)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1000000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="0 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.INFO)
+    core.run()
+
+    assert "base=1000000" in caplog.text
+    assert "full(compressed=False)=1000000" in caplog.text, (
+        "Uncompressed FULL should be 100% of base size"
+    )
+
+
+def test_incremental_size_rolling_average_from_state(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Average incremental size is computed from state snapshot history.
+
+    Call ``_log_size_estimate`` directly so the pipeline does not create
+    any additional snapshots that would skew the average.
+    """
+    target = make_target(compress=False)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with snapshots having known allocation sizes
+    now = datetime.now()
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="snap1",
+            path=Path("/tmp/snap1.qcow2"),
+            timestamp=now,
+            allocation=100000,
+        ),
+    )
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="snap2",
+            path=Path("/tmp/snap2.qcow2"),
+            timestamp=now,
+            allocation=200000,
+        ),
+    )
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="snap3",
+            path=Path("/tmp/snap3.qcow2"),
+            timestamp=now,
+            allocation=300000,
+        ),
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1000000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(success=True, stdout="0 /mnt\n", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.INFO)
+    core._log_size_estimate(vm, target)
+
+    # avg_inc_size = (100000 + 200000 + 300000) // 3 = 200000
+    assert "avg_inc=200000" in caplog.text, (
+        "Average incremental size should be computed from state history"
+    )

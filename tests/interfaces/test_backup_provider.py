@@ -6,6 +6,7 @@ contract: correct return types, ABC enforcement, and no Core inheritance (D1).
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
 from pathlib import Path
 
@@ -223,3 +224,20 @@ def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwar
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup(source_snapshot, target, compress=False)
     assert isinstance(result, BackupResult)
+
+
+def test_ibackup_provider_create_full_backup_bucket_level_parameter():
+    """create_full_backup signature includes bucket_level parameter.
+
+    The ``bucket_level`` parameter must be present in the signature of
+    ``IBackupProvider.create_full_backup``, defaulting to ``"monthly"``.
+    """
+    sig = inspect.signature(IBackupProvider.create_full_backup)
+    assert "bucket_level" in sig.parameters, (
+        f"bucket_level missing from create_full_backup signature: {sig.parameters}"
+    )
+
+    param = sig.parameters["bucket_level"]
+    assert param.default == "monthly", (
+        f"bucket_level default should be 'monthly', got {param.default!r}"
+    )

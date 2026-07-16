@@ -1,4 +1,4 @@
-# full_backup config — tests full_every and full_compress parsing
+# full_backup config — tests compress and copy_base parsing
 
 timestamp_format = "long"
 preserve_day_of_week = "monday"
@@ -16,8 +16,8 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_with_full"
   path = "/mnt/backup/vm_with_full"
   incremental = true
   verify = "hash"
-  full_every = "7d"
-  full_compress = true
+  compress = true
+  copy_base = false
 
 [[vm]]
 name = "vm_no_full"
@@ -27,4 +27,4 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_full"
   [[vm.target]]
   path = "/mnt/backup/vm_no_full"
   incremental = true
-  # full_every and full_compress use defaults ("0d" and false)
+  # compress and copy_base use defaults (true and false)
