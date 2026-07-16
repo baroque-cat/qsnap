@@ -1441,7 +1441,7 @@ def test_chain_verify_intact_chain_blockcommit_proceeds(
 
     # qemu-img info --backing-chain returns the intact chain fixture
     intact_json = _load_fixture("backing_chain_intact.json")
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=intact_json, stderr="", returncode=0, error=None)
     )
 
@@ -1490,7 +1490,7 @@ def test_chain_verify_missing_file_blockcommit_skipped(
 
     # Broken chain fixture: MISSING_FILE.qcow2 is referenced but missing
     broken_json = _load_fixture("backing_chain_broken.json")
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
     )
 
@@ -1546,7 +1546,7 @@ def test_chain_verify_non_qcow2_blockcommit_skipped(
         {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
         {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "raw"},
     ])
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=raw_chain, stderr="", returncode=0, error=None)
     )
 
@@ -1592,7 +1592,7 @@ def test_chain_verify_cyclic_reference_blockcommit_skipped(
         {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
         {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
     ])
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=cyclic_chain, stderr="", returncode=0, error=None)
     )
 
@@ -1634,7 +1634,7 @@ def test_chain_verify_broken_chain_does_not_defer(
 
     # Broken chain
     broken_json = _load_fixture("backing_chain_broken.json")
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
     )
 
@@ -1701,7 +1701,7 @@ def test_chain_verify_inconsistent_backing_filename_blockcommit_skipped(
             "format": "qcow2",
         },
     ])
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=inconsistent_chain, stderr="", returncode=0, error=None)
     )
 
@@ -1878,7 +1878,7 @@ def test_chain_verify_disabled_skips_pre_commit_check(
 
     # Provide a broken chain — but verification is disabled so it shouldn't matter
     broken_json = _load_fixture("backing_chain_broken.json")
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
     )
 

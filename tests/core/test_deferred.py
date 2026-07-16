@@ -357,7 +357,7 @@ def test_risk_deferred_queue_grows_across_runs(
 
     # Chain verification: return a valid single-element chain so that
     # pre-commit verification passes and blockcommit is attempted.
-    mock_shell.expect("qemu-img info --backing-chain").returns(
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(
             success=True,
             stdout='[{"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"}]',

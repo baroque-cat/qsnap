@@ -278,7 +278,7 @@ class Core:
             # Get base image actual-size for size projections
             base_size = 0
             info_cmd = [
-                "qemu-img", "info", "--output=json",
+                "qemu-img", "info", "--force-share", "--output=json",
                 str(vm.base_image),
             ]
             info_result = self._shell.run(info_cmd, timeout=60)
@@ -397,7 +397,7 @@ class Core:
             # Get base image actual-size
             base_size = 0
             info_cmd = [
-                "qemu-img", "info", "--output=json",
+                "qemu-img", "info", "--force-share", "--output=json",
                 str(vm.base_image),
             ]
             info_result = self._shell.run(info_cmd, timeout=60)
@@ -1819,6 +1819,7 @@ class Core:
         result = self._shell.run(
             [
                 "qemu-img", "info",
+                "--force-share",
                 "--backing-chain",
                 "--output=json",
                 str(active_path),
@@ -1952,6 +1953,7 @@ class Core:
         result = self._shell.run(
             [
                 "qemu-img", "info",
+                "--force-share",
                 "--backing-chain",
                 "--output=json",
                 str(active_path),
@@ -2203,7 +2205,7 @@ class Core:
         # Get base image actual-size
         base_size = 0
         info_cmd = [
-            "qemu-img", "info", "--output=json",
+            "qemu-img", "info", "--force-share", "--output=json",
             str(vm_config.base_image),
         ]
         info_result = self._shell.run(info_cmd, timeout=60)
