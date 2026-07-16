@@ -13,7 +13,7 @@ dependencies = []
 qsnap = "qsnap.cli.app:main"
 
 [tool.poetry]
-package-mode = false
+package-mode = true
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
