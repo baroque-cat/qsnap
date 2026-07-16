@@ -1061,7 +1061,12 @@ def test_no_buckets_preserve_min_all_no_full_created(
 def test_should_create_bucket_full_highest_yearly(
     make_target,
 ):
-    """Highest active bucket is yearly when yearly > 0."""
+    """Highest active bucket is yearly when yearly > 0.
+
+    In multi-level mode, ALL active buckets are checked in descending order.
+    To assert no new FULL is needed, every active bucket must have
+    a matching FULL in the same period.
+    """
     from qsnap.models.config import RetentionPolicy
 
     policy = RetentionPolicy(yearly=3, monthly=6)
@@ -1069,33 +1074,50 @@ def test_should_create_bucket_full_highest_yearly(
 
     # No prior FULL — should create full with yearly bucket
     should, level = Core._should_create_bucket_full(
-        target, policy, None, datetime(2025, 7, 13, 10, 0)
+        target, policy, [], datetime(2025, 7, 13, 10, 0)
     )
     assert should is True
     assert level == "yearly"
 
-    # Same year — should NOT create
+    # Same year + same month — should NOT create
+    # (with multi-level, we need FULLs for BOTH yearly and monthly)
     should, level = Core._should_create_bucket_full(
         target, policy,
-        FullBackupInfo(
-            name="full1.FULL.yearly.qcow2",
-            path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
-            timestamp=datetime(2025, 2, 1, 0, 0),
-            bucket_level="yearly",
-        ),
+        [
+            FullBackupInfo(
+                name="full1.FULL.yearly.qcow2",
+                path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
+                timestamp=datetime(2025, 2, 1, 0, 0),
+                bucket_level="yearly",
+            ),
+            FullBackupInfo(
+                name="full2.FULL.monthly.qcow2",
+                path=Path("/mnt/backup/full2.FULL.monthly.qcow2"),
+                timestamp=datetime(2025, 7, 1, 0, 0),
+                bucket_level="monthly",
+            ),
+        ],
         datetime(2025, 7, 13, 10, 0),
     )
     assert should is False
 
-    # New year — should create
+    # New year — should create (yearly is checked first)
     should, level = Core._should_create_bucket_full(
         target, policy,
-        FullBackupInfo(
-            name="full1.FULL.yearly.qcow2",
-            path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
-            timestamp=datetime(2024, 12, 31, 23, 59),
-            bucket_level="yearly",
-        ),
+        [
+            FullBackupInfo(
+                name="full1.FULL.yearly.qcow2",
+                path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
+                timestamp=datetime(2024, 12, 31, 23, 59),
+                bucket_level="yearly",
+            ),
+            FullBackupInfo(
+                name="full2.FULL.monthly.qcow2",
+                path=Path("/mnt/backup/full2.FULL.monthly.qcow2"),
+                timestamp=datetime(2025, 6, 1, 0, 0),
+                bucket_level="monthly",
+            ),
+        ],
         datetime(2025, 7, 13, 10, 0),
     )
     assert should is True
@@ -1108,7 +1130,12 @@ def test_should_create_bucket_full_highest_yearly(
 def test_should_create_bucket_full_highest_daily(
     make_target,
 ):
-    """Highest active bucket is daily when daily > 0 and no higher bucket active."""
+    """Highest active bucket is daily when daily > 0 and no higher bucket active.
+
+    In multi-level mode, ALL active buckets are checked in descending order.
+    To assert no new FULL is needed, every active bucket must have
+    a matching FULL in the same period.
+    """
     from qsnap.models.config import RetentionPolicy
 
     policy = RetentionPolicy(daily=7, hourly=24)
@@ -1116,33 +1143,50 @@ def test_should_create_bucket_full_highest_daily(
 
     # No prior FULL
     should, level = Core._should_create_bucket_full(
-        target, policy, None, datetime(2025, 7, 13, 10, 0)
+        target, policy, [], datetime(2025, 7, 13, 10, 0)
     )
     assert should is True
     assert level == "daily"
 
-    # Same day
+    # Same day + same hour — should NOT create
+    # (with multi-level, we need FULLs for BOTH daily and hourly)
     should, level = Core._should_create_bucket_full(
         target, policy,
-        FullBackupInfo(
-            name="full1.FULL.daily.qcow2",
-            path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
-            timestamp=datetime(2025, 7, 13, 2, 0),
-            bucket_level="daily",
-        ),
+        [
+            FullBackupInfo(
+                name="full1.FULL.daily.qcow2",
+                path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
+                timestamp=datetime(2025, 7, 13, 2, 0),
+                bucket_level="daily",
+            ),
+            FullBackupInfo(
+                name="full2.FULL.hourly.qcow2",
+                path=Path("/mnt/backup/full2.FULL.hourly.qcow2"),
+                timestamp=datetime(2025, 7, 13, 10, 30),
+                bucket_level="hourly",
+            ),
+        ],
         datetime(2025, 7, 13, 10, 0),
     )
     assert should is False
 
-    # Next day
+    # Next day — should create (daily is checked before hourly)
     should, level = Core._should_create_bucket_full(
         target, policy,
-        FullBackupInfo(
-            name="full1.FULL.daily.qcow2",
-            path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
-            timestamp=datetime(2025, 7, 12, 8, 0),
-            bucket_level="daily",
-        ),
+        [
+            FullBackupInfo(
+                name="full1.FULL.daily.qcow2",
+                path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
+                timestamp=datetime(2025, 7, 12, 8, 0),
+                bucket_level="daily",
+            ),
+            FullBackupInfo(
+                name="full2.FULL.hourly.qcow2",
+                path=Path("/mnt/backup/full2.FULL.hourly.qcow2"),
+                timestamp=datetime(2025, 7, 12, 10, 0),
+                bucket_level="hourly",
+            ),
+        ],
         datetime(2025, 7, 13, 10, 0),
     )
     assert should is True
@@ -1162,10 +1206,170 @@ def test_should_create_bucket_full_no_active_buckets(
     target = make_target()
 
     should, level = Core._should_create_bucket_full(
-        target, policy, None, datetime(2025, 7, 13, 10, 0)
+        target, policy, [], datetime(2025, 7, 13, 10, 0)
     )
     assert should is False
     assert level == ""
+
+
+# ── test_new_weekly_period_triggers_full_all_buckets ──────────────────────
+
+
+def test_new_weekly_period_triggers_full_all_buckets(
+    make_target,
+):
+    """New weekly period triggers FULL when higher buckets are in same period.
+
+    Policy has yearly=1, monthly=12, weekly=4.  FULLs exist for yearly
+    (same year) and monthly (same month), but no weekly FULL.  When the
+    snapshot lands in a new weekly period, _should_create_bucket_full
+    checks all active buckets and returns (True, "weekly").
+    """
+    from qsnap.models.config import RetentionPolicy
+
+    policy = RetentionPolicy(yearly=1, monthly=12, weekly=4)
+    target = make_target()
+
+    # FULLs for yearly (same year) and monthly (same month), no weekly FULL
+    all_fulls: list[FullBackupInfo] = [
+        FullBackupInfo(
+            name="full_yearly.qcow2",
+            path=Path("/mnt/backup/full_yearly.qcow2"),
+            timestamp=datetime(2025, 1, 15),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="full_monthly.qcow2",
+            path=Path("/mnt/backup/full_monthly.qcow2"),
+            timestamp=datetime(2025, 6, 10),  # W24, same month as snapshot
+            bucket_level="monthly",
+        ),
+    ]
+    # Snapshot in June 2025, W25 (June 16 = W25 Monday)
+    snapshot_ts = datetime(2025, 6, 16)
+
+    should, level = Core._should_create_bucket_full(
+        target, policy, all_fulls, snapshot_ts,
+    )
+    assert should is True
+    assert level == "weekly", (
+        "Should trigger weekly FULL: yearly and monthly are same period, "
+        "but no weekly FULL exists for the new week"
+    )
+
+
+# ── test_f_anchor_weekly_only_full_on_week_boundary_not_day ───────────────
+
+
+def test_f_anchor_weekly_only_full_on_week_boundary_not_day(
+    make_target,
+):
+    """F-anchor mode only checks F-marked buckets, daily is ignored.
+
+    Policy: weekly=4, anchor_weekly=True, daily=7, anchor_daily=False.
+    F-anchor mode restricts full creation to only F-marked boundaries.
+    """
+    from qsnap.models.config import RetentionPolicy
+
+    policy = RetentionPolicy(
+        weekly=4, anchor_weekly=True,
+        daily=7, anchor_daily=False,
+    )
+    target = make_target()
+
+    # FULL exists for weekly in W24 (June 9, 2025 = Monday of W24)
+    weekly_full = FullBackupInfo(
+        name="full_weekly.qcow2",
+        path=Path("/mnt/backup/full_weekly.qcow2"),
+        timestamp=datetime(2025, 6, 9),  # W24 Monday
+        bucket_level="weekly",
+    )
+
+    # Case A: Snapshot on new day but same week (W24 Tuesday)
+    # Only weekly is checked (F-anchor), daily != 0 is ignored.
+    snapshot_a = datetime(2025, 6, 10)  # W24 Tuesday
+    should, level = Core._should_create_bucket_full(
+        target, policy, [weekly_full], snapshot_a,
+    )
+    assert should is False
+    assert level == "", (
+        "F-anchor mode: same week (W24) should NOT trigger new FULL; "
+        "daily bucket is ignored even though day changed"
+    )
+
+    # Case B: Snapshot on new week (W25 Monday)
+    snapshot_b = datetime(2025, 6, 16)  # W25 Monday
+    should, level = Core._should_create_bucket_full(
+        target, policy, [weekly_full], snapshot_b,
+    )
+    assert should is True
+    assert level == "weekly", (
+        "F-anchor mode: new week (W25) should trigger weekly FULL"
+    )
+
+
+# ── test_backup_target_passes_full_list_to_bucket_check ───────────────────
+
+
+def test_backup_target_passes_full_list_to_bucket_check(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_backup_target passes the full list of FULLs to _should_create_bucket_full.
+
+    Verifies that state.get_full_backups() (list, not single) is used,
+    and the list is passed through to _should_create_bucket_full.
+    """
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record 2 FULL backups (same day as snapshot to avoid triggering a new one)
+    mock_state.record_full_backup(
+        str(target.path), "full1.FULL.daily.qcow2",
+        datetime(2025, 7, 13, 2), "daily",
+    )
+    mock_state.record_full_backup(
+        str(target.path), "full2.FULL.daily.qcow2",
+        datetime(2025, 7, 13, 5), "daily",
+    )
+
+    # Snapshot on the same day → no new FULL triggered
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Spy on _should_create_bucket_full
+    with patch.object(
+        Core, "_should_create_bucket_full",
+        wraps=Core._should_create_bucket_full,
+    ) as bucket_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert bucket_spy.called, (
+        "_should_create_bucket_full should be called during _backup_target"
+    )
+    # Third positional arg is all_fulls
+    all_fulls_arg = bucket_spy.call_args[0][2]
+    assert isinstance(all_fulls_arg, list), (
+        "all_fulls should be a list, not a single FullBackupInfo or None"
+    )
+    assert len(all_fulls_arg) == 2, (
+        "all_fulls should contain all 2 FULLs from state.get_full_backups()"
+    )
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────

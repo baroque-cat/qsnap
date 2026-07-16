@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from qsnap.models.config import GlobalConfig, VMConfig
 
@@ -12,8 +13,14 @@ class IConfigFacade(ABC):
 
     ``ConfigFacade`` is the root of truth.  No module reads the config file
     or accesses raw config objects — every module receives a fully
-    resolved, immutable config dataclass from ``Core``.
+    resolved, immutable dataclass from ``Core``.
     """
+
+    @property
+    @abstractmethod
+    def config_path(self) -> Path:
+        """Return the path to the config file on disk."""
+        ...
 
     @abstractmethod
     def get_global(self) -> GlobalConfig:

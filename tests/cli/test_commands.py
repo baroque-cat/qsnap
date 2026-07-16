@@ -18,7 +18,9 @@ from unittest.mock import Mock
 from qsnap.cli.commands import (
     handle_backup,
     handle_check,
+    handle_deploy,
     handle_estimate,
+    handle_fork,
     handle_list,
     handle_list_deferred,
     handle_prune,
@@ -97,6 +99,20 @@ def _make_mock_core() -> Mock:
     core.list_latest.return_value = {}
     core.check.return_value = {}
     core.restore.return_value = RestoreResult(
+        success=True,
+        snapshot_name="",
+        restored_path=Path("/tmp"),
+        chain_files=[],
+        error=None,
+    )
+    core.fork.return_value = RestoreResult(
+        success=True,
+        snapshot_name="",
+        restored_path=Path("/tmp"),
+        chain_files=[],
+        error=None,
+    )
+    core.deploy.return_value = RestoreResult(
         success=True,
         snapshot_name="",
         restored_path=Path("/tmp"),
@@ -764,3 +780,105 @@ def test_estimate_subcommand_respects_format_flag(cli_app, capsys):
     mock_core.estimate.assert_called_once_with("myvm")
     captured = capsys.readouterr()
     assert "ESTIMATE OUTPUT" in captured.out
+
+
+# ── fork subcommand dispatch tests ────────────────────────────────────────
+
+
+def test_fork_command_dispatches_to_core_fork(cli_app):
+    """Parse 'fork snap1 --as-vm newvm --storage /tmp/storage' and
+    verify core.fork is called with the translated arguments."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(
+        ["fork", "snap1", "--as-vm", "newvm", "--storage", "/tmp/storage"]
+    )
+    result = handle_fork(mock_core, args)
+    mock_core.fork.assert_called_once_with(
+        "snap1",
+        "newvm",
+        Path("/tmp/storage"),
+        add_to_config=False,
+        vm_filter=None,
+    )
+    assert result == EXIT_SUCCESS
+
+
+def test_fork_command_missing_snapshot_exit_one(cli_app):
+    """When core.fork returns RestoreResult(success=False), handle_fork
+    returns EXIT_GENERIC (1)."""
+    mock_core = _make_mock_core()
+    mock_core.fork.return_value = RestoreResult(
+        success=False,
+        snapshot_name="snap1",
+        restored_path=Path("/var/lib/libvirt/images"),
+        chain_files=[],
+        error="Snapshot not found: snap1",
+    )
+    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm"])
+    result = handle_fork(mock_core, args)
+    assert result == EXIT_GENERIC
+
+
+def test_fork_command_add_to_config_flag(cli_app):
+    """Parse 'fork snap1 --as-vm newvm --add-to-config' and verify
+    core.fork is called with add_to_config=True."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(
+        ["fork", "snap1", "--as-vm", "newvm", "--add-to-config"]
+    )
+    result = handle_fork(mock_core, args)
+    mock_core.fork.assert_called_once_with(
+        "snap1",
+        "newvm",
+        Path("/var/lib/libvirt/images"),
+        add_to_config=True,
+        vm_filter=None,
+    )
+    assert result == EXIT_SUCCESS
+
+
+# ── deploy subcommand dispatch tests ──────────────────────────────────────
+
+
+def test_deploy_command_dispatches_to_core_deploy(cli_app):
+    """Parse 'deploy backup1 --as-vm newvm --storage /tmp/storage' and
+    verify core.deploy is called with the translated arguments."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(
+        ["deploy", "backup1", "--as-vm", "newvm", "--storage", "/tmp/storage"]
+    )
+    result = handle_deploy(mock_core, args)
+    mock_core.deploy.assert_called_once_with(
+        "backup1",
+        "newvm",
+        Path("/tmp/storage"),
+        add_to_config=False,
+        vm_filter=None,
+    )
+    assert result == EXIT_SUCCESS
+
+
+def test_deploy_command_storage_and_add_to_config_flags(cli_app):
+    """Parse 'deploy backup1 --as-vm newvm --storage /custom/path --add-to-config'
+    and verify core.deploy is called with both flags translated."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(
+        [
+            "deploy",
+            "backup1",
+            "--as-vm",
+            "newvm",
+            "--storage",
+            "/custom/path",
+            "--add-to-config",
+        ]
+    )
+    result = handle_deploy(mock_core, args)
+    mock_core.deploy.assert_called_once_with(
+        "backup1",
+        "newvm",
+        Path("/custom/path"),
+        add_to_config=True,
+        vm_filter=None,
+    )
+    assert result == EXIT_SUCCESS

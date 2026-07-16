@@ -40,6 +40,10 @@ class ConfigFacade(IConfigFacade):
         self._vm_map: dict[str, VMConfig]
         self._parse()
 
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
+
     # ── internal helpers ───────────────────────────────────────────────
 
     def _parse(self) -> None:
@@ -274,12 +278,23 @@ class ConfigFacade(IConfigFacade):
             and target_preserve_min is not None
             and target_preserve_min != "all"
         ):
-            # Parse bucket counts from the preserve string.
-            counts = [
-                int(m.group(1))
-                for m in re.finditer(r"(\d+)([hdwmy])", target_preserve)
-            ]
-            if counts and all(c == 0 for c in counts):
+            # Parse bucket counts and F-anchors from the preserve string.
+            # Regex: count, optional F prefix, bucket char.
+            bucket_char_map = {"h": "h", "d": "d", "w": "w", "m": "m", "y": "y"}
+            tokens = list(re.finditer(r"(\d+)(F?)([hdwmy])", target_preserve))
+            counts = [int(m.group(1)) for m in tokens]
+            f_anchors = [m for m in tokens if m.group(2) == "F"]
+
+            # Validate: F-anchor on a bucket with count == 0 is rejected.
+            for m in tokens:
+                if m.group(2) == "F" and int(m.group(1)) == 0:
+                    bucket = m.group(3)
+                    raise ConfigError(
+                        f"F-anchor on bucket '{bucket}' requires count > 0"
+                    )
+
+            # Only reject if ALL bucket counts are 0 AND no F-anchors present.
+            if counts and all(c == 0 for c in counts) and not f_anchors:
                 raise ConfigError(
                     f"target_preserve={target_preserve!r} has all zero bucket "
                     f"counts and target_preserve_min={target_preserve_min!r} "

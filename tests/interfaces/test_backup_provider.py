@@ -18,7 +18,7 @@ from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
-from tests.mocks.mock_modules import MockBackupProvider
+from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvider
 from tests.mocks.mock_shell import MockShell
 
 
@@ -203,8 +203,9 @@ def test_ibackup_provider_create_full_backup_abstract():
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "mock"],
+    ids=["file_copy", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwargs):
     """create_full_backup() returns a BackupResult instance.
@@ -240,4 +241,61 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
     param = sig.parameters["bucket_level"]
     assert param.default == "monthly", (
         f"bucket_level default should be 'monthly', got {param.default!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (FileCopyBackupProvider, {"shell": MockShell()}),
+        (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
+    ],
+    ids=["file_copy", "mock", "mock_bitmap"],
+)
+def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
+    cls, init_kwargs,
+):
+    """Every concrete provider that overrides create_full_backup() has bucket_level parameter.
+
+    This ensures that adding new backup provider implementations does not
+    accidentally omit the ``bucket_level`` parameter from the signature.
+    """
+    sig = inspect.signature(cls.create_full_backup)
+    assert "bucket_level" in sig.parameters, (
+        f"bucket_level missing from {cls.__name__}.create_full_backup signature"
+    )
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
+    ],
+    ids=["mock", "mock_bitmap"],
+)
+def test_backup_provider_create_full_backup_bucket_level_custom_value(
+    cls, init_kwargs,
+):
+    """create_full_backup() correctly uses a non-default bucket_level value.
+
+    When ``bucket_level="yearly"`` is passed, the resulting ``BackupResult``
+    should reflect that value in the ``target_path``.
+    """
+    provider = cls(**init_kwargs)
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    result = provider.create_full_backup(
+        source_snapshot, target, compress=False, bucket_level="yearly",
+    )
+    assert isinstance(result, BackupResult)
+    assert result.success
+    assert ".FULL.yearly.qcow2" in str(result.target_path), (
+        f"bucket_level 'yearly' not reflected in target_path: {result.target_path}"
     )

@@ -384,3 +384,63 @@ def handle_estimate(core: Core, args: Namespace) -> int:
     output = core.estimate(vm_filter)
     print(output)
     return EXIT_SUCCESS
+
+
+def handle_fork(core: Core, args: Namespace) -> int:
+    """Create a standalone VM from a snapshot or backup.
+
+    Calls ``Core.fork()`` and formats the ``RestoreResult`` output.
+    """
+    snapshot_name: str = args.snapshot_name
+    new_vm_name: str = args.as_vm
+    storage_dir = Path(args.storage)
+    add_to_config: bool = getattr(args, "add_to_config", False)
+    vm_filter = _get_vm_filter(args)
+
+    result = core.fork(
+        snapshot_name,
+        new_vm_name,
+        storage_dir,
+        add_to_config=add_to_config,
+        vm_filter=vm_filter,
+    )
+
+    if result.success:
+        print(f"Forked '{snapshot_name}' to VM '{new_vm_name}'")
+        print(f"  Disk: {result.restored_path}")
+        if add_to_config:
+            print(f"  Added to config: {core._config.config_path}")
+        return EXIT_SUCCESS
+    else:
+        print(f"Error: {result.error}", file=sys.stderr)
+        return EXIT_GENERIC
+
+
+def handle_deploy(core: Core, args: Namespace) -> int:
+    """Deploy a backup as a new VM.
+
+    Calls ``Core.deploy()`` and formats the ``RestoreResult`` output.
+    """
+    backup_name: str = args.backup_name
+    new_vm_name: str = args.as_vm
+    storage_dir = Path(args.storage)
+    add_to_config: bool = getattr(args, "add_to_config", False)
+    vm_filter = _get_vm_filter(args)
+
+    result = core.deploy(
+        backup_name,
+        new_vm_name,
+        storage_dir,
+        add_to_config=add_to_config,
+        vm_filter=vm_filter,
+    )
+
+    if result.success:
+        print(f"Deployed '{backup_name}' to VM '{new_vm_name}'")
+        print(f"  Disk: {result.restored_path}")
+        if add_to_config:
+            print(f"  Added to config: {core._config.config_path}")
+        return EXIT_SUCCESS
+    else:
+        print(f"Error: {result.error}", file=sys.stderr)
+        return EXIT_GENERIC

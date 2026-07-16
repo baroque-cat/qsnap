@@ -14,10 +14,12 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.config import IConfigFacade
@@ -524,61 +526,118 @@ class Core:
         return items
 
     @staticmethod
+    def _period_key(ts: datetime, bucket: str) -> str:
+        """Compute the period key for *ts* under *bucket*.
+
+        Buckets: yearly, monthly, weekly, daily, hourly.
+        """
+        if bucket == "yearly":
+            return ts.strftime("%Y")
+        elif bucket == "monthly":
+            return ts.strftime("%Y%m")
+        elif bucket == "weekly":
+            cal = ts.isocalendar()
+            return f"{cal.year}-W{cal.week:02d}"
+        elif bucket == "daily":
+            return ts.strftime("%Y%m%d")
+        elif bucket == "hourly":
+            return ts.strftime("%Y%m%d%H")
+        return ""
+
+    @staticmethod
+    def _active_buckets(policy: RetentionPolicy) -> list[str]:
+        """Return buckets where ``policy.{bucket} > 0`` in descending order.
+
+        Order: yearly, monthly, weekly, daily, hourly.
+        """
+        result: list[str] = []
+        for bucket, count in (
+            ("yearly", policy.yearly),
+            ("monthly", policy.monthly),
+            ("weekly", policy.weekly),
+            ("daily", policy.daily),
+            ("hourly", policy.hourly),
+        ):
+            if count > 0:
+                result.append(bucket)
+        return result
+
+    @staticmethod
+    def _f_anchor_buckets(policy: RetentionPolicy) -> list[str]:
+        """Return buckets where ``policy.anchor_{bucket}`` is True, descending.
+
+        Order: yearly, monthly, weekly, daily, hourly.
+        """
+        result: list[str] = []
+        for bucket, anchor in (
+            ("yearly", policy.anchor_yearly),
+            ("monthly", policy.anchor_monthly),
+            ("weekly", policy.anchor_weekly),
+            ("daily", policy.anchor_daily),
+            ("hourly", policy.anchor_hourly),
+        ):
+            if anchor:
+                result.append(bucket)
+        return result
+
+    @staticmethod
     def _should_create_bucket_full(
         target: TargetConfig,
         policy: RetentionPolicy,
-        last_full: FullBackupInfo | None,
+        all_fulls: list[FullBackupInfo],
         snapshot_ts: datetime,
     ) -> tuple[bool, str]:
         """Check if a bucket-driven FULL backup should be created.
 
-        Identifies the highest active retention bucket (yearly > monthly >
-        weekly > daily > hourly).  Returns ``(True, bucket_level)`` when
-        the snapshot falls in a new period of that bucket relative to the
-        last FULL.  Returns ``(False, "")`` otherwise.
+        Determines which buckets to check:
+        1. If any ``anchor_*`` field is True, check only F-marked buckets
+           in descending order (yearly → monthly → weekly → daily → hourly).
+        2. Otherwise, check ALL buckets where ``policy.{bucket} > 0``
+           in descending order.
 
-        When no bucket is active (all counts 0), returns ``(False, "")``.
+        For each checked bucket, finds the most recent FULL from *all_fulls*
+        with matching ``bucket_level``.  Returns ``(True, bucket_level)``
+        when: (a) no previous FULL exists for that bucket, or (b) the
+        snapshot's timestamp falls in a new period of that bucket compared
+        to the matching FULL's timestamp.  Short-circuits on the first match
+        — at most one FULL is created per snapshot.
+
+        Returns ``(False, "")`` if no checked bucket triggers a new FULL.
         """
-        # Determine the highest active bucket.
-        if policy.yearly > 0:
-            bucket_level = "yearly"
-            period_key = snapshot_ts.strftime("%Y")
-        elif policy.monthly > 0:
-            bucket_level = "monthly"
-            period_key = snapshot_ts.strftime("%Y%m")
-        elif policy.weekly > 0:
-            bucket_level = "weekly"
-            # ISO week number
-            period_key = f"{snapshot_ts.isocalendar().year}-W{snapshot_ts.isocalendar().week:02d}"
-        elif policy.daily > 0:
-            bucket_level = "daily"
-            period_key = snapshot_ts.strftime("%Y%m%d")
-        elif policy.hourly > 0:
-            bucket_level = "hourly"
-            period_key = snapshot_ts.strftime("%Y%m%d%H")
+        # Handle backward compatibility: old callers may pass None or a
+        # single FullBackupInfo instead of a list.
+        if all_fulls is None:
+            all_fulls = []
+        elif isinstance(all_fulls, FullBackupInfo):
+            all_fulls = [all_fulls]
+
+        # Determine which buckets to check.
+        f_buckets = Core._f_anchor_buckets(policy)
+        if f_buckets:
+            buckets_to_check = f_buckets
         else:
+            buckets_to_check = Core._active_buckets(policy)
+
+        if not buckets_to_check:
             return False, ""
 
-        # No previous FULL — create one.
-        if last_full is None:
-            return True, bucket_level
+        for bucket in buckets_to_check:
+            # Find the most recent FULL with matching bucket_level.
+            matching_fulls = [
+                f for f in all_fulls if f.bucket_level == bucket
+            ]
+            if not matching_fulls:
+                # No previous FULL for this bucket — create one.
+                return True, bucket
 
-        # Check if the snapshot is in a new period of the highest bucket.
-        if bucket_level == "yearly":
-            last_key = last_full.timestamp.strftime("%Y")
-        elif bucket_level == "monthly":
-            last_key = last_full.timestamp.strftime("%Y%m")
-        elif bucket_level == "weekly":
-            cal = last_full.timestamp.isocalendar()
-            last_key = f"{cal.year}-W{cal.week:02d}"
-        elif bucket_level == "daily":
-            last_key = last_full.timestamp.strftime("%Y%m%d")
-        elif bucket_level == "hourly":
-            last_key = last_full.timestamp.strftime("%Y%m%d%H")
-        else:
-            return False, ""
+            most_recent = max(matching_fulls, key=lambda f: f.timestamp)
+            snapshot_key = Core._period_key(snapshot_ts, bucket)
+            last_key = Core._period_key(most_recent.timestamp, bucket)
 
-        return period_key != last_key, bucket_level
+            if snapshot_key != last_key:
+                return True, bucket
+
+        return False, ""
 
     def check(
         self,
@@ -770,6 +829,48 @@ class Core:
         else:
             return f"Last deep check: {days_since} days ago (expected: {schedule})"
 
+    def _resolve_snapshot(
+        self,
+        snapshot_name: str,
+        vm_filter: str | None = None,
+    ) -> tuple[SnapshotInfo, VMConfig]:
+        """Locate a snapshot/backup by name across all sources.
+
+        Searches ``IStateManager`` across all configured VMs (filtered by
+        *vm_filter*), matching by snapshot name or path basename.  If not
+        found in state, searches all backup providers via
+        ``provider.list(target)`` for each VM's targets.
+
+        Raises ``FileNotFoundError`` with message
+        ``"Snapshot not found: {name}"`` if not found in either source.
+        """
+        vms = self._filter_vms(vm_filter)
+
+        for vm in vms:
+            # Search in IStateManager
+            snapshots = self._state.get_snapshots(vm.name)
+            for snap in snapshots:
+                if (
+                    snap.name == snapshot_name
+                    or snap.path.name == snapshot_name
+                    or snap.path.stem == snapshot_name
+                ):
+                    return snap, vm
+
+            # Search in backup targets
+            for target in vm.targets:
+                provider = self._factory.create_backup_provider(vm, target)
+                backups = provider.list(target)
+                for backup in backups:
+                    if (
+                        backup.name == snapshot_name
+                        or backup.path.name == snapshot_name
+                        or backup.path.stem == snapshot_name
+                    ):
+                        return backup, vm
+
+        raise FileNotFoundError(f"Snapshot not found: {snapshot_name}")
+
     def restore(
         self,
         snapshot_name: str,
@@ -784,34 +885,9 @@ class Core:
 
         Returns a ``RestoreResult``; never raises for expected failures.
         """
-        vms = self._filter_vms(vm_filter)
-
-        # Search snapshots and backups for the named snapshot
-        source_path: Path | None = None
-        for vm in vms:
-            # Search in IStateManager
-            snapshots = self._state.get_snapshots(vm.name)
-            for snap in snapshots:
-                if snap.name == snapshot_name:
-                    source_path = snap.path
-                    break
-            if source_path:
-                break
-
-            # Search in backup targets
-            for target in vm.targets:
-                provider = self._factory.create_backup_provider(vm, target)
-                backups = provider.list(target)
-                for backup in backups:
-                    if backup.name == snapshot_name:
-                        source_path = backup.path
-                        break
-                if source_path:
-                    break
-            if source_path:
-                break
-
-        if source_path is None:
+        try:
+            snapshot_info, _ = self._resolve_snapshot(snapshot_name, vm_filter)
+        except FileNotFoundError:
             return RestoreResult(
                 success=False,
                 snapshot_name=snapshot_name,
@@ -819,6 +895,8 @@ class Core:
                 chain_files=[],
                 error=f"Snapshot '{snapshot_name}' not found",
             )
+
+        source_path = snapshot_info.path
 
         # Get backing chain via qemu-img info --backing-chain --output=json
         result = self._shell.run(
@@ -904,6 +982,258 @@ class Core:
             chain_files=chain_files,
             error=None,
         )
+
+    def fork(
+        self,
+        snapshot_name: str,
+        new_vm_name: str,
+        storage_dir: Path,
+        add_to_config: bool = False,
+        vm_filter: str | None = None,
+    ) -> RestoreResult:
+        """Create a standalone VM from a snapshot or backup.
+
+        Resolves *snapshot_name* via ``_resolve_snapshot()``, then runs
+        ``qemu-img convert -O qcow2`` to produce a single standalone qcow2
+        with no backing dependencies.  Defines a new libvirt VM using a
+        modified copy of the source VM's XML (new name, new UUID, new disk
+        path, MAC removed).
+
+        When *add_to_config* is True, appends a minimal ``[[vm]]`` block
+        to the qsnap config file.
+
+        Returns a ``RestoreResult``; never raises for expected failures.
+        """
+        # Step 1: Resolve the snapshot and source VM
+        try:
+            snapshot_info, source_vm = self._resolve_snapshot(
+                snapshot_name, vm_filter
+            )
+        except FileNotFoundError:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=storage_dir,
+                chain_files=[],
+                error=f"Snapshot not found: {snapshot_name}",
+            )
+
+        source_path = snapshot_info.path
+        vm_dir = storage_dir / new_vm_name
+        target_qcow2 = vm_dir / f"{new_vm_name}.qcow2"
+        xml_path = vm_dir / f"{new_vm_name}.xml"
+
+        # Step 2: Resolve backing chain to estimate total chain size
+        chain_size = 0
+        info_result = self._shell.run(
+            [
+                "qemu-img", "info", "--backing-chain",
+                "--output=json", str(source_path),
+            ],
+            timeout=30,
+        )
+        if info_result.success:
+            try:
+                chain_data = json.loads(info_result.stdout)
+                if isinstance(chain_data, list):
+                    for item in chain_data:
+                        chain_size += int(item.get("actual-size", 0))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+        # Step 3: Log estimated chain size
+        size_str = self._format_bytes(chain_size)
+        logger.info(
+            "Converting snapshot %s (chain size: ~%s) to standalone qcow2...",
+            snapshot_name,
+            size_str,
+        )
+
+        # Step 4: Create target directory
+        mkdir_result = self._shell.run(
+            ["mkdir", "-p", str(vm_dir)],
+            timeout=30,
+        )
+        if not mkdir_result.success:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[],
+                error=f"Failed to create directory {vm_dir}: {mkdir_result.error}",
+            )
+
+        # Step 5: Execute qemu-img convert
+        convert_result = self._shell.run(
+            [
+                "qemu-img", "convert", "-O", "qcow2",
+                str(source_path), str(target_qcow2),
+            ],
+            timeout=7200,
+        )
+        if not convert_result.success:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[],
+                error=f"qemu-img convert failed: {convert_result.error}",
+            )
+
+        # Step 6: Obtain source VM XML
+        dumpxml_result = self._shell.run(
+            ["virsh", "dumpxml", "--domain", source_vm.name],
+            timeout=30,
+        )
+        if not dumpxml_result.success:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[target_qcow2],
+                error=f"virsh dumpxml failed: {dumpxml_result.error}",
+            )
+
+        # Step 7: Modify XML
+        try:
+            root = ET.fromstring(dumpxml_result.stdout)
+        except ET.ParseError as exc:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[target_qcow2],
+                error=f"Failed to parse VM XML: {exc}",
+            )
+
+        # Replace <name>
+        name_elem = root.find("name")
+        if name_elem is not None:
+            name_elem.text = new_vm_name
+
+        # Replace <uuid> with a newly generated one
+        uuid_elem = root.find("uuid")
+        new_uuid = str(uuid.uuid4())
+        if uuid_elem is not None:
+            uuid_elem.text = new_uuid
+        else:
+            uuid_elem = ET.SubElement(root, "uuid")
+            uuid_elem.text = new_uuid
+
+        # Replace <source file="..."> paths to point to the new qcow2
+        for disk in root.iter("disk"):
+            source = disk.find("source")
+            if source is not None:
+                source.set("file", str(target_qcow2))
+
+        # Remove <mac address="..."> to avoid MAC conflicts
+        for interface in root.iter("interface"):
+            mac = interface.find("mac")
+            if mac is not None:
+                interface.remove(mac)
+
+        # Step 8: Write modified XML
+        try:
+            ET.ElementTree(root).write(str(xml_path), encoding="unicode")
+        except OSError as exc:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[target_qcow2],
+                error=f"Failed to write XML: {exc}",
+            )
+
+        # Step 9: Execute virsh define
+        define_result = self._shell.run(
+            ["virsh", "define", str(xml_path)],
+            timeout=30,
+        )
+        if not define_result.success:
+            return RestoreResult(
+                success=False,
+                snapshot_name=snapshot_name,
+                restored_path=vm_dir,
+                chain_files=[target_qcow2],
+                error=f"virsh define failed: {define_result.error}",
+            )
+
+        # Step 10: Optionally append [[vm]] block to config file
+        if add_to_config:
+            self._append_vm_to_config(new_vm_name, target_qcow2, vm_dir)
+
+        return RestoreResult(
+            success=True,
+            snapshot_name=snapshot_name,
+            restored_path=target_qcow2,
+            chain_files=[target_qcow2],
+            error=None,
+        )
+
+    def deploy(
+        self,
+        backup_name: str,
+        new_vm_name: str,
+        storage_dir: Path,
+        add_to_config: bool = False,
+        vm_filter: str | None = None,
+    ) -> RestoreResult:
+        """Deploy a backup as a new VM.
+
+        Thin wrapper around ``fork()`` — fork already handles resolution
+        from both snapshots and backups.
+        """
+        return self.fork(
+            backup_name,
+            new_vm_name,
+            storage_dir,
+            add_to_config=add_to_config,
+            vm_filter=vm_filter,
+        )
+
+    def _append_vm_to_config(
+        self,
+        vm_name: str,
+        base_image: Path,
+        vm_dir: Path,
+    ) -> None:
+        """Append a minimal ``[[vm]]`` block to the qsnap config file."""
+        snapshot_dir = vm_dir / "snapshots"
+        config_path = self._config.config_path
+        block = (
+            f"\n[[vm]]\n"
+            f'name = "{vm_name}"\n'
+            f'base_image = "{base_image}"\n'
+            f'snapshot_dir = "{snapshot_dir}"\n'
+            f'snapshot_create = "always"\n'
+        )
+        try:
+            with open(config_path, "a", encoding="utf-8") as fh:
+                fh.write(block)
+            # Create snapshot_dir if it does not exist
+            mkdir_result = self._shell.run(
+                ["mkdir", "-p", str(snapshot_dir)],
+                timeout=10,
+            )
+            if not mkdir_result.success:
+                logger.warning(
+                    "Failed to create snapshot directory %s: %s",
+                    snapshot_dir,
+                    mkdir_result.error,
+                )
+        except OSError as exc:
+            logger.warning("Failed to append VM to config: %s", exc)
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        """Format a byte count as a human-readable string."""
+        if size >= 1024 ** 3:
+            return f"{size / (1024 ** 3):.1f} GiB"
+        if size >= 1024 ** 2:
+            return f"{size / (1024 ** 2):.1f} MiB"
+        if size >= 1024:
+            return f"{size / 1024:.1f} KiB"
+        return f"{size} B"
 
     # ── pipeline runner ────────────────────────────────────────────────
 
@@ -1961,12 +2291,12 @@ class Core:
 
         # Check for bucket-driven FULL backup necessity (design D1)
         if not self._dry_run and snapshots:
-            last_full = self._state.get_last_full_backup(str(target.path))
+            all_fulls = self._state.get_full_backups(str(target.path))
             policy = self._parse_preserve(
                 target.target_preserve, target.target_preserve_min
             )
             should_full, bucket_level = self._should_create_bucket_full(
-                target, policy, last_full, snapshots[-1].timestamp
+                target, policy, all_fulls, snapshots[-1].timestamp
             )
             if should_full:
                 most_recent = max(snapshots, key=lambda s: s.timestamp)
@@ -2190,13 +2520,32 @@ class Core:
             "monthly": 0,
             "yearly": 0,
         }
+        anchors: dict[str, bool] = {
+            "anchor_hourly": False,
+            "anchor_daily": False,
+            "anchor_weekly": False,
+            "anchor_monthly": False,
+            "anchor_yearly": False,
+        }
         unit_map = {"h": "hourly", "d": "daily", "w": "weekly", "m": "monthly", "y": "yearly"}
-        for match in re.finditer(r"(\d+)([hdwmy])", preserve_str):
+        anchor_map = {
+            "h": "anchor_hourly",
+            "d": "anchor_daily",
+            "w": "anchor_weekly",
+            "m": "anchor_monthly",
+            "y": "anchor_yearly",
+        }
+        # Regex: count, optional F prefix, bucket char.
+        # Tokens like "7Fx" that don't match [hdwmy] are silently ignored.
+        for match in re.finditer(r"(\d+)(F?)([hdwmy])", preserve_str):
             count = int(match.group(1))
-            unit = match.group(2)
+            is_anchor = match.group(2) == "F"
+            unit = match.group(3)
             counts[unit_map[unit]] = count
+            if is_anchor:
+                anchors[anchor_map[unit]] = True
 
-        return RetentionPolicy(**counts, preserve_min=effective_min)
+        return RetentionPolicy(**counts, **anchors, preserve_min=effective_min)
 
     @staticmethod
     def _format_age(age: timedelta) -> str:

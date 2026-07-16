@@ -471,3 +471,70 @@ def test_preserve_min_with_buckets_allowed(tmp_path: Path) -> None:
     assert vm.target_preserve_min == "6h"
     target = vm.targets[0]
     assert target.target_preserve == "24h 7d 0w 0m 0y"
+
+
+# ── F-anchor validation in _build_target ──────────────────────────────────
+
+
+@pytest.mark.unit
+def test_f_anchor_zero_count_raises_config_error(tmp_path: Path) -> None:
+    """target_preserve with ``0Fh`` (F-anchor + zero count) raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0Fh 7d"\n'
+        'target_preserve_min = "6h"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    with pytest.raises(ConfigError, match="F-anchor on bucket 'h' requires count > 0"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_preserve_min_without_buckets_raises_config_error(tmp_path: Path) -> None:
+    """preserve_min='48h' with all-zero buckets and no F-anchors raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "48h"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    with pytest.raises(ConfigError, match="nothing would be retained"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
+    """preserve_min='all' with all-zero buckets and no F-anchors is allowed."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        '\n'
+        '[[vm]]\n'
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "all"\n'
+        '\n'
+        '  [[vm.target]]\n'
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    # Should not raise — preserve_min='all' is the safe default.
+    facade = ConfigFacade(config_file)
+    assert facade.get_vm("testvm").target_preserve_min == "all"

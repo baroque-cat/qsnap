@@ -528,3 +528,47 @@ def test_target_config_default_retry_values():
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.backup_retry_max == 3
     assert target.backup_retry_base == "2s"
+
+
+# ---------------------------------------------------------------------------
+# RetentionPolicy anchor fields — multi-level FULL anchors
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_anchor_fields_default_false():
+    """RetentionPolicy(hourly=24, daily=7) — all anchor_* fields default to False."""
+    policy = RetentionPolicy(hourly=24, daily=7)
+    assert policy.anchor_hourly is False
+    assert policy.anchor_daily is False
+    assert policy.anchor_weekly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False
+
+
+def test_retention_policy_anchor_fields_explicit():
+    """RetentionPolicy(daily=7, anchor_daily=True, weekly=4, anchor_weekly=True)
+    stores the explicit True values and leaves others as False."""
+    policy = RetentionPolicy(daily=7, anchor_daily=True, weekly=4, anchor_weekly=True)
+    assert policy.anchor_daily is True
+    assert policy.anchor_weekly is True
+    assert policy.anchor_hourly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False
+
+
+def test_retention_policy_anchor_fields_immutable():
+    """RetentionPolicy with anchor_daily=True is frozen;
+    mutating anchor_daily raises FrozenInstanceError."""
+    policy = RetentionPolicy(anchor_daily=True)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.anchor_daily = False  # type: ignore[misc]
+
+
+def test_retention_policy_preserve_min_latest_with_f_anchors():
+    """RetentionPolicy(preserve_min='latest', anchor_daily=True, daily=0)
+    stores anchor_daily=True even when daily count is zero.
+    (Parsing-time rejection of zero F is done at ConfigFacade level, not model.)"""
+    policy = RetentionPolicy(preserve_min="latest", anchor_daily=True, daily=0)
+    assert policy.preserve_min == "latest"
+    assert policy.anchor_daily is True
+    assert policy.daily == 0

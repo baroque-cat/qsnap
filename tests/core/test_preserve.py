@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core
+from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import (
     BackupResult,
     RetentionResult,
@@ -472,3 +473,67 @@ def test_evaluate_backup_retention_uses_target_preserve_min(
     assert retention_spy.called
     policy = retention_spy.call_args.args[0]
     assert policy.preserve_min == "4h"
+
+
+# ── F-syntax tests for _parse_preserve ────────────────────────────────────
+
+
+def test_parse_preserve_f_anchor_single_bucket():
+    """``7Fd`` sets anchor_daily=True; other anchors remain False."""
+    policy = Core._parse_preserve("24h 7Fd 4w")
+    assert policy.anchor_daily is True
+    assert policy.anchor_hourly is False
+    assert policy.anchor_weekly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False
+    assert policy.hourly == 24
+    assert policy.daily == 7
+    assert policy.weekly == 4
+
+
+def test_parse_preserve_f_anchor_all_buckets():
+    """Every bucket with F prefix sets its anchor to True."""
+    policy = Core._parse_preserve("24Fh 7Fd 4Fw 12Fm 1Fy")
+    assert policy.anchor_hourly is True
+    assert policy.anchor_daily is True
+    assert policy.anchor_weekly is True
+    assert policy.anchor_monthly is True
+    assert policy.anchor_yearly is True
+    assert policy.hourly == 24
+    assert policy.daily == 7
+    assert policy.weekly == 4
+    assert policy.monthly == 12
+    assert policy.yearly == 1
+
+
+def test_parse_preserve_f_anchor_in_snapshot_preserve_no_error():
+    """F-syntax is valid in snapshot_preserve context — no error raised."""
+    policy = Core._parse_preserve("24Fh 7Fd")
+    assert isinstance(policy, RetentionPolicy)
+    assert policy.anchor_hourly is True
+    assert policy.anchor_daily is True
+
+
+def test_parse_preserve_no_f_prefix_anchors_false():
+    """Non-F policies leave all anchor_* fields as False (backward compat)."""
+    policy = Core._parse_preserve("24h 7d")
+    assert policy.anchor_hourly is False
+    assert policy.anchor_daily is False
+    assert policy.anchor_weekly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False
+
+
+def test_parse_preserve_f_prefix_invalid_bucket_ignored():
+    """Token ``7Fx`` is silently ignored because 'x' doesn't match [hdwmy]."""
+    policy = Core._parse_preserve("7Fx")
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0
+    assert policy.anchor_hourly is False
+    assert policy.anchor_daily is False
+    assert policy.anchor_weekly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False

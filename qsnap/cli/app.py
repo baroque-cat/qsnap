@@ -36,6 +36,8 @@ _DISPATCH: dict[str, object] = {
     "check": commands.handle_check,
     "restore": commands.handle_restore,
     "estimate": commands.handle_estimate,
+    "fork": commands.handle_fork,
+    "deploy": commands.handle_deploy,
 }
 
 
@@ -158,6 +160,62 @@ def build_argparser() -> argparse.ArgumentParser:
     # estimate subcommand
     estimate_parser = subparsers.add_parser("estimate", help="Show projected backup sizes and retention schedule")
     estimate_parser.add_argument("vm", nargs="*", help="VM name(s) to filter")
+
+    # fork subcommand
+    fork_parser = subparsers.add_parser(
+        "fork",
+        help="Create a standalone VM from a snapshot or backup",
+    )
+    fork_parser.add_argument("snapshot_name", help="Snapshot or backup name to fork from")
+    fork_parser.add_argument(
+        "--as-vm",
+        required=True,
+        help="Name for the new VM",
+    )
+    fork_parser.add_argument(
+        "--storage",
+        default="/var/lib/libvirt/images",
+        help="Storage directory for the new VM (default: /var/lib/libvirt/images)",
+    )
+    fork_parser.add_argument(
+        "--add-to-config",
+        action="store_true",
+        help="Append the new VM to the qsnap config file",
+    )
+    fork_parser.add_argument(
+        "vm",
+        nargs="*",
+        default=[],
+        help="VM name filter for snapshot resolution (optional)",
+    )
+
+    # deploy subcommand
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Deploy a backup as a new VM",
+    )
+    deploy_parser.add_argument("backup_name", help="Backup name to deploy")
+    deploy_parser.add_argument(
+        "--as-vm",
+        required=True,
+        help="Name for the new VM",
+    )
+    deploy_parser.add_argument(
+        "--storage",
+        default="/var/lib/libvirt/images",
+        help="Storage directory for the new VM (default: /var/lib/libvirt/images)",
+    )
+    deploy_parser.add_argument(
+        "--add-to-config",
+        action="store_true",
+        help="Append the new VM to the qsnap config file",
+    )
+    deploy_parser.add_argument(
+        "vm",
+        nargs="*",
+        default=[],
+        help="VM name filter for backup resolution (optional)",
+    )
 
     return parser
 

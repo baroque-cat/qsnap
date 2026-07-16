@@ -97,6 +97,8 @@ qsnap prune debiantest       # retention + cleanup only
 | `qsnap stats [vm]` | Show snapshot/backup counts and sizes |
 | `qsnap check [vm]` | Verify backing-chain integrity (`--deep` for corruption check) |
 | `qsnap restore <name> <dir> [vm]` | Restore a backup chain to a directory |
+| `qsnap fork <snapshot> --as-vm <name>` | Create a standalone VM from a snapshot or backup |
+| `qsnap deploy <backup> --as-vm <name>` | Deploy a backup as a standalone VM |
 
 ### Global Flags
 
@@ -254,61 +256,65 @@ qsnap run --timer
 
 By default, qsnap creates **incremental** backups: each backup file references the previous one via the qcow2 backing chain. This is storage-efficient but means restoring requires the entire chain.
 
-**Bucket-driven full backups** create a standalone qcow2 file with no backing dependencies, using `qemu-img convert`. This provides:
+**Full backups** create a standalone qcow2 file with no backing dependencies, using `qemu-img convert`. This provides:
 - A self-contained restore point independent of the incremental chain
 - A new backing anchor for subsequent incrementals
 - Protection against chain corruption
 
-### How FULL Creation Is Triggered
+### Multi-Level FULL Anchors (automatic mode)
 
-FULL backups are triggered by the **highest active retention bucket** in the target's retention policy. The first snapshot that falls in a new period of the highest bucket triggers a FULL backup via `qemu-img convert`.
+**ALL active retention buckets trigger FULL backups** — not just the highest. A policy like `"48h 14d 8w 12m 1y"` creates FULLs at **weekly, monthly, AND yearly** boundaries, capping incremental chains at ~7 days (the shortest active bucket above hourly/daily). This dramatically reduces the risk of chain corruption making restoration impossible.
 
-| Highest Active Bucket | FULL Frequency | Period Key |
-|---|---|---|
-| `yearly` | Once per year | `YYYY` |
-| `monthly` | Once per month | `YYYYMM` |
-| `weekly` | Once per ISO week | `YYYY-WNN` |
-| `daily` | Once per day | `YYYYMMDD` |
-| `hourly` | Once per hour | `YYYYMMDDHH` |
-| (none — all zero) | No FULL backups | — |
+For each active bucket, qsnap checks whether the current snapshot falls in a new period compared to the most recent FULL with matching `bucket_level`. Period keys are:
+- **yearly** — `YYYY`
+- **monthly** — `YYYYMM`
+- **weekly** — `YYYY-WNN` (ISO week)
+- **daily** — `YYYYMMDD`
+- **hourly** — `YYYYMMDDHH`
 
-For example, if `target_preserve = "48h 14d 8w 12m 1y"`, the highest active bucket is `yearly`, so a FULL backup is created once per year. If `target_preserve = "48h 14d 8w"`, the highest active bucket is `weekly`, so a FULL is created once per ISO week.
+**Short-circuit:** at most ONE FULL is created per snapshot. Buckets are checked in descending order (yearly → monthly → weekly → daily → hourly), and the first bucket whose period has changed wins.
 
-### Configuration
+| Policy | Active Buckets | FULL Frequency | Max Incremental Chain |
+|---|---|---|---|
+| `"48h 14d 8w 12m 1y"` | h, d, w, m, y | Weekly + Monthly + Yearly | ~7 days |
+| `"48h 14d 8w"` | h, d, w | Weekly | ~7 days |
+| `"24h 7d"` | h, d | Daily | ~1 day |
+| `"1y"` | y | Yearly | ~365 days |
+| (all zero) | — | No FULLs | Unlimited |
+
+Single-bucket policies preserve the old highest-only behavior. A policy with only `"1y"` active creates exactly one FULL per year.
+
+### Manual F-Syntax (override mode)
+
+The `F` prefix on a bucket token marks it as a **FULL anchor**. When ANY F-anchor is present, automatic multi-level mode is **disabled** — FULLs are created ONLY at F-marked levels:
 
 ```toml
-[[vm]]
-name = "myvm"
-base_image = "/var/lib/libvirt/images/myvm.qcow2"
-snapshot_dir = "/var/lib/libvirt/snapshots/myvm"
+# Automatic mode: FULLs at weekly, monthly, yearly
+target_preserve = "48h 14d 8w 12m 1y"
 
-  [[vm.target]]
-  path = "/mnt/backup/myvm"
-  incremental = true
-  compress = true           # compress full backups with zlib (default)
-  copy_base = false         # don't copy base.qcow2; first backup is FULL (default)
+# Manual F-syntax: FULLs at daily boundaries only
+target_preserve = "48h 7Fd 8w 12m 1y"
+
+# FULLs at every level (hourly + daily + weekly + monthly + yearly)
+target_preserve = "48Fh 7Fd 4Fw 12Fm 1Fy"
+
+# Weekly-only FULLs (ignore daily, monthly, yearly for FULL creation)
+target_preserve = "24h 7d 4Fw 12m 1y"
 ```
 
-| Key | Default | Description |
-|---|---|---|
-| `compress` | `true` | When `true`, passes `-c` to `qemu-img convert` for zlib compression. Reduces file size at the cost of conversion time. Inherited from global → VM → target. |
-| `copy_base` | `false` | When `false` (default), the base image is never copied to the target — the first backup is always a FULL via `qemu-img convert`. When `true`, the base image is copied to the target on first backup. |
+Non-F buckets still participate in retention — `"24h 7d 4Fw"` retains 24 hourly, 7 daily, and 4 weekly snapshots, but FULLs are created only at weekly boundaries.
+
+**Validation:** an F-anchor on a zero-count bucket is rejected at parse time. `"0Fh 7d"` raises `ConfigError: F-anchor on bucket 'h' requires count > 0`.
 
 ### How It Works
 
-1. Before each incremental transfer, qsnap checks the last FULL backup timestamp and the retention policy.
-2. If the snapshot falls in a new period of the highest active bucket, qsnap calls `qemu-img convert` to create a standalone qcow2.
-3. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
-4. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
-5. The conversion is atomic: `qemu-img convert` writes to a `.tmp` file, which is renamed only on success.
-6. After creation, the FULL is recorded in state with its bucket level for cascade deletion tracking.
-
-### Cascade Deletion
-
-When a FULL backup falls out of all retention buckets, qsnap checks whether any incremental backups still depend on it (via `IStateManager.get_incremental_dependencies()`):
-
-- **If dependents exist in the keep-set** — the FULL is retained as a "ghost" (kept but not counted by retention). This prevents breaking the incremental chain.
-- **If no dependents remain** — the FULL is deleted, and any orphaned incrementals (not in the keep-set) are cascade-deleted.
+1. Before each incremental transfer, qsnap retrieves ALL full backups for the target (`get_full_backups()`).
+2. If any `F`-marked buckets exist, only those are checked. Otherwise, all buckets with `count > 0` are checked in descending order.
+3. For each checked bucket: find the most recent FULL with matching `bucket_level`, compare period keys. If the period changed (or no prior FULL exists), create a new FULL.
+4. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
+5. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
+6. The conversion is atomic: `qemu-img convert` writes to a `.tmp` file, which is renamed only on success.
+7. After creation, the FULL is recorded in state with its `bucket_level` for cascade deletion tracking.
 
 ### `compress` Trade-off
 
@@ -318,6 +324,13 @@ When a FULL backup falls out of all retention buckets, qsnap checks whether any 
 | Size | Full size | ~30-50% smaller (data-dependent) |
 | Compatibility | Standard qcow2 | Standard qcow2 (zlib clusters) |
 | Restore | Direct | Direct (qemu-img handles transparently) |
+
+### Cascade Deletion
+
+When a FULL backup falls out of all retention buckets, qsnap checks whether any incremental backups still depend on it (via `IStateManager.get_incremental_dependencies()`):
+
+- **If dependents exist in the keep-set** — the FULL is retained as a "ghost" (kept but not counted by retention). This prevents breaking the incremental chain.
+- **If no dependents remain** — the FULL is deleted, and any orphaned incrementals (not in the keep-set) are cascade-deleted.
 
 ## Backup Verification
 
@@ -387,6 +400,85 @@ qemu-img convert -O raw myvm.20250714T130000.qcow2 restored.img
 ```
 
 5. **Boot the restored VM** — attach the restored image to a new or existing VM definition.
+
+## Fork and Deploy
+
+`qsnap fork` and `qsnap deploy` create a fully independent, standalone VM from any qsnap-managed snapshot or backup. The resulting VM has no backing dependencies on the source — it is immune to source snapshot deletion.
+
+### fork — Create a VM from a snapshot
+
+```bash
+qsnap fork <snapshot-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-config]
+```
+
+**Steps performed:**
+
+1. **Resolve** the snapshot/backup by name across all configured VMs (state + backup targets).
+2. **Estimate** total chain size via `qemu-img info --backing-chain` and log it.
+3. **Convert** the backing chain into a single standalone qcow2 via `qemu-img convert -O qcow2`.
+4. **Obtain** the source VM's XML via `virsh dumpxml`.
+5. **Modify** the XML: new VM name, new UUID, updated disk paths, MAC address removed.
+6. **Define** the new VM via `virsh define`.
+7. Optionally **append** a `[[vm]]` block to the qsnap config file (`--add-to-config`).
+
+The resulting qcow2 file has **no backing file** — it is fully self-contained and writable.
+
+```bash
+# Basic fork
+qsnap fork myvm.20260701T1200 --as-vm myvm-clone
+
+# Fork to custom storage with auto-config
+qsnap fork myvm.20260701T1200 --as-vm myvm-clone \
+    --storage /mnt/fast-ssd --add-to-config
+
+# Fork from a specific VM (when names collide across VMs)
+qsnap fork myvm.20260701T1200 --as-vm recovered-vm prod-server
+```
+
+### deploy — Deploy a backup as a VM
+
+```bash
+qsnap deploy <backup-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-config]
+```
+
+`deploy` is a thin wrapper around `fork` — it resolves the backup from backup targets and delegates everything to the same `qemu-img convert` + VM creation pipeline.
+
+```bash
+# Deploy a FULL backup
+qsnap deploy vm.FULL.20260701.monthly --as-vm recovered-vm
+
+# Deploy an incremental backup (chain is flattened via qemu-img convert)
+qsnap deploy vm.20260715T1200 --as-vm recovered-vm \
+    --storage /mnt/vms --add-to-config
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--as-vm` | **required** | Name for the new VM |
+| `--storage` | `/var/lib/libvirt/images` | Directory where the VM disk and XML are stored. A subdirectory `/<new-vm-name>/` is created inside |
+| `--add-to-config` | `false` | Append a minimal `[[vm]]` block to the qsnap config file, enabling qsnap to manage the new VM going forward |
+
+### Generated `[[vm]]` Block
+
+When `--add-to-config` is used, the following block is appended:
+
+```toml
+[[vm]]
+name = "myvm-clone"
+base_image = "/var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2"
+snapshot_dir = "/var/lib/libvirt/images/myvm-clone/snapshots"
+snapshot_create = "always"
+```
+
+The `snapshot_dir` is created automatically. You can add targets and customize retention policies afterward.
+
+### Important Notes
+
+- **Disk space:** `qemu-img convert` produces a file as large as the full virtual disk (not sparse like the backing chain). The estimated size is logged before conversion begins.
+- **Source VM running:** Fork does NOT require the source VM to be stopped — snapshot files are read-only once created. A WARNING is logged if the source VM is running.
+- **Performance:** Conversion reads the entire backing chain. For large VMs, consider forking from a FULL backup (which is already standalone) for near-instant conversion.
 
 ## Example Configurations
 

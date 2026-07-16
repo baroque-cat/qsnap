@@ -23,12 +23,18 @@ state_dir = "/var/lib/qsnap/state"
 # Default retention policy for snapshots (applies to all VMs unless
 # overridden at the VM level).
 # Format: "<count>h <count>d <count>w <count>m <count>y"
+# F-syntax: prefix a count with "F" to mark a bucket as a FULL anchor.
+#   "24h 7Fd 4w" — keep 24 hourly, 7 daily (FULL at day boundaries), 4 weekly
+#   "24Fh 7Fd 4Fw 12Fm 1Fy" — FULL at every bucket boundary
+# When any F-anchor is present, FULLs are created ONLY at F-marked levels.
+# Without F-anchors, FULLs are created at ALL active bucket boundaries.
 # Examples:
 #   "24h 7d 4w 12m 0y" — keep 24 hourly, 7 daily, 4 weekly, 12 monthly
 #   "all"              — keep everything (default)
 snapshot_preserve = "24h 7d 4w 12m 1y"
 
 # Default retention policy for backup targets.
+# Same format and F-syntax as snapshot_preserve.
 target_preserve = "48h 14d 8w 12m 1y"
 
 # Minimum retention period for snapshots.  Snapshots younger than this
@@ -189,3 +195,15 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   compress = true
 #   backup_retry_max = 5
 #   backup_retry_base = "10s"
+
+
+# ── Fork & Deploy ───────────────────────────────────────────────────────
+# qsnap fork creates a standalone VM from a snapshot or backup:
+#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone
+#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone --storage /mnt/vms
+#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone --add-to-config
+#
+# qsnap deploy creates a VM from a backup (same as fork, resolves from
+# backup targets):
+#   qsnap deploy vm.FULL.20250701.monthly --as-vm recovered-vm
+#   qsnap deploy backup.20250715T1200 --as-vm recovered-vm --storage /mnt/vms

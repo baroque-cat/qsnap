@@ -17,6 +17,11 @@ class RetentionPolicy:
     Each field is a count of items to preserve for that time bucket.
     ``preserve_min`` is a duration string (e.g. ``"6h"``, ``"2d"``) or
     ``"all"`` meaning keep everything.
+
+    The ``anchor_*`` boolean fields mark a bucket as a FULL anchor
+    (set via the ``F`` prefix in the preserve string, e.g. ``"7Fd"``).
+    When any ``anchor_*`` is ``True``, FULL backups are created only at
+    F-marked bucket boundaries instead of all active buckets.
     """
 
     hourly: int = 0
@@ -25,6 +30,11 @@ class RetentionPolicy:
     monthly: int = 0
     yearly: int = 0
     preserve_min: str = "all"
+    anchor_hourly: bool = False
+    anchor_daily: bool = False
+    anchor_weekly: bool = False
+    anchor_monthly: bool = False
+    anchor_yearly: bool = False
 
 
 @dataclass(frozen=True)
