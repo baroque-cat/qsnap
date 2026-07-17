@@ -145,3 +145,23 @@ class InMemoryStateManager(IStateManager):
     def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         target_deps = self._dependencies.get(target_path, {})
         return list(target_deps.get(full_name, []))
+
+    def remove_full_backup(self, target_path: str, name: str) -> bool:
+        """Remove a full backup record from in-memory state."""
+        entries = self._full_backups.get(target_path, [])
+        for entry in entries:
+            if entry.name == name:
+                entries.remove(entry)
+                return True
+        return False
+
+    def remove_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> bool:
+        """Remove an incremental dependency from in-memory state."""
+        target_deps = self._dependencies.get(target_path, {})
+        deps = target_deps.get(full_name, [])
+        if incremental_name in deps:
+            deps.remove(incremental_name)
+            return True
+        return False

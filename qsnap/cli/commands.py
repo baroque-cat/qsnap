@@ -22,7 +22,7 @@ from qsnap.cli.format import (
 )
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo
+from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo, StateCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,31 @@ def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
                 "broken_snapshots": (
                     ", ".join(result.broken_snapshots) if result.broken_snapshots else "-"
                 ),
+            }
+        )
+    return rows
+
+
+def _state_check_to_rows(
+    data: dict[str, StateCheckResult],
+) -> list[dict[str, str]]:
+    """Convert state check results to display rows."""
+    rows: list[dict[str, str]] = []
+    for vm_name, result in data.items():
+        phantom = (
+            ", ".join(result.phantom_snapshots + result.phantom_fulls)
+            if (result.phantom_snapshots or result.phantom_fulls)
+            else "-"
+        )
+        stale = ", ".join(result.stale_deps) if result.stale_deps else "-"
+        corrupt = ", ".join(result.corrupt_files) if result.corrupt_files else "-"
+        rows.append(
+            {
+                "vm": vm_name,
+                "status": result.status,
+                "phantom": phantom,
+                "stale_deps": stale,
+                "corrupt": corrupt,
             }
         )
     return rows
@@ -308,6 +333,17 @@ def handle_check(core: Core, args: Namespace) -> int:
     vm_filter = _get_vm_filter(args)
     fmt: str = getattr(args, "format", "table")
     deep: bool = getattr(args, "deep", False)
+    state: bool = getattr(args, "state", False)
+
+    if state:
+        data = core.check_state(vm_filter)
+        rows = _state_check_to_rows(data)
+        columns = ["vm", "status", "phantom", "stale_deps", "corrupt"]
+        has_issues = any(r.status != "ok" for r in data.values())
+        output = format_output(rows, columns, fmt)
+        print(output or "State is consistent — no issues found.")
+        return 1 if has_issues else 0
+
     data = core.check(vm_filter, deep=deep)
 
     # Print safety configuration summary

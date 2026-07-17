@@ -819,6 +819,133 @@ def test_validate_env_cleanup_skipped_when_auto_cleanup_false(
     assert result.status == "ok"
 
 
+# ── Pre-flight cleanup: truncated .qcow2 detection on backup targets ──────
+
+
+def test_preflight_cleanup_truncated_qcow2_detected_deleted(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """A non-FULL .qcow2 on target where ``qemu-img info`` fails → file
+    is deleted and a WARNING is logged."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    target_path = Path("/mnt/backup/testvm")
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", targets=[target])
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    truncated_file = target_path / "snap-incomplete.qcow2"
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    shell.expect_first(
+        f"qemu-img info.*--output=json.*snap-incomplete\\.qcow2"
+    ).returns(
+        ShellResult(
+            success=False, stdout="", stderr="corrupt", returncode=1, error="truncated"
+        )
+    )
+
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
+
+    def _glob_side_effect(self, pattern):
+        if self == target_path and pattern == "*.qcow2":
+            return [truncated_file]
+        return []
+
+    with patch.object(Path, "glob", _glob_side_effect):
+        with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+            with patch.object(shell, "run", wraps=shell.run) as run_spy:
+                core._preflight_cleanup(vm)
+
+    # Verify rm -f was called for the truncated file
+    rm_calls = [
+        c
+        for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 1, f"Expected 1 rm call, got {len(rm_calls)}"
+    assert "snap-incomplete.qcow2" in str(rm_calls[0].args)
+
+    # WARNING was logged for stale partial transfer
+    assert any(
+        "Stale partial transfer detected and deleted" in r.message
+        for r in caplog.records
+    ), f"Expected stale partial transfer warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_preflight_cleanup_valid_qcow2_not_deleted(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """A non-FULL .qcow2 on target where ``qemu-img info`` succeeds → file
+    is NOT deleted."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    target_path = Path("/mnt/backup/testvm")
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", targets=[target])
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    valid_file = target_path / "snap-valid.qcow2"
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    shell.expect_first(
+        f"qemu-img info.*--output=json.*snap-valid\\.qcow2"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout='{"format": "qcow2", "virtual-size": 1073741824}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
+
+    def _glob_side_effect(self, pattern):
+        if self == target_path and pattern == "*.qcow2":
+            return [valid_file]
+        return []
+
+    with patch.object(Path, "glob", _glob_side_effect):
+        with caplog.at_level(logging.WARNING, logger="qsnap.core"):
+            with patch.object(shell, "run", wraps=shell.run) as run_spy:
+                core._preflight_cleanup(vm)
+
+    # No rm calls at all — valid file not deleted, no stale tmp/partial/sockets found
+    rm_calls = [
+        c
+        for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert len(rm_calls) == 0, (
+        f"Expected 0 rm calls for valid qcow2, got {len(rm_calls)}: "
+        f"{[c.args for c in rm_calls]}"
+    )
+
+    # No stale transfer warning
+    stale_warnings = [
+        r for r in caplog.records if "Stale partial transfer" in r.message
+    ]
+    assert len(stale_warnings) == 0, (
+        f"Expected no stale warnings, got: {[r.message for r in stale_warnings]}"
+    )
+
+
 # ── test_dry_run_runs_validation_non_fatal_warnings ────────────────────────
 
 

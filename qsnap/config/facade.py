@@ -92,6 +92,16 @@ class ConfigFacade(IConfigFacade):
         if "compress" in raw:
             global_kwargs["compress"] = bool(raw["compress"])
 
+        # FULL backup integrity verification tiers (M1/M2/M3).
+        if "full_verify_after_create" in raw:
+            global_kwargs["full_verify_after_create"] = str(raw["full_verify_after_create"])
+        if "full_verify_before_rebase" in raw:
+            global_kwargs["full_verify_before_rebase"] = str(raw["full_verify_before_rebase"])
+        if "full_verify_before_delete" in raw:
+            global_kwargs["full_verify_before_delete"] = str(raw["full_verify_before_delete"])
+        if "deep_check_targets" in raw:
+            global_kwargs["deep_check_targets"] = bool(raw["deep_check_targets"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate rate_limit format.
@@ -114,6 +124,29 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(
                 f"Invalid deep_check_schedule: {self._global.deep_check_schedule!r}. "
                 f"Must be one of: {', '.join(sorted(valid_schedules))}"
+            )
+
+        # Validate FULL verification tiers.
+        valid_after_create = {"metadata", "check", "hash", "off"}
+        if self._global.full_verify_after_create.lower() not in valid_after_create:
+            raise ConfigError(
+                f"Invalid full_verify_after_create: "
+                f"{self._global.full_verify_after_create!r}. "
+                f"Must be one of: {', '.join(sorted(valid_after_create))}"
+            )
+        valid_before_rebase = {"metadata", "off"}
+        if self._global.full_verify_before_rebase.lower() not in valid_before_rebase:
+            raise ConfigError(
+                f"Invalid full_verify_before_rebase: "
+                f"{self._global.full_verify_before_rebase!r}. "
+                f"Must be one of: {', '.join(sorted(valid_before_rebase))}"
+            )
+        valid_before_delete = {"metadata", "check", "off"}
+        if self._global.full_verify_before_delete.lower() not in valid_before_delete:
+            raise ConfigError(
+                f"Invalid full_verify_before_delete: "
+                f"{self._global.full_verify_before_delete!r}. "
+                f"Must be one of: {', '.join(sorted(valid_before_delete))}"
             )
 
         # Build VM configs.

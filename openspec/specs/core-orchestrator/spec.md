@@ -348,3 +348,11 @@ When executing deferred blockcommit operations on a shut-off VM and `vm_config.b
 - **WHEN** `core.deploy("vm.FULL.20260701.monthly", "recovered-vm", Path("/var/lib/libvirt/images"))` is called
 - **THEN** `core.fork("vm.FULL.20260701.monthly", "recovered-vm", Path("/var/lib/libvirt/images"))` is called internally
 - **THEN** returns the same `RestoreResult`
+
+### Requirement: Phantom FULL detection
+
+Before using `get_full_backups()` for bucket-driven FULL creation decisions, Core SHALL verify each FULL file exists on disk via `os.path.exists()`. Entries whose files do not exist SHALL be removed from state via `remove_full_backup()` with a WARNING log. This prevents phantom FULLs (deleted externally but still in state) from blocking new FULL creation.
+
+### Requirement: Post-create FULL backup verification with source_path
+
+When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_full_backup()` after `create_full_backup()` completes. When the mode is `"hash"`, Core SHALL pass `source_path=most_recent.path` for `qemu-img compare` content verification. On success, `record_full_backup()` is called; on failure, the FULL file is deleted and NOT recorded.

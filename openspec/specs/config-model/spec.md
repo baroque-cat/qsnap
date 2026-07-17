@@ -227,3 +227,23 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 #### Scenario: Target inherits compress from global
 - **WHEN** global config sets `compress = false` and a target does not specify `compress`
 - **THEN** `TargetConfig.compress` resolves to `False`
+
+### Requirement: GlobalConfig full_verify_after_create field
+
+`GlobalConfig` SHALL include a `full_verify_after_create: str` field with default `"check"`. Accepted values: `"metadata"` (M1 only), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare), `"off"` (no verification). Controls FULL backup verification immediately after creation.
+
+### Requirement: GlobalConfig full_verify_before_rebase field
+
+`GlobalConfig` SHALL include a `full_verify_before_rebase: str` field with default `"metadata"`. Controls M1 verification of FULL anchors before rebasing incrementals.
+
+### Requirement: GlobalConfig full_verify_before_delete field
+
+`GlobalConfig` SHALL include a `full_verify_before_delete: str` field with default `"check"`. Controls optional M2 verification before cascade-deletion. M1 is always enforced regardless of this setting.
+
+### Requirement: GlobalConfig deep_check_targets field
+
+`GlobalConfig` SHALL include a `deep_check_targets: bool` field with default `False`. When enabled, `qsnap check --deep` also checks FULL and incremental backup files on target directories.
+
+### Requirement: Active retention buckets required when targets configured
+
+When a VM has backup targets configured, at least one retention bucket (hourly/daily/weekly/monthly/yearly) SHALL have count > 0 OR `preserve_min` SHALL be `"all"`. A configuration with targets but all-zero bucket counts SHALL raise `ConfigError` at parse time.

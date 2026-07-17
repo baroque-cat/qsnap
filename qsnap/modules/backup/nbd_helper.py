@@ -150,7 +150,11 @@ def nbd_full_export(
         ``True``, the ``-c`` flag is passed to ``qemu-img convert``,
         producing a compressed qcow2 (experimentally verified with
         qemu-img 11.0.2).
-    (e) Clean up the socket via ``rm -f`` in a ``finally`` block.
+    (e) Call ``virsh domjobabort --domain <vm>`` to terminate the
+        backup job and release the state change lock, then clean up
+        the socket via ``rm -f``.  Steps (e) SHALL execute in a
+        ``finally`` block and SHALL run regardless of whether
+        ``qemu-img convert`` succeeded or failed.
 
     Args:
         shell: :class:`IShell` instance for running commands.
@@ -204,5 +208,20 @@ def nbd_full_export(
         return convert_result
 
     finally:
-        # (e) Socket cleanup (always, even on failure).
+        # (e) NBD job abort + socket cleanup (always, even on failure).
+        # Abort the virsh backup-begin job to release the VM state
+        # change lock (design D3).  domjobabort is idempotent — safe
+        # to call when no job is running.  On failure, log a WARNING
+        # but do NOT propagate the error — the socket cleanup is the
+        # critical path and must still proceed.
+        abort_cmd = ["virsh", "domjobabort", "--domain", vm_name]
+        abort_result = shell.run(abort_cmd, timeout=30)
+        if not abort_result.success:
+            logger.warning(
+                "virsh domjobabort failed for VM %s (job may have "
+                "already terminated): %s",
+                vm_name,
+                abort_result.error,
+            )
+        # Remove the socket file.
         shell.run(["rm", "-f", socket_path], timeout=10)

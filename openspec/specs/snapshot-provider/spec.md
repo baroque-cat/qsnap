@@ -74,3 +74,7 @@ The system SHALL delete a snapshot `.qcow2` file via `rm -f`. The method accepts
 #### Scenario: Snapshot without quiesce (default)
 - **WHEN** `provider.create(vm_config, name, disk, path)` is called without quiesce
 - **THEN** `virsh snapshot-create-as` is executed without `--quiesce`
+
+### Requirement: Snapshot creation retry on lock conflict
+
+`ExternalSnapshotProvider.create()` SHALL retry `virsh snapshot-create-as` up to 3 total attempts (1 initial + 2 retries) when the error message contains "cannot acquire state change lock". Retry backoff SHALL be exponential: 2 seconds, then 4 seconds. Non-lock errors SHALL NOT be retried.

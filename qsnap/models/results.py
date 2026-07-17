@@ -261,3 +261,27 @@ class ScheduleResult:
 
     snapshots: RetentionResult
     backups: dict[str, RetentionResult] = field(default_factory=dict)  # type: ignore[unknown-variable-type]
+
+
+# ── State consistency check ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class StateCheckResult:
+    """Outcome of a state consistency check for a single VM.
+
+    Reports phantom entries (state records pointing to non-existent files)
+    and orphan files (files on disk not recorded in state).  The check is
+    read-only — it never deletes files or state entries.
+
+    ``status`` is ``"ok"`` when no issues found, or a combination of
+    flags: ``"stale_snapshots"``, ``"stale_fulls"``, ``"stale_deps"``,
+    ``"corrupt_state"``.
+    """
+
+    vm_name: str
+    status: str  # "ok" or combination of flags joined by ":"
+    phantom_snapshots: list[str] = field(default_factory=list)
+    phantom_fulls: list[str] = field(default_factory=list)
+    stale_deps: list[str] = field(default_factory=list)
+    corrupt_files: list[str] = field(default_factory=list)

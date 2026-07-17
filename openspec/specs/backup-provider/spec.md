@@ -278,3 +278,11 @@ Backup providers (`FileCopyBackupProvider`, `BitmapBackupProvider`) SHALL NOT im
 - **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False, bucket_level="monthly")` is called
 - **THEN** `nbd_full_export(shell, "3.Projects_opencode", ...)` is called with the full VM name
 - **AND** the FULL backup file is named `3.Projects_opencode.FULL.YYYYMMDD.qcow2`
+
+### Requirement: transfer_missing SHALL NOT create FULL backups
+
+`FileCopyBackupProvider.transfer_missing()` SHALL NOT call `create_full_backup()` under any circumstances. FULL backup creation is the sole responsibility of `Core._backup_target()` via the bucket-driven mechanism, ensuring every FULL passes through Core's verification pipeline before state recording.
+
+### Requirement: Snapshot file existence guard before rsync
+
+Before calling `rsync`, `transfer_missing()` SHALL verify the source snapshot file exists on disk. If missing (stale — blockcommitted but not cleaned from state), the entry SHALL be removed from state and the snapshot SHALL be skipped.

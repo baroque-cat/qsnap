@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -29,7 +30,7 @@ from qsnap.modules.backup.nbd_helper import (
     is_vm_running,
     nbd_full_export,
 )
-from qsnap.modules.backup.verification import verify_backup
+from qsnap.modules.backup.verification import verify_backup, verify_full_backup
 from qsnap.utils.parsing import parse_rate_limit, parse_timestamp, rate_limit_to_kib
 
 logger = logging.getLogger(__name__)
@@ -56,19 +57,28 @@ class FileCopyBackupProvider(IBackupProvider):
         filename (``YYYYMMDD``) and returns the most recent by date,
         or ``None`` if none exist.
         """
+        sorted_anchors = FileCopyBackupProvider._get_sorted_full_anchors(target)
+        return sorted_anchors[0] if sorted_anchors else None
+
+    @staticmethod
+    def _get_sorted_full_anchors(target: TargetConfig) -> list[Path]:
+        """Return all FULL anchor files sorted by date (most recent first).
+
+        Looks for ``*.FULL.*.qcow2`` files.  Parses the date from the
+        filename (``YYYYMMDD``) and returns them sorted descending by
+        date.  Returns an empty list if none exist.
+        """
         if not target.path.exists():
-            return None
+            return []
         full_files = list(target.path.glob("*.FULL.*.qcow2"))
         if not full_files:
-            return None
+            return []
 
-        # Parse date from filename and return most recent by date.
         def _extract_date(path: Path) -> str:
-            # Filename pattern: <vm>.FULL.<YYYYMMDD>.qcow2
             match = re.search(r"\.FULL\.(\d{8})\.", path.name)
             return match.group(1) if match else ""
 
-        return max(full_files, key=_extract_date)
+        return sorted(full_files, key=_extract_date, reverse=True)
 
     def transfer_missing(
         self,
@@ -80,38 +90,34 @@ class FileCopyBackupProvider(IBackupProvider):
         """Copy snapshots not yet present at *target* using ``rsync``.
 
         1. Determine existing backups via ``list()``.
-        2. When ``copy_base`` is False (default) and target is empty,
-           trigger ``create_full_backup()`` for the first snapshot
-           instead of rsync (design D4).
-        3. For each missing snapshot: ``rsync --partial`` (or
+        2. For each missing snapshot: ``rsync --partial`` (or
            ``rsync --bwlimit=<kib> --partial`` when rate limiting).
-        4. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
-        5. After rebase, record incremental→FULL dependency in state.
+        3. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
+        4. After rebase, record incremental→FULL dependency in state.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}
 
         results: list[BackupResult] = []
 
-        # Design D4: When copy_base is False and target is empty, create
-        # a FULL backup for the first snapshot instead of rsync.
-        if not target.copy_base and not existing and snapshots:
-            most_recent = max(snapshots, key=lambda s: s.timestamp)
-            full_result = self.create_full_backup(
-                vm_config.name,
-                most_recent,
-                target,
-                compress=target.compress,
-                bucket_level="monthly",
-            )
-            results.append(full_result)
-            if not full_result.success:
-                return results
-            # Mark the FULL as existing so it's not re-transferred.
-            existing_names.add(full_result.target_path.stem)
-
         for snapshot in snapshots:
             if snapshot.name in existing_names:
+                continue
+
+            # Stale state self-healing: before rsync, verify the snapshot
+            # file still exists on disk.  If it was already blockcommitted
+            # by a prior run that failed to update state, clean the entry
+            # and skip the transfer (per chain-integrity-verification spec).
+            if not os.path.exists(str(snapshot.path)):
+                if self._state is not None:
+                    self._state.remove_snapshot(
+                        vm_config.name, snapshot.name
+                    )
+                logger.warning(
+                    "Stale state entry: snapshot %s file not found on "
+                    "disk — removed from state",
+                    snapshot.name,
+                )
                 continue
 
             target_file = target.path / f"{snapshot.name}.qcow2"
@@ -202,7 +208,33 @@ class FileCopyBackupProvider(IBackupProvider):
             # Step 4: If incremental, rebase backing path (design D5)
             if target.incremental:
                 # Check for FULL anchor in target directory
-                full_anchor = self._find_full_anchor(target)
+                # Try anchors from most recent to oldest, verifying M1
+                # integrity before use (per backup-full-verification spec).
+                full_anchor: Path | None = None
+                sorted_anchors = self._get_sorted_full_anchors(target)
+                for candidate in sorted_anchors:
+                    m1_error = verify_full_backup(
+                        self._shell, candidate, "metadata"
+                    )
+                    if m1_error is None:
+                        full_anchor = candidate
+                        break
+                    else:
+                        logger.warning(
+                            "FULL anchor %s failed M1 verification — "
+                            "trying older anchor: %s",
+                            candidate.name,
+                            m1_error,
+                        )
+
+                if full_anchor is None and sorted_anchors:
+                    logger.warning(
+                        "All FULL anchors in %s failed M1 verification "
+                        "— skipping rebase for %s",
+                        target.path,
+                        snapshot.name,
+                    )
+
                 if full_anchor is not None:
                     # Rebase to FULL anchor
                     rebase_cmd = [
@@ -211,6 +243,8 @@ class FileCopyBackupProvider(IBackupProvider):
                         "-u",
                         "-b",
                         f"./{full_anchor.name}",
+                        "-F",
+                        "qcow2",
                         str(target_file),
                     ]
                     rebase_result = self._shell.run(rebase_cmd, timeout=60)
@@ -254,6 +288,8 @@ class FileCopyBackupProvider(IBackupProvider):
                                     "-u",
                                     "-b",
                                     backing_basename,
+                                    "-F",
+                                    "qcow2",
                                     str(target_file),
                                 ]
                                 rebase_result = self._shell.run(rebase_cmd, timeout=60)
@@ -346,10 +382,9 @@ class FileCopyBackupProvider(IBackupProvider):
         on success.  On failure, the ``.tmp`` file is removed and no
         final file is created.
 
-        After creation, records the FULL in state (if state manager is
-        available) via ``record_full_backup()`` with the snapshot's
-        timestamp (not the NBD export time) for retention bucket
-        alignment.
+        Callers are responsible for recording the FULL in state via
+        ``IStateManager.record_full_backup()`` after optionally
+        performing integrity verification.
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -434,16 +469,6 @@ class FileCopyBackupProvider(IBackupProvider):
             bytes_transferred = target_file.stat().st_size
         except OSError:
             bytes_transferred = 0
-
-        # Record FULL backup in state with snapshot timestamp (not
-        # NBD export time) for retention bucket alignment.
-        if self._state is not None:
-            self._state.record_full_backup(
-                str(target.path),
-                f"{full_name}.qcow2",
-                source_snapshot.timestamp,
-                bucket_level,
-            )
 
         return BackupResult(
             success=True,

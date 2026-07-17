@@ -107,3 +107,7 @@ The `use_base_image` parameter previously added to `Core._get_chain_length()` fo
 - **WHEN** `Core._deep_check_file()` is called on a snapshot that is the active layer
 - **THEN** `qemu-img check --force-share --output=json` is used
 - **AND** the command succeeds despite the VM holding a write lock
+
+### Requirement: File existence guard before blockcommit (stale state self-healing)
+
+Before passing `to_merge` to the lifecycle manager, `Core._blockcommit_snapshots()` SHALL iterate entries and verify each snapshot file exists on disk via `os.path.exists()`. For entries where the file does not exist: remove the entry from state via `remove_snapshot()`, log WARNING, and remove from `to_merge`. If `to_merge` becomes empty after filtering, skip the blockcommit step entirely.

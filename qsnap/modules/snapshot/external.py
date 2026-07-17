@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
@@ -19,6 +20,9 @@ from qsnap.modules.backup.verification import _file_sha256
 from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+_LOCK_RETRY_MAX = 3  # 1 initial attempt + 2 retries
+_LOCK_RETRY_BASE = 2.0  # seconds base backoff
 
 
 class ExternalSnapshotProvider(ISnapshotProvider):
@@ -61,14 +65,39 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         if quiesce:
             create_cmd.append("--quiesce")
         timeout = 180 if quiesce else 120
-        create_result = self._shell.run(create_cmd, timeout=timeout)
-        if not create_result.success:
+
+        # Retry loop for state change lock conflicts (design D5).
+        # A lingering NBD backup job or concurrent virsh operation can
+        # hold the lock transiently.  Retry up to 3 times with exponential
+        # backoff (2s, 4s).  Non-lock errors fail immediately.
+        create_result = None
+        for attempt in range(_LOCK_RETRY_MAX):
+            create_result = self._shell.run(create_cmd, timeout=timeout)
+            if create_result.success:
+                break
+            if "cannot acquire state change lock" in (create_result.error or "") and attempt < _LOCK_RETRY_MAX - 1:
+                backoff = _LOCK_RETRY_BASE * (2 ** attempt)
+                logger.warning(
+                    "Snapshot creation lock conflict for VM %s "
+                    "(attempt %d/%d, retrying in %.1fs): %s",
+                    vm_config.name,
+                    attempt + 1,
+                    _LOCK_RETRY_MAX,
+                    backoff,
+                    create_result.error,
+                )
+                time.sleep(backoff)
+                continue
+            # Non-lock error or retries exhausted — fail immediately.
+            break
+
+        if create_result is None or not create_result.success:
             return SnapshotResult(
                 success=False,
                 name=snapshot_name,
                 path=snapshot_path,
                 new_allocation=0,
-                error=create_result.error,
+                error=create_result.error if create_result is not None else "unknown error",
             )
 
         # Step 2: chmod g+rw,o+r

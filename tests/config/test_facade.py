@@ -515,3 +515,180 @@ def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
     # Should not raise — preserve_min='all' is the safe default.
     facade = ConfigFacade(config_file)
     assert facade.get_vm("testvm").target_preserve_min == "all"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# FULL backup integrity verification tiers — ConfigFacade integration
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_parses_full_verify_after_create_hash(tmp_path: Path) -> None:
+    """ConfigFacade parses full_verify_after_create='hash' from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_after_create = "hash"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_verify_after_create == "hash"
+
+
+@pytest.mark.unit
+def test_facade_parses_full_verify_before_rebase_off(tmp_path: Path) -> None:
+    """ConfigFacade parses full_verify_before_rebase='off' from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_before_rebase = "off"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_verify_before_rebase == "off"
+
+
+@pytest.mark.unit
+def test_facade_parses_full_verify_before_delete_metadata(tmp_path: Path) -> None:
+    """ConfigFacade parses full_verify_before_delete='metadata' from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_before_delete = "metadata"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_verify_before_delete == "metadata"
+
+
+@pytest.mark.unit
+def test_facade_parses_deep_check_targets_true(tmp_path: Path) -> None:
+    """ConfigFacade parses deep_check_targets=true from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        "deep_check_targets = true\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().deep_check_targets is True
+
+
+@pytest.mark.unit
+def test_facade_invalid_full_verify_after_create_raises_config_error(tmp_path: Path) -> None:
+    """An invalid full_verify_after_create value raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_after_create = "sha256"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid full_verify_after_create"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_facade_invalid_full_verify_before_rebase_raises_config_error(tmp_path: Path) -> None:
+    """An invalid full_verify_before_rebase value raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_before_rebase = "hash"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid full_verify_before_rebase"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_facade_invalid_full_verify_before_delete_raises_config_error(tmp_path: Path) -> None:
+    """An invalid full_verify_before_delete value raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        'full_verify_before_delete = "hash"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid full_verify_before_delete"):
+        ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# all-zero bucket validation with target_preserve_min variants
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_all_zero_buckets_with_targets_raises_config_error(tmp_path: Path) -> None:
+    """Config with all-zero bucket counts and target_preserve_min='latest'
+    raises ConfigError (because 'latest' is not 'all')."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "latest"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    with pytest.raises(ConfigError, match="nothing would be retained"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_preserve_min_all_allows_zero_buckets(tmp_path: Path) -> None:
+    """Config with all-zero bucket counts and target_preserve_min='all'
+    is accepted (the 'all' bypass overrides the all-zero check)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'preserve_day_of_week = "monday"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'target_preserve = "0h 0d 0w 0m 0y"\n'
+        'target_preserve_min = "all"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    assert vm.target_preserve_min == "all"
+    # Verify the target was also parsed correctly.
+    assert len(vm.targets) == 1
+    assert vm.targets[0].path == Path("/mnt/backup/testvm")

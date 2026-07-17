@@ -178,6 +178,10 @@ def make_global_config():
         chain_verify_after_commit: bool = True,
         deep_check_schedule: str = "off",
         compress: bool = True,
+        full_verify_after_create: str = "check",
+        full_verify_before_rebase: str = "metadata",
+        full_verify_before_delete: str = "check",
+        deep_check_targets: bool = False,
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -199,6 +203,10 @@ def make_global_config():
             chain_verify_after_commit=chain_verify_after_commit,
             deep_check_schedule=deep_check_schedule,
             compress=compress,
+            full_verify_after_create=full_verify_after_create,
+            full_verify_before_rebase=full_verify_before_rebase,
+            full_verify_before_delete=full_verify_before_delete,
+            deep_check_targets=deep_check_targets,
         )
 
     return _make

@@ -1015,7 +1015,9 @@ def test_same_bucket_period_skips_full(
 
     backup_provider = mock_factory._backup_provider
 
-    with patch.object(
+    with patch(
+        "qsnap.core.os.path.exists", return_value=True
+    ), patch.object(
         backup_provider,
         "create_full_backup",
         wraps=backup_provider.create_full_backup,
@@ -1383,7 +1385,9 @@ def test_backup_target_passes_full_list_to_bucket_check(
     mock_state.record_snapshot("testvm", snap)
 
     # Spy on _should_create_bucket_full
-    with patch.object(
+    with patch(
+        "qsnap.core.os.path.exists", return_value=True
+    ), patch.object(
         Core,
         "_should_create_bucket_full",
         wraps=Core._should_create_bucket_full,
@@ -1500,7 +1504,10 @@ def test_chain_verify_intact_chain_blockcommit_proceeds(
     retention = RetentionResult(keep=["snap4"], remove=["snap1"])
     manager = mock_factory._lifecycle_manager
 
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed when chain is intact"
@@ -1550,7 +1557,10 @@ def test_chain_verify_intact_chain_new_qemu_format_blockcommit_proceeds(
     retention = RetentionResult(keep=["snap4"], remove=["snap1"])
     manager = mock_factory._lifecycle_manager
 
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed when chain is intact (new QEMU format)"
@@ -1877,7 +1887,10 @@ def test_post_commit_chain_shortened_as_expected(
     manager = mock_factory._lifecycle_manager
 
     caplog.set_level(logging.INFO)
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed"
@@ -1946,7 +1959,10 @@ def test_post_commit_chain_shortened_intermediate_removal(
     manager = mock_factory._lifecycle_manager
 
     caplog.set_level(logging.INFO)
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed"
@@ -2004,7 +2020,10 @@ def test_post_commit_chain_length_unchanged_critical(
     manager = mock_factory._lifecycle_manager
 
     caplog.set_level(logging.CRITICAL)
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should be attempted"
@@ -2072,7 +2091,10 @@ def test_post_commit_measurement_fails_graceful(
     manager = mock_factory._lifecycle_manager
 
     caplog.set_level(logging.INFO)
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed"
@@ -2131,7 +2153,10 @@ def test_post_commit_skipped_when_pre_commit_unavailable(
     manager = mock_factory._lifecycle_manager
 
     caplog.set_level(logging.INFO)
-    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
         core._blockcommit_snapshots(vm, retention)
 
     assert bc_spy.called, "blockcommit should proceed despite measurement failure"
@@ -2232,6 +2257,7 @@ def test_chain_verify_disabled_skips_pre_commit_check(
     manager = mock_factory._lifecycle_manager
 
     with (
+        patch("os.path.exists", return_value=True),
         patch.object(core, "_verify_backing_chain") as verify_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
@@ -2587,6 +2613,26 @@ def test_full_deleted_when_no_active_dependents(
     ]
     retention = RetentionResult(keep=[], remove=[full_name])
 
+    # Provide expectations for verify_full_backup (M1 + M2)
+    mock_shell.expect("qemu-img info.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"format": "qcow2", "virtual-size": 10000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"errors": 0, "leaks": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     backup_provider = mock_factory._backup_provider
     with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
@@ -2634,6 +2680,26 @@ def test_orphaned_incrementals_cascade_deleted(
     ]
     # All are removed
     retention = RetentionResult(keep=[], remove=[full_name, inc1, inc2])
+
+    # Provide expectations for verify_full_backup (M1 + M2)
+    mock_shell.expect("qemu-img info.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"format": "qcow2", "virtual-size": 10000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"errors": 0, "leaks": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     backup_provider = mock_factory._backup_provider
     with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
@@ -3136,3 +3202,331 @@ def test_core_passes_vm_name_to_create_full_backup(
     assert full_spy.call_args.args[0] == vm.name, (
         f"vm_name should equal vm_config.name, got: {full_spy.call_args.args[0]!r}"
     )
+
+
+# ── Stale State Self-Healing in _blockcommit_snapshots ──────────────────────
+
+
+def test_blockcommit_stale_guard_all_exist_proceeds(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All snapshot files exist → stale guard passes → blockcommit called.
+
+    When every snapshot in ``to_merge`` has its file present on disk,
+    ``os.path.exists()`` returns True for all, no entries are removed
+    from state, and the lifecycle manager's ``blockcommit()`` is called
+    with the complete to_merge list.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record snapshots in state
+    snap1 = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap2 = SnapshotInfo(
+        name="snap2",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+
+    retention = RetentionResult(keep=[], remove=["snap1", "snap2"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True) as exists_mock,
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
+        ) as remove_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # All files exist — no staleness detected
+    assert exists_mock.called, "os.path.exists should be called to verify files"
+
+    # No entries removed from state (all files exist)
+    remove_spy.assert_not_called()
+
+    # Blockcommit called with both snapshots
+    assert bc_spy.called, "blockcommit should proceed when all files exist"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert set(merge_names) == {"snap1", "snap2"}
+
+
+def test_blockcommit_stale_guard_one_stale_removed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """One stale snapshot → removed from state and to_merge; remaining blockcommitted.
+
+    When one snapshot file no longer exists on disk (e.g. it was already
+    blockcommitted by a prior run), the stale entry is removed from state,
+    a WARNING is logged, and blockcommit proceeds with only the remaining
+    valid snapshot.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap_ok = SnapshotInfo(
+        name="snap_ok",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_ok.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap_stale = SnapshotInfo(
+        name="snap_stale",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_stale.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    mock_state.record_snapshot("testvm", snap_ok)
+    mock_state.record_snapshot("testvm", snap_stale)
+
+    retention = RetentionResult(keep=[], remove=["snap_ok", "snap_stale"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.WARNING)
+
+    def path_exists(path_str):
+        return "snap_stale" not in path_str
+
+    with (
+        patch("os.path.exists", side_effect=path_exists),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
+        ) as remove_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Stale snapshot removed from state
+    remove_spy_calls = [c.args for c in remove_spy.call_args_list]
+    assert ("testvm", "snap_stale") in remove_spy_calls, (
+        "remove_snapshot should be called for the stale entry"
+    )
+
+    # WARNING logged for stale state entry
+    assert "snap_stale" in caplog.text, "stale snapshot name should appear in WARNING log"
+    assert "Stale state entry" in caplog.text, "WARNING should mention stale state entry"
+
+    # Blockcommit called, but only with the surviving snapshot
+    assert bc_spy.called, "blockcommit should proceed with surviving snapshots"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert merge_names == ["snap_ok"], (
+        f"Only snap_ok should be blockcommitted, got: {merge_names}"
+    )
+    assert "snap_stale" not in merge_names, "stale snapshot must not be blockcommitted"
+
+
+def test_blockcommit_stale_guard_all_stale_skipped(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """All snapshots stale → to_merge becomes empty → blockcommit skipped.
+
+    When every snapshot in ``to_merge`` has already been removed from disk,
+    ``to_merge`` becomes empty after filtering.  The method logs an INFO
+    message and returns early without calling any lifecycle operations.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1 = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap2 = SnapshotInfo(
+        name="snap2",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+
+    retention = RetentionResult(keep=[], remove=["snap1", "snap2"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch("os.path.exists", return_value=False),
+        patch.object(
+            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
+        ) as remove_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Both stale entries removed from state
+    assert remove_spy.call_count == 2, (
+        f"Both stale snapshots should be removed from state, got {remove_spy.call_count}"
+    )
+
+    # Blockcommit NOT called (to_merge became empty)
+    bc_spy.assert_not_called()
+
+    # INFO log: skipping blockcommit
+    assert "All snapshots in to_merge were stale" in caplog.text, (
+        "Should log INFO about all snaps being stale"
+    )
+    assert "skipping blockcommit" in caplog.text
+
+
+def test_blockcommit_stale_guard_no_short_circuit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """One stale snapshot doesn't block blockcommit of subsequent valid snapshots.
+
+    When multiple snapshots are in ``to_merge`` and one in the middle is
+    stale, the stale entry is removed from state and skipped, but the
+    remaining valid snapshots still proceed to blockcommit.  This verifies
+    that a single stale entry does NOT short-circuit the entire operation.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap_a = SnapshotInfo(
+        name="snap_a",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_a.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap_stale = SnapshotInfo(
+        name="snap_stale",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_stale.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    snap_b = SnapshotInfo(
+        name="snap_b",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_b.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=3000,
+    )
+    mock_state.record_snapshot("testvm", snap_a)
+    mock_state.record_snapshot("testvm", snap_stale)
+    mock_state.record_snapshot("testvm", snap_b)
+
+    retention = RetentionResult(keep=[], remove=["snap_a", "snap_stale", "snap_b"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.WARNING)
+
+    def path_exists(path_str):
+        # Only the middle snapshot is stale
+        return "snap_stale" not in path_str
+
+    with (
+        patch("os.path.exists", side_effect=path_exists),
+        patch.object(core, "_get_chain_length", return_value=4),
+        patch.object(
+            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
+        ) as remove_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Only snap_stale removed from state
+    remove_spy_calls = [c.args[1] for c in remove_spy.call_args_list]
+    assert remove_spy_calls == ["snap_stale"], (
+        f"Only snap_stale should be removed from state, got: {remove_spy_calls}"
+    )
+
+    # WARNING logged for the single stale entry
+    assert "snap_stale" in caplog.text
+    assert "Stale state entry" in caplog.text
+
+    # Blockcommit called with the two surviving snapshots
+    assert bc_spy.called, (
+        "blockcommit should proceed despite one stale entry in the middle"
+    )
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert set(merge_names) == {"snap_a", "snap_b"}, (
+        f"snap_a and snap_b should be blockcommitted, snap_stale skipped; got: {merge_names}"
+    )
+    assert "snap_stale" not in merge_names, "stale snapshot must be excluded from blockcommit"

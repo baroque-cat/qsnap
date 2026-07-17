@@ -78,3 +78,7 @@ NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bit
 - **AND** it returns `(True, bucket_level)`
 - **THEN** `BitmapBackupProvider.create_full_backup()` is called and succeeds
 - **AND** the FULL is recorded in state with the given `bucket_level`
+
+### Requirement: NBD backup job termination via domjobabort
+
+`nbd_full_export()` SHALL call `virsh domjobabort --domain <vm>` in its `finally` block, before socket cleanup. On failure, a WARNING SHALL be logged but the error SHALL NOT propagate — socket cleanup proceeds regardless.

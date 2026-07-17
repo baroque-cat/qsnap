@@ -405,3 +405,29 @@ class JsonStateManager(IStateManager):
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})
         return list(target_deps.get(full_name, []))
+
+    def remove_full_backup(self, target_path: str, name: str) -> bool:
+        """Remove a full backup record from persistent state."""
+        data = self._load_full_backups()
+        entries = data.get(target_path, [])
+        original_len = len(entries)
+        data[target_path] = [e for e in entries if e.get("name") != name]
+        if len(data[target_path]) == original_len:
+            return False
+        self._save_full_backups(data)
+        return True
+
+    def remove_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> bool:
+        """Remove an incremental dependency from persistent state."""
+        data = self._load_dependencies()
+        target_deps = data.get(target_path, {})
+        deps = target_deps.get(full_name, [])
+        if incremental_name not in deps:
+            return False
+        deps.remove(incremental_name)
+        target_deps[full_name] = deps
+        data[target_path] = target_deps
+        self._save_dependencies(data)
+        return True

@@ -97,3 +97,23 @@ class IStateManager(ABC):
     def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         """Return the incremental backup names that depend on *full_name*."""
         ...
+
+    @abstractmethod
+    def remove_full_backup(self, target_path: str, name: str) -> bool:
+        """Remove the full backup record for *name* on *target_path*.
+
+        Returns ``True`` if the entry was found and removed, ``False``
+        if no matching entry existed.
+        """
+        ...
+
+    @abstractmethod
+    def remove_incremental_dependency(
+        self, target_path: str, incremental_name: str, full_name: str
+    ) -> bool:
+        """Remove a dependency record where *incremental_name* depends on *full_name*.
+
+        Returns ``True`` if the dependency was found and removed,
+        ``False`` if no matching dependency existed.
+        """
+        ...

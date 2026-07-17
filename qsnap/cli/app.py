@@ -158,6 +158,11 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run qemu-img check for corruption detection",
     )
+    check_parser.add_argument(
+        "--state",
+        action="store_true",
+        help="Verify consistency between persisted state and filesystem",
+    )
 
     # restore subcommand
     restore_parser = subparsers.add_parser(

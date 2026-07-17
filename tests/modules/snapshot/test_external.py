@@ -543,6 +543,230 @@ def test_risk_quiesce_no_silent_fallback(mock_shell, make_vm_config):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 3c. Lock conflict retry (design D5)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config):
+    """When the first ``virsh snapshot-create-as`` attempt fails with a lock
+    conflict error ('cannot acquire state change lock'), the provider retries
+    with exponential backoff.  After one retry succeeds, the overall
+    ``create()`` returns success and exactly 2 virsh attempts were made.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    # Pre-configure chmod and qemu-img info for the successful path
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    virsh_attempts: list[None] = []
+    original_run = mock_shell.run
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(None)
+            if len(virsh_attempts) == 1:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    returncode=1,
+                    error="error: internal error: cannot acquire state change lock",
+                )
+            return ShellResult(
+                success=True, stdout="", stderr="", returncode=0, error=None
+            )
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None),
+        patch.object(mock_shell, "run", side_effect=side_effect),
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    assert result.success is True
+    assert result.new_allocation == 1048576
+    assert result.error is None
+    assert len(virsh_attempts) == 2, (
+        f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), "
+        f"got {len(virsh_attempts)}"
+    )
+
+
+def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config):
+    """When all 3 virsh attempts fail with a lock conflict error, the provider
+    returns ``SnapshotResult(success=False)`` with the error from the last
+    attempt, and exactly 3 virsh calls were made.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    virsh_attempts: list[None] = []
+    original_run = mock_shell.run
+    lock_error = "error: internal error: cannot acquire state change lock"
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(None)
+            return ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                returncode=1,
+                error=lock_error,
+            )
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None),
+        patch.object(mock_shell, "run", side_effect=side_effect),
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    assert result.success is False
+    assert result.error == lock_error
+    assert len(virsh_attempts) == 3, (
+        f"Expected 3 virsh attempts (1 initial + 2 retries), "
+        f"got {len(virsh_attempts)}"
+    )
+
+
+def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
+    """When ``virsh snapshot-create-as`` fails with a non-lock error
+    ('No space left on device'), the provider fails immediately with NO
+    retry.  Exactly 1 virsh call is made.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    stderr_msg = "error: internal error: No space left on device"
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    assert result.success is False
+    assert result.error == stderr_msg
+    assert result.new_allocation == 0
+
+    virsh_cmds = [
+        " ".join(c.args[0])
+        for c in shell_spy.call_args_list
+        if "snapshot-create-as" in " ".join(c.args[0])
+    ]
+    assert len(virsh_cmds) == 1, (
+        f"Non-lock errors must NOT be retried; "
+        f"expected 1 virsh call, got {len(virsh_cmds)}"
+    )
+
+
+def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config):
+    """When ``virsh snapshot-create-as`` times out (returncode=-1) but the
+    error message contains 'cannot acquire state change lock', the provider
+    retries.  If the second attempt succeeds, the snapshot is created.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    # Pre-configure chmod and qemu-img info for the successful path
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    virsh_attempts: list[None] = []
+    original_run = mock_shell.run
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(None)
+            if len(virsh_attempts) == 1:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    returncode=-1,
+                    error=(
+                        "Command timed out after 120s: "
+                        "cannot acquire state change lock"
+                    ),
+                )
+            return ShellResult(
+                success=True, stdout="", stderr="", returncode=0, error=None
+            )
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None),
+        patch.object(mock_shell, "run", side_effect=side_effect),
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    assert result.success is True
+    assert result.new_allocation == 1048576
+    assert len(virsh_attempts) == 2, (
+        "Timeout with lock conflict should trigger retry; "
+        f"expected 2 virsh attempts, got {len(virsh_attempts)}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # 4. List backing chain with snapshots
 # ──────────────────────────────────────────────────────────────────────────
 

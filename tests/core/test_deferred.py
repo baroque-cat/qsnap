@@ -377,6 +377,7 @@ def test_risk_deferred_queue_grows_across_runs(
     )
 
     with (
+        patch("os.path.exists", return_value=True),
         patch.object(
             mock_factory._retention_engine,
             "evaluate",

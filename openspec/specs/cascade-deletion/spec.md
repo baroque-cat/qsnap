@@ -66,3 +66,11 @@ When a FULL is deleted, all incrementals that referenced it AND are not in the r
 #### Scenario: New format loaded as-is
 - **WHEN** `_full_backups.json` contains `{"target_path": [{"name": "...", ...}]}` (list value)
 - **THEN** it is loaded as-is without migration
+
+### Requirement: State cleanup when FULL backup is deleted
+
+When `Core._cleanup_backups()` deletes a FULL backup (after passing M1 verification), Core SHALL call `IStateManager.remove_full_backup(target_path, full_name)` to remove the `FullBackupInfo` entry from persistent state. This prevents phantom FULL entries from blocking future bucket-driven FULL creation. Deletion blocked by M1 failure SHALL NOT call `remove_full_backup()`.
+
+### Requirement: State cleanup when incremental backup is deleted
+
+When `Core._cleanup_backups()` cascade-deletes an orphaned incremental, Core SHALL call `IStateManager.remove_incremental_dependency(target_path, incremental_name, full_name)` to clean the dependency record.

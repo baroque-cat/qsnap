@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -29,8 +30,8 @@ from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
-    CheckResult,
     ChainVerifyResult,
+    CheckResult,
     DeferredBlockcommit,
     DeferredSummary,
     FullBackupInfo,
@@ -40,8 +41,10 @@ from qsnap.models.results import (
     ScheduleResult,
     SnapshotInfo,
     SnapshotResult,
+    StateCheckResult,
 )
 from qsnap.modules.backup.nbd_helper import is_vm_running, nbd_full_export
+from qsnap.modules.backup.verification import verify_full_backup
 from qsnap.retention.time_based import _parse_duration
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
@@ -1274,6 +1277,85 @@ class Core:
             return f"{size / 1024:.1f} KiB"
         return f"{size} B"
 
+    # ── state consistency check ─────────────────────────────────────────
+
+    def check_state(
+        self,
+        vm_filter: str | None = None,
+    ) -> dict[str, StateCheckResult]:
+        """Verify consistency between persisted state and filesystem.
+
+        Cross-references recorded snapshots, FULL backups, and incremental
+        dependencies against actual files on disk.  Reports phantom
+        entries (state records pointing to non-existent files).  The
+        check is read-only — it never deletes files or state entries.
+        """
+        vms = self._filter_vms(vm_filter)
+        results: dict[str, StateCheckResult] = {}
+        for vm in vms:
+            phantom_snapshots: list[str] = []
+            phantom_fulls: list[str] = []
+            stale_deps: list[str] = []
+            corrupt_files: list[str] = []
+            status_parts: list[str] = []
+
+            # ── Phantom snapshots ────────────────────────────────────
+            snapshots = self._state.get_snapshots(vm.name)
+            for sn in snapshots:
+                if not os.path.exists(str(sn.path)):
+                    phantom_snapshots.append(
+                        f"{sn.name} (expected: {sn.path})"
+                    )
+            if phantom_snapshots:
+                status_parts.append("stale_snapshots")
+
+            # ── Phantom FULLs ────────────────────────────────────────
+            for target in vm.targets:
+                fulls = self._state.get_full_backups(str(target.path))
+                for full in fulls:
+                    if not os.path.exists(str(full.path)):
+                        phantom_fulls.append(
+                            f"{full.name} (target: {target.path})"
+                        )
+                # ── Stale dependencies ───────────────────────────────
+                for full in fulls:
+                    deps = self._state.get_incremental_dependencies(
+                        str(target.path), full.name
+                    )
+                    for dep_name in deps:
+                        dep_path = target.path / f"{dep_name}.qcow2"
+                        if not os.path.exists(str(dep_path)):
+                            stale_deps.append(
+                                f"{dep_name} → {full.name} "
+                                f"(target: {target.path})"
+                            )
+            if phantom_fulls:
+                status_parts.append("stale_fulls")
+            if stale_deps:
+                status_parts.append("stale_deps")
+
+            # ── Corrupt state files ──────────────────────────────────
+            state_dir = Path(self._config.get_global().state_dir)
+            vm_state_path = state_dir / f"{vm.name}.json"
+            if vm_state_path.exists():
+                try:
+                    with open(vm_state_path, encoding="utf-8") as fh:
+                        json.load(fh)
+                except (json.JSONDecodeError, OSError) as exc:
+                    corrupt_files.append(f"{vm_state_path}: {exc}")
+                    status_parts.append("corrupt_state")
+
+            status = ":".join(status_parts) if status_parts else "ok"
+            results[vm.name] = StateCheckResult(
+                vm_name=vm.name,
+                status=status,
+                phantom_snapshots=phantom_snapshots,
+                phantom_fulls=phantom_fulls,
+                stale_deps=stale_deps,
+                corrupt_files=corrupt_files,
+            )
+        return results
+
     # ── pipeline runner ────────────────────────────────────────────────
 
     def _run_pipeline(
@@ -1460,6 +1542,31 @@ class Core:
                     "Pre-flight cleanup: removed %d stale file(s)",
                     removed_count,
                 )
+
+            # (d) Detect truncated .qcow2 files on backup targets
+            #     (partial rsync artifacts).  Only scan non-FULL .qcow2
+            #     files — FULL files are verified at lifecycle points.
+            for target_dir in (t.path for t in vm_config.targets):
+                for qcow2_file in target_dir.glob("*.qcow2"):
+                    # Skip FULL anchor files (verified elsewhere)
+                    if ".FULL." in qcow2_file.name:
+                        continue
+                    info_result = self._shell.run(
+                        ["qemu-img", "info", "--output=json", str(qcow2_file)],
+                        timeout=10,
+                        check=True,
+                    )
+                    if not info_result.success:
+                        self._shell.run(
+                            ["rm", "-f", str(qcow2_file)],
+                            timeout=10,
+                            check=True,
+                        )
+                        logger.warning(
+                            "Stale partial transfer detected and deleted: %s",
+                            qcow2_file,
+                        )
+                        removed_count += 1
 
             # (c) Detect orphan .qcow2 files (warning only, do NOT delete)
             # Only consider files matching the qsnap naming pattern:
@@ -2036,6 +2143,29 @@ class Core:
         if not to_merge:
             return
 
+        # Stale state self-healing: before blockcommit, verify every snapshot
+        # file still exists on disk.  If a file was already blockcommitted by a
+        # prior run that failed to update state (pre-acde50c bug), remove the
+        # stale entry and skip it.  This prevents one stale entry from
+        # short-circuiting ALL subsequent blockcommits.
+        filtered: list[SnapshotInfo] = []
+        for sn in to_merge:
+            if os.path.exists(str(sn.path)):
+                filtered.append(sn)
+            else:
+                self._state.remove_snapshot(vm_config.name, sn.name)
+                logger.warning(
+                    "Stale state entry: snapshot %s file not found on disk "
+                    "— removed from state",
+                    sn.name,
+                )
+        to_merge = filtered
+        if not to_merge:
+            logger.info(
+                "All snapshots in to_merge were stale — skipping blockcommit"
+            )
+            return
+
         if self._preserve_snapshots:
             logger.info(
                 "[preserve] Skipping blockcommit of %d snapshots for VM %s",
@@ -2379,6 +2509,25 @@ class Core:
         # Check for bucket-driven FULL backup necessity (design D1)
         if snapshots:
             all_fulls = self._state.get_full_backups(str(target.path))
+            # Filter out phantom FULLs — entries in state whose files
+            # no longer exist (deleted externally, disk failure, etc.).
+            # Phantom FULLs block bucket-driven FULL creation because
+            # _should_create_bucket_full sees an existing FULL for the
+            # period and skips creation.
+            filtered_fulls: list[FullBackupInfo] = []
+            for full in all_fulls:
+                if os.path.exists(str(full.path)):
+                    filtered_fulls.append(full)
+                else:
+                    self._state.remove_full_backup(
+                        str(target.path), full.name
+                    )
+                    logger.warning(
+                        "Phantom FULL entry: %s file not found on "
+                        "disk — removed from state",
+                        full.name,
+                    )
+            all_fulls = filtered_fulls
             policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
             should_full, bucket_level = self._should_create_bucket_full(
                 target, policy, all_fulls, snapshots[-1].timestamp
@@ -2405,14 +2554,44 @@ class Core:
                         bucket_level=bucket_level,
                     )
                     if full_result.success:
-                        full_name = full_result.target_path.stem
-                        logger.info(
-                            "Created %s-bucket FULL backup for VM %s target %s: %s",
-                            bucket_level,
-                            vm_config.name,
-                            target.path,
-                            full_name,
+                        # ── Post-create FULL backup verification ────
+                        global_cfg = self._config.get_global()
+                        verify_error = verify_full_backup(
+                            self._shell,
+                            full_result.target_path,
+                            global_cfg.full_verify_after_create,
+                            source_path=most_recent.path,
                         )
+                        if verify_error is not None:
+                            self._shell.run(
+                                ["rm", "-f", str(full_result.target_path)],
+                                timeout=10,
+                            )
+                            backup_failed = True
+                            logger.warning(
+                                "FULL backup verification failed for VM %s "
+                                "target %s — file deleted: %s",
+                                vm_config.name,
+                                target.path,
+                                verify_error,
+                            )
+                        else:
+                            full_name = full_result.target_path.stem
+                            # Record FULL in state (caller's responsibility
+                            # after verification — per core-orchestrator spec).
+                            self._state.record_full_backup(
+                                str(target.path),
+                                f"{full_name}.qcow2",
+                                most_recent.timestamp,
+                                bucket_level,
+                            )
+                            logger.info(
+                                "Created %s-bucket FULL backup for VM %s target %s: %s",
+                                bucket_level,
+                                vm_config.name,
+                                target.path,
+                                full_name,
+                            )
                     else:
                         logger.warning(
                             "Full backup failed for VM %s target %s: %s",
@@ -2529,9 +2708,50 @@ class Core:
                         len(ghosted),
                     )
                     continue
-                # No dependents in keep-set — delete FULL
+                # No dependents in keep-set — verify FULL integrity before deletion
+                # M1 (metadata) verification is NON-CONFIGURABLE — always enforced
+                # to prevent data loss from cascade-deleting a corrupt FULL.
+                m1_error = verify_full_backup(
+                    self._shell, backup.path, "metadata"
+                )
+                if m1_error is not None:
+                    logger.critical(
+                        "FULL backup %s is corrupt — blocking deletion of "
+                        "FULL and %d dependent incrementals to prevent "
+                        "data loss. Run: qsnap check --deep %s. Error: %s",
+                        backup.name,
+                        len(dependents),
+                        target.path,
+                        m1_error,
+                    )
+                    continue
+
+                # M2 verification (configurable via full_verify_before_delete)
+                global_cfg = self._config.get_global()
+                if global_cfg.full_verify_before_delete == "check":
+                    m2_error = verify_full_backup(
+                        self._shell, backup.path, "check"
+                    )
+                    if m2_error is not None:
+                        logger.critical(
+                            "FULL backup %s failed M2 check — blocking "
+                            "deletion of FULL and %d dependent "
+                            "incrementals. Run: qsnap check --deep %s. "
+                            "Error: %s",
+                            backup.name,
+                            len(dependents),
+                            target.path,
+                            m2_error,
+                        )
+                        continue
+
+                # No dependents in keep-set AND M1 (and optionally M2) passed
+                # — delete FULL
                 provider.delete(backup)
                 logger.info("Deleted FULL backup: %s", backup.name)
+                # Clean up state: remove FullBackupInfo from persistent state
+                # to prevent phantom FULLs from blocking future FULL creation.
+                self._state.remove_full_backup(str(target.path), backup.name)
                 # Cascade-delete orphaned incrementals not in keep-set
                 for dep_name in dependents:
                     if dep_name not in keep_set:
@@ -2542,6 +2762,12 @@ class Core:
                             allocation=0,
                         )
                         provider.delete(dep_backup)
+                        # Clean up state: remove the incremental→FULL
+                        # dependency to prevent ghost retention on
+                        # already-deleted incrementals.
+                        self._state.remove_incremental_dependency(
+                            str(target.path), dep_name, backup.name
+                        )
                         logger.info(
                             "Cascade-deleted orphaned incremental: %s",
                             dep_name,

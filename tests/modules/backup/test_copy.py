@@ -9,8 +9,10 @@ Design decisions verified:
 - **D1**: ``FileCopyBackupProvider`` does NOT inherit from ``Core``; its
   dependencies are ``IShell`` (required) and ``IStateManager`` (optional).
 - **D3**: All transfers use ``rsync`` exclusively (no ``cp`` fallback).
-- **D4**: When ``copy_base`` is False (default) and target is empty,
-  ``create_full_backup()`` is called instead of rsync for the first snapshot.
+- **D4**: REMOVED.  ``transfer_missing`` no longer calls
+  ``create_full_backup()``.  All snapshots (including the first to an
+  empty target) are transferred via ``rsync`` — the ``copy_base``
+  config flag is now advisory and no longer triggers FULL creation.
 - **D5**: For incremental backups, ``qemu-img rebase -u -b <bare_filename>``
   is used to update the backing path to a bare filename in the target
   directory (metadata-only update, no data copy).
@@ -23,7 +25,7 @@ Transfer Missing:
 4. Non-incremental backup — no rebase.
 5. Transfer fails — rsync error.
 6. Rate-limited transfer via rsync --bwlimit.
-7. copy_base=false triggers create_full_backup on empty target.
+7. copy_base=false with empty target — rsync used (no create_full_backup).
 8. copy_base=true allows direct rsync transfer.
 List Backups:
 9. Target directory exists with backups.
@@ -38,13 +40,42 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_shell import MockShell
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Autouse fixture: ensure fake snapshot paths pass os.path.exists check
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _ensure_snapshot_paths_exist(monkeypatch):
+    """Make os.path.exists return True for fake snapshot paths in tests.
+
+    The stale state guard in ``transfer_missing`` checks
+    ``os.path.exists(snapshot.path)`` before rsync.  Most tests use
+    fake paths like ``/snapshots/testvm.X.qcow2`` that don't exist on
+    disk.  This fixture patches ``os.path.exists`` to return True for
+    those paths while preserving real behavior for everything else.
+    """
+    real_exists = os.path.exists
+
+    def _fake_exists(path):
+        path_str = str(path)
+        if "/snapshots/" in path_str:
+            return True
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", _fake_exists)
 
 # ──────────────────────────────────────────────────────────────────────────
 # Transfer Missing — rsync-based (no cp fallback — design D3)
@@ -244,6 +275,8 @@ def test_transfer_incremental_rebase_backing_path(
     # CRITICAL: backing path is the bare filename, not the full source path
     assert "-b backing.qcow2" in rebase_cmd
     assert "/source/path/backing.qcow2" not in rebase_cmd
+    # CRITICAL: -F qcow2 flag is present (design D5 extension)
+    assert "-F qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -1545,11 +1578,15 @@ def test_nbd_full_file_copy_no_checkpoint_created(mock_shell, make_target, tmp_p
 def test_nbd_full_timestamp_matches_snapshot_not_export_time(
     mock_shell, make_target, tmp_path, mock_state
 ):
-    """The FULL backup recorded in state uses the snapshot timestamp, not
-    the NBD export time.
+    """``create_full_backup()`` no longer calls ``record_full_backup()``
+    itself — that responsibility has moved to callers
+    (``transfer_missing`` D4 path, Core's ``_backup_target``).
 
-    ``record_full_backup()`` is called with ``source_snapshot.timestamp``
-    for retention bucket alignment.
+    The FULL backup result still uses ``source_snapshot.timestamp`` for
+    retention bucket alignment — callers pass that timestamp to
+    ``record_full_backup()``.  Here we verify that ``create_full_backup``
+    returns the correct timestamp (embedded in the filename) but does NOT
+    record state itself.
     """
     target = make_target(path=str(tmp_path / "backups"))
     target.path.mkdir(parents=True, exist_ok=True)
@@ -1604,15 +1641,19 @@ def test_nbd_full_timestamp_matches_snapshot_not_export_time(
 
     assert result.success is True
 
-    # Verify FULL recorded with snapshot timestamp
+    # Verify create_full_backup does NOT record state itself — callers do it.
     full_backups = mock_state.get_full_backups(str(target.path))
-    assert len(full_backups) == 1
-    assert full_backups[0].timestamp == snapshot.timestamp, (
-        f"FULL should be recorded with snapshot timestamp "
-        f"({snapshot.timestamp}), not NBD export time "
-        f"({full_backups[0].timestamp})"
+    assert len(full_backups) == 0, (
+        "create_full_backup should NOT call record_full_backup — "
+        "callers are responsible for recording state"
     )
-    assert full_backups[0].bucket_level == "monthly"
+
+    # Verify the result filename still embeds the snapshot timestamp
+    # (callers use source_snapshot.timestamp for retention alignment).
+    assert "20250101" in str(result.target_path), (
+        f"FULL filename should embed snapshot date 20250101, "
+        f"got: {result.target_path}"
+    )
 
 
 def test_nbd_full_old_libvirt_falls_back_direct_convert(mock_shell, make_target, tmp_path, caplog):
@@ -2035,11 +2076,19 @@ def test_transfer_missing_rebases_to_full_anchor(mock_shell, make_vm_config, mak
 
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
-    # list() calls qemu-img info on the existing anchor file
+    # list() calls qemu-img info on the existing anchor file.
+    # Also used by verify_full_backup() for M1 on the anchor candidate.
+    # Must include format/virtual-size for M1 to pass.
     mock_shell.expect(r"qemu-img info").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps({"actual-size": 1024}),
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1024,
+                }
+            ),
             stderr="",
             returncode=0,
             error=None,
@@ -2085,6 +2134,8 @@ def test_transfer_missing_rebases_to_full_anchor(mock_shell, make_vm_config, mak
     assert " -u " in rebase_cmd
     # CRITICAL: backing path is the bare anchor filename prefixed with ./
     assert f"./{anchor_name}" in rebase_cmd
+    # CRITICAL: -F qcow2 flag is present
+    assert "-F qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -2195,6 +2246,8 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     # CRITICAL: backing path is the bare filename from source, not full path
     assert "-b backing.qcow2" in rebase_cmd
     assert "/source/path/backing.qcow2" not in rebase_cmd
+    # CRITICAL: -F qcow2 flag is present (design D5 extension)
+    assert "-F qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -2605,53 +2658,43 @@ def test_copy_base_false_prevents_base_copy(
     mock_shell, make_vm_config, make_target, tmp_path, mock_state
 ):
     """When ``copy_base=False`` (default) and the target is empty,
-    ``transfer_missing`` triggers ``create_full_backup()`` for the
-    first (most recent) snapshot instead of rsync.  No rsync is called
-    for that snapshot.
+    ``transfer_missing`` does NOT call ``create_full_backup()`` — the D4
+    code path has been removed.
 
-    Verifies design D4: first backup to empty target is always a FULL via
-    ``qemu-img convert``, and ``record_full_backup()`` is called on state.
+    Instead, the snapshot is transferred via ``rsync`` (normal transfer
+    behavior), just like the ``copy_base=True`` case.
+
+    Verifies that ``qemu-img convert`` is never called, ``rsync`` is used
+    instead, and no FULL backup state is recorded.
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "backups"),
+        path=str(tmp_path / "nonexistent_target"),
         incremental=False,
         verify="off",
         copy_base=False,
     )
-    target.path.mkdir(parents=True, exist_ok=True)
 
-    snapshots = [
-        SnapshotInfo(
-            name="testvm.20250101T000000",
-            path=Path("/snapshots/testvm.20250101T000000.qcow2"),
-            timestamp=datetime(2025, 1, 1, 0, 0, 0),
-            allocation=65536,
-        ),
-    ]
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
 
-    # Mock qemu-img convert returns success
-    mock_shell.expect(r"qemu-img convert").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    # Mock mv (atomic rename) returns success
-    mock_shell.expect(r"^mv ").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    # Mock rsync (for subsequent incremental transfer after FULL)
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # Mock rsync returns success
     mock_shell.expect(r"^rsync").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    # Side effect: simulate mv creating the final file so stat() works
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("mv "):
-            target_file = Path(cmd[-1])
-            target_file.write_bytes(b"\x00" * 65536)
-        elif cmd_str.startswith("rsync "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -2659,27 +2702,123 @@ def test_copy_base_false_prevents_base_copy(
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
-        results = provider.transfer_missing(vm_config, target, snapshots, rate_limit="no")
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
-    # First result is from create_full_backup
-    # Second result is from rsync of the same snapshot (FULL name ≠ snapshot name)
-    assert len(results) == 2
-    assert results[0].success is True  # FULL creation
-    assert results[1].success is True  # rsync transfer
+    # Only ONE result: the rsync transfer.  No FULL creation.
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].target_path == expected_target_file
 
-    # Both qemu-img convert and rsync were called
+    # rsync was called (normal transfer behavior)
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
-    assert len(rsync_cmds) == 1, (
-        "rsync should be called for subsequent transfer after FULL creation"
-    )
-    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
-    assert len(convert_cmds) == 1
+    assert len(rsync_cmds) == 1
 
-    # State was notified: record_full_backup was called
+    # qemu-img convert is NOT called — D4 path is removed
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, (
+        "qemu-img convert should NOT be called from transfer_missing — "
+        "D4 code path has been removed"
+    )
+
+    # No FULL backup state was recorded
     full_backups = mock_state.get_full_backups(str(target.path))
-    assert len(full_backups) == 1
-    assert full_backups[0].bucket_level == "monthly"
+    assert len(full_backups) == 0, (
+        "transfer_missing should NOT record FULL backup state — "
+        "D4 code path has been removed"
+    )
+
+
+def test_transfer_missing_does_not_create_full_when_empty_target(
+    mock_shell, make_vm_config, make_target, tmp_path, mock_state
+):
+    """When the target is empty (``list()`` returns ``[]``),
+    ``transfer_missing`` does NOT call ``create_full_backup()`` — the D4
+    code path has been removed.
+
+    The snapshot is transferred via ``rsync`` normally.  No
+    ``qemu-img convert`` command is ever issued, and no FULL backup
+    state is recorded.  This applies regardless of the ``copy_base``
+    setting.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        copy_base=False,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # Side effect: simulate rsync creating the target file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell, state=mock_state)
+
+        # Spy on create_full_backup to verify it is never called
+        with patch.object(
+            provider, "create_full_backup", wraps=provider.create_full_backup
+        ) as full_spy:
+            results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
+
+    # Only ONE result: the rsync transfer.  No FULL creation.
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+    assert results[0].bytes_transferred == 65536
+    assert results[0].snapshot_name == snapshot.name
+    assert results[0].target_path == expected_target_file
+
+    # create_full_backup was NEVER called
+    assert full_spy.call_count == 0, (
+        f"create_full_backup should NOT be called from transfer_missing — "
+        f"D4 code path has been removed.  Got {full_spy.call_count} call(s)."
+    )
+
+    # rsync was called (normal transfer behavior)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+
+    # qemu-img convert is NOT called — D4 path is removed
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, (
+        "qemu-img convert should NOT be called from transfer_missing — "
+        "D4 code path has been removed"
+    )
+
+    # verify commands don't include mv (no FULL creation rename)
+    mv_cmds = [cmd for cmd in all_cmds if cmd.startswith("mv ")]
+    assert len(mv_cmds) == 0, "mv should not be called — no FULL creation"
+
+    # No FULL backup state was recorded
+    full_backups = mock_state.get_full_backups(str(target.path))
+    assert len(full_backups) == 0, (
+        "transfer_missing should NOT record FULL backup state — "
+        "D4 code path has been removed"
+    )
 
 
 def test_copy_base_true_allows_base_copy(mock_shell, make_vm_config, make_target, tmp_path):
@@ -2949,67 +3088,45 @@ def test_create_full_backup_dotted_vm_name(mock_shell, make_target, tmp_path):
 def test_transfer_missing_passes_vm_name_to_create_full(
     mock_shell, make_vm_config, make_target, tmp_path, mock_state
 ):
-    """Spec: ``transfer_missing`` passes ``vm_config.name`` as the first
-    positional argument to ``create_full_backup``.
+    """Spec: ``transfer_missing`` no longer calls ``create_full_backup``
+    — the D4 code path has been removed (see design-D4-removal).
 
     When ``copy_base=False`` (default) and the target is empty,
-    ``transfer_missing`` internally calls ``create_full_backup`` for the
-    first snapshot.  The ``vm_config.name`` is passed directly — even
-    when it contains dots (e.g. ``"3.Projects_opencode"``).
+    ``transfer_missing`` now uses ``rsync`` for the snapshot instead.
+    ``create_full_backup()`` is NOT called from within
+    ``transfer_missing()`` — it is only invoked by Core orchestration
+    (e.g. ``_backup_target`` for bucket-triggered FULL anchors).
 
-    Uses ``unittest.mock.patch.object`` to spy on ``create_full_backup``
-    and verify the first positional arg.
+    Verifies that ``create_full_backup`` is never called, regardless of
+    ``vm_config.name`` content (including dotted names like
+    ``"3.Projects_opencode"``).
     """
     vm_config = make_vm_config(name="3.Projects_opencode")
     target = make_target(
-        path=str(tmp_path / "backups"),
+        path=str(tmp_path / "nonexistent_target"),
         incremental=False,
         verify="off",
         copy_base=False,
     )
-    target.path.mkdir(parents=True, exist_ok=True)
 
-    snapshots = [
-        SnapshotInfo(
-            name="testvm.20250101T000000",
-            path=Path("/snapshots/testvm.20250101T000000.qcow2"),
-            timestamp=datetime(2025, 1, 1, 0, 0, 0),
-            allocation=65536,
-        ),
-    ]
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
 
-    # VM is stopped → direct qemu-img convert path
-    mock_shell.expect_first("virsh dominfo").returns(
-        ShellResult(
-            success=True,
-            stdout=("Id: -\nName: 3.Projects_opencode\nState: shut off\n"),
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    # qemu-img convert (from create_full_backup)
-    mock_shell.expect(r"qemu-img convert").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    # mv (atomic rename after convert)
-    mock_shell.expect(r"^mv ").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    # rsync (for subsequent transfer of the snapshot itself)
+    # Mock rsync returns success
     mock_shell.expect(r"^rsync").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    # Side effect: simulate mv and rsync creating files so stat() works.
+    # Side effect: simulate rsync creating the target file so stat() works.
     original_run = mock_shell.run
 
     def spied_run(cmd, timeout):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("mv "):
-            target_file = Path(cmd[-1])
-            target_file.write_bytes(b"\x00" * 65536)
-        elif cmd_str.startswith("rsync "):
+        if cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
@@ -3018,35 +3135,29 @@ def test_transfer_missing_passes_vm_name_to_create_full(
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
 
-        # Spy on create_full_backup to capture call arguments
+        # Spy on create_full_backup to verify it is never called
         with patch.object(
             provider, "create_full_backup", wraps=provider.create_full_backup
         ) as full_spy:
-            results = provider.transfer_missing(vm_config, target, snapshots, rate_limit="no")
+            results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
-    # transfer_missing returns 2 results: FULL creation + rsync transfer
-    assert len(results) == 2
+    # transfer_missing returns exactly 1 result: the rsync transfer.
+    # No FULL creation result is included.
+    assert len(results) == 1
     assert results[0].success is True
-    assert results[1].success is True
 
-    # Verify create_full_backup was called with vm_config.name
-    assert full_spy.call_count == 1
-    call_args = full_spy.call_args[0]  # positional args tuple
-    assert call_args[0] == "3.Projects_opencode", (
-        f"create_full_backup first arg should be vm_config.name "
-        f"('3.Projects_opencode'), got: {call_args[0]}"
+    # create_full_backup was NOT called — D4 path is removed
+    assert full_spy.call_count == 0, (
+        f"create_full_backup should NOT be called from transfer_missing — "
+        f"D4 code path has been removed. Got {full_spy.call_count} call(s)."
     )
 
-    # Verify the FULL backup file uses the dotted VM name
-    assert results[0].target_path is not None
-    assert "3.Projects_opencode.FULL." in str(results[0].target_path), (
-        f"Full backup file should use dotted VM name, got: {results[0].target_path}"
-    )
-
-    # State was notified: record_full_backup was called
+    # No FULL backup state was recorded
     full_backups = mock_state.get_full_backups(str(target.path))
-    assert len(full_backups) == 1
-    assert full_backups[0].bucket_level == "monthly"
+    assert len(full_backups) == 0, (
+        "transfer_missing should NOT record FULL backup state — "
+        "D4 code path has been removed"
+    )
 
 
 def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
@@ -3153,3 +3264,780 @@ def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
     assert "3.Projects_opencode.FULL." in str(result.target_path), (
         f"Full backup file should use dotted VM name, got: {result.target_path}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# -F qcow2 flag (design D5 extension)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_incremental_rebase_with_F_qcow2(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """The rebase command includes ``-F qcow2`` (backing file format)
+    when rebasing an incremental snapshot to a FULL anchor or source
+    backing file.
+
+    Design D5 extension: ``-F qcow2`` ensures ``qemu-img rebase -u``
+    can resolve the backing file regardless of security context or
+    metadata format ambiguity.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=True,
+        verify="off",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info on source returns JSON with backing-filename
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "actual-size": 65536,
+                    "backing-filename": "/source/path/backing.qcow2",
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img rebase succeeds
+    mock_shell.expect(r"qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # Side effect: simulate rsync creating the target file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 1
+    rebase_cmd = rebase_cmds[0]
+
+    # CRITICAL: -F qcow2 flag MUST be present
+    assert "-F" in rebase_cmd
+    assert "qcow2" in rebase_cmd
+    # Verify -F qcow2 appears as a contiguous pair
+    assert "-F qcow2" in rebase_cmd
+    assert "-u" in rebase_cmd
+    assert "-b" in rebase_cmd
+
+
+def test_transfer_no_full_anchor_rebase_with_F_flag(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When no FULL anchor exists and the rebase uses the source backing
+    filename, the ``-F qcow2`` flag is STILL included.
+
+    Both rebase code paths (FULL-anchor and source-backing fallback) use
+    the ``-F qcow2`` flag consistently.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=True,
+        verify="off",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info on source returns backing-filename
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "actual-size": 65536,
+                    "backing-filename": "/var/lib/qemu/base.qcow2",
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img rebase succeeds
+    mock_shell.expect(r"qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 1
+    rebase_cmd = rebase_cmds[0]
+
+    # Both -u and -F qcow2 are present (no-FULL-anchor fallback path)
+    assert "-F qcow2" in rebase_cmd
+    assert "-u" in rebase_cmd
+    assert "-b base.qcow2" in rebase_cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# FULL anchor M1 verification before rebase
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_missing_rebases_to_full_anchor_m1_passes(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When a FULL anchor exists and M1 verification
+    (``verify_full_backup(shell, anchor, "metadata")``) passes, the
+    incremental snapshot is rebased to the anchor.
+
+    M1 verification checks via ``qemu-img info`` that the anchor is
+    valid qcow2 (format="qcow2").
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=True,
+        verify="off",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create a FULL anchor file
+    anchor_name = "testvm.FULL.20250101.qcow2"
+    anchor_file = target.path / anchor_name
+    anchor_file.write_bytes(b"\x00" * 1024)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250102T000000",
+        path=Path("/snapshots/testvm.20250102T000000.qcow2"),
+        timestamp=datetime(2025, 1, 2, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # qemu-img info for list() on the anchor AND for M1 verification
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1024,
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img rebase succeeds
+    mock_shell.expect(r"qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify rebase command uses the FULL anchor
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 1
+    assert f"./{anchor_name}" in rebase_cmds[0]
+    assert "-F qcow2" in rebase_cmds[0]
+
+    # qemu-img info was NOT called on the source (anchor path skips source query)
+    source_info_cmds = [
+        cmd for cmd in all_cmds if "qemu-img info" in cmd and str(snapshot.path) in cmd
+    ]
+    assert len(source_info_cmds) == 0
+
+
+def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When M1 verification fails on the newest FULL anchor, the system
+    tries the next older anchor.  If that one passes, the rebase uses
+    the older anchor.
+
+    M1 failure is simulated via ``qemu-img info`` returning a non-qcow2
+    format (e.g. ``"raw"``) for the newer anchor, causing
+    ``verify_full_backup`` to report ``"expected format qcow2"``.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=True,
+        verify="off",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create TWO FULL anchors — newer (M1 FAILS) and older (M1 PASSES)
+    older_anchor_name = "testvm.FULL.20250101.qcow2"
+    newer_anchor_name = "testvm.FULL.20250102.qcow2"
+    (target.path / newer_anchor_name).write_bytes(b"\x00" * 1024)
+    (target.path / older_anchor_name).write_bytes(b"\x00" * 1024)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250103T000000",
+        path=Path("/snapshots/testvm.20250103T000000.qcow2"),
+        timestamp=datetime(2025, 1, 3, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # ── qemu-img info mocks ──
+    # Newer anchor → M1 FAILS (format is "raw", not "qcow2")
+    mock_shell.expect_first(
+        rf"qemu-img info.*{newer_anchor_name}"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Older anchor → M1 PASSES (format is "qcow2")
+    mock_shell.expect_first(
+        rf"qemu-img info.*{older_anchor_name}"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {"format": "qcow2", "virtual-size": 1073741824, "actual-size": 1024}
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Generic fallback for any other qemu-img info calls
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 65536}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # rsync
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img rebase
+    mock_shell.expect(r"qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify rebase uses the OLDER anchor (the one that passed M1)
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 1
+    assert f"./{older_anchor_name}" in rebase_cmds[0], (
+        f"Rebase should use older anchor '{older_anchor_name}' "
+        f"(the one that passed M1), got: {rebase_cmds[0]}"
+    )
+    assert f"./{newer_anchor_name}" not in rebase_cmds[0], (
+        f"Rebase should NOT use newer anchor '{newer_anchor_name}' "
+        f"(it failed M1)"
+    )
+    assert "-F qcow2" in rebase_cmds[0]
+
+
+def test_transfer_missing_no_rebase_when_no_valid_full(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When all FULL anchors fail M1 verification, no rebase is performed.
+    The snapshot transfer succeeds but no ``qemu-img rebase`` command is
+    executed.
+
+    The old behavior was to fall back to the source backing file, but
+    the new logic deliberately skips rebase when no valid FULL anchor
+    can be found (avoids linking incrementals to a potentially corrupt
+    anchor chain).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=True,
+        verify="off",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create a FULL anchor that will FAIL M1
+    anchor_name = "testvm.FULL.20250101.qcow2"
+    anchor_file = target.path / anchor_name
+    anchor_file.write_bytes(b"\x00" * 1024)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250102T000000",
+        path=Path("/snapshots/testvm.20250102T000000.qcow2"),
+        timestamp=datetime(2025, 1, 2, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Anchor → M1 FAILS (format is not qcow2)
+    mock_shell.expect_first(
+        rf"qemu-img info.*{anchor_name}"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Fallback for any other qemu-img info calls
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 65536}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], rate_limit="no"
+        )
+
+    # Transfer succeeds — no rebase performed (all anchors failed M1)
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 0, (
+        "No rebase should be performed when all FULL anchors fail M1"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Stale state self-healing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_missing_stale_snapshot_skipped(
+    mock_shell, make_vm_config, make_target, tmp_path, mock_state
+):
+    """When a snapshot exists in state but the file has been removed from
+    disk (e.g. blockcommitted by a prior run), it is silently skipped,
+    removed from state, and no transfer attempt is made.
+
+    A WARNING is logged about the stale state entry.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        # Path deliberately outside /snapshots/ so autouse fixture does NOT
+        # intercept os.path.exists — the stale guard SHOULD fire.
+        path=Path("/stale_snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Pre-populate state so we can verify removal
+    mock_state.record_snapshot(vm_config.name, snapshot)
+    assert len(mock_state.get_snapshots(vm_config.name)) == 1
+
+    # The file does NOT exist on disk → stale guard fires.
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell, state=mock_state)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Stale snapshot skipped — no results
+    assert len(results) == 0
+
+    # No rsync or qemu-img commands were called
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 0, "No rsync should be called for stale snapshot"
+    qemu_cmds = [cmd for cmd in all_cmds if "qemu-img" in cmd]
+    assert len(qemu_cmds) == 0
+
+    # State entry was removed
+    remaining = mock_state.get_snapshots(vm_config.name)
+    assert len(remaining) == 0, (
+        f"Stale snapshot should be removed from state, got {len(remaining)} entries"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# NBD: domjobabort + socket cleanup
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_nbd_socket_and_domjobabort_on_success(
+    mock_shell, make_target, tmp_path
+):
+    """When ``create_full_backup`` via NBD succeeds, ``virsh domjobabort``
+    is called in the ``finally`` block before the socket ``rm -f``.
+
+    The domjobabort releases the VM state change lock held by the
+    ``virsh backup-begin`` job.  Socket cleanup follows abort.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # domjobabort (called in finally)
+    mock_shell.expect("domjobabort").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify domjobabort was called
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        f"Expected 1 domjobabort call in finally block, got: {abort_cmds}"
+    )
+    assert "--domain testvm" in abort_cmds[0]
+
+    # Verify socket rm -f was called (before backup-begin AND in finally)
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    socket_rm_cmds = [cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd]
+    assert len(socket_rm_cmds) == 2, (
+        f"Expected 2 socket rm -f calls (stale removal + finally), got: {socket_rm_cmds}"
+    )
+
+    # domjobabort runs AFTER backup-begin but BEFORE final socket rm
+    backup_cmds_list = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    backup_idx = all_cmds.index(backup_cmds_list[0]) if backup_cmds_list else -1
+    abort_idx = all_cmds.index(abort_cmds[0])
+    assert abort_idx > backup_idx, (
+        "domjobabort should run after backup-begin"
+    )
+
+
+def test_nbd_cleanup_on_failure_domjobabort(
+    mock_shell, make_target, tmp_path
+):
+    """When ``qemu-img convert`` (NBD pull) fails, ``virsh domjobabort``
+    is still called in the ``finally`` block.
+
+    The VM state change lock must be released even when the export fails.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img convert FAILS
+    convert_error = "NBD connection reset"
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=convert_error,
+            returncode=1,
+            error=convert_error,
+        )
+    )
+    # domjobabort STILL called (in finally)
+    mock_shell.expect("domjobabort").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
+        )
+
+    assert result.success is False
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # domjobabort was called despite qemu-img convert failure
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        f"domjobabort should be called in finally even on failure, got: {abort_cmds}"
+    )
+
+    # Socket rm -f was still called (cleanup in finally)
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    socket_rm_cmds = [cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd]
+    # At least 1 socket rm (stale removal before backup-begin) + final rm
+    assert len(socket_rm_cmds) >= 1, (
+        f"Socket rm -f should run in finally even on failure, got: {socket_rm_cmds}"
+    )
+
+
+def test_risk_domjobabort_fails_gracefully(
+    mock_shell, make_target, tmp_path, caplog
+):
+    """When ``virsh domjobabort`` itself fails (e.g. job already
+    terminated), a WARNING is logged but the failure does NOT propagate
+    — socket cleanup proceeds and the backup result is still returned.
+
+    The domjobabort is best-effort; its failure should not mask the
+    underlying backup operation result.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # domjobabort FAILS (job already terminated)
+    domjob_error = "error: Requested operation is not valid: domain is not running"
+    mock_shell.expect("domjobabort").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=domjob_error,
+            returncode=1,
+            error=domjob_error,
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.nbd_helper")
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
+        )
+
+    # Verify the expected behaviors:
+    # 1. WARNING logged about domjobabort failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("domjobabort failed" in msg for msg in warnings), (
+        f"Expected 'domjobabort failed' WARNING, got: {warnings}"
+    )
+
+    # 2. Socket cleanup STILL ran after the WARNING (finally block completed)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        f"domjobabort should be called (then WARNING on failure), got: {abort_cmds}"
+    )
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    socket_rm_cmds = [cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd]
+    assert len(socket_rm_cmds) == 2, (
+        f"Socket rm -f should still proceed after domjobabort failure, "
+        f"got: {socket_rm_cmds}"
+    )
+
+    # 3. The domjobabort failure is non-fatal — the mv (atomic rename)
+    # completed successfully after the NBD export, proving the finally
+    # block ran without crashing the operation.
+    mv_cmds = [cmd for cmd in all_cmds if cmd.startswith("mv ")]
+    assert len(mv_cmds) == 1, "mv should still complete after domjobabort warning"

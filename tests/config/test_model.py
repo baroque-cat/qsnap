@@ -41,6 +41,16 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.deep_check_schedule = "weekly"  # type: ignore[misc]
 
+    # Mutating new FULL verification fields also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.full_verify_after_create = "off"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.full_verify_before_rebase = "off"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.full_verify_before_delete = "off"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.deep_check_targets = True  # type: ignore[misc]
+
 
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
@@ -64,6 +74,11 @@ def test_global_config_defaults():
     assert cfg.deep_check_schedule == "off"
     # Compress full backups defaults to True.
     assert cfg.compress is True
+    # FULL backup integrity verification tiers (M1/M2/M3).
+    assert cfg.full_verify_after_create == "check"
+    assert cfg.full_verify_before_rebase == "metadata"
+    assert cfg.full_verify_before_delete == "check"
+    assert cfg.deep_check_targets is False
 
 
 def test_vm_config_required_fields():
@@ -572,3 +587,86 @@ def test_retention_policy_preserve_min_latest_with_f_anchors():
     assert policy.preserve_min == "latest"
     assert policy.anchor_daily is True
     assert policy.daily == 0
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.full_verify_after_create — FULL creation verification tier
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_full_verify_after_create_default():
+    """GlobalConfig().full_verify_after_create defaults to 'check' (M1+M2)."""
+    assert GlobalConfig().full_verify_after_create == "check"
+
+
+def test_global_config_full_verify_after_create_metadata():
+    """GlobalConfig(full_verify_after_create='metadata') stores 'metadata' (M1 only)."""
+    cfg = GlobalConfig(full_verify_after_create="metadata")
+    assert cfg.full_verify_after_create == "metadata"
+
+
+def test_global_config_full_verify_after_create_hash():
+    """GlobalConfig(full_verify_after_create='hash') stores 'hash' (M1+M2+M3)."""
+    cfg = GlobalConfig(full_verify_after_create="hash")
+    assert cfg.full_verify_after_create == "hash"
+
+
+def test_global_config_full_verify_after_create_off():
+    """GlobalConfig(full_verify_after_create='off') stores 'off' (no verification)."""
+    cfg = GlobalConfig(full_verify_after_create="off")
+    assert cfg.full_verify_after_create == "off"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.full_verify_before_rebase — pre-rebase re-verification
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_full_verify_before_rebase_default():
+    """GlobalConfig().full_verify_before_rebase defaults to 'metadata' (M1)."""
+    assert GlobalConfig().full_verify_before_rebase == "metadata"
+
+
+def test_global_config_full_verify_before_rebase_off():
+    """GlobalConfig(full_verify_before_rebase='off') stores 'off'."""
+    cfg = GlobalConfig(full_verify_before_rebase="off")
+    assert cfg.full_verify_before_rebase == "off"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.full_verify_before_delete — pre-deletion verification
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_full_verify_before_delete_default():
+    """GlobalConfig().full_verify_before_delete defaults to 'check' (M1+M2)."""
+    assert GlobalConfig().full_verify_before_delete == "check"
+
+
+def test_global_config_full_verify_before_delete_off_m1_still_enforced():
+    """GlobalConfig(full_verify_before_delete='off') stores 'off' — M1 is
+    enforced by the application layer regardless of this setting."""
+    cfg = GlobalConfig(full_verify_before_delete="off")
+    assert cfg.full_verify_before_delete == "off"
+
+
+def test_global_config_full_verify_before_delete_metadata():
+    """GlobalConfig(full_verify_before_delete='metadata') stores 'metadata' (M1 only)."""
+    cfg = GlobalConfig(full_verify_before_delete="metadata")
+    assert cfg.full_verify_before_delete == "metadata"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.deep_check_targets — deep check extends to backup targets
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_deep_check_targets_default_false():
+    """GlobalConfig().deep_check_targets defaults to False."""
+    assert GlobalConfig().deep_check_targets is False
+
+
+def test_global_config_deep_check_targets_true():
+    """GlobalConfig(deep_check_targets=True) stores True."""
+    cfg = GlobalConfig(deep_check_targets=True)
+    assert cfg.deep_check_targets is True

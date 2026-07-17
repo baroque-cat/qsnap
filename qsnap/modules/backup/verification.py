@@ -44,6 +44,151 @@ def _file_sha256(path: Path) -> str:
     return sha.hexdigest()
 
 
+def verify_full_backup(
+    shell: IShell,
+    target_path: Path,
+    verify_mode: str,
+    source_path: Path | None = None,
+    expected_virtual_size: int | None = None,
+) -> str | None:
+    """Verify a standalone FULL backup file (no source comparison).
+
+    Unlike :func:`verify_backup` (which compares source and target),
+    this function verifies a standalone FULL backup file's structural
+    integrity.  Used at three FULL lifecycle points: post-creation
+    (before state recording), pre-rebase (before linking incrementals),
+    and pre-deletion (before cascade-deletion).
+
+    Args:
+        shell: :class:`IShell` instance for running qemu-img commands.
+        target_path: Path to the FULL backup qcow2 file to verify.
+        verify_mode: One of ``"off"``, ``"metadata"``, ``"check"``,
+            ``"hash"``.
+        source_path: Path to the source snapshot for ``"hash"`` mode
+            (M3 — ``qemu-img compare`` content verification).  The
+            compare traverses the backing chain automatically.  If
+            ``None`` in ``"hash"`` mode, M3 is skipped.
+        expected_virtual_size: When provided, verify the FULL's
+            virtual-size matches this value (M1).
+
+    Returns:
+        ``None`` on success (all enabled checks pass), or an error
+        string starting with ``"verification failed: ..."`` on failure.
+    """
+    if verify_mode == "off":
+        return None
+
+    # ── M1: Metadata verification (always runs for metadata/check/hash) ──
+
+    info_cmd = [
+        "qemu-img",
+        "info",
+        "--output=json",
+        str(target_path),
+    ]
+    info_result = shell.run(info_cmd, timeout=60)
+    if not info_result.success:
+        error_detail = info_result.stderr or info_result.error or "unknown"
+        return f"verification failed: qemu-img info returned {error_detail}"
+
+    try:
+        info = json.loads(info_result.stdout)
+    except json.JSONDecodeError as exc:
+        return f"verification failed: cannot parse qemu-img info JSON: {exc}"
+
+    # (a) format check
+    target_format = info.get("format", "")
+    if target_format != "qcow2":
+        return f"verification failed: expected format qcow2, got {target_format}"
+
+    # (b) corrupt-bit detection — check incompatible-features for "corrupt"
+    format_specific = info.get("format-specific")
+    if isinstance(format_specific, dict):
+        data = format_specific.get("data", {})
+        if isinstance(data, dict):
+            incompatible = data.get("incompatible-features", [])
+            if isinstance(incompatible, list):
+                for feature in incompatible:
+                    if isinstance(feature, dict) and feature.get("name") == "corrupt":
+                        return (
+                            "verification failed: FULL backup has corrupt bit set "
+                            "— file is damaged"
+                        )
+                    if isinstance(feature, str) and feature == "corrupt":
+                        return (
+                            "verification failed: FULL backup has corrupt bit set "
+                            "— file is damaged"
+                        )
+
+    # (c) optional virtual-size match
+    if expected_virtual_size is not None:
+        target_vsize = int(info.get("virtual-size", 0))
+        if target_vsize != expected_virtual_size:
+            return (
+                f"verification failed: virtual-size mismatch "
+                f"(expected={expected_virtual_size}, got={target_vsize})"
+            )
+
+    # ── M2: Structural verification (check/hash modes only) ────────────
+
+    if verify_mode in ("check", "hash"):
+        check_cmd = [
+            "qemu-img",
+            "check",
+            "--output=json",
+            str(target_path),
+        ]
+        check_result = shell.run(check_cmd, timeout=7200)
+        if not check_result.success:
+            error_detail = check_result.stderr or check_result.error or "unknown"
+            return f"verification failed: qemu-img check returned {error_detail}"
+
+        try:
+            check_data = json.loads(check_result.stdout)
+        except json.JSONDecodeError as exc:
+            return f"verification failed: cannot parse qemu-img check JSON: {exc}"
+
+        errors = int(check_data.get("errors", 0))
+        if errors > 0:
+            return f"verification failed: qemu-img check found {errors} errors"
+
+        leaks = int(check_data.get("leaks", 0))
+        if leaks > 0:
+            return f"verification failed: qemu-img check found {leaks} leaks"
+
+    # ── M3: Content comparison via qemu-img compare (hash mode only) ──
+    # NOTE: This replaces the previous SHA-256 hash comparison which was
+    # broken — SHA-256 of a snapshot delta file (with backing chain)
+    # never matches SHA-256 of a standalone NBD-converted FULL file.
+    # qemu-img compare traverses the backing chain automatically and
+    # compares virtual-disk content visible to the guest OS.
+
+    if verify_mode == "hash" and source_path is not None:
+        compare_cmd = [
+            "qemu-img",
+            "compare",
+            "-q",
+            "--force-share",
+            str(source_path),
+            str(target_path),
+        ]
+        compare_result = shell.run(compare_cmd, timeout=7200)
+        if not compare_result.success:
+            error_detail = compare_result.stderr or compare_result.error or "unknown"
+            if "lock" in error_detail.lower() or "shared" in error_detail.lower():
+                return (
+                    "verification failed: content comparison failed "
+                    "(source may be locked by running VM); "
+                    "consider verify='metadata' or 'check'"
+                )
+            return (
+                "verification failed: content comparison mismatch: "
+                f"{error_detail}"
+            )
+
+    return None
+
+
 def verify_backup(
     shell: IShell,
     source_path: str,
