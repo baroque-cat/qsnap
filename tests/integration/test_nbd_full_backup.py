@@ -96,7 +96,7 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     # Step 5: Create full backup — this should use the NBD path
     # because the VM is running and libvirt is new enough.
     result = provider.create_full_backup(
-        source_snapshot, target, compress=False, bucket_level="monthly",
+        vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
     )
 
     assert result.success, (
@@ -178,7 +178,7 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
 
     # Step 3: Create full backup — should use direct qemu-img convert.
     result = provider.create_full_backup(
-        source_snapshot, target, compress=False, bucket_level="monthly",
+        vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
     )
 
     assert result.success, (
@@ -264,7 +264,7 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         result = provider.create_full_backup(
-            source_snapshot, target, compress=False, bucket_level="monthly",
+            vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
         )
 
         # The socket MUST be gone — either removed by step (a) (rm -f
@@ -294,7 +294,7 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         result = provider.create_full_backup(
-            source_snapshot, target, compress=False, bucket_level="monthly",
+            vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
         )
         assert not result.success, "Expected failure with nonexistent source"
         assert not tmp_file.exists(), (

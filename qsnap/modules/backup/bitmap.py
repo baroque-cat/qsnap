@@ -261,12 +261,19 @@ class BitmapBackupProvider(IBackupProvider):
 
     def create_full_backup(
         self,
+        vm_name: str,
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
     ) -> BackupResult:
         """Create a standalone FULL backup via NBD full export (design D4).
+
+        ``vm_name`` is the full, untruncated VM name (e.g.
+        ``"3.Projects_opencode"``), passed from Core's
+        ``vm_config.name``.  It is used directly for
+        ``nbd_full_export()`` and ``full_name`` generation — the method
+        SHALL NOT extract the VM name from the snapshot filename.
 
         Uses the shared :func:`nbd_full_export` helper (no
         ``--incremental`` flag) to produce a standalone qcow2 on the
@@ -287,7 +294,6 @@ class BitmapBackupProvider(IBackupProvider):
 
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
-        vm_name = source_snapshot.name.split(".")[0]
         full_name = f"{vm_name}.FULL.{date_str}"
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"

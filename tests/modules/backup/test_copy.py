@@ -909,7 +909,7 @@ def test_create_full_backup_uncompressed_stopped_vm(mock_shell, make_target, tmp
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     # Assert successful result
@@ -1007,7 +1007,7 @@ def test_create_full_backup_compressed_stopped_vm(mock_shell, make_target, tmp_p
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=True, bucket_level="monthly",
+            "testvm", snapshot, target, compress=True, bucket_level="monthly",
         )
 
     # Assert successful result
@@ -1124,7 +1124,7 @@ def test_create_full_backup_nbd_running_vm_succeeds(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     # Assert successful result
@@ -1218,7 +1218,7 @@ def test_create_full_backup_direct_stopped_vm_succeeds(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1299,7 +1299,7 @@ def test_create_full_backup_vm_state_detection_fails_falls_back(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     # Falls back to direct convert — succeeds
@@ -1388,7 +1388,7 @@ def test_nbd_full_export_produces_standalone_qcow2(
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1482,7 +1482,7 @@ def test_nbd_socket_cleanup_on_success(mock_shell, make_target, tmp_path):
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1559,7 +1559,7 @@ def test_nbd_socket_cleanup_on_failure(mock_shell, make_target, tmp_path):
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is False
@@ -1638,7 +1638,7 @@ def test_nbd_full_file_copy_no_checkpoint_created(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1716,7 +1716,7 @@ def test_nbd_full_timestamp_matches_snapshot_not_export_time(
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1784,7 +1784,7 @@ def test_nbd_full_old_libvirt_falls_back_direct_convert(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1873,7 +1873,7 @@ def test_nbd_full_creates_tmp_then_renames(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -1955,7 +1955,7 @@ def test_nbd_full_failure_leaves_no_final_file(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is False
@@ -2045,7 +2045,7 @@ def test_nbd_full_backup_ignores_compress_flag(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=True, bucket_level="monthly",
+            "testvm", snapshot, target, compress=True, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -2131,7 +2131,7 @@ def test_nbd_full_no_force_share_on_convert(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -2787,7 +2787,7 @@ def test_full_backup_ignores_rate_limit(
     ) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -3089,3 +3089,331 @@ def test_backup_result_error_structured_for_retry_detection(
     # The error string is structured so that is_retryable() can
     # pattern-match it (Core's responsibility to act on the result)
     assert is_retryable(results[0].error) is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Dotted VM name support (fix-dotted-vm-names)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_full_backup_dotted_vm_name(
+    mock_shell, make_target, tmp_path
+):
+    """Spec: ``create_full_backup("3.Projects_opencode", ...)`` passes the
+    full dotted VM name untruncated to ``virsh dominfo`` and uses it in
+    the FULL backup filename.
+
+    Verifies:
+    - ``virsh dominfo --domain 3.Projects_opencode`` is called (NOT
+      ``--domain 3``).
+    - The FULL backup file is named ``3.Projects_opencode.FULL.YYYYMMDD.qcow2``.
+    - The VM name is NOT extracted from the snapshot filename via
+      ``split(".")`` — the snapshot name is ``"testvm.<timestamp>"``
+      but the FULL uses ``"3.Projects_opencode"``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # VM is stopped → direct qemu-img convert
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: 3.Projects_opencode\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv creating the final file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "3.Projects_opencode", snapshot, target,
+            compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+    assert result.error is None
+
+    # Assert dominfo called with full dotted name — NOT truncated to "3"
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    dominfo_cmds = [cmd for cmd in all_cmds if "virsh dominfo" in cmd]
+    assert len(dominfo_cmds) >= 1
+    assert "--domain 3.Projects_opencode" in dominfo_cmds[0], (
+        f"Expected '--domain 3.Projects_opencode' in dominfo command, "
+        f"got: {dominfo_cmds[0]}"
+    )
+
+    # Assert FULL backup file name uses full VM name
+    assert result.target_path is not None
+    assert "3.Projects_opencode.FULL." in str(result.target_path), (
+        f"Full backup file should use dotted VM name, "
+        f"got: {result.target_path}"
+    )
+    # FULL name uses vm_name arg, NOT extracted from snapshot filename
+    assert "testvm" not in str(result.target_path), (
+        f"FULL backup name should use vm_name arg ('3.Projects_opencode'), "
+        f"not extracted from snapshot name. Got: {result.target_path}"
+    )
+
+
+def test_transfer_missing_passes_vm_name_to_create_full(
+    mock_shell, make_vm_config, make_target, tmp_path, mock_state
+):
+    """Spec: ``transfer_missing`` passes ``vm_config.name`` as the first
+    positional argument to ``create_full_backup``.
+
+    When ``copy_base=False`` (default) and the target is empty,
+    ``transfer_missing`` internally calls ``create_full_backup`` for the
+    first snapshot.  The ``vm_config.name`` is passed directly — even
+    when it contains dots (e.g. ``"3.Projects_opencode"``).
+
+    Uses ``unittest.mock.patch.object`` to spy on ``create_full_backup``
+    and verify the first positional arg.
+    """
+    vm_config = make_vm_config(name="3.Projects_opencode")
+    target = make_target(
+        path=str(tmp_path / "backups"), incremental=False,
+        verify="off", copy_base=False,
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshots = [
+        SnapshotInfo(
+            name="testvm.20250101T000000",
+            path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+            timestamp=datetime(2025, 1, 1, 0, 0, 0),
+            allocation=65536,
+        ),
+    ]
+
+    # VM is stopped → direct qemu-img convert path
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Id: -\n"
+                "Name: 3.Projects_opencode\n"
+                "State: shut off\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img convert (from create_full_backup)
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # mv (atomic rename after convert)
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # rsync (for subsequent transfer of the snapshot itself)
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv and rsync creating files so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        elif cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell, state=mock_state)
+
+        # Spy on create_full_backup to capture call arguments
+        with patch.object(
+            provider, "create_full_backup", wraps=provider.create_full_backup
+        ) as full_spy:
+            results = provider.transfer_missing(
+                vm_config, target, snapshots, rate_limit="no"
+            )
+
+    # transfer_missing returns 2 results: FULL creation + rsync transfer
+    assert len(results) == 2
+    assert results[0].success is True
+    assert results[1].success is True
+
+    # Verify create_full_backup was called with vm_config.name
+    assert full_spy.call_count == 1
+    call_args = full_spy.call_args[0]  # positional args tuple
+    assert call_args[0] == "3.Projects_opencode", (
+        f"create_full_backup first arg should be vm_config.name "
+        f"('3.Projects_opencode'), got: {call_args[0]}"
+    )
+
+    # Verify the FULL backup file uses the dotted VM name
+    assert results[0].target_path is not None
+    assert "3.Projects_opencode.FULL." in str(results[0].target_path), (
+        f"Full backup file should use dotted VM name, "
+        f"got: {results[0].target_path}"
+    )
+
+    # State was notified: record_full_backup was called
+    full_backups = mock_state.get_full_backups(str(target.path))
+    assert len(full_backups) == 1
+    assert full_backups[0].bucket_level == "monthly"
+
+
+def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
+    mock_shell, make_target, tmp_path
+):
+    """Spec: ``create_full_backup`` passes the full dotted VM name to
+    ``is_vm_running`` and ``nbd_full_export``.
+
+    When the VM is running, the NBD pull-model path is selected.  The
+    dotted VM name (e.g. ``"3.Projects_opencode"``) must be passed
+    untruncated to:
+    - ``virsh dominfo --domain 3.Projects_opencode`` (NOT ``--domain 3``)
+    - ``virsh backup-begin --domain 3.Projects_opencode`` (NOT truncated)
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # NBD path: libvirt >= 6.0 required
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    # rm -f stale socket (before backup-begin)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # virsh backup-begin succeeds (no --incremental)
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # qemu-img convert via NBD succeeds
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # rm -f socket cleanup (in finally)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # mv (atomic rename) returns success
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv creating the final file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "3.Projects_opencode", snapshot, target,
+            compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+    assert result.error is None
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Assert dominfo called with the full dotted name, not truncated
+    dominfo_cmds = [cmd for cmd in all_cmds if "virsh dominfo" in cmd]
+    assert len(dominfo_cmds) >= 1
+    assert "--domain 3.Projects_opencode" in dominfo_cmds[0], (
+        f"is_vm_running should receive full dotted VM name. "
+        f"Expected '--domain 3.Projects_opencode', got: {dominfo_cmds[0]}"
+    )
+
+    # Assert backup-begin uses the full dotted VM name
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 1
+    assert "--domain 3.Projects_opencode" in backup_cmds[0], (
+        f"nbd_full_export should receive full dotted VM name. "
+        f"Expected '--domain 3.Projects_opencode' in backup-begin, "
+        f"got: {backup_cmds[0]}"
+    )
+
+    # Assert NBD path was used (qemu-img convert via nbd:)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0], (
+        "NBD path should be used for running VM"
+    )
+
+    # Assert FULL backup file uses full VM name
+    assert "3.Projects_opencode.FULL." in str(result.target_path), (
+        f"Full backup file should use dotted VM name, "
+        f"got: {result.target_path}"
+    )

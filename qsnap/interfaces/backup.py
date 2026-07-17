@@ -39,12 +39,20 @@ class IBackupProvider(ABC):
 
     def create_full_backup(
         self,
+        vm_name: str,
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
     ) -> BackupResult:
         """Create a standalone full (anchor) backup via ``qemu-img convert``.
+
+        ``vm_name`` is the full, untruncated VM name (e.g.
+        ``"3.Projects_opencode"``), passed from Core's
+        ``vm_config.name``.  Implementations SHALL NOT extract the VM
+        name from the snapshot filename — the explicit parameter is the
+        single source of truth (design D1: dependency injection over
+        fragile parsing).
 
         ``bucket_level`` records which retention bucket triggered the
         FULL (e.g. ``"yearly"``, ``"monthly"``).

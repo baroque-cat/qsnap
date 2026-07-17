@@ -134,7 +134,7 @@ def test_mock_backup_provider_has_create_full_backup(make_vm_config, make_target
         timestamp=datetime.now(),
         allocation=65536,
     )
-    result = provider.create_full_backup(source_snapshot, make_target())
+    result = provider.create_full_backup("testvm", source_snapshot, make_target())
     assert isinstance(result, BackupResult)
 
 

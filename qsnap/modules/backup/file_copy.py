@@ -97,7 +97,7 @@ class FileCopyBackupProvider(IBackupProvider):
         if not target.copy_base and not existing and snapshots:
             most_recent = max(snapshots, key=lambda s: s.timestamp)
             full_result = self.create_full_backup(
-                most_recent, target,
+                vm_config.name, most_recent, target,
                 compress=target.compress,
                 bucket_level="monthly",
             )
@@ -315,12 +315,19 @@ class FileCopyBackupProvider(IBackupProvider):
 
     def create_full_backup(
         self,
+        vm_name: str,
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
     ) -> BackupResult:
         """Create a standalone full (anchor) backup.
+
+        ``vm_name`` is the full, untruncated VM name (e.g.
+        ``"3.Projects_opencode"``), passed from Core's
+        ``vm_config.name``.  It is used directly for ``is_vm_running()``,
+        ``nbd_full_export()``, and ``full_name`` generation — the method
+        SHALL NOT extract the VM name from the snapshot filename.
 
         Detects VM running state via ``virsh dominfo``.  When the VM is
         running and libvirt >= 6.0, uses the NBD pull-model (``virsh
@@ -344,7 +351,6 @@ class FileCopyBackupProvider(IBackupProvider):
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
-        vm_name = source_snapshot.name.split(".")[0]
         full_name = f"{vm_name}.FULL.{date_str}"
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"

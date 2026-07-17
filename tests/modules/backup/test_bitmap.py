@@ -628,7 +628,7 @@ def test_bitmap_create_full_backup_nbd_succeeds(
     ) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     # Assert successful result
@@ -700,7 +700,7 @@ def test_bitmap_full_backup_does_not_raise_not_implemented(
         # Explicit assertion: create_full_backup is callable
         # (was previously NotImplementedError)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     # Returns a valid BackupResult
@@ -749,7 +749,7 @@ def test_bitmap_full_socket_cleanup(
     ) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -790,7 +790,7 @@ def test_bitmap_full_socket_cleanup(
     ) as fail_spy:
         provider_fail = BitmapBackupProvider(fail_shell)
         result_fail = provider_fail.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result_fail.success is False
@@ -844,7 +844,7 @@ def test_bitmap_full_backup_no_checkpoint(
     ) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -906,7 +906,7 @@ def test_bitmap_bucket_driven_full_no_longer_crashes(
         # Bucket-driven FULL for various retention bucket levels
         for bucket_level in ("monthly", "weekly", "daily", "yearly"):
             result = provider.create_full_backup(
-                snapshot, target, compress=False, bucket_level=bucket_level,
+                "testvm", snapshot, target, compress=False, bucket_level=bucket_level,
             )
             assert result.success is True, (
                 f"create_full_backup failed for bucket_level={bucket_level}"
@@ -945,7 +945,7 @@ def test_bitmap_create_full_backup_returns_standalone_qcow2(
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            snapshot, target, compress=False, bucket_level="monthly",
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
         )
 
     assert result.success is True
@@ -975,4 +975,113 @@ def test_bitmap_create_full_backup_returns_standalone_qcow2(
     assert "backing-filename" not in info_data, (
         f"NBD full export should produce standalone qcow2, "
         f"got backing-filename: {info_data.get('backing-filename', 'N/A')}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 10. create_full_backup with dotted VM name (fix-dotted-vm-names)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_bitmap_create_full_backup_dotted_vm_name(
+    mock_shell, make_target, tmp_path
+):
+    """Bitmap FULL backup with dotted VM name ``"3.Projects_opencode"``.
+
+    - ``nbd_full_export(shell, "3.Projects_opencode", ...)`` is called
+      with the full VM name (NOT ``"3"`` — the first dot-delimited token).
+    - The FULL backup file is named
+      ``3.Projects_opencode.FULL.YYYYMMDD.qcow2``, preserving every dot.
+    - The VM name is NOT extracted from the snapshot filename via
+      ``split(".")`` — ``_make_snapshot()`` produces
+      ``"testvm.20250101T000000"`` and its first dot-delimited token is
+      ``"testvm"``, not ``"3.Projects_opencode"``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # Constructor version check
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    # nbd_full_export internal calls (two rm -f, one backup-begin, one
+    # qemu-img convert).  domblklist is deliberately *not* mocked so
+    # _get_first_disk_target returns None (exportname is omitted from
+    # NBD URI — harmless for the test).
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # mv for atomic rename after nbd_full_export returns
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    # Spy on nbd_full_export to assert it receives the full VM name
+    from qsnap.modules.backup.nbd_helper import (
+        nbd_full_export as real_nbd_full_export,
+    )
+
+    with patch(
+        "qsnap.modules.backup.bitmap.nbd_full_export",
+        wraps=real_nbd_full_export,
+    ) as nbd_spy, patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "3.Projects_opencode",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
+        )
+
+    # ── Assert successful result ────────────────────────────────────
+    assert result.success is True
+    assert result.error is None
+    assert result.snapshot_name == snapshot.name
+    assert result.bytes_transferred == 65536
+
+    # ── Assert nbd_full_export called with full VM name ─────────────
+    nbd_spy.assert_called_once()
+    # Positional args to nbd_full_export: (shell, vm_name, target_file)
+    actual_vm_name = nbd_spy.call_args[0][1]
+    assert actual_vm_name == "3.Projects_opencode", (
+        f"nbd_full_export vm_name should be '3.Projects_opencode' "
+        f"(full dotted name), got {actual_vm_name!r}"
+    )
+
+    # ── Assert FULL backup file named with full VM name ─────────────
+    result_filename = result.target_path.name
+    expected_date = snapshot.timestamp.strftime("%Y%m%d")
+    expected_name = f"3.Projects_opencode.FULL.{expected_date}.qcow2"
+    assert result_filename == expected_name, (
+        f"Expected backup filename {expected_name!r}, "
+        f"got {result_filename!r}"
+    )
+    # Sanity: the filename *starts* with the full dotted VM name
+    # (not just "3.")
+    assert result_filename.startswith("3.Projects_opencode.FULL."), (
+        f"Full backup filename must start with "
+        f"'3.Projects_opencode.FULL.', got {result_filename!r}"
+    )
+    assert result_filename.endswith(".qcow2")
+
+    # ── Assert VM name NOT extracted from snapshot filename ─────────
+    # _make_snapshot() produces "testvm.20250101T000000".  If the
+    # implementation extracted the VM name from the snapshot filename
+    # via split("."), it would get "testvm", never "3.Projects_opencode".
+    assert snapshot.name == "testvm.20250101T000000", (
+        "Snapshot name should be the canonical _make_snapshot() name"
+    )
+    assert "3.Projects_opencode" not in snapshot.name, (
+        "The dotted VM name MUST NOT appear in the snapshot filename — "
+        "it is supplied as the explicit vm_name parameter, not parsed "
+        "from the snapshot name via split('.')"
     )

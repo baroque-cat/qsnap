@@ -2361,7 +2361,7 @@ class Core:
                 else:
                     most_recent = max(snapshots, key=lambda s: s.timestamp)
                     full_result = provider.create_full_backup(
-                        most_recent, target,
+                        vm_config.name, most_recent, target,
                         compress=target.compress,
                         bucket_level=bucket_level,
                     )

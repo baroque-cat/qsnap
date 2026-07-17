@@ -183,6 +183,7 @@ def test_ibackup_provider_create_full_backup_abstract():
     bare = _BareBackupProvider()
     with pytest.raises(NotImplementedError):
         bare.create_full_backup(
+            vm_name="testvm",
             source_snapshot=SnapshotInfo(
                 name="test-snap",
                 path=Path("/tmp/snap.qcow2"),
@@ -226,7 +227,7 @@ def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwar
         allocation=65536,
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
-    result = provider.create_full_backup(source_snapshot, target, compress=False)
+    result = provider.create_full_backup("testvm", source_snapshot, target, compress=False)
     assert isinstance(result, BackupResult)
 
 
@@ -244,6 +245,16 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
     param = sig.parameters["bucket_level"]
     assert param.default == "monthly", (
         f"bucket_level default should be 'monthly', got {param.default!r}"
+    )
+
+    assert "vm_name" in sig.parameters, (
+        f"vm_name missing from create_full_backup signature: {sig.parameters}"
+    )
+    # Verify vm_name is the first parameter (after self)
+    params = list(sig.parameters.keys())
+    # params[0] is 'self', params[1] should be 'vm_name'
+    assert params[1] == "vm_name", (
+        f"vm_name should be the first positional parameter, got {params[1]}"
     )
 
 
@@ -268,6 +279,9 @@ def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
     sig = inspect.signature(cls.create_full_backup)
     assert "bucket_level" in sig.parameters, (
         f"bucket_level missing from {cls.__name__}.create_full_backup signature"
+    )
+    assert "vm_name" in sig.parameters, (
+        f"vm_name missing from {cls.__name__}.create_full_backup signature"
     )
 
 
@@ -296,7 +310,7 @@ def test_backup_provider_create_full_backup_bucket_level_custom_value(
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup(
-        source_snapshot, target, compress=False, bucket_level="yearly",
+        "testvm", source_snapshot, target, compress=False, bucket_level="yearly",
     )
     assert isinstance(result, BackupResult)
     assert result.success

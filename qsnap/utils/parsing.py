@@ -65,19 +65,49 @@ def parse_domblklist_disks(stdout: str) -> list[tuple[str, str]]:
 
 
 def parse_timestamp(name: str, filepath: Path) -> datetime:
-    """Parse a timestamp from the filename suffix.
+    """Parse a timestamp from a snapshot or backup filename.
 
-    Attempts to parse ``%Y%m%dT%H%M%S`` from the last ``.``-separated
-    segment of *name*.  Falls back to the file's ``mtime`` and finally
-    to ``datetime.now()``.
+    Searches *name* for timestamp patterns using :func:`re.search` in
+    order of specificity (long-iso first, then long, then short) so
+    that longer patterns are not shadowed by shorter ones:
+
+    - ``long-iso``: ``%Y%m%dT%H%M%S%z`` (e.g. ``20250713T153123+0200``)
+    - ``long``: ``%Y%m%dT%H%M`` (e.g. ``20250713T1531``) — default
+    - ``short``: ``%Y%m%d`` (e.g. ``20250713``)
+
+    This correctly handles:
+
+    - VM names containing dots (e.g. ``3.Projects_opencode.20250713T1531_vda``)
+    - The ``_{disk}`` suffix in snapshot names (e.g. ``_vda``, ``_vdb``)
+    - Collision suffixes (e.g. ``_1`` appended to snapshot names)
+    - FULL backup names (e.g. ``vm.FULL.20250713.qcow2``)
+
+    The ``_{disk}`` and collision suffixes are naturally excluded
+    because they do not match the timestamp patterns.
+
+    If no timestamp pattern is found, falls back to the file's ``mtime``,
+    and finally to :func:`datetime.now`.
+
+    The function SHALL NOT use ``split(".")`` to extract the timestamp
+    segment, as VM names may contain dots.
     """
-    name_parts = name.split(".")
-    if len(name_parts) >= 2:
-        ts_str = name_parts[-1]
-        try:
-            return datetime.strptime(ts_str, "%Y%m%dT%H%M%S")
-        except ValueError:
-            pass
+    # Patterns tried in order of specificity (longest first) so that a
+    # shorter pattern does not shadow a longer one.
+    patterns: list[tuple[str, str]] = [
+        # long-iso: 20250713T153123+0200
+        (r"(\d{8}T\d{6}[+-]\d{4})", "%Y%m%dT%H%M%S%z"),
+        # long: 20250713T1531
+        (r"(\d{8}T\d{4})", "%Y%m%dT%H%M"),
+        # short: 20250713
+        (r"(\d{8})", "%Y%m%d"),
+    ]
+    for regex, fmt in patterns:
+        match = re.search(regex, name)
+        if match:
+            try:
+                return datetime.strptime(match.group(1), fmt)
+            except ValueError:
+                continue
     try:
         mtime = filepath.stat().st_mtime
         return datetime.fromtimestamp(mtime)

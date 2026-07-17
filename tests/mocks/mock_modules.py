@@ -96,6 +96,7 @@ class MockBackupProvider(IBackupProvider):
 
     def create_full_backup(
         self,
+        vm_name: str,
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
@@ -105,7 +106,7 @@ class MockBackupProvider(IBackupProvider):
             success=True,
             snapshot_name=source_snapshot.name,
             source_path=source_snapshot.path,
-            target_path=target.path / f"{source_snapshot.name}.FULL.{bucket_level}.qcow2",
+            target_path=target.path / f"{vm_name}.FULL.{bucket_level}.qcow2",
             bytes_transferred=1048576,
             error=None,
         )
@@ -156,6 +157,7 @@ class MockBitmapBackupProvider(IBackupProvider):
 
     def create_full_backup(
         self,
+        vm_name: str,
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
@@ -165,7 +167,7 @@ class MockBitmapBackupProvider(IBackupProvider):
             success=True,
             snapshot_name=source_snapshot.name,
             source_path=source_snapshot.path,
-            target_path=target.path / f"{source_snapshot.name}.FULL.{bucket_level}.qcow2",
+            target_path=target.path / f"{vm_name}.FULL.{bucket_level}.qcow2",
             bytes_transferred=1048576,
             error=None,
         )

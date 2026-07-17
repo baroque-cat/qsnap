@@ -2791,3 +2791,63 @@ def test_deep_check_uses_force_share_on_active_layer(
     assert "--force-share" in cmd_str, (
         f"qemu-img check must include --force-share, got: {cmd_str}"
     )
+
+
+# ── test_core_passes_vm_name_to_create_full_backup ───────────────────────
+
+
+def test_core_passes_vm_name_to_create_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core passes vm_config.name to create_full_backup as first positional arg.
+
+    Verifies that the full, untruncated VM name (e.g. ``"3.Projects_opencode"``)
+    is passed as ``vm_name`` to ``IBackupProvider.create_full_backup()``,
+    not extracted from the snapshot filename.  This is critical for VMs with
+    dotted names where filename-based extraction would truncate to ``"3"``.
+    """
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="3.Projects_opencode", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("3.Projects_opencode", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch.object(
+            Core, "_should_create_bucket_full", return_value=(True, "monthly")
+        ),
+        patch.object(
+            backup_provider,
+            "create_full_backup",
+            wraps=backup_provider.create_full_backup,
+        ) as full_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, "create_full_backup should be called when FULL is triggered"
+    assert full_spy.call_args.args[0] == "3.Projects_opencode", (
+        f"vm_name should be '3.Projects_opencode' (full dotted name), "
+        f"got: {full_spy.call_args.args[0]!r}"
+    )
+    assert full_spy.call_args.args[0] == vm.name, (
+        f"vm_name should equal vm_config.name, "
+        f"got: {full_spy.call_args.args[0]!r}"
+    )
