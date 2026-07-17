@@ -706,3 +706,69 @@ def test_blockcommit_deep_verify_false_no_check(
     assert result.success is True
     assert result.error is None
     assert result.committed_snapshot == snap.name
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 12. Blockcommit does NOT use --force-share (design D5)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
+    """Lifecycle commit operations are intentionally offline-only (design D5).
+
+    ``virsh blockcommit`` and ``qemu-img check`` (deep_verify) must NOT
+    include ``--force-share``.  These operations are not safe to run
+    while the VM is holding an exclusive write lock on the image.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(ShellResult(
+        success=True,
+        stdout=_DOMBLKLIST_OUTPUT,
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("virsh blockcommit").returns(ShellResult(
+        success=True,
+        stdout="",
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+    mock_shell.expect("qemu-img check").returns(ShellResult(
+        success=True,
+        stdout='{"corruptions": 0}',
+        stderr="",
+        returncode=0,
+        error=None,
+    ))
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+
+    # Verify qemu-img check does NOT include --force-share
+    qemu_calls = [c for c in shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1, (
+        f"Expected exactly 1 qemu-img check call, got {len(qemu_calls)}"
+    )
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" not in qemu_cmd_str, (
+        f"qemu-img check must NOT include --force-share (lifecycle ops are offline-only), "
+        f"got: {qemu_cmd_str}"
+    )
+    assert "check" in qemu_cmd_str
+
+    # Verify virsh blockcommit calls do not include --force-share
+    bc_calls = _blockcommit_calls(shell)
+    for cmd in bc_calls:
+        cmd_str = " ".join(cmd)
+        assert "--force-share" not in cmd_str, (
+            f"virsh blockcommit must NOT include --force-share, got: {cmd_str}"
+        )

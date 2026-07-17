@@ -41,6 +41,7 @@ from qsnap.models.results import (
     SnapshotInfo,
     SnapshotResult,
 )
+from qsnap.modules.backup.nbd_helper import is_vm_running, nbd_full_export
 from qsnap.retention.time_based import _parse_duration
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
@@ -673,7 +674,8 @@ class Core:
                         unreadable = True
                 else:
                     result = self._shell.run(
-                        ["qemu-img", "info", "--backing-chain", str(snap.path)],
+                        ["qemu-img", "info", "--force-share",
+                         "--backing-chain", str(snap.path)],
                         timeout=30,
                     )
                     if not result.success:
@@ -762,7 +764,8 @@ class Core:
         ``"critical"`` when unreadable.
         """
         chk = self._shell.run(
-            ["qemu-img", "check", "--output=json", str(path)],
+            ["qemu-img", "check", "--force-share",
+             "--output=json", str(path)],
             timeout=60,
         )
         if not chk.success:
@@ -1024,10 +1027,12 @@ class Core:
         xml_path = vm_dir / f"{new_vm_name}.xml"
 
         # Step 2: Resolve backing chain to estimate total chain size
+        # --force-share: the source may be the active layer of a running
+        # VM, which has an exclusive write lock (design D5, bug U).
         chain_size = 0
         info_result = self._shell.run(
             [
-                "qemu-img", "info", "--backing-chain",
+                "qemu-img", "info", "--force-share", "--backing-chain",
                 "--output=json", str(source_path),
             ],
             timeout=30,
@@ -1063,14 +1068,26 @@ class Core:
                 error=f"Failed to create directory {vm_dir}: {mkdir_result.error}",
             )
 
-        # Step 5: Execute qemu-img convert
-        convert_result = self._shell.run(
-            [
-                "qemu-img", "convert", "-O", "qcow2",
-                str(source_path), str(target_qcow2),
-            ],
-            timeout=7200,
-        )
+        # Step 5: Execute qemu-img convert (hybrid NBD/direct — design D9)
+        # If the source VM is running, the active layer has an exclusive
+        # write lock.  Use NBD pull-model to avoid the lock conflict.
+        # If stopped, direct convert is safe.
+        if is_vm_running(self._shell, source_vm.name):
+            logger.info(
+                "VM %s is running — using NBD export for fork",
+                source_vm.name,
+            )
+            convert_result = nbd_full_export(
+                self._shell, source_vm.name, str(target_qcow2)
+            )
+        else:
+            convert_result = self._shell.run(
+                [
+                    "qemu-img", "convert", "-O", "qcow2",
+                    str(source_path), str(target_qcow2),
+                ],
+                timeout=7200,
+            )
         if not convert_result.success:
             return RestoreResult(
                 success=False,
@@ -1570,11 +1587,19 @@ class Core:
         Returns:
             True if any backup transfer failed (for EXIT_BACKUP_ABORT).
         """
-        # Step 1: Pre-flight validation (skipped in dry-run mode)
-        if not self._dry_run:
-            validation = self._validate_environment(vm_config)
-            if validation.status != "ok":
-                error_msg = "; ".join(validation.broken_snapshots)
+        # Step 1: Pre-flight validation (always runs — design D6)
+        # In dry-run mode, failures are logged as WARNING (non-fatal).
+        # In normal mode, failures raise RuntimeError.
+        validation = self._validate_environment(vm_config)
+        if validation.status != "ok":
+            error_msg = "; ".join(validation.broken_snapshots)
+            if self._dry_run:
+                logger.warning(
+                    "Environment validation failed for VM %s (dry-run): %s",
+                    vm_config.name,
+                    error_msg,
+                )
+            else:
                 logger.error(
                     "Environment validation failed for VM %s: %s",
                     vm_config.name,
@@ -2275,6 +2300,28 @@ class Core:
             current_target_size,
         )
 
+        # Dry-run: indicate whether a FULL would be created this run
+        if self._dry_run and snapshots:
+            all_fulls = self._state.get_full_backups(str(target.path))
+            should_full, bucket_level = self._should_create_bucket_full(
+                target, policy, all_fulls, snapshots[-1].timestamp
+            )
+            if should_full:
+                logger.info(
+                    "[dry-run] FULL backup would be created "
+                    "(bucket=%s) for VM %s target %s",
+                    bucket_level,
+                    vm_config.name,
+                    target.path,
+                )
+            else:
+                logger.info(
+                    "[dry-run] No FULL backup needed this run "
+                    "for VM %s target %s",
+                    vm_config.name,
+                    target.path,
+                )
+
     def _backup_target(
         self,
         vm_config: VMConfig,
@@ -2292,7 +2339,7 @@ class Core:
         self._log_size_estimate(vm_config, target)
 
         # Check for bucket-driven FULL backup necessity (design D1)
-        if not self._dry_run and snapshots:
+        if snapshots:
             all_fulls = self._state.get_full_backups(str(target.path))
             policy = self._parse_preserve(
                 target.target_preserve, target.target_preserve_min
@@ -2301,29 +2348,40 @@ class Core:
                 target, policy, all_fulls, snapshots[-1].timestamp
             )
             if should_full:
-                most_recent = max(snapshots, key=lambda s: s.timestamp)
-                full_result = provider.create_full_backup(
-                    most_recent, target,
-                    compress=target.compress,
-                    bucket_level=bucket_level,
-                )
-                if full_result.success:
-                    full_name = full_result.target_path.stem
+                if self._dry_run:
+                    # Log FULL-would-be-created without executing (design D7)
+                    vm_running = is_vm_running(self._shell, vm_config.name)
+                    method = "NBD" if vm_running else "direct convert"
+                    vm_state = "running" if vm_running else "stopped"
                     logger.info(
-                        "Created %s-bucket FULL backup for VM %s target %s: %s",
-                        bucket_level,
-                        vm_config.name,
-                        target.path,
-                        full_name,
+                        "[dry-run] Would create FULL backup "
+                        "(bucket=%s, method=%s, VM=%s)",
+                        bucket_level, method, vm_state,
                     )
                 else:
-                    logger.warning(
-                        "Full backup failed for VM %s target %s: %s",
-                        vm_config.name,
-                        target.path,
-                        full_result.error,
+                    most_recent = max(snapshots, key=lambda s: s.timestamp)
+                    full_result = provider.create_full_backup(
+                        most_recent, target,
+                        compress=target.compress,
+                        bucket_level=bucket_level,
                     )
-                    backup_failed = True
+                    if full_result.success:
+                        full_name = full_result.target_path.stem
+                        logger.info(
+                            "Created %s-bucket FULL backup for VM %s target %s: %s",
+                            bucket_level,
+                            vm_config.name,
+                            target.path,
+                            full_name,
+                        )
+                    else:
+                        logger.warning(
+                            "Full backup failed for VM %s target %s: %s",
+                            vm_config.name,
+                            target.path,
+                            full_result.error,
+                        )
+                        backup_failed = True
 
         # Transfer missing snapshots (with retry when configured)
         if not self._dry_run:

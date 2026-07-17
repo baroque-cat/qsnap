@@ -313,8 +313,27 @@ Non-F buckets still participate in retention — `"24h 7d 4Fw"` retains 24 hourl
 3. For each checked bucket: find the most recent FULL with matching `bucket_level`, compare period keys. If the period changed (or no prior FULL exists), create a new FULL.
 4. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
 5. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
-6. The conversion is atomic: `qemu-img convert` writes to a `.tmp` file, which is renamed only on success.
+6. The conversion is atomic: the FULL is written to a `.tmp` file, which is renamed to the final name only on success. For running VMs, the NBD pull-model is used (see [NBD-Based FULL Backups](#nbd-based-full-backups-for-running-vms) below); for stopped VMs, direct `qemu-img convert` is used.
 7. After creation, the FULL is recorded in state with its `bucket_level` for cascade deletion tracking.
+
+### NBD-Based FULL Backups for Running VMs
+
+When a VM is **running**, `qemu-img convert` cannot read the active layer directly — QEMU holds an exclusive write lock on it, causing `Failed to get shared "write" lock` errors. qsnap solves this with the **NBD pull-model**:
+
+1. **Detect VM state** — `virsh dominfo --domain <vm>` is called; the `State:` line is parsed. If the VM is running, the NBD path is selected.
+2. **Check libvirt version** — `virsh --version` must report major version >= 6. If older, qsnap logs a WARNING and falls back to direct convert (which will fail on a running VM's active layer).
+3. **Start NBD export** — `virsh backup-begin --domain <vm> <xml>` is called with a `<domainbackup mode='pull'>` XML that specifies a Unix socket path (`/tmp/qsnap-backup-{pid}.sock`). No `--incremental` flag is used — this is a full export, not an incremental checkpoint.
+4. **Pull data via NBD** — `qemu-img convert -n nbd:unix:<socket> <target>.tmp` reads the entire disk through the NBD server, which coordinates with the running QEMU process to provide a consistent view without lock conflicts.
+5. **Clean up** — the socket file is removed in a `finally` block, and the `.tmp` file is atomically renamed to `vm.FULL.YYYYMMDD.qcow2` on success (or deleted on failure).
+
+This mechanism is used by **both** backup providers:
+
+| Provider | FULL Backup Method | Notes |
+|---|---|---|
+| `FileCopyBackupProvider` (`incremental_mode = "file-copy"`) | NBD for running VMs, direct `qemu-img convert` for stopped | Logs WARNING if `compress = true` and NBD is used (NBD path doesn't support `-c`) |
+| `BitmapBackupProvider` (`incremental_mode = "nbd-bitmap"`) | NBD full export (no checkpoint) | Previously raised `NotImplementedError` on bucket boundaries — now supported. No checkpoint is created or deleted during FULL creation; checkpoint lifecycle remains exclusively in `transfer_missing()`. |
+
+The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
 
 ### `compress` Trade-off
 
@@ -355,6 +374,35 @@ qsnap offers four verification tiers, configured per target via the `verify` key
 - **Home host with USB drive** — `"metadata"` is sufficient; the transfer is local and fast
 - **Server with network target** — `"hash"` provides integrity without the overhead of `qemu-img compare`
 - **Compliance/audit** — `"full"` gives maximum assurance at the cost of reading both files
+
+## `--force-share` Safety Classification
+
+qsnap adds the `--force-share` flag to `qemu-img` commands that operate on files that may be the **active layer** of a running VM. This flag tells qemu-img to use `BDRV_O_RDWR` with shared write permissions, avoiding `Failed to get shared "write" lock` errors when reading metadata from a live disk.
+
+### Safe vs. Dangerous Operations
+
+| Operation | `--force-share` | Why |
+|---|---|---|
+| `qemu-img info` | **Yes** | Metadata-only read; safe to share with running QEMU |
+| `qemu-img info --backing-chain` | **Yes** | Metadata-only read of chain; active layer may be live |
+| `qemu-img map` | **Yes** | Reads allocation map metadata; safe to share |
+| `qemu-img check` | **Yes** | Read-only consistency check; safe to share |
+| `qemu-img rebase -u` | **Yes** | Unsafe rebase only changes metadata (no data copy); safe to share |
+| `qemu-img convert` | **No** | Data-copying operation; `--force-share` would corrupt the output if the source is being written to |
+| `qemu-img compare` | **No** | Data-copying read of both files; `--force-share` may produce inconsistent results on a live source |
+| `qemu-img commit` | **No** | Data-merging operation; `--force-share` is not applicable |
+
+### Where `--force-share` Is Applied
+
+qsnap applies `--force-share` on these metadata-only calls when the file may be an active layer:
+
+- `ExternalSnapshotProvider.create()` — post-snapshot `qemu-img info` (the new snapshot IS the active layer)
+- `MapChangeDetector.has_changed()` — `qemu-img map` on the most recent snapshot
+- `Core.check_integrity()` — `qemu-img info --backing-chain` on snapshots (most recent may be active)
+- `Core._deep_check_file()` — `qemu-img check` when the file may be the active layer
+- `Core._verify_backing_chain()` / `Core._get_chain_length()` — `qemu-img info --backing-chain` (already had it)
+- `Core.fork()` — `qemu-img info --backing-chain` for chain-size estimation
+- `verify_backup()` — source-side `qemu-img info` (source may be active layer). `qemu-img compare` (full verify) does NOT get `--force-share`; a WARNING is logged instead advising that `verify=full` on a running VM's active layer may produce unreliable results.
 
 ## Restore
 
@@ -415,7 +463,7 @@ qsnap fork <snapshot-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-con
 
 1. **Resolve** the snapshot/backup by name across all configured VMs (state + backup targets).
 2. **Estimate** total chain size via `qemu-img info --backing-chain` and log it.
-3. **Convert** the backing chain into a single standalone qcow2 via `qemu-img convert -O qcow2`.
+3. **Convert** the backing chain into a single standalone qcow2. If the source VM is running, the NBD pull-model is used (`virsh backup-begin` + `qemu-img convert -n nbd:unix:<socket>`); if stopped, direct `qemu-img convert -O qcow2` is used.
 4. **Obtain** the source VM's XML via `virsh dumpxml`.
 5. **Modify** the XML: new VM name, new UUID, updated disk paths, MAC address removed.
 6. **Define** the new VM via `virsh define`.
@@ -477,7 +525,7 @@ The `snapshot_dir` is created automatically. You can add targets and customize r
 ### Important Notes
 
 - **Disk space:** `qemu-img convert` produces a file as large as the full virtual disk (not sparse like the backing chain). The estimated size is logged before conversion begins.
-- **Source VM running:** Fork does NOT require the source VM to be stopped — snapshot files are read-only once created. A WARNING is logged if the source VM is running.
+- **Source VM running:** Fork does NOT require the source VM to be stopped. If the source VM is running, the NBD pull-model is used to avoid lock conflicts on the active layer. If stopped, direct `qemu-img convert` is used.
 - **Performance:** Conversion reads the entire backing chain. For large VMs, consider forking from a FULL backup (which is already standalone) for near-instant conversion.
 
 ## Example Configurations
@@ -609,10 +657,84 @@ Example output:
 
 The size estimate is also logged at INFO level during every pipeline run (including `--dry-run`), allowing monitoring systems to track projected storage growth.
 
+## Dry-Run Mode
+
+The `--dry-run` / `-n` flag prints planned actions without executing any mutations. qsnap's dry-run mode provides a **safe preview** of what would happen:
+
+### What Dry-Run Does
+
+- **Runs environment validation** — all pre-flight checks (`virsh`, `qemu-img`, `rsync` availability; directory writability; libvirt access) are executed. Failures are logged as **WARNING** (non-fatal) instead of raising `RuntimeError`. This lets you see configuration issues without aborting the preview.
+- **Logs FULL-would-be-created** — when a periodic FULL backup would be triggered by a retention bucket boundary, qsnap logs:
+  ```
+  [dry-run] Would create FULL backup (bucket=weekly, method=NBD, VM=running)
+  ```
+  The `method` field shows whether NBD or direct convert would be used, and `VM` shows the detected running state. No FULL backup is actually created.
+- **Logs size estimates with FULL indicator** — the size estimation step includes whether a FULL would be created this run:
+  ```
+  [dry-run] FULL backup would be created (bucket=weekly)
+  ```
+  or:
+  ```
+  [dry-run] No FULL backup needed this run
+  ```
+- **Does NOT create snapshots** — `snapshot_provider.create()` is never called.
+- **Does NOT transfer backups** — no `rsync` or `qemu-img convert` data-copying commands are executed.
+- **Does NOT delete anything** — retention is evaluated but no snapshots or backups are removed.
+
+### What Dry-Run Allows
+
+Dry-run mode permits **read-only** shell commands for validation and estimation:
+
+- `test -d`, `test -w`, `test -f` — directory/file existence checks
+- `which virsh`, `which qemu-img`, `which rsync` — binary discovery
+- `virsh dominfo` — VM running-state detection
+- `qemu-img info` — metadata reads for size estimation
+- `du` — current target size measurement
+- `find` — stale file discovery
+
 ## Requirements
 
 - Python 3.11+
-- libvirt + virsh (libvirt 6.0+ for NBD bitmap backup)
+- libvirt + virsh (libvirt 6.0+ for NBD bitmap backup and NBD-based FULL backups of running VMs)
 - qemu-img
 - rsync (hard requirement for all backup transfers)
 - QEMU/KVM hypervisor
+
+### Libvirt Permissions
+
+The user running qsnap must have **libvirt access** to manage VMs, create snapshots, and initiate NBD backups. There are two common approaches:
+
+**Option A: Group membership (recommended)**
+
+Add the qsnap user to the `libvirt` group:
+
+```bash
+sudo usermod -aG libvirt qsnap
+```
+
+The user must log out and back in for the group change to take effect. Verify with:
+
+```bash
+virsh list --all   # should list VMs without sudo
+```
+
+**Option B: Polkit configuration**
+
+If group membership is not suitable, configure polkit to grant libvirt access:
+
+```bash
+sudo cat > /etc/polkit-1/rules.d/50-qsnap.rules << 'EOF'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.libvirt.api.domain" &&
+        subject.user == "qsnap") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+sudo systemctl restart polkit
+```
+
+**Without libvirt access**, qsnap will fail with errors like:
+- `error: Failed to connect to system bus` — no D-Bus/libvirt access
+- `error: unauthorized` — polkit denied access
+- `Failed to get shared "write" lock` — NBD backup-begin fails without proper permissions

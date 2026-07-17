@@ -84,9 +84,13 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             )
 
         # Step 3: qemu-img info to get actual-size
+        # --force-share: the snapshot file may be the active layer of a
+        # running VM, which has an exclusive write lock.  --force-share
+        # requests a shared lock for this metadata-only read (design D5).
         info_cmd = [
             "qemu-img",
             "info",
+            "--force-share",
             "--output=json",
             str(snapshot_path),
         ]

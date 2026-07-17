@@ -55,6 +55,16 @@ class MockShell(IShell):
         self._expectations.append(exp)
         return exp
 
+    def expect_first(self, pattern: str) -> _Expectation:
+        """Register a high-priority expectation at the front of the list.
+
+        Useful for overriding global fixture expectations that match the
+        same pattern.  The first matching expectation wins.
+        """
+        exp = _Expectation(pattern)
+        self._expectations.insert(0, exp)
+        return exp
+
     def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         cmd_str = " ".join(cmd)
         for exp in self._expectations:

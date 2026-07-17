@@ -26,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import json
+
 import pytest
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -574,3 +576,403 @@ def test_bitmap_backup_ignores_rate_limit(
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
     assert "nbd:unix:" in convert_cmds[0]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# create_full_backup via NBD full export (design D4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_bitmap_create_full_backup_nbd_succeeds(
+    mock_shell, make_target, tmp_path
+):
+    """``BitmapBackupProvider.create_full_backup()`` uses NBD full export
+    (no ``--incremental``) and returns ``BackupResult(success=True)``.
+
+    Verifies:
+    - ``create_full_backup()`` does NOT raise ``NotImplementedError``
+    - ``virsh backup-begin`` called WITHOUT ``--incremental``
+    - ``qemu-img convert -n nbd:unix:...`` used
+    - No checkpoint creation or deletion
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # Constructor version check
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    # rm -f stale socket (before backup-begin)
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # virsh backup-begin (no --incremental)
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # qemu-img convert via NBD
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # rm -f socket cleanup (finally)
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # mv (atomic rename)
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    # Assert successful result
+    assert result.success is True
+    assert result.error is None
+    assert result.snapshot_name == snapshot.name
+    assert result.bytes_transferred == 65536
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Verify backup-begin called WITHOUT --incremental
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 1
+    assert "--incremental" not in backup_cmds[0]
+
+    # Verify qemu-img convert uses NBD
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]
+
+    # Verify NO checkpoints created or deleted
+    cp_create_cmds = [
+        cmd for cmd in all_cmds if "checkpoint-create-as" in cmd
+    ]
+    assert len(cp_create_cmds) == 0, (
+        "create_full_backup should NOT create checkpoints"
+    )
+    cp_delete_cmds = [
+        cmd for cmd in all_cmds if "checkpoint-delete" in cmd
+    ]
+    assert len(cp_delete_cmds) == 0, (
+        "create_full_backup should NOT delete checkpoints"
+    )
+
+
+def test_bitmap_full_backup_does_not_raise_not_implemented(
+    mock_shell, make_target, tmp_path
+):
+    """``BitmapBackupProvider.create_full_backup()`` is callable and
+    returns a valid ``BackupResult`` (no longer raises
+    ``NotImplementedError``).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    # Side effect: simulate mv creating the file
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell)
+
+        # Explicit assertion: create_full_backup is callable
+        # (was previously NotImplementedError)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    # Returns a valid BackupResult
+    from qsnap.models.results import BackupResult as _BR
+    assert isinstance(result, _BR), (
+        f"create_full_backup should return BackupResult, "
+        f"got {type(result).__name__}"
+    )
+    assert result.success is True
+    assert result.snapshot_name == snapshot.name
+
+
+def test_bitmap_full_socket_cleanup(
+    mock_shell, make_target, tmp_path
+):
+    """Socket cleanup on both success and failure paths.
+
+    Success path: ``rm -f`` called before ``backup-begin`` and in
+    ``finally``.
+    Failure path: ``rm -f`` called in ``finally`` even when
+    ``qemu-img convert`` fails.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # ── Success case ──────────────────────────────────────────────────
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    original_run_success = mock_shell.run
+
+    def spied_run_success(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run_success(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run_success
+    ) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Socket rm -f calls on success
+    all_cmds_success = [
+        " ".join(call_obj.args[0])
+        for call_obj in shell_spy.call_args_list
+    ]
+    socket_rm_cmds = [
+        cmd for cmd in all_cmds_success
+        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_cmds) >= 2, (
+        f"Expected >=2 socket rm calls on success, got: {socket_rm_cmds}"
+    )
+
+    # ── Failure case ──────────────────────────────────────────────────
+    # Fresh mock shell and provider for failure test
+    from tests.mocks.mock_shell import MockShell
+    fail_shell = MockShell()
+
+    # Need dominfo for the new shell (no conftest fixture applied)
+    fail_shell.expect("virsh dominfo").returns(
+        ShellResult(success=True, stdout="State: running\n", stderr="", returncode=0, error=None)
+    )
+
+    fail_shell.expect("virsh --version").returns(_ok_version_result())
+    fail_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    fail_shell.expect("backup-begin").returns(_ok_result())
+    fail_shell.expect("qemu-img convert").returns(
+        ShellResult(success=False, stdout="", stderr="I/O error",
+                     returncode=1, error="I/O error")
+    )
+
+    with patch.object(
+        fail_shell, "run", wraps=fail_shell.run
+    ) as fail_spy:
+        provider_fail = BitmapBackupProvider(fail_shell)
+        result_fail = provider_fail.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result_fail.success is False
+
+    # Socket rm -f calls on failure (socket cleanup in finally)
+    all_cmds_fail = [
+        " ".join(call_obj.args[0])
+        for call_obj in fail_spy.call_args_list
+    ]
+    socket_rm_fail = [
+        cmd for cmd in all_cmds_fail
+        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_fail) >= 1, (
+        f"Expected >=1 socket rm call on failure (finally), "
+        f"got: {socket_rm_fail}"
+    )
+
+
+def test_bitmap_full_backup_no_checkpoint(
+    mock_shell, make_target, tmp_path
+):
+    """``BitmapBackupProvider.create_full_backup()`` does NOT create or
+    delete any checkpoints.
+
+    The checkpoint lifecycle remains exclusively in ``transfer_missing()``
+    for incremental runs (design D3).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # No checkpoints
+    cp_create_cmds = [
+        cmd for cmd in all_cmds if "checkpoint-create-as" in cmd
+    ]
+    assert len(cp_create_cmds) == 0
+    cp_delete_cmds = [
+        cmd for cmd in all_cmds if "checkpoint-delete" in cmd
+    ]
+    assert len(cp_delete_cmds) == 0
+
+    # No checkpoint-list either (that's in transfer_missing only)
+    cp_list_cmds = [
+        cmd for cmd in all_cmds if "checkpoint-list" in cmd
+    ]
+    assert len(cp_list_cmds) == 0
+
+
+def test_bitmap_bucket_driven_full_no_longer_crashes(
+    mock_shell, make_target, tmp_path
+):
+    """``BitmapBackupProvider.create_full_backup()`` works with different
+    ``bucket_level`` values (was previously ``NotImplementedError``).
+
+    Core's ``_backup_target()`` calls ``create_full_backup()`` for
+    bitmap targets when a new bucket period is entered.  This test
+    verifies the call succeeds for various bucket levels.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell)
+
+        # Bucket-driven FULL for various retention bucket levels
+        for bucket_level in ("monthly", "weekly", "daily", "yearly"):
+            result = provider.create_full_backup(
+                snapshot, target, compress=False, bucket_level=bucket_level,
+            )
+            assert result.success is True, (
+                f"create_full_backup failed for bucket_level={bucket_level}"
+            )
+            assert result.snapshot_name == snapshot.name
+
+
+def test_bitmap_create_full_backup_returns_standalone_qcow2(
+    mock_shell, make_target, tmp_path
+):
+    """``BitmapBackupProvider.create_full_backup()`` via NBD produces a
+    standalone qcow2 with no backing file.
+
+    ``qemu-img info`` on the result shows no ``backing-filename`` field.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Verify standalone qcow2 — mock qemu-img info to return no backing
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1048576,
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    info_cmd = [
+        "qemu-img", "info", "--output=json", str(result.target_path),
+    ]
+    info_result = mock_shell.run(info_cmd, timeout=30)
+    info_data = json.loads(info_result.stdout)
+    assert "backing-filename" not in info_data, (
+        f"NBD full export should produce standalone qcow2, "
+        f"got backing-filename: {info_data.get('backing-filename', 'N/A')}"
+    )

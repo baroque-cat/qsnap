@@ -190,6 +190,12 @@ def test_map_changed_detected(
     # Design D3: domblklist called, qemu-img map used domblklist path
     _assert_d3_paths(tracking_shell)
 
+    # Design D5: qemu-img map includes --force-share
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" in qemu_cmd_str
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 2. Map unchanged — same JSON as stored → changed=False
@@ -231,6 +237,12 @@ def test_map_unchanged_no_changes(
 
     # Design D3: domblklist called, qemu-img map used domblklist path
     _assert_d3_paths(tracking_shell)
+
+    # Design D5: qemu-img map includes --force-share
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" in qemu_cmd_str
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -310,6 +322,10 @@ def test_map_command_fails_failsafe(
     qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
     assert len(qemu_calls) == 1
 
+    # Design D5: --force-share is present even when command fails
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" in qemu_cmd_str
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 5. Same total size but different regions → changed=True
@@ -364,6 +380,12 @@ def test_zero_fill_changes_map_not_size(
         "Test setup error: old and new maps should have the same total "
         f"length ({old_total} vs {new_total})"
     )
+
+    # Design D5: qemu-img map includes --force-share
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" in qemu_cmd_str
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -443,3 +465,48 @@ def test_risk_map_fallback_on_parse_error(
     assert result.changed is True
     assert result.last_allocation == old_hash
     assert result.current_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 8. Map on running VM uses --force-share (design D5)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_map_on_running_vm_uses_force_share(
+    tracking_shell: CallTrackingShell,
+    mock_state,
+    make_vm_config,
+):
+    """``qemu-img map`` on a running VM includes ``--force-share`` so it
+    can read the allocation map despite the VM holding an exclusive write
+    lock (design D5).
+
+    The detector resolves the active disk via ``virsh domblklist``, then
+    calls ``qemu-img map --force-share --output=json`` on the resolved
+    path.  The command succeeds even though the VM is running.
+    """
+    regions = [{"offset": 0, "length": 4096}]
+    stored_hash = _compute_map_hash(regions)
+    mock_state.set_last_allocation("testvm", stored_hash)
+
+    tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
+    tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(regions))
+
+    vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
+    detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
+    result = detector.has_changed(vm_config)
+
+    # Command succeeds despite VM holding write lock
+    assert result.changed is False
+    assert result.last_allocation == stored_hash
+    assert result.current_allocation == stored_hash
+
+    # Design D5: qemu-img map includes --force-share
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1
+    qemu_cmd_str = " ".join(qemu_calls[0])
+    assert "--force-share" in qemu_cmd_str, (
+        f"qemu-img map command must include --force-share, got: {qemu_cmd_str}"
+    )
+    assert "--output=json" in qemu_cmd_str
+    assert ACTIVE_DISK_PATH in qemu_cmd_str

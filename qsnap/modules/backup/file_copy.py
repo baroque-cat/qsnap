@@ -24,6 +24,11 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.modules.backup.nbd_helper import (
+    is_libvirt_new_enough,
+    is_vm_running,
+    nbd_full_export,
+)
 from qsnap.modules.backup.verification import verify_backup
 from qsnap.utils.parsing import parse_rate_limit, parse_timestamp, rate_limit_to_kib
 
@@ -315,45 +320,95 @@ class FileCopyBackupProvider(IBackupProvider):
         compress: bool = False,
         bucket_level: str = "monthly",
     ) -> BackupResult:
-        """Create a standalone full (anchor) backup via ``qemu-img convert``.
+        """Create a standalone full (anchor) backup.
 
-        Runs ``qemu-img convert [-c] -f qcow2 -O qcow2`` to produce a
-        self-contained qcow2 file.  Uses an atomic pattern: convert to
-        a ``.tmp`` file, then rename on success.
+        Detects VM running state via ``virsh dominfo``.  When the VM is
+        running and libvirt >= 6.0, uses the NBD pull-model (``virsh
+        backup-begin`` + ``qemu-img convert -n nbd:``) to avoid lock
+        conflicts on the active layer (design D1).  When the VM is
+        stopped, uses direct ``qemu-img convert [-c]`` on the snapshot
+        file (existing behavior, no lock conflict).
+
+        The NBD path does not support compression — if ``compress=True``
+        and NBD is selected, a WARNING is logged and the result is
+        uncompressed.
+
+        Uses an atomic pattern: convert to a ``.tmp`` file, then rename
+        on success.  On failure, the ``.tmp`` file is removed and no
+        final file is created.
 
         After creation, records the FULL in state (if state manager is
-        available) via ``record_full_backup()``.
+        available) via ``record_full_backup()`` with the snapshot's
+        timestamp (not the NBD export time) for retention bucket
+        alignment.
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
-        full_name = f"{source_snapshot.name.split('.')[0]}.FULL.{date_str}"
+        vm_name = source_snapshot.name.split(".")[0]
+        full_name = f"{vm_name}.FULL.{date_str}"
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"
 
-        # Build qemu-img convert command
-        convert_cmd = [
-            "qemu-img",
-            "convert",
-        ]
-        if compress:
-            convert_cmd.append("-c")
-        convert_cmd.extend([
-            "-f", "qcow2",
-            "-O", "qcow2",
-            str(source_snapshot.path),
-            str(tmp_file),
-        ])
+        # ── Method selection: NBD (running VM) vs direct convert (stopped) ──
+        use_nbd = False
+        if is_vm_running(self._shell, vm_name):
+            if is_libvirt_new_enough(self._shell):
+                use_nbd = True
+            else:
+                logger.warning(
+                    "libvirt < 6.0 — NBD unavailable, attempting direct "
+                    "convert (may fail on running VM)"
+                )
 
-        convert_result = self._shell.run(convert_cmd, timeout=3600)
-        if not convert_result.success:
-            return BackupResult(
-                success=False,
-                snapshot_name=source_snapshot.name,
-                source_path=source_snapshot.path,
-                target_path=target_file,
-                bytes_transferred=0,
-                error=convert_result.error,
+        if use_nbd:
+            # NBD path does not support compression.
+            if compress:
+                logger.warning(
+                    "compress=True ignored for NBD-based FULL backup"
+                )
+            # Run NBD full-export to .tmp file (no --force-share, no
+            # checkpoint — design D3, D5).
+            nbd_result = nbd_full_export(
+                self._shell, vm_name, str(tmp_file)
             )
+            if not nbd_result.success:
+                # Remove .tmp on failure — no final file created.
+                self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
+                return BackupResult(
+                    success=False,
+                    snapshot_name=source_snapshot.name,
+                    source_path=source_snapshot.path,
+                    target_path=target_file,
+                    bytes_transferred=0,
+                    error=nbd_result.error,
+                )
+        else:
+            # Direct convert path (stopped VM or fallback).
+            convert_cmd = [
+                "qemu-img",
+                "convert",
+            ]
+            if compress:
+                convert_cmd.append("-c")
+            convert_cmd.extend([
+                "-f", "qcow2",
+                "-O", "qcow2",
+                str(source_snapshot.path),
+                str(tmp_file),
+            ])
+
+            convert_result = self._shell.run(convert_cmd, timeout=3600)
+            if not convert_result.success:
+                # Remove .tmp on failure — no final file created.
+                self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
+                return BackupResult(
+                    success=False,
+                    snapshot_name=source_snapshot.name,
+                    source_path=source_snapshot.path,
+                    target_path=target_file,
+                    bytes_transferred=0,
+                    error=convert_result.error,
+                )
 
         # Atomic rename: mv .tmp to final name
         mv_cmd = ["mv", str(tmp_file), str(target_file)]
@@ -374,7 +429,8 @@ class FileCopyBackupProvider(IBackupProvider):
         except OSError:
             bytes_transferred = 0
 
-        # Record FULL backup in state (Task 4.5)
+        # Record FULL backup in state with snapshot timestamp (not
+        # NBD export time) for retention bucket alignment.
         if self._state is not None:
             self._state.record_full_backup(
                 str(target.path),

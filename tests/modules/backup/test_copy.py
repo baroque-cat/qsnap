@@ -851,12 +851,14 @@ def test_transfer_missing_no_verification_when_off(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
-    """``create_full_backup(compress=False, bucket_level="monthly")`` calls
-    ``qemu-img convert`` WITHOUT the ``-c`` flag and returns
-    ``BackupResult(success=True)``.
+def test_create_full_backup_uncompressed_stopped_vm(mock_shell, make_target, tmp_path):
+    """``create_full_backup(compress=False, bucket_level="monthly")`` with
+    a stopped VM calls ``qemu-img convert`` WITHOUT the ``-c`` flag and
+    returns ``BackupResult(success=True)``.
 
     The command pattern is ``qemu-img convert -f qcow2 -O qcow2 <src> <tmp>``.
+    The direct ``qemu-img convert`` path is used (no NBD, no ``virsh
+    backup-begin``).
     """
     target = make_target(path=str(tmp_path / "backups"))
     target.path.mkdir(parents=True, exist_ok=True)
@@ -866,6 +868,17 @@ def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
         path=Path("/snapshots/testvm.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+    )
+
+    # VM is stopped → direct qemu-img convert
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
 
     # Mock qemu-img convert returns success
@@ -906,13 +919,17 @@ def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
     assert result.snapshot_name == snapshot.name
 
     # Verify qemu-img convert was called WITHOUT -c flag
-    convert_calls = [
-        call_obj
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    convert_args_list = [
+        call_obj.args[0]
         for call_obj in shell_spy.call_args_list
         if "qemu-img convert" in " ".join(call_obj.args[0])
     ]
-    assert len(convert_calls) == 1
-    convert_args = convert_calls[0].args[0]
+    convert_args = convert_args_list[0]
     assert "-c" not in convert_args, (
         "qemu-img convert should NOT contain -c when compress=False"
     )
@@ -921,13 +938,25 @@ def test_create_full_backup_uncompressed(mock_shell, make_target, tmp_path):
     assert "qcow2" in convert_args
     assert "-O" in convert_args
 
+    # Verify direct convert path used, no NBD
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0, (
+        "virsh backup-begin should NOT be called for stopped VM"
+    )
+    nbd_cmds = [cmd for cmd in all_cmds if "nbd:unix:" in cmd]
+    assert len(nbd_cmds) == 0, (
+        "NBD should NOT be used for stopped VM"
+    )
 
-def test_create_full_backup_compressed(mock_shell, make_target, tmp_path):
-    """``create_full_backup(compress=True, bucket_level="monthly")`` calls
-    ``qemu-img convert`` WITH the ``-c`` flag and returns
-    ``BackupResult(success=True)``.
+
+def test_create_full_backup_compressed_stopped_vm(mock_shell, make_target, tmp_path):
+    """``create_full_backup(compress=True, bucket_level="monthly")`` with
+    a stopped VM calls ``qemu-img convert`` WITH the ``-c`` flag and
+    returns ``BackupResult(success=True)``.
 
     The command pattern is ``qemu-img convert -c -f qcow2 -O qcow2 <src> <tmp>``.
+    The direct ``qemu-img convert`` path is used (no NBD, no ``virsh
+    backup-begin``).
     """
     target = make_target(path=str(tmp_path / "backups"))
     target.path.mkdir(parents=True, exist_ok=True)
@@ -937,6 +966,17 @@ def test_create_full_backup_compressed(mock_shell, make_target, tmp_path):
         path=Path("/snapshots/testvm.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+    )
+
+    # VM is stopped → direct qemu-img convert
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
 
     # Mock qemu-img convert returns success
@@ -976,18 +1016,1143 @@ def test_create_full_backup_compressed(mock_shell, make_target, tmp_path):
     assert result.bytes_transferred == 65536
 
     # Verify qemu-img convert was called WITH -c flag
-    convert_calls = [
-        call_obj
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    convert_args_list = [
+        call_obj.args[0]
         for call_obj in shell_spy.call_args_list
         if "qemu-img convert" in " ".join(call_obj.args[0])
     ]
-    assert len(convert_calls) == 1
-    convert_args = convert_calls[0].args[0]
+    convert_args = convert_args_list[0]
     assert "-c" in convert_args, (
         "qemu-img convert should contain -c when compress=True"
     )
     # Verify -c appears before -f (flag ordering in source)
     assert convert_args.index("-c") < convert_args.index("-f")
+
+    # Verify direct convert path used, no NBD
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0, (
+        "virsh backup-begin should NOT be called for stopped VM"
+    )
+    nbd_cmds = [cmd for cmd in all_cmds if "nbd:unix:" in cmd]
+    assert len(nbd_cmds) == 0, (
+        "NBD should NOT be used for stopped VM"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# NBD-based full backup (running VM, libvirt >= 6.0)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_full_backup_nbd_running_vm_succeeds(
+    mock_shell, make_target, tmp_path
+):
+    """When the VM is running and libvirt >= 6.0, ``create_full_backup``
+    uses NBD pull-model (``virsh backup-begin`` + ``qemu-img convert -n
+    nbd:unix:``) and returns ``BackupResult(success=True)``.
+
+    Verifies:
+    - ``virsh backup-begin`` called WITHOUT ``--incremental``
+    - ``qemu-img convert -n nbd:unix:...`` used
+    - No direct ``qemu-img convert -f qcow2 -O qcow2``
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # NBD path: libvirt >= 6.0 required
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    # rm -f stale socket (before backup-begin)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # virsh backup-begin succeeds (no --incremental)
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # qemu-img convert via NBD succeeds
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # rm -f socket cleanup (in finally)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # mv (atomic rename) returns success
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    # Assert successful result
+    assert result.success is True
+    assert result.error is None
+    assert result.bytes_transferred == 65536
+    assert result.snapshot_name == snapshot.name
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Verify backup-begin called WITHOUT --incremental
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 1
+    assert "--incremental" not in backup_cmds[0]
+
+    # Verify qemu-img convert uses NBD
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]
+
+    # Verify NO direct qemu-img convert path (no -f -O flags)
+    direct_cmds = [
+        cmd for cmd in convert_cmds
+        if "-f" in cmd and "-O" in cmd
+    ]
+    assert len(direct_cmds) == 0, (
+        "Direct qemu-img convert (-f/-O) should NOT be used for NBD path"
+    )
+
+
+def test_create_full_backup_direct_stopped_vm_succeeds(
+    mock_shell, make_target, tmp_path
+):
+    """When the VM is stopped (``State: shut off``), ``create_full_backup``
+    uses direct ``qemu-img convert`` with no NBD and returns
+    ``BackupResult(success=True)``.
+
+    Verifies:
+    - ``virsh dominfo`` returns ``State: shut off``
+    - Direct ``qemu-img convert -f qcow2 -O qcow2`` called
+    - No ``virsh backup-begin``
+    - No ``nbd:unix:``
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # VM is stopped
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Direct qemu-img convert
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # mv (atomic rename)
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+    assert result.error is None
+    assert result.bytes_transferred == 65536
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Verify direct convert with format flags
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "-f qcow2" in convert_cmds[0]
+    assert "-O qcow2" in convert_cmds[0]
+
+    # Verify NO NBD
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0
+    nbd_cmds = [cmd for cmd in all_cmds if "nbd:unix:" in cmd]
+    assert len(nbd_cmds) == 0
+
+
+def test_create_full_backup_vm_state_detection_fails_falls_back(
+    mock_shell, make_target, tmp_path, caplog
+):
+    """When ``virsh dominfo`` fails, a WARNING is logged and the provider
+    falls back to direct ``qemu-img convert`` (best-effort).
+
+    No NBD is attempted since the VM state is unknown.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # virsh dominfo FAILS → VM state unknown
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="virsh: error: failed to connect",
+            returncode=1,
+            error="virsh: error: failed to connect",
+        )
+    )
+
+    # Direct convert fallback
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.nbd_helper")
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    # Falls back to direct convert — succeeds
+    assert result.success is True
+
+    # WARNING about VM state detection failure
+    warnings = [
+        r.message for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "Failed to detect VM running state" in msg for msg in warnings
+    ), f"Expected VM state detection failure warning, got: {warnings}"
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Direct convert used
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "-f qcow2" in convert_cmds[0]
+
+    # No NBD attempted
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0
+
+
+def test_nbd_full_export_produces_standalone_qcow2(
+    mock_shell, make_target, tmp_path
+):
+    """After ``create_full_backup`` via NBD, the resulting qcow2 has no
+    backing file (``qemu-img info`` shows no ``backing-filename``).
+
+    NBD full export creates a standalone qcow2 because it exports the
+    entire disk state through the socket — there is no backing chain on
+    the target.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # NBD path mocks
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Simulate mv creating the final file
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Now verify the result is standalone: mock qemu-img info on the
+    # target file to return no backing filename.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1048576,
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    info_cmd = [
+        "qemu-img", "info", "--output=json", str(result.target_path),
+    ]
+    info_result = mock_shell.run(info_cmd, timeout=30)
+    info_data = json.loads(info_result.stdout)
+    assert "backing-filename" not in info_data, (
+        f"NBD full export should produce a standalone qcow2 with no "
+        f"backing file, but got backing-filename: "
+        f"{info_data.get('backing-filename', 'N/A')}"
+    )
+
+
+def test_nbd_socket_cleanup_on_success(mock_shell, make_target, tmp_path):
+    """When ``create_full_backup`` via NBD succeeds, the Unix socket is
+    removed via ``rm -f`` in the ``finally`` block.
+
+    ``rm -f`` is called at least twice: once before ``backup-begin``
+    (stale socket removal) and once in ``finally`` (cleanup).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Count rm -f commands (socket cleanup before + after)
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    # At least 2: stale socket removal + finally cleanup
+    assert len(rm_cmds) >= 2, (
+        f"Expected >= 2 rm -f calls (stale socket + finally), got: {rm_cmds}"
+    )
+    # Verify socket paths in rm commands
+    socket_rm_cmds = [
+        cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_cmds) == 2, (
+        f"Expected 2 socket rm -f calls, got: {socket_rm_cmds}"
+    )
+
+
+def test_nbd_socket_cleanup_on_failure(mock_shell, make_target, tmp_path):
+    """When ``qemu-img convert`` (NBD pull) fails, the Unix socket is
+    still removed via ``rm -f`` in the ``finally`` block.
+
+    Socket cleanup is guaranteed even when the NBD export fails.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # qemu-img convert FAILS
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="NBD connection reset",
+            returncode=1,
+            error="NBD connection reset",
+        )
+    )
+    # rm -f .tmp file (in create_full_backup error handling)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    with patch.object(
+        mock_shell, "run", wraps=mock_shell.run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is False
+
+    # Verify socket cleanup rm -f was called despite failure
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    socket_rm_cmds = [
+        cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_cmds) >= 1, (
+        f"Socket cleanup rm -f should be called even on failure, "
+        f"got: {socket_rm_cmds}"
+    )
+
+
+def test_nbd_full_file_copy_no_checkpoint_created(
+    mock_shell, make_target, tmp_path
+):
+    """``create_full_backup`` via NBD for ``FileCopyBackupProvider`` does
+    NOT create or delete any checkpoints.
+
+    No ``virsh checkpoint-create-as`` or ``virsh checkpoint-delete``
+    calls should appear.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # No checkpoints
+    cp_create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
+    assert len(cp_create_cmds) == 0, (
+        "FileCopyBackupProvider should NOT create checkpoints"
+    )
+    cp_delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
+    assert len(cp_delete_cmds) == 0, (
+        "FileCopyBackupProvider should NOT delete checkpoints"
+    )
+
+
+def test_nbd_full_timestamp_matches_snapshot_not_export_time(
+    mock_shell, make_target, tmp_path, mock_state
+):
+    """The FULL backup recorded in state uses the snapshot timestamp, not
+    the NBD export time.
+
+    ``record_full_backup()`` is called with ``source_snapshot.timestamp``
+    for retention bucket alignment.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell, state=mock_state)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Verify FULL recorded with snapshot timestamp
+    full_backups = mock_state.get_full_backups(str(target.path))
+    assert len(full_backups) == 1
+    assert full_backups[0].timestamp == snapshot.timestamp, (
+        f"FULL should be recorded with snapshot timestamp "
+        f"({snapshot.timestamp}), not NBD export time "
+        f"({full_backups[0].timestamp})"
+    )
+    assert full_backups[0].bucket_level == "monthly"
+
+
+def test_nbd_full_old_libvirt_falls_back_direct_convert(
+    mock_shell, make_target, tmp_path, caplog
+):
+    """When libvirt < 6.0 and VM is running, a WARNING is logged and the
+    provider falls back to direct ``qemu-img convert`` (best-effort).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # VM is running (from conftest), but libvirt is OLD
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 5.9.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+
+    # Direct convert fallback
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # WARNING about old libvirt → fallback
+    warnings = [
+        r.message for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "libvirt < 6.0" in msg for msg in warnings
+    ), f"Expected old-libvirt warning, got: {warnings}"
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Direct convert used
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "-f qcow2" in convert_cmds[0]
+
+    # No NBD attempted
+    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0
+
+
+def test_nbd_full_creates_tmp_then_renames(
+    mock_shell, make_target, tmp_path
+):
+    """``create_full_backup`` via NBD writes data to a ``.tmp`` file, then
+    atomically renames it to the final name on success.
+
+    Verifies:
+    - ``qemu-img convert`` target is ``.tmp``
+    - ``mv`` from ``.tmp`` to final name
+    - ``BackupResult.path`` is the final (non-``.tmp``) path
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Verify qemu-img convert writes to .tmp
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert ".tmp" in convert_cmds[0], (
+        f"Expected convert target to be .tmp file, got: {convert_cmds[0]}"
+    )
+
+    # Verify mv from .tmp to final
+    mv_cmds = [cmd for cmd in all_cmds if cmd.startswith("mv ")]
+    assert len(mv_cmds) == 1
+    assert ".tmp" in mv_cmds[0], (
+        f"Expected mv from .tmp, got: {mv_cmds[0]}"
+    )
+
+    # Verify result path is the FINAL (non-.tmp) path
+    assert ".tmp" not in str(result.target_path), (
+        f"Result path should be final (non-.tmp), got: {result.target_path}"
+    )
+    assert ".FULL." in str(result.target_path)
+
+
+def test_nbd_full_failure_leaves_no_final_file(
+    mock_shell, make_target, tmp_path
+):
+    """When ``create_full_backup`` via NBD fails (``qemu-img convert``
+    error), the ``.tmp`` file is removed and no final ``.FULL.*.qcow2``
+    file is created.
+
+    Result is ``BackupResult(success=False)``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    # qemu-img convert FAILS
+    convert_error = "qemu-img: NBD I/O error"
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=convert_error,
+            returncode=1,
+            error=convert_error,
+        )
+    )
+
+    with patch.object(
+        mock_shell, "run", wraps=mock_shell.run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is False
+    assert result.error == convert_error
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # Verify .tmp file is removed
+    tmp_rm_cmds = [
+        cmd for cmd in all_cmds
+        if cmd.startswith("rm -f") and ".tmp" in cmd
+    ]
+    assert len(tmp_rm_cmds) >= 1, (
+        f"Expected rm -f on .tmp file after failure, got: {all_cmds}"
+    )
+
+    # Verify no mv was called (no final file rename)
+    mv_cmds = [cmd for cmd in all_cmds if cmd.startswith("mv ")]
+    assert len(mv_cmds) == 0
+
+    # Verify no final .FULL. file exists
+    full_files = list(target.path.glob("*.FULL.*.qcow2"))
+    assert len(full_files) == 0, (
+        f"No final FULL file should exist after failure, got: {full_files}"
+    )
+
+
+def test_nbd_full_backup_ignores_compress_flag(
+    mock_shell, make_target, tmp_path, caplog
+):
+    """When ``compress=True`` and NBD is selected, a WARNING is logged and
+    the backup proceeds via the NBD path WITHOUT the ``-c`` flag (NBD
+    does not support compression).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=True, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # WARNING about compress ignored
+    warnings = [
+        r.message for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any(
+        "compress=True ignored" in msg for msg in warnings
+    ), f"Expected compress-ignored warning, got: {warnings}"
+
+    # NBD path used without -c
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]
+    assert "-c" not in convert_cmds[0], (
+        "NBD path should NOT use -c (compression not supported)"
+    )
+
+
+def test_nbd_full_no_force_share_on_convert(
+    mock_shell, make_target, tmp_path
+):
+    """``create_full_backup`` via NBD does NOT use ``--force-share`` on
+    the ``qemu-img convert`` command.
+
+    The NBD pull-model avoids the lock conflict by design — data is read
+    through the Unix socket served by QEMU, not by opening the qcow2 file
+    directly.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True, stdout="virsh 8.2.0\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(
+            success=True, stdout="", stderr="", returncode=0, error=None
+        )
+    )
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(
+        mock_shell, "run", side_effect=spied_run
+    ) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    all_cmds = [
+        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
+    ]
+
+    # No --force-share anywhere
+    force_share_cmds = [
+        cmd for cmd in all_cmds if "--force-share" in cmd
+    ]
+    assert len(force_share_cmds) == 0, (
+        f"--force-share should NOT appear in any NBD convert command, "
+        f"got: {force_share_cmds}"
+    )
+
+    # NBD used (not direct convert with --force-share)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]
 
 
 # ──────────────────────────────────────────────────────────────────────────

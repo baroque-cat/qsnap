@@ -109,6 +109,10 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     # quiesce=False → no --quiesce flag
     assert "--quiesce" not in virsh_cmd
 
+    # Assert qemu-img info includes --force-share (design D5)
+    qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
+    assert "--force-share" in qemu_cmd
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 2. virsh command fails
@@ -275,6 +279,11 @@ def test_create_snapshot_with_quiesce_enabled(mock_shell, make_vm_config):
     virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
     assert len(virsh_cmds) == 1
     assert "--quiesce" in virsh_cmds[0]
+
+    # Verify --force-share on qemu-img info (design D5)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
+    assert "--force-share" in qemu_cmd
 
 
 def test_create_snapshot_without_quiesce_default(mock_shell, make_vm_config):
@@ -780,7 +789,7 @@ def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
 
     with patch(
         "qsnap.modules.snapshot.external._file_sha256", return_value=fake_hash
-    ):
+    ), patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
         result = provider.create(
             vm_config=vm_config,
@@ -795,6 +804,11 @@ def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
     # All characters are valid lowercase hex
     assert all(c in "0123456789abcdef" for c in result.content_hash)
     assert result.content_hash == fake_hash
+
+    # Verify --force-share on qemu-img info (design D5)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
+    assert "--force-share" in qemu_cmd
 
 
 def test_create_snapshot_failure_content_hash_none(mock_shell, make_vm_config):
@@ -829,3 +843,145 @@ def test_create_snapshot_failure_content_hash_none(mock_shell, make_vm_config):
     assert result.success is False
     assert result.content_hash is None
     assert result.error == stderr_msg
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 10. Post-snapshot qemu-img info uses --force-share (design D5)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
+    """After ``virsh snapshot-create-as`` succeeds, the ``qemu-img info``
+    command includes ``--force-share`` so it can read metadata despite the
+    VM holding an exclusive write lock (design D5).
+
+    The command succeeds even though the VM is running.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    # Step 1: virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Step 2: chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Step 3: qemu-img info --force-share succeeds
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    mock_shell.expect("qemu-img info.*--force-share").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        result = provider.create(
+            vm_config=vm_config,
+            snapshot_name="snap.20250101T000000",
+            disk="vda",
+            snapshot_path=snapshot_path,
+        )
+
+    # The command succeeded despite the VM holding a write lock
+    assert result.success is True
+    assert result.new_allocation == 1048576
+
+    # Verify --force-share is in the qemu-img info command
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
+    assert "--force-share" in qemu_cmd, (
+        f"qemu-img info command must include --force-share, got: {qemu_cmd}"
+    )
+
+
+def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_config):
+    """Regression guard: without ``--force-share``, ``qemu-img info`` on
+    a running VM's active layer fails with a lock error because the VM
+    holds an exclusive write lock.
+
+    This test uses ``expect_first`` with a negative-lookahead pattern to
+    intercept a ``qemu-img info`` command that does NOT contain
+    ``--force-share``.  If someone removes ``--force-share`` from the
+    source code, the negative-lookahead pattern matches first and returns
+    the lock error, causing this test to fail.
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    # Step 1: virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Step 2: chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Regression guard (expect_first, highest priority):
+    # Pattern only matches if --force-share is NOT in the command.
+    # If someone removes --force-share, this returns a lock error.
+    mock_shell.expect_first(r"qemu-img info(?!.*--force-share)").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="Failed to get shared lock: Is another process using the image?",
+            returncode=1,
+            error="Failed to get shared lock: Is another process using the image?",
+        )
+    )
+    # Normal expectation: --force-share IS present, so this succeeds
+    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    mock_shell.expect("qemu-img info.*--force-share").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    # The command MUST succeed — --force-share was present
+    assert result.success is True, (
+        f"Snapshot creation failed: {result.error}. "
+        "This likely means --force-share was removed from qemu-img info."
+    )
+    assert result.new_allocation == 1048576

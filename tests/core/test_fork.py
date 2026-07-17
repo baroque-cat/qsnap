@@ -47,12 +47,22 @@ def _make_shell_convert_expectations(shell) -> None:
     """Set up MockShell expectations required by Core.fork() happy path.
 
     Registers responses for:
+      - virsh dominfo (VM state — shut off so direct convert is used)
       - qemu-img info --backing-chain (chain size estimation)
       - mkdir -p (vm directory creation)
       - qemu-img convert (standalone qcow2)
       - virsh dumpxml (get source VM XML)
       - virsh define (define new VM)
     """
+    # VM state: shut off (so fork uses direct convert, not NBD)
+    # Use expect_first to override the global fixture's "running" response
+    shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: sourcevm\nState: shut off\n",
+            stderr="", returncode=0, error=None,
+        )
+    )
     # Chain size info (JSON list with actual-size per image)
     chain_info_json = json.dumps(
         [
@@ -90,17 +100,21 @@ def _make_snapshot(name="snap1", path="/snapshots/snap1.qcow2") -> SnapshotInfo:
     )
 
 
-# ── test_fork_creates_standalone_qcow2_via_qemu_img_convert ────────────────
+# ── test_fork_direct_convert_stopped_vm ──────────────────────────────────
 
 
-def test_fork_creates_standalone_qcow2_via_qemu_img_convert(
+def test_fork_direct_convert_stopped_vm(
     tmp_path,
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """fork() runs qemu-img convert -O qcow2 to produce a standalone image."""
+    """fork() uses direct qemu-img convert -O qcow2 when VM is stopped.
+
+    Verifies that fork detects VM state via virsh dominfo and chooses the
+    direct convert path (not NBD) when the VM is shut off.
+    """
     vm = make_vm_config(name="sourcevm")
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -119,17 +133,184 @@ def test_fork_creates_standalone_qcow2_via_qemu_img_convert(
     assert isinstance(result, RestoreResult)
     assert result.success is True
 
-    # Verify qemu-img convert was called
-    convert_calls = [
-        c for c in spy.call_args_list
-        if "convert" in " ".join(c.args[0])
-    ]
+    # Verify qemu-img convert was called (use "qemu-img convert" to avoid
+    # matching the test's own temp directory name which may contain "convert")
+    call_cmds = [" ".join(c.args[0]) for c in spy.call_args_list]
+    convert_calls = [c for c in call_cmds if "qemu-img convert" in c]
     assert len(convert_calls) >= 1, "qemu-img convert should have been called"
 
-    # Verify the convert command includes -O qcow2
-    convert_cmd = " ".join(convert_calls[0].args[0])
+    # Verify the convert command includes -O qcow2 (direct convert)
+    convert_cmd = convert_calls[0]
     assert "-O" in convert_cmd
     assert "qcow2" in convert_cmd
+
+    # Verify NBD was NOT used (stopped VM path)
+    nbd_calls = [c for c in call_cmds if "nbd:unix:" in c]
+    assert len(nbd_calls) == 0, (
+        "NBD should not be used for stopped VM"
+    )
+    backup_begin_calls = [c for c in call_cmds if "virsh backup-begin" in c]
+    assert len(backup_begin_calls) == 0, (
+        "virsh backup-begin should not be called for stopped VM"
+    )
+
+
+# ── NBD helper ─────────────────────────────────────────────────────────────
+
+
+def _make_shell_nbd_expectations(shell) -> None:
+    """Set up MockShell expectations for the NBD fork path (running VM).
+
+    Registers responses for:
+      - qemu-img info --backing-chain (chain size estimation)
+      - mkdir -p (vm directory creation)
+      - rm -f /tmp/qsnap-backup-* (NBD socket cleanup)
+      - virsh backup-begin (start NBD export)
+      - qemu-img convert -n nbd:unix: (pull via NBD)
+      - virsh dumpxml (get source VM XML)
+      - virsh define (define new VM)
+    """
+    # Chain size info (JSON list with actual-size per image)
+    chain_info_json = json.dumps(
+        [
+            {"image": "/snapshots/snap1.qcow2", "actual-size": 1048576},
+            {"image": "/var/lib/libvirt/images/sourcevm.qcow2", "actual-size": 2097152},
+        ]
+    )
+    shell.expect("backing-chain").returns(
+        ShellResult(success=True, stdout=chain_info_json, stderr="", returncode=0, error=None)
+    )
+    # mkdir
+    shell.expect("mkdir").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # NBD: rm stale socket (called in nbd_full_export before and after)
+    shell.expect(r"rm.*-f.*qsnap-backup").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # NBD: virsh backup-begin
+    shell.expect("virsh backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # NBD: qemu-img convert -n nbd:unix:<socket>
+    shell.expect(r"nbd:unix:").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # virsh dumpxml
+    shell.expect("dumpxml").returns(
+        ShellResult(success=True, stdout=SAMPLE_SOURCE_XML, stderr="", returncode=0, error=None)
+    )
+    # virsh define
+    shell.expect("virsh define").returns(
+        ShellResult(success=True, stdout="Domain newvm defined", stderr="", returncode=0, error=None)
+    )
+
+
+# ── test_fork_nbd_running_vm ───────────────────────────────────────────────
+
+
+def test_fork_nbd_running_vm(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """fork() uses NBD export when source VM is running.
+
+    With the default conftest ``virsh dominfo`` returning ``State: running``,
+    fork should call ``virsh backup-begin`` and ``qemu-img convert -n
+    nbd:unix:<socket>`` instead of direct ``qemu-img convert -O qcow2``.
+    """
+    vm = make_vm_config(name="sourcevm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    mock_state.record_snapshot("sourcevm", _make_snapshot("snap1"))
+    _make_shell_nbd_expectations(mock_shell)
+
+    storage_dir = tmp_path / "storage"
+    (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as spy:
+        result = core.fork("snap1", "newvm", storage_dir)
+
+    assert isinstance(result, RestoreResult)
+    assert result.success is True
+
+    # Verify the correct commands were issued
+    call_cmds = [" ".join(c.args[0]) for c in spy.call_args_list]
+
+    # virsh backup-begin should be called (NBD export)
+    backup_begin_calls = [c for c in call_cmds if "virsh backup-begin" in c]
+    assert len(backup_begin_calls) >= 1, (
+        "virsh backup-begin should be called for NBD export"
+    )
+
+    # qemu-img convert via NBD should be called
+    nbd_convert_calls = [c for c in call_cmds if "nbd:unix:" in c]
+    assert len(nbd_convert_calls) >= 1, (
+        "qemu-img convert nbd:unix: should be called for NBD path"
+    )
+
+    # direct qemu-img convert (without NBD) should NOT be called
+    all_convert_calls = [c for c in call_cmds if "qemu-img convert" in c]
+    direct_convert_calls = [c for c in all_convert_calls if "nbd:unix:" not in c]
+    assert len(direct_convert_calls) == 0, (
+        "direct qemu-img convert (non-NBD) should NOT be used for running VM"
+    )
+
+    # rm -f socket cleanup should be called
+    socket_cleanup_calls = [c for c in call_cmds if "rm" in c and "qsnap-backup" in c]
+    assert len(socket_cleanup_calls) >= 1, (
+        "socket cleanup (rm -f) should be called"
+    )
+
+
+# ── test_fork_chain_size_estimation_uses_force_share ────────────────────────
+
+
+def test_fork_chain_size_estimation_uses_force_share(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """fork() chain-size estimation uses --force-share on qemu-img info.
+
+    The backing chain may include the active layer of a running VM, which
+    holds an exclusive write lock.  ``--force-share`` allows metadata reads
+    despite the lock (design D5, bug U).
+    """
+    vm = make_vm_config(name="sourcevm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    mock_state.record_snapshot("sourcevm", _make_snapshot("snap1"))
+    _make_shell_convert_expectations(mock_shell)
+
+    storage_dir = tmp_path / "storage"
+    (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as spy:
+        result = core.fork("snap1", "newvm", storage_dir)
+
+    assert result.success is True
+
+    # Verify that qemu-img info --backing-chain includes --force-share
+    backing_calls = [
+        " ".join(c.args[0]) for c in spy.call_args_list
+        if "backing-chain" in " ".join(c.args[0])
+    ]
+    assert len(backing_calls) >= 1, (
+        "qemu-img info --backing-chain should be called"
+    )
+    backing_cmd = backing_calls[0]
+    assert "--force-share" in backing_cmd, (
+        "qemu-img info --backing-chain must include --force-share"
+        " (design D5: read-only metadata access on active layer)"
+    )
 
 
 # ── test_fork_defines_new_libvirt_vm_with_modified_xml ─────────────────────

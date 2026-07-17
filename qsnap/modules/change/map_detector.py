@@ -89,9 +89,13 @@ class MapChangeDetector(IChangeDetector):
             active_disk = disks[0][1]
 
         # Step 3: Get current allocation map via qemu-img map
+        # --force-share: the active disk may be the active layer of a
+        # running VM, which has an exclusive write lock.  --force-share
+        # requests a shared lock for this metadata-only read (design D5).
         map_cmd = [
             "qemu-img",
             "map",
+            "--force-share",
             "--output=json",
             active_disk,
         ]

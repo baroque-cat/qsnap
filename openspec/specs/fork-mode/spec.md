@@ -7,13 +7,26 @@ One-command creation of a fully independent, self-sufficient VM from any qsnap-m
 ## Requirements
 
 ### Requirement: qsnap fork command creates independent VM from snapshot
-`qsnap fork <snapshot-name> --as-vm <new-vm-name>` SHALL locate the named snapshot (via `IStateManager` and backup providers, reusing `Core.restore()` resolution logic), create a standalone qcow2 via `qemu-img convert -O qcow2 <snapshot-path> <target-path>`, and define a new libvirt VM using `virsh define` with a modified copy of the source VM's XML.
+`qsnap fork <snapshot-name> --as-vm <new-vm-name>` SHALL locate the named snapshot (via `IStateManager` and backup providers, reusing `Core.restore()` resolution logic), create a standalone qcow2, and define a new libvirt VM using `virsh define` with a modified copy of the source VM's XML.
 
-#### Scenario: Fork creates standalone writable qcow2
+The standalone qcow2 creation SHALL detect VM running state via `virsh dominfo`. When the VM is running, the method SHALL use the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert -n nbd:unix:<socket>`) to avoid lock conflicts on the active layer. When the VM is stopped, the method SHALL use direct `qemu-img convert -O qcow2 <snapshot-path> <target-path>`.
+
+The chain-size estimation step (`qemu-img info --backing-chain`) SHALL use `--force-share` because the source snapshot may be the active layer of a running VM.
+
+#### Scenario: Fork creates standalone writable qcow2 (stopped VM)
 - **WHEN** `qsnap fork myvm.20260701T1200 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
+- **AND** `virsh dominfo` returns `State: shut off`
 - **THEN** `qemu-img convert -O qcow2 /source/snapshots/myvm.20260701T1200.qcow2 /var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2` is executed
 - **THEN** the resulting file has NO backing file (`qemu-img info` shows `backing file: <none>`)
 - **THEN** the file is writable
+
+#### Scenario: Fork creates standalone writable qcow2 (running VM)
+- **WHEN** `qsnap fork myvm.20260701T1200 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
+- **AND** `virsh dominfo` returns `State: running`
+- **THEN** `virsh backup-begin` is called without `--incremental` to start NBD export
+- **THEN** `qemu-img convert -n nbd:unix:<socket> /var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2` is executed
+- **THEN** the resulting file has NO backing file
+- **AND** no lock conflict occurs
 
 #### Scenario: Fork defines new libvirt VM
 - **WHEN** `qsnap fork ... --as-vm myvm-clone` completes convert successfully
@@ -58,11 +71,17 @@ The forked VM SHALL receive a newly generated UUID via `uuid.uuid4()`. It SHALL 
 - **THEN** the new VM's XML contains a different UUID (not "abc123")
 
 ### Requirement: Fork logs estimated size before converting
-Before running `qemu-img convert`, fork SHALL estimate and log the expected size of the resulting standalone file (sum of `actual-size` of all files in the snapshot's backing chain).
+Before running `qemu-img convert`, fork SHALL estimate and log the expected size of the resulting standalone file (sum of `actual-size` of all files in the snapshot's backing chain). The chain-size estimation step (`qemu-img info --backing-chain`) SHALL use `--force-share` because the source snapshot may be the active layer of a running VM.
 
 #### Scenario: Size estimate logged
 - **WHEN** `qsnap fork ...` is executed
 - **THEN** an INFO log message shows: "Converting snapshot myvm.20260701T1200 (chain size: ~12.3 GiB) to standalone qcow2..."
+
+#### Scenario: Fork chain-size estimation uses --force-share
+- **WHEN** `qsnap fork ...` estimates chain size via `qemu-img info --backing-chain`
+- **AND** the source snapshot is the active layer of a running VM
+- **THEN** `--force-share` is included in the `qemu-img info` command
+- **AND** the command succeeds despite the VM holding a write lock
 
 ### Requirement: qsnap deploy command deploys backup as VM
 `qsnap deploy <backup-name> --as-vm <new-vm-name> [--storage <dir>]` SHALL be a thin wrapper around fork semantics: locate the backup via restore resolution, convert to standalone qcow2, define VM. If the backup is already a FULL (standalone), `qemu-img convert` SHALL still be called (it is a no-op copy for standalone files, ensuring consistent behavior).

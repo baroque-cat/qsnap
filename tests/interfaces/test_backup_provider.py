@@ -202,18 +202,21 @@ def test_ibackup_provider_create_full_backup_abstract():
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "mock", "mock_bitmap"],
+    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwargs):
     """create_full_backup() returns a BackupResult instance.
 
     For ``FileCopyBackupProvider`` the bare ``MockShell`` causes the
     ``qemu-img convert`` step to fail, but the provider still returns a
-    ``BackupResult`` (with ``success=False``).  ``MockBackupProvider``
-    returns a successful ``BackupResult``.
+    ``BackupResult`` (with ``success=False``).  ``BitmapBackupProvider``
+    similarly fails on the NBD export step but returns a
+    ``BackupResult(success=False)``.  ``MockBackupProvider`` returns a
+    successful ``BackupResult``.
     """
     provider = cls(**init_kwargs)
     source_snapshot = SnapshotInfo(
@@ -248,10 +251,11 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "mock", "mock_bitmap"],
+    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
     cls, init_kwargs,

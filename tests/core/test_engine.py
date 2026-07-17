@@ -820,8 +820,12 @@ def test_size_estimation_logged_during_dry_run(
     mock_shell,
     caplog,
 ):
-    """Size estimation is logged during dry-run."""
-    target = make_target()
+    """Size estimation is logged during dry-run.
+
+    When dry-run mode is active and a FULL backup would be created,
+    the output includes '[dry-run] FULL backup would be created'.
+    """
+    target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -831,6 +835,15 @@ def test_size_estimation_logged_during_dry_run(
         shell=mock_shell,
     )
     core.dry_run = True
+
+    # Record a snapshot so _log_size_estimate has snapshots to evaluate
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot(vm.name, snap)
 
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
@@ -852,10 +865,21 @@ def test_size_estimation_logged_during_dry_run(
     )
 
     caplog.set_level(logging.INFO)
-    core.run()
+
+    with patch.object(
+        Core, "_should_create_bucket_full", return_value=(True, "weekly")
+    ):
+        core._log_size_estimate(vm, target)
 
     assert "Size estimate" in caplog.text, (
         "Size estimation should be logged during dry-run"
+    )
+    # New assertion: dry-run FULL would-be-created indicator
+    assert "[dry-run] FULL backup would be created" in caplog.text, (
+        "Dry-run size estimation should indicate FULL would be created"
+    )
+    assert "bucket=weekly" in caplog.text, (
+        "Bucket level should be indicated in dry-run log"
     )
 
 
@@ -1143,3 +1167,68 @@ def test_incremental_size_rolling_average_from_state(
     assert "avg_inc=200000" in caplog.text, (
         "Average incremental size should be computed from state history"
     )
+
+
+# ── Size Estimation: --force-share on Base Image ────────────────────────────
+
+
+def test_size_estimation_uses_force_share_on_base_image(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """qemu-img info on base image includes --force-share.
+
+    When base image is locked as backing file by a running VM,
+    ``_log_size_estimate`` uses ``--force-share`` to avoid lock conflicts
+    (design D5, bug U).
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        core._log_size_estimate(vm, target)
+
+    # Find the qemu-img info call for the base image
+    info_calls = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0] and "info" in " ".join(c.args[0])
+        and str(vm.base_image) in " ".join(c.args[0])
+    ]
+    assert len(info_calls) >= 1, (
+        "qemu-img info should be called for base image in size estimation"
+    )
+    for call in info_calls:
+        cmd_str = " ".join(call.args[0])
+        assert "--force-share" in cmd_str, (
+            f"qemu-img info on base image must include --force-share, got: {cmd_str}"
+        )

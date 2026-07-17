@@ -457,11 +457,16 @@ def test_dry_run_logs_no_mutation(
 
     # IShell.run may be called for read-only operations (_log_size_estimate
     # runs even in dry-run mode to provide size projections via qemu-img info
-    # and du -sb).  Verify only read-only shell calls were made.
+    # and du -sb).  In dry-run mode, _validate_environment() also runs
+    # (design D6) making read-only validation calls (test, which, virsh
+    # dominfo, find).  Verify only read-only shell calls were made.
+    read_only_patterns = (
+        "qemu-img info", "du", "test ", "which ", "virsh dominfo", "find",
+    )
     for call in shell_spy.call_args_list:
         cmd = call[0][0]  # command list
         cmd_str = " ".join(cmd)
-        assert any(p in cmd_str for p in ("qemu-img info", "du")), (
+        assert any(p in cmd_str for p in read_only_patterns), (
             f"Unexpected shell call in dry-run: {cmd_str}"
         )
 
@@ -475,6 +480,19 @@ def test_dry_run_logs_no_mutation(
 
     # Dry-run logs planned actions at INFO level.
     assert "[dry-run]" in caplog.text
+
+    # Verify --force-share is used on qemu-img info read-only calls
+    qemu_img_calls = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list)
+        and "qemu-img" in " ".join(c.args[0])
+    ]
+    for call in qemu_img_calls:
+        cmd_str = " ".join(call.args[0])
+        if "info" in cmd_str:
+            assert "--force-share" in cmd_str, (
+                f"qemu-img info must use --force-share in dry-run, got: {cmd_str}"
+            )
 
 
 # ── test_create_snapshot_single_disk_sda_not_vda ─────────────────────────
@@ -2430,4 +2448,346 @@ def test_core_post_processes_retention_for_dependencies(
     )
     assert inc1 not in deleted_names, (
         "inc1 is in keep-set and should not be deleted"
+    )
+
+
+# ── Dry-Run FULL Backup Tests ──────────────────────────────────────────────
+
+
+def test_dry_run_logs_full_would_be_created(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run mode: _should_create_bucket_full returns True → INFO log.
+
+    Verifies the dry-run log includes bucket, method (NBD for running VM),
+    and VM state.  Also verifies create_full_backup() is NOT called.
+    """
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    # Record a snapshot so _backup_target has something to process.
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    caplog.set_level(logging.INFO)
+
+    # Patch _should_create_bucket_full to force a new FULL
+    with (
+        patch.object(
+            Core, "_should_create_bucket_full", return_value=(True, "weekly")
+        ),
+        patch.object(
+            backup_provider,
+            "create_full_backup",
+            wraps=backup_provider.create_full_backup,
+        ) as full_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # The dry-run log includes the creation spec.
+    assert "[dry-run] Would create FULL backup" in caplog.text
+    assert "bucket=weekly" in caplog.text
+    assert "method=NBD" in caplog.text, (
+        "Running VM should use NBD method"
+    )
+    assert "VM=running" in caplog.text
+
+    # create_full_backup() was NOT actually called.
+    assert not full_spy.called, (
+        "create_full_backup() must NOT be called in dry-run mode"
+    )
+
+
+def test_dry_run_detects_vm_running_state_for_method(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run detects VM state: running → method=NBD, stopped → method=direct convert."""
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    caplog.set_level(logging.INFO)
+
+    # --- Case A: VM running (default fixture dominfo returns State: running) ---
+    with patch.object(
+        Core, "_should_create_bucket_full", return_value=(True, "weekly")
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert "method=NBD" in caplog.text, (
+        "Running VM should produce method=NBD in dry-run log"
+    )
+    assert "VM=running" in caplog.text
+
+    # --- Case B: VM stopped — patch is_vm_running to return False ---
+    caplog.clear()
+    with (
+        patch.object(
+            Core, "_should_create_bucket_full", return_value=(True, "weekly")
+        ),
+        patch("qsnap.core.is_vm_running", return_value=False),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert "method=direct convert" in caplog.text, (
+        "Stopped VM should produce method=direct convert in dry-run log"
+    )
+    assert "VM=stopped" in caplog.text
+
+
+def test_dry_run_logs_full_would_be_created_without_executing(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run with should_full=True → log indicates FULL would be created,
+    but no virsh backup-begin or qemu-img convert is executed."""
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch.object(
+            Core, "_should_create_bucket_full", return_value=(True, "weekly")
+        ),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Log confirms FULL would be created.
+    assert "[dry-run] Would create FULL backup" in caplog.text
+
+    # No virsh backup-begin or qemu-img convert was executed.
+    mutating_cmds = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list)
+        and any(
+            m in " ".join(c.args[0])
+            for m in ("backup-begin", "qemu-img convert")
+        )
+    ]
+    assert len(mutating_cmds) == 0, (
+        f"No mutating commands should be executed in dry-run, got: {mutating_cmds}"
+    )
+
+
+# ── Bitmap Target FULL Backup Test ──────────────────────────────────────────
+
+
+def test_full_creation_works_for_file_copy_and_bitmap(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Bitmap-mode target with weekly trigger → BitmapBackupProvider.create_full_backup() called.
+
+    Verifies that the factory returns the bitmap provider when incremental_mode="bitmap"
+    and that create_full_backup succeeds without raising NotImplementedError.
+    """
+    target = make_target(
+        target_preserve="7d",
+        incremental_mode="bitmap",
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    bitmap_provider = mock_factory._bitmap_backup_provider
+
+    with patch.object(
+        bitmap_provider,
+        "create_full_backup",
+        wraps=bitmap_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, (
+        "BitmapBackupProvider.create_full_backup() should be called for bitmap target"
+    )
+
+
+# ── Check Integrity: --force-share on Active Layer ──────────────────────────
+
+
+def test_check_integrity_uses_force_share_on_active_layer(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.check_integrity() uses --force-share on qemu-img info --backing-chain.
+
+    Verifies that the non-deep check path includes --force-share in the
+    qemu-img info command used to verify backing chains on active layers.
+    """
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record a snapshot so check() iterates over it.
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Override qemu-img info expectations — the fixture doesn't set one,
+    # so MockShell will return a failure by default for unconfigured commands.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps([{"image": str(snap.path), "format": "qcow2"}]),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        core.check()
+
+    # Find the qemu-img info call for snap1
+    info_calls = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "qemu-img" in c.args[0][0]
+        and "info" in " ".join(c.args[0])
+    ]
+    assert len(info_calls) >= 1, "qemu-img info should be called"
+
+    # Every qemu-img info --backing-chain call must include --force-share
+    backing_chain_calls = [
+        c for c in info_calls
+        if "--backing-chain" in " ".join(c.args[0])
+    ]
+    for call in backing_chain_calls:
+        cmd_str = " ".join(call.args[0])
+        assert "--force-share" in cmd_str, (
+            f"qemu-img info --backing-chain must include --force-share, got: {cmd_str}"
+        )
+
+
+def test_deep_check_uses_force_share_on_active_layer(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core._deep_check_file() uses --force-share on qemu-img check."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"corruptions": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        core._deep_check_file(
+            Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+            "snap1",
+            [],
+        )
+
+    check_calls = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0] and "check" in " ".join(c.args[0])
+    ]
+    assert len(check_calls) == 1, "qemu-img check should be called exactly once"
+    cmd_str = " ".join(check_calls[0].args[0])
+    assert "--force-share" in cmd_str, (
+        f"qemu-img check must include --force-share, got: {cmd_str}"
     )

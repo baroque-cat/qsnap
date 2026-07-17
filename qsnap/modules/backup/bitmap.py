@@ -36,6 +36,7 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.modules.backup.nbd_helper import _get_first_disk_target, nbd_full_export
 from qsnap.modules.backup.verification import verify_backup
 from qsnap.utils.parsing import parse_timestamp
 
@@ -148,9 +149,23 @@ class BitmapBackupProvider(IBackupProvider):
                     continue
 
                 # Step 4: Pull dirty blocks via NBD.
+                # libvirt's NBD server exports each disk under its
+                # target device name (e.g., "vda").  We must specify
+                # exportname in the NBD URI to connect to the correct
+                # export.
+                disk_target = _get_first_disk_target(
+                    self._shell, vm_config.name,
+                )
+                nbd_uri = f"nbd:unix:{socket_path}"
+                if disk_target:
+                    nbd_uri = (
+                        f"nbd:unix:{socket_path}"
+                        f":exportname={disk_target}"
+                    )
+
                 convert_cmd = [
-                    "qemu-img", "convert", "-n",
-                    f"nbd:unix:{socket_path}",
+                    "qemu-img", "convert", "-O", "qcow2",
+                    nbd_uri,
                     str(target_file),
                 ]
                 convert_result = self._shell.run(convert_cmd, timeout=600)
@@ -244,6 +259,84 @@ class BitmapBackupProvider(IBackupProvider):
 
         return results
 
+    def create_full_backup(
+        self,
+        source_snapshot: SnapshotInfo,
+        target: TargetConfig,
+        compress: bool = False,
+        bucket_level: str = "monthly",
+    ) -> BackupResult:
+        """Create a standalone FULL backup via NBD full export (design D4).
+
+        Uses the shared :func:`nbd_full_export` helper (no
+        ``--incremental`` flag) to produce a standalone qcow2 on the
+        target.  No checkpoint is created or deleted — the checkpoint
+        lifecycle remains exclusively in :meth:`transfer_missing` for
+        incremental runs (design D3).
+
+        Uses an atomic pattern: convert to a ``.tmp`` file, then rename
+        on success.  On failure, the ``.tmp`` file is removed.
+
+        The ``compress`` flag is accepted for interface compatibility but
+        ignored — the NBD path does not support compression.
+        """
+        if compress:
+            logger.warning(
+                "compress=True ignored for NBD-based FULL backup"
+            )
+
+        # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
+        date_str = source_snapshot.timestamp.strftime("%Y%m%d")
+        vm_name = source_snapshot.name.split(".")[0]
+        full_name = f"{vm_name}.FULL.{date_str}"
+        target_file = target.path / f"{full_name}.qcow2"
+        tmp_file = target.path / f"{full_name}.qcow2.tmp"
+
+        # Run NBD full-export to .tmp file (no --incremental, no
+        # checkpoint — design D3, D4).
+        nbd_result = nbd_full_export(
+            self._shell, vm_name, str(tmp_file)
+        )
+        if not nbd_result.success:
+            # Remove .tmp on failure — no final file created.
+            self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
+            return BackupResult(
+                success=False,
+                snapshot_name=source_snapshot.name,
+                source_path=source_snapshot.path,
+                target_path=target_file,
+                bytes_transferred=0,
+                error=nbd_result.error,
+            )
+
+        # Atomic rename: mv .tmp to final name
+        mv_cmd = ["mv", str(tmp_file), str(target_file)]
+        mv_result = self._shell.run(mv_cmd, timeout=30)
+        if not mv_result.success:
+            return BackupResult(
+                success=False,
+                snapshot_name=source_snapshot.name,
+                source_path=source_snapshot.path,
+                target_path=target_file,
+                bytes_transferred=0,
+                error=mv_result.error,
+            )
+
+        # Get file size
+        try:
+            bytes_transferred = target_file.stat().st_size
+        except OSError:
+            bytes_transferred = 0
+
+        return BackupResult(
+            success=True,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target_file,
+            bytes_transferred=bytes_transferred,
+            error=None,
+        )
+
     def list(self, target: TargetConfig) -> list[SnapshotInfo]:
         """List existing backups at *target*.
 
@@ -336,7 +429,7 @@ class BitmapBackupProvider(IBackupProvider):
         """
         xml_content = (
             f"<domainbackup mode='pull'>\n"
-            f"  <server transport='unix' path='{socket_path}'/>\n"
+            f"  <server transport='unix' socket='{socket_path}'/>\n"
             f"</domainbackup>\n"
         )
         fd, tmp_path = tempfile.mkstemp(

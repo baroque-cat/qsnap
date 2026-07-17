@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
+
+logger = logging.getLogger(__name__)
 
 _VERIFY_COMPARE_TIMEOUT = 7200  # 2 hours
 
@@ -69,8 +72,12 @@ def verify_backup(
     # ── Metadata verification ────────────────────────────────────────
 
     # Source info
+    # --force-share: the source may be the active layer of a running
+    # VM, which has an exclusive write lock.  --force-share requests a
+    # shared lock for this metadata-only read (design D5).
     source_info_cmd = [
-        "qemu-img", "info", "--output=json", str(source_path),
+        "qemu-img", "info", "--force-share",
+        "--output=json", str(source_path),
     ]
     source_result = shell.run(source_info_cmd, timeout=60)
     if not source_result.success:
@@ -138,6 +145,16 @@ def verify_backup(
     # ── Full verification ────────────────────────────────────────────
 
     if verify_mode == "full":
+        # Warn: if the source is a live VM active layer, qemu-img compare
+        # may fail with a lock error (compare is a data-copying operation
+        # that does NOT use --force-share — design D5).
+        logger.warning(
+            "Full verification (qemu-img compare) on source %s — "
+            "if this is a live VM active layer, the compare may fail "
+            "with a lock error; consider verify='metadata' or 'hash' "
+            "for running VMs",
+            source_path,
+        )
         compare_cmd = [
             "qemu-img", "compare", "-q",
             str(source_path), str(target_path),
@@ -146,6 +163,15 @@ def verify_backup(
             compare_cmd, timeout=_VERIFY_COMPARE_TIMEOUT,
         )
         if not compare_result.success:
-            return "verification failed: data comparison mismatch"
+            error_detail = (
+                compare_result.error or compare_result.stderr or ""
+            )
+            if "lock" in error_detail.lower() or "shared" in error_detail.lower():
+                return (
+                    "verification failed: data comparison failed "
+                    "(source may be locked by running VM); "
+                    "consider verify='metadata' or 'hash'"
+                )
+            return f"verification failed: data comparison mismatch: {error_detail}"
 
     return None

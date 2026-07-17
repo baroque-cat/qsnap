@@ -837,3 +837,58 @@ def test_validate_env_cleanup_skipped_when_auto_cleanup_false(
 
     # Main validation still passes — cleanup being disabled is not a failure
     assert result.status == "ok"
+
+
+# ── test_dry_run_runs_validation_non_fatal_warnings ────────────────────────
+
+
+def test_dry_run_runs_validation_non_fatal_warnings(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run mode → validation failures logged as WARNING, pipeline continues.
+
+    In dry-run mode, ``_validate_environment()`` is always called (design D6).
+    Validation failures are logged as WARNING (non-fatal), and the pipeline
+    does NOT abort.  It continues to log planned actions
+    (e.g. ``[dry-run] Would create snapshot``).
+    """
+    # Make validation fail by overriding snapshot_dir check.
+    _override(mock_shell, "test -d", _FAIL)
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    caplog.set_level(logging.INFO)
+
+    with patch.object(
+        core, "_validate_environment", wraps=core._validate_environment
+    ) as validate_spy:
+        result = core.run()
+
+    # Validation was called (always runs in dry-run mode — design D6).
+    assert validate_spy.called
+
+    # Validation failure is logged as WARNING in dry-run mode.
+    assert any(
+        "Environment validation failed" in r.message
+        and "dry-run" in r.message
+        for r in caplog.records
+    ), f"Expected dry-run validation WARNING in: {[r.message for r in caplog.records]}"
+
+    # Pipeline does NOT abort — snapshot dry-run log appears.
+    assert "[dry-run] Would create snapshot" in caplog.text, (
+        "Pipeline should continue after dry-run validation warning"
+    )
+
+    # Pipeline succeeds (dry-run failures do not cause pipeline failure).
+    assert result.success is True

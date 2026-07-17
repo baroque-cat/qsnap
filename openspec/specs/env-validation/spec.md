@@ -27,6 +27,8 @@ The pre-flight environment validation SHALL check that the `rsync` binary is ava
 
 Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) stale `.tmp`, `.partial`, and NBD socket files are cleaned up per `auto_cleanup` config, (b) orphan `.qcow2` snapshots are detected (WARNING only), (c) `snapshot_dir` exists and is a writable directory, (d) `base_image` file exists, (e) `virsh` and `qemu-img` binaries are in PATH, (f) VM is defined in libvirt (`virsh dominfo` returns 0), (g) `rsync` is in PATH (hard requirement, pipeline aborts if missing). Failure on checks (c)-(f) SHALL return immediately — no partial pipeline execution. Cleanup steps (a)-(b) SHALL be skipped when `auto_cleanup = false`. Checks (a)-(b) SHALL NOT block pipeline execution — they are defensive, not critical.
 
+In dry-run mode, `_validate_environment()` SHALL still be called. Validation failures SHALL be logged as WARNING (non-fatal) in dry-run mode. The pipeline SHALL NOT abort on validation failure in dry-run mode. In non-dry-run mode, validation failure SHALL raise `RuntimeError` and abort the pipeline as before.
+
 #### Scenario: Cleanup and orphan detection execute before main checks
 - **WHEN** `_validate_environment()` is called and `auto_cleanup = true`
 - **THEN** stale file cleanup and orphan detection run first
@@ -72,3 +74,16 @@ Pre-flight validation SHALL check each configured target: if `target.path` does 
 
 - **WHEN** `snapshot_create = "always"` and a target directory does not exist
 - **THEN** validation fails with an error pointing to the missing target
+
+#### Scenario: Dry-run runs validation as non-fatal warnings
+- **WHEN** `Core._execute_pipeline()` is called in dry-run mode
+- **THEN** `_validate_environment()` is called (NOT skipped)
+- **AND** if validation fails, the broken checks are logged as WARNING
+- **AND** the pipeline does NOT abort (continues to dry-run snapshot/backup steps)
+- **AND** the dry-run output includes the validation warnings
+
+#### Scenario: Non-dry-run aborts on validation failure
+- **WHEN** `Core._execute_pipeline()` is called in non-dry-run mode
+- **AND** `_validate_environment()` returns `status="validation_failed"`
+- **THEN** a `RuntimeError` is raised with the broken checks
+- **AND** the pipeline does NOT proceed to snapshot or backup steps
