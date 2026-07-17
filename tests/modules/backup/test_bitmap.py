@@ -22,11 +22,10 @@ Scenarios:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-
-import json
 
 import pytest
 
@@ -50,9 +49,7 @@ def _ok_version_result(version: str = "8.2.0") -> ShellResult:
 
 def _ok_result() -> ShellResult:
     """A generic successful ShellResult."""
-    return ShellResult(
-        success=True, stdout="", stderr="", returncode=0, error=None
-    )
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
 def _make_snapshot() -> SnapshotInfo:
@@ -96,7 +93,8 @@ def test_first_backup_full_nbd_no_prior_checkpoint(
     vm_config = make_vm_config()
     # Nonexistent target path -> list() returns [] without shell calls
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -134,9 +132,7 @@ def test_first_backup_full_nbd_no_prior_checkpoint(
     assert results[0].error is None
 
     # Verify backup-begin command has NO --incremental
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1
     assert "--incremental" not in backup_cmds[0]
@@ -160,15 +156,14 @@ def test_first_backup_full_nbd_no_prior_checkpoint(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_incremental_backup_dirty_blocks_via_nbd(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
+def test_incremental_backup_dirty_blocks_via_nbd(mock_shell, make_vm_config, make_target, tmp_path):
     """When a prior checkpoint exists, backup-begin includes
     ``--incremental <prior_checkpoint>``.
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -210,9 +205,7 @@ def test_incremental_backup_dirty_blocks_via_nbd(
     assert results[0].success is True
 
     # Verify backup-begin command HAS --incremental with prior checkpoint
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1
     assert "--incremental" in backup_cmds[0]
@@ -233,7 +226,8 @@ def test_checkpoint_cleanup_after_successful_transfer(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -272,9 +266,7 @@ def test_checkpoint_cleanup_after_successful_transfer(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
 
     # Verify checkpoint-delete was called with --metadata and prior name
     delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
@@ -295,15 +287,14 @@ def test_checkpoint_cleanup_after_successful_transfer(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_transfer_failure_preserves_checkpoint(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
+def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_target, tmp_path):
     """When ``qemu-img convert`` (NBD pull) fails, the prior checkpoint
     is NOT deleted and the result is ``BackupResult(success=False)``.
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -351,21 +342,15 @@ def test_transfer_failure_preserves_checkpoint(
     assert results[0].bytes_transferred == 0
     assert results[0].snapshot_name == snapshot.name
 
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
 
     # Verify checkpoint-delete was NOT called (checkpoint preserved)
     delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
-    assert len(delete_cmds) == 0, (
-        "checkpoint-delete should NOT be called when convert fails"
-    )
+    assert len(delete_cmds) == 0, "checkpoint-delete should NOT be called when convert fails"
 
     # Verify checkpoint-create-as was NOT called
     create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
-    assert len(create_cmds) == 0, (
-        "checkpoint-create-as should NOT be called when convert fails"
-    )
+    assert len(create_cmds) == 0, "checkpoint-create-as should NOT be called when convert fails"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -373,15 +358,14 @@ def test_transfer_failure_preserves_checkpoint(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_socket_cleanup_on_success(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
+def test_socket_cleanup_on_success(mock_shell, make_vm_config, make_target, tmp_path):
     """When ``qemu-img convert`` completes successfully, the Unix socket
     is removed via ``rm -f`` in the finally block.
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -402,15 +386,14 @@ def test_socket_cleanup_on_success(
     # We just verify the test passes without error.
 
 
-def test_socket_cleanup_on_failure(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
+def test_socket_cleanup_on_failure(mock_shell, make_vm_config, make_target, tmp_path):
     """When ``qemu-img convert`` fails, the Unix socket is still removed
     via ``rm -f`` in the finally block.
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
     )
     snapshot = _make_snapshot()
 
@@ -452,10 +435,7 @@ def test_list_checkpoints_filters_qsnap_prefix(mock_shell):
         ShellResult(
             success=True,
             stdout=(
-                "qsnap-abc123-snap1\n"
-                "other-checkpoint\n"
-                "libvirt-something\n"
-                "qsnap-xyz789-snap2\n"
+                "qsnap-abc123-snap1\nother-checkpoint\nlibvirt-something\nqsnap-xyz789-snap2\n"
             ),
             stderr="",
             returncode=0,
@@ -471,9 +451,7 @@ def test_list_checkpoints_filters_qsnap_prefix(mock_shell):
     assert checkpoints == ["qsnap-abc123-snap1", "qsnap-xyz789-snap2"]
 
     # Verify the command structure
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     cp_list_cmds = [cmd for cmd in all_cmds if "checkpoint-list" in cmd]
     assert len(cp_list_cmds) == 1
     assert "--name" in cp_list_cmds[0]
@@ -509,9 +487,7 @@ def test_constructor_rejects_unsupported_libvirt_version(mock_shell):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_bitmap_backup_ignores_rate_limit(
-    mock_shell, make_vm_config, make_target, tmp_path
-):
+def test_bitmap_backup_ignores_rate_limit(mock_shell, make_vm_config, make_target, tmp_path):
     """``BitmapBackupProvider.transfer_missing()`` accepts a ``rate_limit``
     parameter for interface compatibility but ignores it — NBD-based
     transfers cannot be throttled via ``rsync --bwlimit``.
@@ -521,7 +497,8 @@ def test_bitmap_backup_ignores_rate_limit(
     """
     vm_config = make_vm_config()
     target = make_target(
-        path=str(tmp_path / "nonexistent_target"), verify="off",
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
         rate_limit="100M",
     )
     snapshot = _make_snapshot()
@@ -551,9 +528,7 @@ def test_bitmap_backup_ignores_rate_limit(
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], rate_limit="100M"
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
 
     # Assert successful result
     assert len(results) == 1
@@ -561,9 +536,7 @@ def test_bitmap_backup_ignores_rate_limit(
     assert results[0].snapshot_name == snapshot.name
     assert results[0].error is None
 
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
 
     # No rsync command should be issued
     rsync_cmds = [cmd for cmd in all_cmds if "rsync" in cmd]
@@ -583,9 +556,7 @@ def test_bitmap_backup_ignores_rate_limit(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_bitmap_create_full_backup_nbd_succeeds(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_create_full_backup_nbd_succeeds(mock_shell, make_target, tmp_path):
     """``BitmapBackupProvider.create_full_backup()`` uses NBD full export
     (no ``--incremental``) and returns ``BackupResult(success=True)``.
 
@@ -623,12 +594,14 @@ def test_bitmap_create_full_backup_nbd_succeeds(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(
-        mock_shell, "run", side_effect=spied_run
-    ) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     # Assert successful result
@@ -637,38 +610,109 @@ def test_bitmap_create_full_backup_nbd_succeeds(
     assert result.snapshot_name == snapshot.name
     assert result.bytes_transferred == 65536
 
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
 
     # Verify backup-begin called WITHOUT --incremental
     backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1
     assert "--incremental" not in backup_cmds[0]
 
-    # Verify qemu-img convert uses NBD
+    # Verify qemu-img convert uses NBD (and NO compression flag)
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
     assert "nbd:unix:" in convert_cmds[0]
+    assert "-c" not in convert_cmds[0], "qemu-img convert should NOT use -c when compress=False"
 
     # Verify NO checkpoints created or deleted
-    cp_create_cmds = [
-        cmd for cmd in all_cmds if "checkpoint-create-as" in cmd
-    ]
-    assert len(cp_create_cmds) == 0, (
-        "create_full_backup should NOT create checkpoints"
-    )
-    cp_delete_cmds = [
-        cmd for cmd in all_cmds if "checkpoint-delete" in cmd
-    ]
-    assert len(cp_delete_cmds) == 0, (
-        "create_full_backup should NOT delete checkpoints"
-    )
+    cp_create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
+    assert len(cp_create_cmds) == 0, "create_full_backup should NOT create checkpoints"
+    cp_delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
+    assert len(cp_delete_cmds) == 0, "create_full_backup should NOT delete checkpoints"
 
 
-def test_bitmap_full_backup_does_not_raise_not_implemented(
-    mock_shell, make_target, tmp_path
+def test_bitmap_create_full_backup_with_compression_succeeds(
+    mock_shell,
+    make_target,
+    tmp_path,
+    caplog,
 ):
+    """``BitmapBackupProvider.create_full_backup(compress=True)`` passes
+    ``-c`` to ``qemu-img convert`` via ``nbd_full_export``, producing a
+    compressed FULL backup.
+
+    Verifies:
+    - ``-c`` IS present in the ``qemu-img convert`` command
+    - NO WARNING about ``compress=True ignored`` is logged
+    - ``BackupResult.success`` is True
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # Constructor version check
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    # rm -f stale socket (before backup-begin, in nbd_full_export)
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # virsh backup-begin (no --incremental)
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # qemu-img convert via NBD (with -c for compression)
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # rm -f socket cleanup (finally in nbd_full_export)
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # mv (atomic rename)
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    # Side effect: simulate mv creating the final file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm",
+            snapshot,
+            target,
+            compress=True,
+            bucket_level="monthly",
+        )
+
+    # Assert successful result
+    assert result.success is True
+    assert result.error is None
+    assert result.snapshot_name == snapshot.name
+    assert result.bytes_transferred == 65536
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify qemu-img convert uses NBD WITH compression flag
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0]
+    assert "-c" in convert_cmds[0], "qemu-img convert SHOULD use -c when compress=True"
+
+    # Verify NO WARNING about "compress=True ignored" is logged
+    compress_ignored_warnings = [
+        record for record in caplog.records if "compress=True ignored" in record.getMessage()
+    ]
+    assert len(compress_ignored_warnings) == 0, (
+        "Should NOT log 'compress=True ignored' for NBD-based FULL backup"
+    )
+
+    # Verify NO checkpoints created or deleted
+    cp_create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
+    assert len(cp_create_cmds) == 0
+    cp_delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
+    assert len(cp_delete_cmds) == 0
+
+
+def test_bitmap_full_backup_does_not_raise_not_implemented(mock_shell, make_target, tmp_path):
     """``BitmapBackupProvider.create_full_backup()`` is callable and
     returns a valid ``BackupResult`` (no longer raises
     ``NotImplementedError``).
@@ -700,22 +744,24 @@ def test_bitmap_full_backup_does_not_raise_not_implemented(
         # Explicit assertion: create_full_backup is callable
         # (was previously NotImplementedError)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     # Returns a valid BackupResult
     from qsnap.models.results import BackupResult as _BR
+
     assert isinstance(result, _BR), (
-        f"create_full_backup should return BackupResult, "
-        f"got {type(result).__name__}"
+        f"create_full_backup should return BackupResult, got {type(result).__name__}"
     )
     assert result.success is True
     assert result.snapshot_name == snapshot.name
 
 
-def test_bitmap_full_socket_cleanup(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_full_socket_cleanup(mock_shell, make_target, tmp_path):
     """Socket cleanup on both success and failure paths.
 
     Success path: ``rm -f`` called before ``backup-begin`` and in
@@ -744,24 +790,22 @@ def test_bitmap_full_socket_cleanup(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run_success(cmd, timeout)
 
-    with patch.object(
-        mock_shell, "run", side_effect=spied_run_success
-    ) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run_success) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result.success is True
 
     # Socket rm -f calls on success
-    all_cmds_success = [
-        " ".join(call_obj.args[0])
-        for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds_success = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     socket_rm_cmds = [
-        cmd for cmd in all_cmds_success
-        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+        cmd for cmd in all_cmds_success if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
     ]
     assert len(socket_rm_cmds) >= 2, (
         f"Expected >=2 socket rm calls on success, got: {socket_rm_cmds}"
@@ -770,6 +814,7 @@ def test_bitmap_full_socket_cleanup(
     # ── Failure case ──────────────────────────────────────────────────
     # Fresh mock shell and provider for failure test
     from tests.mocks.mock_shell import MockShell
+
     fail_shell = MockShell()
 
     # Need dominfo for the new shell (no conftest fixture applied)
@@ -781,38 +826,32 @@ def test_bitmap_full_socket_cleanup(
     fail_shell.expect("rm -f").returns(_ok_result())  # stale socket
     fail_shell.expect("backup-begin").returns(_ok_result())
     fail_shell.expect("qemu-img convert").returns(
-        ShellResult(success=False, stdout="", stderr="I/O error",
-                     returncode=1, error="I/O error")
+        ShellResult(success=False, stdout="", stderr="I/O error", returncode=1, error="I/O error")
     )
 
-    with patch.object(
-        fail_shell, "run", wraps=fail_shell.run
-    ) as fail_spy:
+    with patch.object(fail_shell, "run", wraps=fail_shell.run) as fail_spy:
         provider_fail = BitmapBackupProvider(fail_shell)
         result_fail = provider_fail.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result_fail.success is False
 
     # Socket rm -f calls on failure (socket cleanup in finally)
-    all_cmds_fail = [
-        " ".join(call_obj.args[0])
-        for call_obj in fail_spy.call_args_list
-    ]
+    all_cmds_fail = [" ".join(call_obj.args[0]) for call_obj in fail_spy.call_args_list]
     socket_rm_fail = [
-        cmd for cmd in all_cmds_fail
-        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+        cmd for cmd in all_cmds_fail if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
     ]
     assert len(socket_rm_fail) >= 1, (
-        f"Expected >=1 socket rm call on failure (finally), "
-        f"got: {socket_rm_fail}"
+        f"Expected >=1 socket rm call on failure (finally), got: {socket_rm_fail}"
     )
 
 
-def test_bitmap_full_backup_no_checkpoint(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_full_backup_no_checkpoint(mock_shell, make_target, tmp_path):
     """``BitmapBackupProvider.create_full_backup()`` does NOT create or
     delete any checkpoints.
 
@@ -839,40 +878,32 @@ def test_bitmap_full_backup_no_checkpoint(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(
-        mock_shell, "run", side_effect=spied_run
-    ) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result.success is True
 
-    all_cmds = [
-        " ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list
-    ]
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
 
     # No checkpoints
-    cp_create_cmds = [
-        cmd for cmd in all_cmds if "checkpoint-create-as" in cmd
-    ]
+    cp_create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
     assert len(cp_create_cmds) == 0
-    cp_delete_cmds = [
-        cmd for cmd in all_cmds if "checkpoint-delete" in cmd
-    ]
+    cp_delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
     assert len(cp_delete_cmds) == 0
 
     # No checkpoint-list either (that's in transfer_missing only)
-    cp_list_cmds = [
-        cmd for cmd in all_cmds if "checkpoint-list" in cmd
-    ]
+    cp_list_cmds = [cmd for cmd in all_cmds if "checkpoint-list" in cmd]
     assert len(cp_list_cmds) == 0
 
 
-def test_bitmap_bucket_driven_full_no_longer_crashes(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_bucket_driven_full_no_longer_crashes(mock_shell, make_target, tmp_path):
     """``BitmapBackupProvider.create_full_backup()`` works with different
     ``bucket_level`` values (was previously ``NotImplementedError``).
 
@@ -906,7 +937,11 @@ def test_bitmap_bucket_driven_full_no_longer_crashes(
         # Bucket-driven FULL for various retention bucket levels
         for bucket_level in ("monthly", "weekly", "daily", "yearly"):
             result = provider.create_full_backup(
-                "testvm", snapshot, target, compress=False, bucket_level=bucket_level,
+                "testvm",
+                snapshot,
+                target,
+                compress=False,
+                bucket_level=bucket_level,
             )
             assert result.success is True, (
                 f"create_full_backup failed for bucket_level={bucket_level}"
@@ -914,9 +949,7 @@ def test_bitmap_bucket_driven_full_no_longer_crashes(
             assert result.snapshot_name == snapshot.name
 
 
-def test_bitmap_create_full_backup_returns_standalone_qcow2(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_create_full_backup_returns_standalone_qcow2(mock_shell, make_target, tmp_path):
     """``BitmapBackupProvider.create_full_backup()`` via NBD produces a
     standalone qcow2 with no backing file.
 
@@ -945,7 +978,11 @@ def test_bitmap_create_full_backup_returns_standalone_qcow2(
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result.success is True
@@ -968,7 +1005,10 @@ def test_bitmap_create_full_backup_returns_standalone_qcow2(
     )
 
     info_cmd = [
-        "qemu-img", "info", "--output=json", str(result.target_path),
+        "qemu-img",
+        "info",
+        "--output=json",
+        str(result.target_path),
     ]
     info_result = mock_shell.run(info_cmd, timeout=30)
     info_data = json.loads(info_result.stdout)
@@ -983,9 +1023,7 @@ def test_bitmap_create_full_backup_returns_standalone_qcow2(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_bitmap_create_full_backup_dotted_vm_name(
-    mock_shell, make_target, tmp_path
-):
+def test_bitmap_create_full_backup_dotted_vm_name(mock_shell, make_target, tmp_path):
     """Bitmap FULL backup with dotted VM name ``"3.Projects_opencode"``.
 
     - ``nbd_full_export(shell, "3.Projects_opencode", ...)`` is called
@@ -1029,10 +1067,13 @@ def test_bitmap_create_full_backup_dotted_vm_name(
         nbd_full_export as real_nbd_full_export,
     )
 
-    with patch(
-        "qsnap.modules.backup.bitmap.nbd_full_export",
-        wraps=real_nbd_full_export,
-    ) as nbd_spy, patch.object(mock_shell, "run", side_effect=spied_run):
+    with (
+        patch(
+            "qsnap.modules.backup.bitmap.nbd_full_export",
+            wraps=real_nbd_full_export,
+        ) as nbd_spy,
+        patch.object(mock_shell, "run", side_effect=spied_run),
+    ):
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "3.Projects_opencode",
@@ -1062,14 +1103,12 @@ def test_bitmap_create_full_backup_dotted_vm_name(
     expected_date = snapshot.timestamp.strftime("%Y%m%d")
     expected_name = f"3.Projects_opencode.FULL.{expected_date}.qcow2"
     assert result_filename == expected_name, (
-        f"Expected backup filename {expected_name!r}, "
-        f"got {result_filename!r}"
+        f"Expected backup filename {expected_name!r}, got {result_filename!r}"
     )
     # Sanity: the filename *starts* with the full dotted VM name
     # (not just "3.")
     assert result_filename.startswith("3.Projects_opencode.FULL."), (
-        f"Full backup filename must start with "
-        f"'3.Projects_opencode.FULL.', got {result_filename!r}"
+        f"Full backup filename must start with '3.Projects_opencode.FULL.', got {result_filename!r}"
     )
     assert result_filename.endswith(".qcow2")
 

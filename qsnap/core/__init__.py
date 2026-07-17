@@ -183,9 +183,7 @@ class Core:
                 results[vm.name] = max(snapshots, key=lambda s: s.timestamp)
         return results
 
-    def list_deferred(
-        self, vm_filter: str | None = None
-    ) -> list[DeferredSummary]:
+    def list_deferred(self, vm_filter: str | None = None) -> list[DeferredSummary]:
         """Return per-VM summaries of deferred blockcommit operations.
 
         Each summary includes the VM name, total snapshot count across all
@@ -226,9 +224,7 @@ class Core:
             if not snapshots:
                 snap_retention = RetentionResult(keep=[], remove=[])
             else:
-                policy = self._parse_preserve(
-                    vm.snapshot_preserve, vm.snapshot_preserve_min
-                )
+                policy = self._parse_preserve(vm.snapshot_preserve, vm.snapshot_preserve_min)
                 engine = self._factory.create_retention_engine(policy)
                 items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
                 snap_retention = engine.evaluate(
@@ -279,7 +275,10 @@ class Core:
             # Get base image actual-size for size projections
             base_size = 0
             info_cmd = [
-                "qemu-img", "info", "--force-share", "--output=json",
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--output=json",
                 str(vm.base_image),
             ]
             info_result = self._shell.run(info_cmd, timeout=60)
@@ -302,9 +301,7 @@ class Core:
             lines.append(f"  Avg incremental size:   {avg_inc_size} B")
 
             # Snapshot retention
-            snap_policy = self._parse_preserve(
-                vm.snapshot_preserve, vm.snapshot_preserve_min
-            )
+            snap_policy = self._parse_preserve(vm.snapshot_preserve, vm.snapshot_preserve_min)
             snap_window = self._retention_window(snap_policy)
             snap_items = self._generate_synthetic_items(now, snap_window, "snap")
             snap_engine = self._factory.create_retention_engine(snap_policy)
@@ -316,9 +313,11 @@ class Core:
             )
 
             lines.append("  Snapshots:")
-            lines.append(f"    Policy: hourly={snap_policy.hourly} daily={snap_policy.daily} "
-                         f"weekly={snap_policy.weekly} monthly={snap_policy.monthly} "
-                         f"yearly={snap_policy.yearly} preserve_min={snap_policy.preserve_min}")
+            lines.append(
+                f"    Policy: hourly={snap_policy.hourly} daily={snap_policy.daily} "
+                f"weekly={snap_policy.weekly} monthly={snap_policy.monthly} "
+                f"yearly={snap_policy.yearly} preserve_min={snap_policy.preserve_min}"
+            )
             lines.append(f"    Simulated items: {len(snap_items)}")
             lines.append(f"    Expected kept:   {len(snap_result.keep)}")
             lines.append(f"    Expected remove: {len(snap_result.remove)}")
@@ -344,9 +343,11 @@ class Core:
                 )
 
                 lines.append(f"  Backups [{target.path}]:")
-                lines.append(f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
-                             f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
-                             f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}")
+                lines.append(
+                    f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
+                    f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
+                    f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}"
+                )
                 lines.append(f"    Simulated items: {len(tgt_items)}")
                 lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
                 lines.append(f"    Expected remove: {len(tgt_result.remove)}")
@@ -358,19 +359,27 @@ class Core:
 
                 # Size projections (design D5)
                 full_size = int(base_size * 0.3) if target.compress else base_size
-                active_buckets = sum(1 for c in (
-                    tgt_policy.hourly, tgt_policy.daily, tgt_policy.weekly,
-                    tgt_policy.monthly, tgt_policy.yearly,
-                ) if c > 0)
+                active_buckets = sum(
+                    1
+                    for c in (
+                        tgt_policy.hourly,
+                        tgt_policy.daily,
+                        tgt_policy.weekly,
+                        tgt_policy.monthly,
+                        tgt_policy.yearly,
+                    )
+                    if c > 0
+                )
                 total_kept = (
-                    tgt_policy.hourly + tgt_policy.daily + tgt_policy.weekly
-                    + tgt_policy.monthly + tgt_policy.yearly
+                    tgt_policy.hourly
+                    + tgt_policy.daily
+                    + tgt_policy.weekly
+                    + tgt_policy.monthly
+                    + tgt_policy.yearly
                 )
                 projected_fulls = max(1, active_buckets)
                 projected_incs = max(0, total_kept - projected_fulls)
-                projected_total = (
-                    projected_fulls * full_size + projected_incs * avg_inc_size
-                )
+                projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
                 lines.append(f"    Projected FULLs: {projected_fulls}")
                 lines.append(f"    Projected incrementals: {projected_incs}")
                 lines.append(f"    Projected total size: {projected_total} B")
@@ -398,7 +407,10 @@ class Core:
             # Get base image actual-size
             base_size = 0
             info_cmd = [
-                "qemu-img", "info", "--force-share", "--output=json",
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--output=json",
                 str(vm.base_image),
             ]
             info_result = self._shell.run(info_cmd, timeout=60)
@@ -434,24 +446,33 @@ class Core:
 
                 # Size projections
                 full_size = int(base_size * 0.3) if target.compress else base_size
-                active_buckets = sum(1 for c in (
-                    tgt_policy.hourly, tgt_policy.daily, tgt_policy.weekly,
-                    tgt_policy.monthly, tgt_policy.yearly,
-                ) if c > 0)
+                active_buckets = sum(
+                    1
+                    for c in (
+                        tgt_policy.hourly,
+                        tgt_policy.daily,
+                        tgt_policy.weekly,
+                        tgt_policy.monthly,
+                        tgt_policy.yearly,
+                    )
+                    if c > 0
+                )
                 total_kept = (
-                    tgt_policy.hourly + tgt_policy.daily + tgt_policy.weekly
-                    + tgt_policy.monthly + tgt_policy.yearly
+                    tgt_policy.hourly
+                    + tgt_policy.daily
+                    + tgt_policy.weekly
+                    + tgt_policy.monthly
+                    + tgt_policy.yearly
                 )
                 projected_fulls = max(1, active_buckets)
                 projected_incs = max(0, total_kept - projected_fulls)
-                projected_total = (
-                    projected_fulls * full_size + projected_incs * avg_inc_size
-                )
+                projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
 
                 # Current target size
                 current_target_size = 0
                 du_result = self._shell.run(
-                    ["du", "-sb", str(target.path)], timeout=60,
+                    ["du", "-sb", str(target.path)],
+                    timeout=60,
                 )
                 if du_result.success:
                     parts = du_result.stdout.split()
@@ -462,9 +483,11 @@ class Core:
                             pass
 
                 lines.append(f"  Backups [{target.path}]:")
-                lines.append(f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
-                             f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
-                             f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}")
+                lines.append(
+                    f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
+                    f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
+                    f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}"
+                )
                 lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
                 lines.append(f"    Expected remove: {len(tgt_result.remove)}")
                 lines.append(f"    Projected FULLs: {projected_fulls}")
@@ -624,9 +647,7 @@ class Core:
 
         for bucket in buckets_to_check:
             # Find the most recent FULL with matching bucket_level.
-            matching_fulls = [
-                f for f in all_fulls if f.bucket_level == bucket
-            ]
+            matching_fulls = [f for f in all_fulls if f.bucket_level == bucket]
             if not matching_fulls:
                 # No previous FULL for this bucket — create one.
                 return True, bucket
@@ -674,8 +695,7 @@ class Core:
                         unreadable = True
                 else:
                     result = self._shell.run(
-                        ["qemu-img", "info", "--force-share",
-                         "--backing-chain", str(snap.path)],
+                        ["qemu-img", "info", "--force-share", "--backing-chain", str(snap.path)],
                         timeout=30,
                     )
                     if not result.success:
@@ -754,9 +774,7 @@ class Core:
 
         return results
 
-    def _deep_check_file(
-        self, path: Path, name: str, broken: list[str]
-    ) -> str:
+    def _deep_check_file(self, path: Path, name: str, broken: list[str]) -> str:
         """Run ``qemu-img check`` on a single file.
 
         Appends *name* to *broken* if the file is corrupt or unreadable.
@@ -764,8 +782,7 @@ class Core:
         ``"critical"`` when unreadable.
         """
         chk = self._shell.run(
-            ["qemu-img", "check", "--force-share",
-             "--output=json", str(path)],
+            ["qemu-img", "check", "--force-share", "--output=json", str(path)],
             timeout=60,
         )
         if not chk.success:
@@ -930,7 +947,8 @@ class Core:
         # Extract chain file paths and reverse to base-to-top order
         chain_paths: list[Path] = []
         for item in chain_data:
-            image = item.get("image")
+            # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
+            image = item.get("image") or item.get("filename", "")
             if image:
                 chain_paths.append(Path(image))
         chain_paths.reverse()
@@ -1009,9 +1027,7 @@ class Core:
         """
         # Step 1: Resolve the snapshot and source VM
         try:
-            snapshot_info, source_vm = self._resolve_snapshot(
-                snapshot_name, vm_filter
-            )
+            snapshot_info, source_vm = self._resolve_snapshot(snapshot_name, vm_filter)
         except FileNotFoundError:
             return RestoreResult(
                 success=False,
@@ -1032,8 +1048,12 @@ class Core:
         chain_size = 0
         info_result = self._shell.run(
             [
-                "qemu-img", "info", "--force-share", "--backing-chain",
-                "--output=json", str(source_path),
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--backing-chain",
+                "--output=json",
+                str(source_path),
             ],
             timeout=30,
         )
@@ -1077,14 +1097,16 @@ class Core:
                 "VM %s is running — using NBD export for fork",
                 source_vm.name,
             )
-            convert_result = nbd_full_export(
-                self._shell, source_vm.name, str(target_qcow2)
-            )
+            convert_result = nbd_full_export(self._shell, source_vm.name, str(target_qcow2))
         else:
             convert_result = self._shell.run(
                 [
-                    "qemu-img", "convert", "-O", "qcow2",
-                    str(source_path), str(target_qcow2),
+                    "qemu-img",
+                    "convert",
+                    "-O",
+                    "qcow2",
+                    str(source_path),
+                    str(target_qcow2),
                 ],
                 timeout=7200,
             )
@@ -1244,10 +1266,10 @@ class Core:
     @staticmethod
     def _format_bytes(size: int) -> str:
         """Format a byte count as a human-readable string."""
-        if size >= 1024 ** 3:
-            return f"{size / (1024 ** 3):.1f} GiB"
-        if size >= 1024 ** 2:
-            return f"{size / (1024 ** 2):.1f} MiB"
+        if size >= 1024**3:
+            return f"{size / (1024**3):.1f} GiB"
+        if size >= 1024**2:
+            return f"{size / (1024**2):.1f} MiB"
         if size >= 1024:
             return f"{size / 1024:.1f} KiB"
         return f"{size} B"
@@ -1349,9 +1371,7 @@ class Core:
                 )
 
                 # Update last_warned_at on the oldest deferred entry
-                self._state.update_deferred_warning(
-                    vm.name, oldest_idx, now
-                )
+                self._state.update_deferred_warning(vm.name, oldest_idx, now)
 
     def _filter_vms(self, vm_filter: str | None) -> list[VMConfig]:
         vms = self._config.get_vms()
@@ -1375,9 +1395,7 @@ class Core:
         """
         global_cfg = self._config.get_global()
         if not global_cfg.auto_cleanup:
-            logger.info(
-                "auto_cleanup is disabled — skipping stale file cleanup"
-            )
+            logger.info("auto_cleanup is disabled — skipping stale file cleanup")
             return
 
         try:
@@ -1390,12 +1408,16 @@ class Core:
                 for pattern in ("*.tmp", "*.partial"):
                     result = self._shell.run(
                         [
-                            "find", str(directory),
-                            "-maxdepth", "1",
-                            "-name", pattern,
+                            "find",
+                            str(directory),
+                            "-maxdepth",
+                            "1",
+                            "-name",
+                            pattern,
                             "-print",
                         ],
-                        timeout=10, check=True,
+                        timeout=10,
+                        check=True,
                     )
                     if result.success and result.stdout.strip():
                         for line in result.stdout.strip().splitlines():
@@ -1403,19 +1425,24 @@ class Core:
                             if filepath:
                                 self._shell.run(
                                     ["rm", "-f", filepath],
-                                    timeout=10, check=True,
+                                    timeout=10,
+                                    check=True,
                                 )
                                 removed_count += 1
 
             # (b) Remove stale NBD sockets
             sock_result = self._shell.run(
                 [
-                    "find", "/tmp",
-                    "-maxdepth", "1",
-                    "-name", "qsnap-backup-*.sock",
+                    "find",
+                    "/tmp",
+                    "-maxdepth",
+                    "1",
+                    "-name",
+                    "qsnap-backup-*.sock",
                     "-print",
                 ],
-                timeout=10, check=True,
+                timeout=10,
+                check=True,
             )
             if sock_result.success and sock_result.stdout.strip():
                 for line in sock_result.stdout.strip().splitlines():
@@ -1423,7 +1450,8 @@ class Core:
                     if sockpath:
                         self._shell.run(
                             ["rm", "-f", sockpath],
-                            timeout=10, check=True,
+                            timeout=10,
+                            check=True,
                         )
                         removed_count += 1
 
@@ -1436,23 +1464,23 @@ class Core:
             # (c) Detect orphan .qcow2 files (warning only, do NOT delete)
             # Only consider files matching the qsnap naming pattern:
             # {vm_name}.{timestamp}.qcow2
-            recorded_names = {
-                s.path.name for s in self._state.get_snapshots(vm_config.name)
-            }
+            recorded_names = {s.path.name for s in self._state.get_snapshots(vm_config.name)}
             orphan_pattern = f"{vm_config.name}.*.qcow2"
             orphan_result = self._shell.run(
                 [
-                    "find", str(vm_config.snapshot_dir),
-                    "-maxdepth", "1",
-                    "-name", orphan_pattern,
+                    "find",
+                    str(vm_config.snapshot_dir),
+                    "-maxdepth",
+                    "1",
+                    "-name",
+                    orphan_pattern,
                     "-print",
                 ],
-                timeout=10, check=True,
+                timeout=10,
+                check=True,
             )
             if orphan_result.success and orphan_result.stdout.strip():
-                qsnap_re = re.compile(
-                    rf"^{re.escape(vm_config.name)}\.\d{{8}}T\d{{6}}\.qcow2$"
-                )
+                qsnap_re = re.compile(rf"^{re.escape(vm_config.name)}\.\d{{8}}T\d{{6}}\.qcow2$")
                 for line in orphan_result.stdout.strip().splitlines():
                     filepath = line.strip()
                     if filepath:
@@ -1493,36 +1521,35 @@ class Core:
         # (a) snapshot_dir exists and is writable
         dir_check = self._shell.run(
             ["test", "-d", str(vm_config.snapshot_dir)],
-            timeout=10, check=True,
+            timeout=10,
+            check=True,
         )
         if not dir_check.success:
-            broken.append(
-                f"snapshot_dir not found: {vm_config.snapshot_dir}"
-            )
+            broken.append(f"snapshot_dir not found: {vm_config.snapshot_dir}")
         else:
             write_check = self._shell.run(
                 ["test", "-w", str(vm_config.snapshot_dir)],
-                timeout=10, check=True,
+                timeout=10,
+                check=True,
             )
             if not write_check.success:
-                broken.append(
-                    f"snapshot_dir not writable: {vm_config.snapshot_dir}"
-                )
+                broken.append(f"snapshot_dir not writable: {vm_config.snapshot_dir}")
 
         # (b) base_image file exists
         img_check = self._shell.run(
             ["test", "-f", str(vm_config.base_image)],
-            timeout=10, check=True,
+            timeout=10,
+            check=True,
         )
         if not img_check.success:
-            broken.append(
-                f"base_image not found: {vm_config.base_image}"
-            )
+            broken.append(f"base_image not found: {vm_config.base_image}")
 
         # (c) virsh and qemu-img in PATH
         for binary in ("virsh", "qemu-img"):
             result = self._shell.run(
-                ["which", binary], timeout=10, check=True,
+                ["which", binary],
+                timeout=10,
+                check=True,
             )
             if not result.success:
                 broken.append(f"{binary} not in PATH")
@@ -1530,18 +1557,18 @@ class Core:
         # (d) VM defined in libvirt
         dominfo = self._shell.run(
             ["virsh", "dominfo", "--domain", vm_config.name],
-            timeout=30, check=True,
+            timeout=30,
+            check=True,
         )
         if not dominfo.success:
-            broken.append(
-                f"VM not defined in libvirt: {vm_config.name}"
-            )
+            broken.append(f"VM not defined in libvirt: {vm_config.name}")
 
         # (e) Target paths exist (mode-dependent)
         for target in vm_config.targets:
             target_check = self._shell.run(
                 ["test", "-d", str(target.path)],
-                timeout=10, check=True,
+                timeout=10,
+                check=True,
             )
             if not target_check.success:
                 if vm_config.snapshot_create == "ondemand":
@@ -1550,13 +1577,13 @@ class Core:
                         target.path,
                     )
                 else:
-                    broken.append(
-                        f"target directory not found: {target.path}"
-                    )
+                    broken.append(f"target directory not found: {target.path}")
 
         # (f) rsync availability — hard requirement (design D3)
         rsync_check = self._shell.run(
-            ["which", "rsync"], timeout=10, check=True,
+            ["which", "rsync"],
+            timeout=10,
+            check=True,
         )
         if not rsync_check.success:
             broken.append("rsync not found — rsync is a hard requirement")
@@ -1623,13 +1650,10 @@ class Core:
         # Step 1: Change detection / ondemand check
         should_snapshot = True
         if vm_config.snapshot_create == "onchange":
-            detector = self._factory.create_change_detector(
-                vm_config.change_detection_mode
-            )
+            detector = self._factory.create_change_detector(vm_config.change_detection_mode)
             disks = self._resolve_disks(vm_config)
             should_snapshot = any(
-                detector.has_changed(vm_config, disk=disk).changed
-                for disk in disks
+                detector.has_changed(vm_config, disk=disk).changed for disk in disks
             )
         elif vm_config.snapshot_create == "ondemand":
             has_reachable = any(t.path.is_dir() for t in vm_config.targets)
@@ -1666,7 +1690,10 @@ class Core:
 
         # Check VM state
         domstate_cmd = [
-            "virsh", "domstate", "--domain", vm_config.name,
+            "virsh",
+            "domstate",
+            "--domain",
+            vm_config.name,
         ]
         state_result = self._shell.run(domstate_cmd, timeout=30)
         vm_state = state_result.stdout.strip().lower() if state_result.success else ""
@@ -1679,7 +1706,8 @@ class Core:
             failed_entries: list[DeferredBlockcommit] = []
             for entry in deferred:
                 snapshots = [
-                    s for s in self._state.get_snapshots(vm_config.name)
+                    s
+                    for s in self._state.get_snapshots(vm_config.name)
                     if s.name in entry.snapshots
                 ]
                 if not snapshots:
@@ -1691,13 +1719,13 @@ class Core:
                     failed_entries.append(entry)
                     continue
                 result = manager.blockcommit(
-                    vm_config, snapshots,
+                    vm_config,
+                    snapshots,
                     deep_verify=vm_config.blockcommit_deep_verify,
                 )
                 if result.success:
                     logger.info(
-                        "Deferred blockcommit succeeded for VM %s "
-                        "(was blocked by %s)",
+                        "Deferred blockcommit succeeded for VM %s (was blocked by %s)",
                         vm_config.name,
                         entry.reason,
                     )
@@ -1715,7 +1743,9 @@ class Core:
                 self._state.clear_deferred_operations(vm_config.name)
                 for entry in failed_entries:
                     self._state.add_deferred_blockcommit(
-                        vm_config.name, entry.snapshots, entry.reason,
+                        vm_config.name,
+                        entry.snapshots,
+                        entry.reason,
                     )
         else:
             logger.info(
@@ -1814,9 +1844,7 @@ class Core:
         if not snapshots:
             return None
 
-        policy = self._parse_preserve(
-            vm_config.snapshot_preserve, vm_config.snapshot_preserve_min
-        )
+        policy = self._parse_preserve(vm_config.snapshot_preserve, vm_config.snapshot_preserve_min)
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         dow = self._config.get_global().preserve_day_of_week
@@ -1843,7 +1871,8 @@ class Core:
 
         result = self._shell.run(
             [
-                "qemu-img", "info",
+                "qemu-img",
+                "info",
                 "--force-share",
                 "--backing-chain",
                 "--output=json",
@@ -1876,7 +1905,8 @@ class Core:
 
         seen_files: set[str] = set()
         for i, item in enumerate(chain_data):
-            image = item.get("image")
+            # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
+            image = item.get("image") or item.get("filename", "")
             if not image:
                 return ChainVerifyResult(
                     success=False,
@@ -1898,7 +1928,8 @@ class Core:
             # (a) Check file exists (via IShell for mockability)
             existence = self._shell.run(
                 ["test", "-f", str(image_path)],
-                timeout=10, check=True,
+                timeout=10,
+                check=True,
             )
             if not existence.success:
                 return ChainVerifyResult(
@@ -1912,10 +1943,7 @@ class Core:
             if fmt != "qcow2":
                 return ChainVerifyResult(
                     success=False,
-                    error=(
-                        f"Unexpected format '{fmt}' for {image_path} "
-                        f"(expected 'qcow2')"
-                    ),
+                    error=(f"Unexpected format '{fmt}' for {image_path} (expected 'qcow2')"),
                     broken_file=image_path,
                 )
 
@@ -1925,22 +1953,23 @@ class Core:
                 backing_path = Path(backing)
                 backing_existence = self._shell.run(
                     ["test", "-f", str(backing_path)],
-                    timeout=10, check=True,
+                    timeout=10,
+                    check=True,
                 )
                 if not backing_existence.success:
                     return ChainVerifyResult(
                         success=False,
-                        error=(
-                            f"Backing chain broken: backing file "
-                            f"{backing_path} does not exist"
-                        ),
+                        error=(f"Backing chain broken: backing file {backing_path} does not exist"),
                         broken_file=backing_path,
                     )
 
                 # Cross-check: backing-filename must match the next
                 # entry's image in the chain array.
                 if i + 1 < len(chain_data):
-                    next_image = chain_data[i + 1].get("image")
+                    # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
+                    next_image = chain_data[i + 1].get("image") or chain_data[i + 1].get(
+                        "filename", ""
+                    )
                     if next_image is not None and str(backing_path) != next_image:
                         return ChainVerifyResult(
                             success=False,
@@ -1954,7 +1983,10 @@ class Core:
         return ChainVerifyResult(success=True, error=None, broken_file=None)
 
     def _get_chain_length(
-        self, vm_config: VMConfig, *, use_base_image: bool = False,
+        self,
+        vm_config: VMConfig,
+        *,
+        use_base_image: bool = False,
     ) -> int | None:
         """Get the backing chain length.
 
@@ -1977,7 +2009,8 @@ class Core:
 
         result = self._shell.run(
             [
-                "qemu-img", "info",
+                "qemu-img",
+                "info",
                 "--force-share",
                 "--backing-chain",
                 "--output=json",
@@ -2059,22 +2092,23 @@ class Core:
         result = manager.blockcommit(vm_config, to_merge)
 
         # Check for MAC denial — defer if blocked by AppArmor/SELinux
-        if not result.success and result.error and (
-            "apparmor" in result.error or "selinux" in result.error
+        if (
+            not result.success
+            and result.error
+            and ("apparmor" in result.error or "selinux" in result.error)
         ):
-                reason = "apparmor" if "apparmor" in result.error else "selinux"
-                self._state.add_deferred_blockcommit(
-                    vm_config.name,
-                    [s.name for s in to_merge],
-                    reason,
-                )
-                logger.info(
-                    "Blockcommit blocked by %s for VM %s — "
-                    "deferred to next VM shutdown",
-                    reason,
-                    vm_config.name,
-                )
-                return
+            reason = "apparmor" if "apparmor" in result.error else "selinux"
+            self._state.add_deferred_blockcommit(
+                vm_config.name,
+                [s.name for s in to_merge],
+                reason,
+            )
+            logger.info(
+                "Blockcommit blocked by %s for VM %s — deferred to next VM shutdown",
+                reason,
+                vm_config.name,
+            )
+            return
 
         if not result.success:
             logger.error(
@@ -2087,7 +2121,8 @@ class Core:
         # Post-commit chain verification
         if global_cfg.chain_verify_after_commit:
             chain_length_after = self._get_chain_length(
-                vm_config, use_base_image=True,
+                vm_config,
+                use_base_image=True,
             )
             if chain_length_before is not None and chain_length_after is not None:
                 expected_length = chain_length_before - len(to_merge)
@@ -2164,8 +2199,7 @@ class Core:
             if not failed:
                 if attempt > 1:
                     logger.info(
-                        "Backup transfer for VM %s target %s "
-                        "succeeded on retry attempt %d/%d",
+                        "Backup transfer for VM %s target %s succeeded on retry attempt %d/%d",
                         vm_config.name,
                         target.path,
                         attempt,
@@ -2174,12 +2208,8 @@ class Core:
                 return results
 
             # Check if any failure is retryable
-            retryable_errors = [
-                r for r in failed if r.error and is_retryable(r.error)
-            ]
-            non_retryable = [
-                r for r in failed if r.error and not is_retryable(r.error)
-            ]
+            retryable_errors = [r for r in failed if r.error and is_retryable(r.error)]
+            non_retryable = [r for r in failed if r.error and not is_retryable(r.error)]
 
             # If any non-retryable error, fail immediately
             if non_retryable:
@@ -2188,8 +2218,7 @@ class Core:
             # If this was the last attempt, log exhaustion
             if attempt >= max_retries:
                 logger.warning(
-                    "Backup transfer for VM %s target %s failed "
-                    "after %d retries",
+                    "Backup transfer for VM %s target %s failed after %d retries",
                     vm_config.name,
                     target.path,
                     max_retries,
@@ -2199,8 +2228,7 @@ class Core:
             # Sleep and retry
             backoff = compute_backoff(base_seconds, attempt)
             logger.info(
-                "Retrying backup transfer for VM %s target %s "
-                "(attempt %d/%d, backoff %.1fs)",
+                "Retrying backup transfer for VM %s target %s (attempt %d/%d, backoff %.1fs)",
                 vm_config.name,
                 target.path,
                 attempt + 1,
@@ -2230,7 +2258,10 @@ class Core:
         # Get base image actual-size
         base_size = 0
         info_cmd = [
-            "qemu-img", "info", "--force-share", "--output=json",
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--output=json",
             str(vm_config.base_image),
         ]
         info_result = self._shell.run(info_cmd, timeout=60)
@@ -2253,19 +2284,21 @@ class Core:
                 avg_inc_size = sum(sizes) // len(sizes)
 
         # Projected FULL count and incremental count from retention policy
-        policy = self._parse_preserve(
-            target.target_preserve, target.target_preserve_min
-        )
+        policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
         # Count active buckets for FULL projection
-        active_buckets = sum(1 for c in (
-            policy.hourly, policy.daily, policy.weekly,
-            policy.monthly, policy.yearly,
-        ) if c > 0)
-        # Project: 1 FULL per highest bucket period, incrementals fill the rest
-        total_kept = (
-            policy.hourly + policy.daily + policy.weekly
-            + policy.monthly + policy.yearly
+        active_buckets = sum(
+            1
+            for c in (
+                policy.hourly,
+                policy.daily,
+                policy.weekly,
+                policy.monthly,
+                policy.yearly,
+            )
+            if c > 0
         )
+        # Project: 1 FULL per highest bucket period, incrementals fill the rest
+        total_kept = policy.hourly + policy.daily + policy.weekly + policy.monthly + policy.yearly
         projected_fulls = max(1, active_buckets)
         projected_incs = max(0, total_kept - projected_fulls)
         projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
@@ -2273,7 +2306,8 @@ class Core:
         # Current target size
         current_target_size = 0
         du_result = self._shell.run(
-            ["du", "-sb", str(target.path)], timeout=60,
+            ["du", "-sb", str(target.path)],
+            timeout=60,
         )
         if du_result.success:
             parts = du_result.stdout.split()
@@ -2308,16 +2342,14 @@ class Core:
             )
             if should_full:
                 logger.info(
-                    "[dry-run] FULL backup would be created "
-                    "(bucket=%s) for VM %s target %s",
+                    "[dry-run] FULL backup would be created (bucket=%s) for VM %s target %s",
                     bucket_level,
                     vm_config.name,
                     target.path,
                 )
             else:
                 logger.info(
-                    "[dry-run] No FULL backup needed this run "
-                    "for VM %s target %s",
+                    "[dry-run] No FULL backup needed this run for VM %s target %s",
                     vm_config.name,
                     target.path,
                 )
@@ -2341,9 +2373,7 @@ class Core:
         # Check for bucket-driven FULL backup necessity (design D1)
         if snapshots:
             all_fulls = self._state.get_full_backups(str(target.path))
-            policy = self._parse_preserve(
-                target.target_preserve, target.target_preserve_min
-            )
+            policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
             should_full, bucket_level = self._should_create_bucket_full(
                 target, policy, all_fulls, snapshots[-1].timestamp
             )
@@ -2354,14 +2384,17 @@ class Core:
                     method = "NBD" if vm_running else "direct convert"
                     vm_state = "running" if vm_running else "stopped"
                     logger.info(
-                        "[dry-run] Would create FULL backup "
-                        "(bucket=%s, method=%s, VM=%s)",
-                        bucket_level, method, vm_state,
+                        "[dry-run] Would create FULL backup (bucket=%s, method=%s, VM=%s)",
+                        bucket_level,
+                        method,
+                        vm_state,
                     )
                 else:
                     most_recent = max(snapshots, key=lambda s: s.timestamp)
                     full_result = provider.create_full_backup(
-                        vm_config.name, most_recent, target,
+                        vm_config.name,
+                        most_recent,
+                        target,
                         compress=target.compress,
                         bucket_level=bucket_level,
                     )
@@ -2385,9 +2418,7 @@ class Core:
 
         # Transfer missing snapshots (with retry when configured)
         if not self._dry_run:
-            results = self._transfer_with_retry(
-                provider, vm_config, target, snapshots
-            )
+            results = self._transfer_with_retry(provider, vm_config, target, snapshots)
             if any(not r.success for r in results):
                 backup_failed = True
 
@@ -2411,9 +2442,7 @@ class Core:
 
         # Backup retention + cleanup
         for target in vm_config.targets:
-            backups, retention_result = self._evaluate_backup_retention(
-                vm_config, target
-            )
+            backups, retention_result = self._evaluate_backup_retention(vm_config, target)
             self._cleanup_backups(vm_config, target, backups, retention_result)
 
         return False
@@ -2435,15 +2464,11 @@ class Core:
         if not backups:
             return [], None
 
-        policy = self._parse_preserve(
-            target.target_preserve, target.target_preserve_min
-        )
+        policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=b.name, timestamp=b.timestamp) for b in backups]
         dow = self._config.get_global().preserve_day_of_week
-        retention_result = engine.evaluate(
-            items, policy, datetime.now(), preserve_day_of_week=dow
-        )
+        retention_result = engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
         return backups, retention_result
 
     def _cleanup_backups(
@@ -2480,9 +2505,7 @@ class Core:
 
         if self._dry_run:
             for backup in to_delete:
-                logger.info(
-                    "[dry-run] Would delete backup: %s", backup.name
-                )
+                logger.info("[dry-run] Would delete backup: %s", backup.name)
             return
 
         provider = self._factory.create_backup_provider(vm_config, target)
@@ -2490,9 +2513,7 @@ class Core:
             is_full = ".FULL." in backup.name
             if is_full:
                 # Check for dependent incrementals in keep-set (ghost retention)
-                dependents = self._state.get_incremental_dependencies(
-                    str(target.path), backup.name
-                )
+                dependents = self._state.get_incremental_dependencies(str(target.path), backup.name)
                 ghosted = [d for d in dependents if d in keep_set]
                 if ghosted:
                     logger.info(

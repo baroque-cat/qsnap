@@ -44,7 +44,8 @@ def is_vm_running(shell: IShell, vm_name: str) -> bool:
     caller should fall back to direct convert (design D8).
     """
     result = shell.run(
-        ["virsh", "dominfo", "--domain", vm_name], timeout=30,
+        ["virsh", "dominfo", "--domain", vm_name],
+        timeout=30,
     )
     if not result.success:
         logger.warning(
@@ -93,7 +94,8 @@ def _get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
     the command fails or no disks are found.
     """
     result = shell.run(
-        ["virsh", "domblklist", "--domain", vm_name], timeout=30,
+        ["virsh", "domblklist", "--domain", vm_name],
+        timeout=30,
     )
     if not result.success:
         return None
@@ -124,9 +126,7 @@ def write_backup_xml(socket_path: str) -> Path:
         f"  <server transport='unix' socket='{socket_path}'/>\n"
         f"</domainbackup>\n"
     )
-    fd, tmp_path = tempfile.mkstemp(
-        prefix="qsnap-backup-", suffix=".xml"
-    )
+    fd, tmp_path = tempfile.mkstemp(prefix="qsnap-backup-", suffix=".xml")
     with os.fdopen(fd, "w") as f:
         f.write(xml_content)
     return Path(tmp_path)
@@ -136,6 +136,7 @@ def nbd_full_export(
     shell: IShell,
     vm_name: str,
     target_file: str | Path,
+    compress: bool = False,
 ) -> ShellResult:
     """Export a full disk via NBD pull-model and convert to *target_file*.
 
@@ -144,9 +145,20 @@ def nbd_full_export(
     (b) Write backup XML with pull-mode Unix socket.
     (c) Run ``virsh backup-begin --domain <vm> <xml>`` WITHOUT
         ``--incremental`` (full export, no checkpoint).
-    (d) Run ``qemu-img convert -n nbd:unix:<socket> <target_file>`` to
-        pull the full disk.
+    (d) Run ``qemu-img convert [-c] -O qcow2 nbd:unix:<socket>
+        <target_file>`` to pull the full disk.  When *compress* is
+        ``True``, the ``-c`` flag is passed to ``qemu-img convert``,
+        producing a compressed qcow2 (experimentally verified with
+        qemu-img 11.0.2).
     (e) Clean up the socket via ``rm -f`` in a ``finally`` block.
+
+    Args:
+        shell: :class:`IShell` instance for running commands.
+        vm_name: Domain name passed to ``virsh backup-begin``.
+        target_file: Destination path for the converted qcow2.
+        compress: When ``True``, add ``-c`` to ``qemu-img convert`` to
+            enable compression.  Defaults to ``False`` (backwards-
+            compatible with existing callers).
 
     Returns the :class:`ShellResult` from the final step — the
     ``qemu-img convert`` result on success/failure of that step, or
@@ -164,8 +176,10 @@ def nbd_full_export(
     try:
         # (c) Start NBD export via virsh backup-begin (no --incremental).
         backup_cmd = [
-            "virsh", "backup-begin",
-            "--domain", vm_name,
+            "virsh",
+            "backup-begin",
+            "--domain",
+            vm_name,
             str(backup_xml_path),
         ]
         backup_result = shell.run(backup_cmd, timeout=120)
@@ -181,11 +195,11 @@ def nbd_full_export(
         if disk_target:
             nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"
 
-        convert_cmd = [
-            "qemu-img", "convert", "-O", "qcow2",
-            nbd_uri,
-            str(target_file),
-        ]
+        convert_cmd = ["qemu-img", "convert", "-O", "qcow2"]
+        if compress:
+            convert_cmd.append("-c")
+        convert_cmd.append(nbd_uri)
+        convert_cmd.append(str(target_file))
         convert_result = shell.run(convert_cmd, timeout=3600)
         return convert_result
 

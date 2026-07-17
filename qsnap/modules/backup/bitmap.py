@@ -62,24 +62,17 @@ class BitmapBackupProvider(IBackupProvider):
         """
         result = self._shell.run(["virsh", "--version"], timeout=30)
         if not result.success:
-            raise RuntimeError(
-                f"Cannot determine virsh version: {result.error}"
-            )
+            raise RuntimeError(f"Cannot determine virsh version: {result.error}")
 
         # Output looks like: "virsh 8.2.0"
         match = re.search(r"(\d+)\.(\d+)", result.stdout)
         if not match:
-            raise RuntimeError(
-                f"Cannot parse virsh version from: {result.stdout!r}"
-            )
+            raise RuntimeError(f"Cannot parse virsh version from: {result.stdout!r}")
 
         major = int(match.group(1))
 
         if major < _MIN_LIBVIRT_MAJOR:
-            raise RuntimeError(
-                "virsh backup-begin not available — "
-                "libvirt 6.0+ required"
-            )
+            raise RuntimeError("virsh backup-begin not available — libvirt 6.0+ required")
 
     # ── IBackupProvider implementation ────────────────────────────────
 
@@ -101,9 +94,7 @@ class BitmapBackupProvider(IBackupProvider):
         existing_names = {s.name for s in existing}
 
         target_hash = self._target_hash(str(target.path))
-        prior_checkpoints = self._list_checkpoints_for_target(
-            vm_config.name, target_hash
-        )
+        prior_checkpoints = self._list_checkpoints_for_target(vm_config.name, target_hash)
 
         results: list[BackupResult] = []
 
@@ -127,8 +118,10 @@ class BitmapBackupProvider(IBackupProvider):
             try:
                 # Step 3: Start NBD export via virsh backup-begin.
                 backup_cmd = [
-                    "virsh", "backup-begin",
-                    "--domain", vm_config.name,
+                    "virsh",
+                    "backup-begin",
+                    "--domain",
+                    vm_config.name,
                     str(backup_xml_path),
                 ]
                 if prior:
@@ -154,17 +147,18 @@ class BitmapBackupProvider(IBackupProvider):
                 # exportname in the NBD URI to connect to the correct
                 # export.
                 disk_target = _get_first_disk_target(
-                    self._shell, vm_config.name,
+                    self._shell,
+                    vm_config.name,
                 )
                 nbd_uri = f"nbd:unix:{socket_path}"
                 if disk_target:
-                    nbd_uri = (
-                        f"nbd:unix:{socket_path}"
-                        f":exportname={disk_target}"
-                    )
+                    nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"
 
                 convert_cmd = [
-                    "qemu-img", "convert", "-O", "qcow2",
+                    "qemu-img",
+                    "convert",
+                    "-O",
+                    "qcow2",
                     nbd_uri,
                     str(target_file),
                 ]
@@ -206,16 +200,17 @@ class BitmapBackupProvider(IBackupProvider):
                 # Step 6: Delete prior checkpoint (if any).
                 if prior:
                     del_cmd = [
-                        "virsh", "checkpoint-delete",
-                        "--domain", vm_config.name,
+                        "virsh",
+                        "checkpoint-delete",
+                        "--domain",
+                        vm_config.name,
                         prior,
                         "--metadata",
                     ]
                     del_result = self._shell.run(del_cmd, timeout=30)
                     if not del_result.success:
                         logger.warning(
-                            "Failed to delete prior checkpoint %s "
-                            "for VM %s: %s",
+                            "Failed to delete prior checkpoint %s for VM %s: %s",
                             prior,
                             vm_config.name,
                             del_result.error,
@@ -223,9 +218,12 @@ class BitmapBackupProvider(IBackupProvider):
 
                 # Step 7: Create new checkpoint for next incremental run.
                 create_cmd = [
-                    "virsh", "checkpoint-create-as",
-                    "--domain", vm_config.name,
-                    "--name", checkpoint_name,
+                    "virsh",
+                    "checkpoint-create-as",
+                    "--domain",
+                    vm_config.name,
+                    "--name",
+                    checkpoint_name,
                 ]
                 create_result = self._shell.run(create_cmd, timeout=120)
                 if not create_result.success:
@@ -284,14 +282,10 @@ class BitmapBackupProvider(IBackupProvider):
         Uses an atomic pattern: convert to a ``.tmp`` file, then rename
         on success.  On failure, the ``.tmp`` file is removed.
 
-        The ``compress`` flag is accepted for interface compatibility but
-        ignored — the NBD path does not support compression.
+        When ``compress=True``, the ``-c`` flag is passed through to
+        :func:`nbd_full_export` and on to ``qemu-img convert``,
+        producing a compressed qcow2.
         """
-        if compress:
-            logger.warning(
-                "compress=True ignored for NBD-based FULL backup"
-            )
-
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
         full_name = f"{vm_name}.FULL.{date_str}"
@@ -299,10 +293,9 @@ class BitmapBackupProvider(IBackupProvider):
         tmp_file = target.path / f"{full_name}.qcow2.tmp"
 
         # Run NBD full-export to .tmp file (no --incremental, no
-        # checkpoint — design D3, D4).
-        nbd_result = nbd_full_export(
-            self._shell, vm_name, str(tmp_file)
-        )
+        # checkpoint — design D3, D4).  Compression is passed through
+        # via the -c flag.
+        nbd_result = nbd_full_export(self._shell, vm_name, str(tmp_file), compress=compress)
         if not nbd_result.success:
             # Remove .tmp on failure — no final file created.
             self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
@@ -356,7 +349,10 @@ class BitmapBackupProvider(IBackupProvider):
         snapshots: list[SnapshotInfo] = []
         for file in target.path.glob("*.qcow2"):
             info_cmd = [
-                "qemu-img", "info", "--output=json", str(file),
+                "qemu-img",
+                "info",
+                "--output=json",
+                str(file),
             ]
             info_result = self._shell.run(info_cmd, timeout=60)
             if not info_result.success:
@@ -397,9 +393,11 @@ class BitmapBackupProvider(IBackupProvider):
         ``qsnap-`` prefix.
         """
         cmd = [
-            "virsh", "checkpoint-list",
+            "virsh",
+            "checkpoint-list",
             "--name",
-            "--domain", vm_name,
+            "--domain",
+            vm_name,
         ]
         result = self._shell.run(cmd, timeout=30)
         if not result.success:
@@ -412,15 +410,10 @@ class BitmapBackupProvider(IBackupProvider):
                 checkpoints.append(name)
         return checkpoints
 
-    def _list_checkpoints_for_target(
-        self, vm_name: str, target_hash: str
-    ) -> list[str]:
+    def _list_checkpoints_for_target(self, vm_name: str, target_hash: str) -> list[str]:
         """Return qsnap checkpoints matching *target_hash*."""
         prefix = f"qsnap-{target_hash}-"
-        return [
-            cp for cp in self.list_checkpoints(vm_name)
-            if cp.startswith(prefix)
-        ]
+        return [cp for cp in self.list_checkpoints(vm_name) if cp.startswith(prefix)]
 
     @staticmethod
     def _target_hash(target_path: str) -> str:
@@ -438,9 +431,7 @@ class BitmapBackupProvider(IBackupProvider):
             f"  <server transport='unix' socket='{socket_path}'/>\n"
             f"</domainbackup>\n"
         )
-        fd, tmp_path = tempfile.mkstemp(
-            prefix="qsnap-backup-", suffix=".xml"
-        )
+        fd, tmp_path = tempfile.mkstemp(prefix="qsnap-backup-", suffix=".xml")
         with os.fdopen(fd, "w") as f:
             f.write(xml_content)
         return Path(tmp_path)

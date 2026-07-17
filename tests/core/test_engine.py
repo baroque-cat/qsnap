@@ -24,8 +24,13 @@ from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.config import GlobalConfig, RetentionPolicy
-from qsnap.models.results import BackupResult, FullBackupInfo, RestoreResult, ShellResult, SnapshotInfo
+from qsnap.models.config import GlobalConfig
+from qsnap.models.results import (
+    BackupResult,
+    RestoreResult,
+    ShellResult,
+    SnapshotInfo,
+)
 from tests.mocks import MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
@@ -422,6 +427,72 @@ def test_core_restore_from_snapshot_returns_restore_result(
     assert result.error is None
 
 
+# ── test_core_restore_from_snapshot_new_qemu_format ──────────────────────
+
+
+def test_core_restore_from_snapshot_new_qemu_format(
+    tmp_path,
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core.restore() accepts QEMU 11.0+ "filename" keys in backing-chain JSON.
+
+    When ``qemu-img info --backing-chain --output=json`` returns entries with
+    ``"filename"`` keys (QEMU 11.0+ format) instead of the legacy ``"image"``
+    keys, the chain must be correctly parsed and all files copied to the
+    restore target directory.
+    """
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/snapshots/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock qemu-img info --backing-chain --output=json (QEMU 11.0+ "filename" keys)
+    chain_json = json.dumps(
+        [
+            {"filename": "/snapshots/snap1.qcow2"},
+            {"filename": "/var/lib/libvirt/images/testvm.qcow2"},
+        ]
+    )
+    mock_shell.expect("backing-chain").returns(
+        ShellResult(success=True, stdout=chain_json, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("cp").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    result = core.restore("snap1", tmp_path)
+
+    assert isinstance(result, RestoreResult)
+    assert result.success is True
+    assert result.snapshot_name == "snap1"
+    assert result.restored_path == tmp_path
+    assert len(result.chain_files) == 2
+    assert result.error is None
+    # Verify chain files are in the target directory with correct names
+    chain_names = {f.name for f in result.chain_files}
+    assert chain_names == {"snap1.qcow2", "testvm.qcow2"}, (
+        "Restored chain must include both the snapshot and base image"
+    )
+
+
 # ── test_core_restore_from_backup_returns_restore_result ──────────────────
 
 
@@ -637,9 +708,7 @@ def test_ondemand_snapshot_created_when_target_reachable(
     ) as create_spy:
         core.run()
 
-    assert create_spy.called, (
-        "Snapshot should be created when target is reachable (ondemand)"
-    )
+    assert create_spy.called, "Snapshot should be created when target is reachable (ondemand)"
 
 
 # ── test_ondemand_snapshot_skipped_when_no_target_reachable ────────────────
@@ -807,9 +876,7 @@ def test_size_estimation_logged_during_normal_run(
     assert "Size estimate" in caplog.text, (
         "Size estimation log message should appear during normal run"
     )
-    assert "base=1048576" in caplog.text, (
-        "Base image actual-size should be logged"
-    )
+    assert "base=1048576" in caplog.text, "Base image actual-size should be logged"
 
 
 def test_size_estimation_logged_during_dry_run(
@@ -866,21 +933,15 @@ def test_size_estimation_logged_during_dry_run(
 
     caplog.set_level(logging.INFO)
 
-    with patch.object(
-        Core, "_should_create_bucket_full", return_value=(True, "weekly")
-    ):
+    with patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")):
         core._log_size_estimate(vm, target)
 
-    assert "Size estimate" in caplog.text, (
-        "Size estimation should be logged during dry-run"
-    )
+    assert "Size estimate" in caplog.text, "Size estimation should be logged during dry-run"
     # New assertion: dry-run FULL would-be-created indicator
     assert "[dry-run] FULL backup would be created" in caplog.text, (
         "Dry-run size estimation should indicate FULL would be created"
     )
-    assert "bucket=weekly" in caplog.text, (
-        "Bucket level should be indicated in dry-run log"
-    )
+    assert "bucket=weekly" in caplog.text, "Bucket level should be indicated in dry-run log"
 
 
 def test_size_estimation_no_state_history(
@@ -922,9 +983,7 @@ def test_size_estimation_no_state_history(
     caplog.set_level(logging.INFO)
     core._log_size_estimate(vm, target)
 
-    assert "avg_inc=0" in caplog.text, (
-        "With no state history, avg_inc should be 0"
-    )
+    assert "avg_inc=0" in caplog.text, "With no state history, avg_inc should be 0"
     assert "base=2097152" in caplog.text, (
         "Base image actual-size should be logged even with no history"
     )
@@ -1219,14 +1278,15 @@ def test_size_estimation_uses_force_share_on_base_image(
 
     # Find the qemu-img info call for the base image
     info_calls = [
-        c for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list)
-        and "qemu-img" in c.args[0][0] and "info" in " ".join(c.args[0])
+        c
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0]
+        and "info" in " ".join(c.args[0])
         and str(vm.base_image) in " ".join(c.args[0])
     ]
-    assert len(info_calls) >= 1, (
-        "qemu-img info should be called for base image in size estimation"
-    )
+    assert len(info_calls) >= 1, "qemu-img info should be called for base image in size estimation"
     for call in info_calls:
         cmd_str = " ".join(call.args[0])
         assert "--force-share" in cmd_str, (

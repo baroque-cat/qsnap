@@ -198,7 +198,7 @@ The system SHALL determine which snapshots are missing on the target and for eac
 
 ### Requirement: FileCopyBackupProvider.create_full_backup creates standalone qcow2 on target
 
-`FileCopyBackupProvider.create_full_backup(vm_name: str, source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False, bucket_level: str = "monthly") -> BackupResult` SHALL create a standalone qcow2 on the target. The `vm_name` parameter SHALL be the full, untruncated VM name (e.g. `3.Projects_opencode`), passed from Core's `vm_config.name` — the method SHALL NOT extract the VM name from the snapshot filename. The method SHALL detect VM running state via `virsh dominfo --domain <vm_name>`. When the VM is running, the method SHALL use the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert -n nbd:unix:<socket>`) to avoid lock conflicts on the active layer. When the VM is stopped, the method SHALL use direct `qemu-img convert [-c] -f qcow2 -O qcow2 <source> <target_path>/<vm_name>.FULL.YYYYMMDD.qcow2`. When `compress=True`, the `-c` flag SHALL be added to direct convert (NBD path does not support compression — the result is uncompressed). The `bucket_level` parameter SHALL be passed to `IStateManager.record_full_backup()`. The operation SHALL be atomic: convert to a `.tmp` path, then rename to the final name on success.
+`FileCopyBackupProvider.create_full_backup(vm_name: str, source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False, bucket_level: str = "monthly") -> BackupResult` SHALL create a standalone qcow2 on the target. The `vm_name` parameter SHALL be the full, untruncated VM name (e.g. `3.Projects_opencode`), passed from Core's `vm_config.name` — the method SHALL NOT extract the VM name from the snapshot filename. The method SHALL detect VM running state via `virsh dominfo --domain <vm_name>`. When the VM is running, the method SHALL use the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert -n nbd:unix:<socket>`) to avoid lock conflicts on the active layer. When the VM is stopped, the method SHALL use direct `qemu-img convert [-c] -f qcow2 -O qcow2 <source> <target_path>/<vm_name>.FULL.YYYYMMDD.qcow2`. When `compress=True`, the `-c` flag SHALL be added to BOTH the NBD path and the direct convert path. The `bucket_level` parameter SHALL be passed to `IStateManager.record_full_backup()`. The operation SHALL be atomic: convert to a `.tmp` path, then rename to the final name on success.
 
 #### Scenario: Uncompressed full backup succeeds (stopped VM)
 - **WHEN** `create_full_backup("myvm", snapshot, target, compress=False, bucket_level="monthly")` is called
@@ -220,11 +220,11 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **AND** the FULL is recorded in state with `bucket_level="weekly"`
 - **AND** no `--force-share` is used on any data-copying operation
 
-#### Scenario: NBD full backup ignores compress flag
+#### Scenario: NBD full backup supports compression
 - **WHEN** `create_full_backup("myvm", snapshot, target, compress=True, bucket_level="daily")` is called
 - **AND** the VM is running (NBD path selected)
-- **THEN** the resulting FULL is uncompressed (NBD path does not support `-c`)
-- **AND** a WARNING is logged: "compress=True ignored for NBD-based FULL backup"
+- **THEN** `qemu-img convert -c nbd:unix:<socket> <target>` is called with the `-c` flag
+- **AND** the resulting FULL is compressed (NBD path supports `-c`, experimentally verified with qemu-img 11.0.2)
 
 #### Scenario: Dotted VM name is passed untruncated to virsh dominfo
 - **WHEN** `create_full_backup("3.Projects_opencode", snapshot, target, compress=False, bucket_level="monthly")` is called

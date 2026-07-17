@@ -61,6 +61,7 @@ class FileCopyBackupProvider(IBackupProvider):
         full_files = list(target.path.glob("*.FULL.*.qcow2"))
         if not full_files:
             return None
+
         # Parse date from filename and return most recent by date.
         def _extract_date(path: Path) -> str:
             # Filename pattern: <vm>.FULL.<YYYYMMDD>.qcow2
@@ -97,7 +98,9 @@ class FileCopyBackupProvider(IBackupProvider):
         if not target.copy_base and not existing and snapshots:
             most_recent = max(snapshots, key=lambda s: s.timestamp)
             full_result = self.create_full_backup(
-                vm_config.name, most_recent, target,
+                vm_config.name,
+                most_recent,
+                target,
                 compress=target.compress,
                 bucket_level="monthly",
             )
@@ -336,9 +339,8 @@ class FileCopyBackupProvider(IBackupProvider):
         stopped, uses direct ``qemu-img convert [-c]`` on the snapshot
         file (existing behavior, no lock conflict).
 
-        The NBD path does not support compression — if ``compress=True``
-        and NBD is selected, a WARNING is logged and the result is
-        uncompressed.
+        Both NBD and direct-convert paths support compression via
+        ``-c`` flag on ``qemu-img convert``.
 
         Uses an atomic pattern: convert to a ``.tmp`` file, then rename
         on success.  On failure, the ``.tmp`` file is removed and no
@@ -367,16 +369,10 @@ class FileCopyBackupProvider(IBackupProvider):
                 )
 
         if use_nbd:
-            # NBD path does not support compression.
-            if compress:
-                logger.warning(
-                    "compress=True ignored for NBD-based FULL backup"
-                )
             # Run NBD full-export to .tmp file (no --force-share, no
-            # checkpoint — design D3, D5).
-            nbd_result = nbd_full_export(
-                self._shell, vm_name, str(tmp_file)
-            )
+            # checkpoint — design D3, D5).  Compression is passed
+            # through to nbd_full_export() via the -c flag.
+            nbd_result = nbd_full_export(self._shell, vm_name, str(tmp_file), compress=compress)
             if not nbd_result.success:
                 # Remove .tmp on failure — no final file created.
                 self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
@@ -396,12 +392,16 @@ class FileCopyBackupProvider(IBackupProvider):
             ]
             if compress:
                 convert_cmd.append("-c")
-            convert_cmd.extend([
-                "-f", "qcow2",
-                "-O", "qcow2",
-                str(source_snapshot.path),
-                str(tmp_file),
-            ])
+            convert_cmd.extend(
+                [
+                    "-f",
+                    "qcow2",
+                    "-O",
+                    "qcow2",
+                    str(source_snapshot.path),
+                    str(tmp_file),
+                ]
+            )
 
             convert_result = self._shell.run(convert_cmd, timeout=3600)
             if not convert_result.success:
@@ -511,9 +511,7 @@ class FileCopyBackupProvider(IBackupProvider):
 
         if is_full and self._state is not None:
             target_path = str(backup.path.parent)
-            dependents = self._state.get_incremental_dependencies(
-                target_path, backup.name
-            )
+            dependents = self._state.get_incremental_dependencies(target_path, backup.name)
             if dependents:
                 logger.info(
                     "Ghost retention: skipping FULL %s — %d dependent "

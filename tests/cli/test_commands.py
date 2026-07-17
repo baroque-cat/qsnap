@@ -31,7 +31,7 @@ from qsnap.cli.commands import (
 )
 from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import GlobalConfig, VMConfig
 from qsnap.models.results import (
     CheckResult,
     DeferredSummary,
@@ -79,18 +79,10 @@ def _make_list_args(**overrides) -> Namespace:
 def _make_mock_core() -> Mock:
     """Create a Mock core with sensible return values for all methods."""
     core = Mock()
-    core.run.return_value = PipelineResult(
-        results=[VMRunResult(vm_name="vm1", success=True)]
-    )
-    core.snapshot.return_value = PipelineResult(
-        results=[VMRunResult(vm_name="vm1", success=True)]
-    )
-    core.backup.return_value = PipelineResult(
-        results=[VMRunResult(vm_name="vm1", success=True)]
-    )
-    core.prune.return_value = PipelineResult(
-        results=[VMRunResult(vm_name="vm1", success=True)]
-    )
+    core.run.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
+    core.snapshot.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
+    core.backup.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
+    core.prune.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
     core.print_schedule.return_value = {}
     core.schedule_summary.return_value = ""
     core.list_snapshots.return_value = {}
@@ -206,9 +198,7 @@ def test_check_subcommand_dispatches_to_core_check():
 # ── flag translation tests (real Core) ─────────────────────────────────
 
 
-def test_dry_run_flag_sets_core_dry_run_true(
-    mock_config, mock_factory, mock_state, mock_shell
-):
+def test_dry_run_flag_sets_core_dry_run_true(mock_config, mock_factory, mock_state, mock_shell):
     core = Core(mock_config, mock_factory, mock_state, mock_shell)
     args = _make_action_args(dry_run=True)
     core.dry_run = args.dry_run
@@ -271,9 +261,7 @@ def test_no_vm_filter_passes_none_to_core_method():
 # ── restore subcommand dispatch tests ────────────────────────────────────
 
 
-def test_handle_restore_dispatches_to_core_restore_with_positional_args(
-    cli_app, tmp_path
-):
+def test_handle_restore_dispatches_to_core_restore_with_positional_args(cli_app, tmp_path):
     """Parse 'restore SNAP TARGET' args, verify core.restore is called."""
     mock_core = _make_mock_core()
     args = cli_app.parse_args(["restore", "SNAP", str(tmp_path)])
@@ -736,9 +724,7 @@ def test_check_output_displays_deep_check_schedule_overdue(capsys):
         deep_check_schedule="weekly",
     )
     mock_core.check.return_value = {}
-    mock_core.get_deep_check_schedule_info.return_value = (
-        "WEEKLY — OVERDUE (never checked)"
-    )
+    mock_core.get_deep_check_schedule_info.return_value = "WEEKLY — OVERDUE (never checked)"
 
     args = _make_action_args(command="check")
     result = handle_check(mock_core, args)
@@ -789,9 +775,7 @@ def test_fork_command_dispatches_to_core_fork(cli_app):
     """Parse 'fork snap1 --as-vm newvm --storage /tmp/storage' and
     verify core.fork is called with the translated arguments."""
     mock_core = _make_mock_core()
-    args = cli_app.parse_args(
-        ["fork", "snap1", "--as-vm", "newvm", "--storage", "/tmp/storage"]
-    )
+    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm", "--storage", "/tmp/storage"])
     result = handle_fork(mock_core, args)
     mock_core.fork.assert_called_once_with(
         "snap1",
@@ -823,9 +807,7 @@ def test_fork_command_add_to_config_flag(cli_app):
     """Parse 'fork snap1 --as-vm newvm --add-to-config' and verify
     core.fork is called with add_to_config=True."""
     mock_core = _make_mock_core()
-    args = cli_app.parse_args(
-        ["fork", "snap1", "--as-vm", "newvm", "--add-to-config"]
-    )
+    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm", "--add-to-config"])
     result = handle_fork(mock_core, args)
     mock_core.fork.assert_called_once_with(
         "snap1",

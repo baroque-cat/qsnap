@@ -55,7 +55,7 @@ NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bit
 
 ### Requirement: BitmapBackupProvider.create_full_backup via NBD full export
 
-`BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. No checkpoint SHALL be created or deleted for this FULL — the checkpoint lifecycle remains exclusively in `transfer_missing()` for incremental runs.
+`BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. No checkpoint SHALL be created or deleted for this FULL — the checkpoint lifecycle remains exclusively in `transfer_missing()` for incremental runs. When `compress=True`, the `-c` flag SHALL be passed to `qemu-img convert` in the NBD path.
 
 #### Scenario: Bitmap FULL via NBD succeeds
 - **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=False, bucket_level="monthly")` is called
@@ -63,6 +63,11 @@ NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bit
 - **THEN** `qemu-img convert -n nbd:unix:<socket> <target>` creates a standalone qcow2
 - **AND** no `virsh checkpoint-create-as` is called
 - **AND** no `virsh checkpoint-delete` is called
+
+#### Scenario: Bitmap FULL with compression succeeds
+- **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, bucket_level="monthly")` is called
+- **THEN** `qemu-img convert -c nbd:unix:<socket> <target>` is called with the `-c` flag
+- **AND** the resulting FULL is compressed
 
 #### Scenario: Bitmap FULL socket cleanup
 - **WHEN** the NBD full export completes (success or failure)

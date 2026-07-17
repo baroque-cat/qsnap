@@ -13,17 +13,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core, PipelineResult
-from qsnap.models.config import GlobalConfig, VMConfig
+from qsnap.models.config import VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
-    CommitResult,
-    DeferredBlockcommit,
     FullBackupInfo,
     RetentionResult,
     ShellResult,
@@ -461,7 +459,12 @@ def test_dry_run_logs_no_mutation(
     # (design D6) making read-only validation calls (test, which, virsh
     # dominfo, find).  Verify only read-only shell calls were made.
     read_only_patterns = (
-        "qemu-img info", "du", "test ", "which ", "virsh dominfo", "find",
+        "qemu-img info",
+        "du",
+        "test ",
+        "which ",
+        "virsh dominfo",
+        "find",
     )
     for call in shell_spy.call_args_list:
         cmd = call[0][0]  # command list
@@ -483,9 +486,9 @@ def test_dry_run_logs_no_mutation(
 
     # Verify --force-share is used on qemu-img info read-only calls
     qemu_img_calls = [
-        c for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list)
-        and "qemu-img" in " ".join(c.args[0])
+        c
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "qemu-img" in " ".join(c.args[0])
     ]
     for call in qemu_img_calls:
         cmd_str = " ".join(call.args[0])
@@ -764,13 +767,9 @@ def test_pipeline_always_mode_validation_first(
     from qsnap.models.results import ShellResult
 
     # Make validation fail by overriding the snapshot_dir check.
-    mock_shell._expectations = [
-        e for e in mock_shell._expectations if e.pattern != "test -d"
-    ]
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -d"]
     mock_shell.expect("test -d").returns(
-        ShellResult(
-            success=False, stdout="", stderr="", returncode=1, error="not found"
-        )
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
     )
 
     vm = make_vm_config(name="testvm", snapshot_create="always", disks=["vda"])
@@ -881,7 +880,7 @@ def test_first_backup_creates_full_via_bucket(
     mock_shell,
 ):
     """First backup to target triggers FULL via bucket-driven logic.
-    
+
     When no previous FULL exists on a target with bucket retention policy,
     ``_should_create_bucket_full`` returns (True, bucket_level) and
     ``create_full_backup`` is called with that bucket_level.
@@ -930,7 +929,7 @@ def test_new_monthly_period_triggers_full(
     mock_shell,
 ):
     """New monthly period triggers FULL backup.
-    
+
     When the highest active bucket is 'monthly' and the last FULL was
     in a different month, a new FULL is created.
     """
@@ -968,9 +967,7 @@ def test_new_monthly_period_triggers_full(
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, (
-        "create_full_backup should be called when entering new monthly period"
-    )
+    assert full_spy.called, "create_full_backup should be called when entering new monthly period"
     assert full_spy.call_args.kwargs.get("bucket_level") == "monthly", (
         "bucket_level should be 'monthly' when monthly is highest active bucket"
     )
@@ -987,7 +984,7 @@ def test_same_bucket_period_skips_full(
     mock_shell,
 ):
     """Same bucket period skips FULL backup.
-    
+
     When the snapshot is in the same daily period as the last FULL,
     no new FULL is created.
     """
@@ -1003,9 +1000,7 @@ def test_same_bucket_period_skips_full(
 
     # Last FULL was earlier today
     last_full_ts = datetime(2025, 7, 13, 2, 0)
-    mock_state.record_full_backup(
-        str(target.path), "today.FULL.daily.qcow2", last_full_ts, "daily"
-    )
+    mock_state.record_full_backup(str(target.path), "today.FULL.daily.qcow2", last_full_ts, "daily")
 
     # Snapshot also today — same daily period
     snap = SnapshotInfo(
@@ -1025,9 +1020,7 @@ def test_same_bucket_period_skips_full(
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called when in same bucket period"
-    )
+    assert not full_spy.called, "create_full_backup should NOT be called when in same bucket period"
 
 
 # ── test_no_buckets_preserve_min_all_no_full_created ──────────────────────
@@ -1100,7 +1093,8 @@ def test_should_create_bucket_full_highest_yearly(
     # Same year + same month — should NOT create
     # (with multi-level, we need FULLs for BOTH yearly and monthly)
     should, level = Core._should_create_bucket_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.yearly.qcow2",
@@ -1121,7 +1115,8 @@ def test_should_create_bucket_full_highest_yearly(
 
     # New year — should create (yearly is checked first)
     should, level = Core._should_create_bucket_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.yearly.qcow2",
@@ -1169,7 +1164,8 @@ def test_should_create_bucket_full_highest_daily(
     # Same day + same hour — should NOT create
     # (with multi-level, we need FULLs for BOTH daily and hourly)
     should, level = Core._should_create_bucket_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.daily.qcow2",
@@ -1190,7 +1186,8 @@ def test_should_create_bucket_full_highest_daily(
 
     # Next day — should create (daily is checked before hourly)
     should, level = Core._should_create_bucket_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.daily.qcow2",
@@ -1267,7 +1264,10 @@ def test_new_weekly_period_triggers_full_all_buckets(
     snapshot_ts = datetime(2025, 6, 16)
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True
     assert level == "weekly", (
@@ -1290,8 +1290,10 @@ def test_f_anchor_weekly_only_full_on_week_boundary_not_day(
     from qsnap.models.config import RetentionPolicy
 
     policy = RetentionPolicy(
-        weekly=4, anchor_weekly=True,
-        daily=7, anchor_daily=False,
+        weekly=4,
+        anchor_weekly=True,
+        daily=7,
+        anchor_daily=False,
     )
     target = make_target()
 
@@ -1307,7 +1309,10 @@ def test_f_anchor_weekly_only_full_on_week_boundary_not_day(
     # Only weekly is checked (F-anchor), daily != 0 is ignored.
     snapshot_a = datetime(2025, 6, 10)  # W24 Tuesday
     should, level = Core._should_create_bucket_full(
-        target, policy, [weekly_full], snapshot_a,
+        target,
+        policy,
+        [weekly_full],
+        snapshot_a,
     )
     assert should is False
     assert level == "", (
@@ -1318,12 +1323,13 @@ def test_f_anchor_weekly_only_full_on_week_boundary_not_day(
     # Case B: Snapshot on new week (W25 Monday)
     snapshot_b = datetime(2025, 6, 16)  # W25 Monday
     should, level = Core._should_create_bucket_full(
-        target, policy, [weekly_full], snapshot_b,
+        target,
+        policy,
+        [weekly_full],
+        snapshot_b,
     )
     assert should is True
-    assert level == "weekly", (
-        "F-anchor mode: new week (W25) should trigger weekly FULL"
-    )
+    assert level == "weekly", "F-anchor mode: new week (W25) should trigger weekly FULL"
 
 
 # ── test_backup_target_passes_full_list_to_bucket_check ───────────────────
@@ -1353,12 +1359,16 @@ def test_backup_target_passes_full_list_to_bucket_check(
 
     # Record 2 FULL backups (same day as snapshot to avoid triggering a new one)
     mock_state.record_full_backup(
-        str(target.path), "full1.FULL.daily.qcow2",
-        datetime(2025, 7, 13, 2), "daily",
+        str(target.path),
+        "full1.FULL.daily.qcow2",
+        datetime(2025, 7, 13, 2),
+        "daily",
     )
     mock_state.record_full_backup(
-        str(target.path), "full2.FULL.daily.qcow2",
-        datetime(2025, 7, 13, 5), "daily",
+        str(target.path),
+        "full2.FULL.daily.qcow2",
+        datetime(2025, 7, 13, 5),
+        "daily",
     )
 
     # Snapshot on the same day → no new FULL triggered
@@ -1372,14 +1382,13 @@ def test_backup_target_passes_full_list_to_bucket_check(
 
     # Spy on _should_create_bucket_full
     with patch.object(
-        Core, "_should_create_bucket_full",
+        Core,
+        "_should_create_bucket_full",
         wraps=Core._should_create_bucket_full,
     ) as bucket_spy:
         core._backup_target(vm, target, [snap])
 
-    assert bucket_spy.called, (
-        "_should_create_bucket_full should be called during _backup_target"
-    )
+    assert bucket_spy.called, "_should_create_bucket_full should be called during _backup_target"
     # Third positional arg is all_fulls
     all_fulls_arg = bucket_spy.call_args[0][2]
     assert isinstance(all_fulls_arg, list), (
@@ -1473,6 +1482,56 @@ def test_chain_verify_intact_chain_blockcommit_proceeds(
     assert mock_state.get_deferred_operations("testvm") == []
 
 
+def test_chain_verify_intact_chain_new_qemu_format_blockcommit_proceeds(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Intact chain (QEMU 11.0+ ``filename`` keys) → verification passes → blockcommit called.
+
+    The backing chain fixture uses ``"filename"`` keys with nested ``"children"``
+    arrays (QEMU 11.0+ format).  All 5 files exist, all are qcow2, and
+    references are consistent.  The ``_verify_backing_chain`` method must
+    correctly parse both legacy ``"image"`` (QEMU < 11.0) and modern
+    ``"filename"`` (QEMU 11.0+) keys.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # qemu-img info --backing-chain returns the new-format intact chain fixture
+    intact_new_json = _load_fixture("backing_chain_intact_new.json")
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=intact_new_json, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should proceed when chain is intact (new QEMU format)"
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
 def test_chain_verify_missing_file_blockcommit_skipped(
     make_vm_config,
     make_global_config,
@@ -1513,9 +1572,7 @@ def test_chain_verify_missing_file_blockcommit_skipped(
     )
 
     # Replace generic test -f with specific MISSING_FILE failure + generic success
-    mock_shell._expectations = [
-        e for e in mock_shell._expectations if e.pattern != "test -f"
-    ]
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
     mock_shell.expect("test -f.*MISSING_FILE").returns(
         ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
     )
@@ -1560,10 +1617,12 @@ def test_chain_verify_non_qcow2_blockcommit_skipped(
     _add_snapshots_for_chain(mock_state, "testvm")
 
     # Chain with a non-qcow2 format entry
-    raw_chain = json.dumps([
-        {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
-        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "raw"},
-    ])
+    raw_chain = json.dumps(
+        [
+            {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
+            {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "raw"},
+        ]
+    )
     mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=raw_chain, stderr="", returncode=0, error=None)
     )
@@ -1605,11 +1664,13 @@ def test_chain_verify_cyclic_reference_blockcommit_skipped(
     _add_snapshots_for_chain(mock_state, "testvm")
 
     # Chain where snap1 appears twice (cycle)
-    cyclic_chain = json.dumps([
-        {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
-        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
-        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
-    ])
+    cyclic_chain = json.dumps(
+        [
+            {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
+            {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+            {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+        ]
+    )
     mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=cyclic_chain, stderr="", returncode=0, error=None)
     )
@@ -1657,9 +1718,7 @@ def test_chain_verify_broken_chain_does_not_defer(
     )
 
     # MISSING_FILE → test -f fails
-    mock_shell._expectations = [
-        e for e in mock_shell._expectations if e.pattern != "test -f"
-    ]
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
     mock_shell.expect("test -f.*MISSING_FILE").returns(
         ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
     )
@@ -1703,22 +1762,24 @@ def test_chain_verify_inconsistent_backing_filename_blockcommit_skipped(
     _add_snapshots_for_chain(mock_state, "testvm")
 
     # Chain where snap4's backing-filename does NOT match the next entry.
-    inconsistent_chain = json.dumps([
-        {
-            "image": "/var/lib/libvirt/snapshots/testvm/snap4.qcow2",
-            "format": "qcow2",
-            "backing-filename": "/var/lib/libvirt/snapshots/testvm/WRONG.qcow2",
-        },
-        {
-            "image": "/var/lib/libvirt/snapshots/testvm/snap3.qcow2",
-            "format": "qcow2",
-            "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
-        },
-        {
-            "image": "/var/lib/libvirt/images/testvm.qcow2",
-            "format": "qcow2",
-        },
-    ])
+    inconsistent_chain = json.dumps(
+        [
+            {
+                "image": "/var/lib/libvirt/snapshots/testvm/snap4.qcow2",
+                "format": "qcow2",
+                "backing-filename": "/var/lib/libvirt/snapshots/testvm/WRONG.qcow2",
+            },
+            {
+                "image": "/var/lib/libvirt/snapshots/testvm/snap3.qcow2",
+                "format": "qcow2",
+                "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
+            },
+            {
+                "image": "/var/lib/libvirt/images/testvm.qcow2",
+                "format": "qcow2",
+            },
+        ]
+    )
     mock_shell.expect("qemu-img info.*--backing-chain").returns(
         ShellResult(success=True, stdout=inconsistent_chain, stderr="", returncode=0, error=None)
     )
@@ -1909,9 +1970,7 @@ def test_chain_verify_disabled_skips_pre_commit_check(
     ):
         core._blockcommit_snapshots(vm, retention)
 
-    assert not verify_spy.called, (
-        "_verify_backing_chain should NOT be called when disabled"
-    )
+    assert not verify_spy.called, "_verify_backing_chain should NOT be called when disabled"
     assert bc_spy.called, "blockcommit should proceed when verify is disabled"
 
 
@@ -2025,9 +2084,7 @@ def test_backup_retry_all_retries_exhausted(
     ):
         results = core._transfer_with_retry(provider, vm, target, [snap])
 
-    assert transfer_spy.call_count == 2, (
-        "transfer_missing should be called max_retries times"
-    )
+    assert transfer_spy.call_count == 2, "transfer_missing should be called max_retries times"
     assert any(not r.success for r in results), "results should indicate failure"
 
 
@@ -2074,9 +2131,7 @@ def test_backup_retry_non_retryable_fails_immediately(
     ) as transfer_spy:
         results = core._transfer_with_retry(provider, vm, target, [snap])
 
-    assert transfer_spy.call_count == 1, (
-        "non-retryable error should fail immediately (one call)"
-    )
+    assert transfer_spy.call_count == 1, "non-retryable error should fail immediately (one call)"
     assert any(not r.success for r in results), "results should indicate failure"
 
 
@@ -2123,9 +2178,7 @@ def test_backup_retry_disabled_when_max_zero(
     ) as transfer_spy:
         results = core._transfer_with_retry(provider, vm, target, [snap])
 
-    assert transfer_spy.call_count == 1, (
-        "retry disabled (max=0) → only one call"
-    )
+    assert transfer_spy.call_count == 1, "retry disabled (max=0) → only one call"
     assert any(not r.success for r in results), "results should indicate failure"
 
 
@@ -2227,9 +2280,7 @@ def test_full_kept_due_to_active_dependent(
     retention = RetentionResult(keep=[inc_name], remove=[full_name])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider, "delete", wraps=backup_provider.delete
-    ) as delete_spy:
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
 
     # FULL should NOT be deleted (ghost retention)
@@ -2270,16 +2321,12 @@ def test_full_deleted_when_no_active_dependents(
     retention = RetentionResult(keep=[], remove=[full_name])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider, "delete", wraps=backup_provider.delete
-    ) as delete_spy:
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
 
     # FULL should be deleted
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    assert full_name in deleted_names, (
-        "FULL with no active dependents should be deleted"
-    )
+    assert full_name in deleted_names, "FULL with no active dependents should be deleted"
 
 
 # ── test_orphaned_incrementals_cascade_deleted ────────────────────────────
@@ -2322,9 +2369,7 @@ def test_orphaned_incrementals_cascade_deleted(
     retention = RetentionResult(keep=[], remove=[full_name, inc1, inc2])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider, "delete", wraps=backup_provider.delete
-    ) as delete_spy:
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
 
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
@@ -2377,20 +2422,14 @@ def test_kept_incremental_rebased_to_new_anchor(
     retention = RetentionResult(keep=[inc1], remove=[full_name, inc2])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider, "delete", wraps=backup_provider.delete
-    ) as delete_spy:
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
 
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
     # FULL has dependents in keep-set (inc1) → ghost-retained
-    assert full_name not in deleted_names, (
-        "FULL should be ghost-retained (inc1 is in keep-set)"
-    )
+    assert full_name not in deleted_names, "FULL should be ghost-retained (inc1 is in keep-set)"
     # inc1 is in keep-set → NOT deleted
-    assert inc1 not in deleted_names, (
-        "kept incremental should NOT be cascade-deleted"
-    )
+    assert inc1 not in deleted_names, "kept incremental should NOT be cascade-deleted"
 
 
 # ── test_core_post_processes_retention_for_dependencies ───────────────────
@@ -2435,9 +2474,7 @@ def test_core_post_processes_retention_for_dependencies(
     retention = RetentionResult(keep=[inc1], remove=[full_name])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider, "delete", wraps=backup_provider.delete
-    ) as delete_spy:
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
         core._cleanup_backups(vm, target, backups, retention)
 
     # Even though retention says remove FULL, Core post-processes and skips it
@@ -2446,9 +2483,7 @@ def test_core_post_processes_retention_for_dependencies(
     assert full_name not in deleted_names, (
         "Core should post-process retention and skip FULL with active dependents"
     )
-    assert inc1 not in deleted_names, (
-        "inc1 is in keep-set and should not be deleted"
-    )
+    assert inc1 not in deleted_names, "inc1 is in keep-set and should not be deleted"
 
 
 # ── Dry-Run FULL Backup Tests ──────────────────────────────────────────────
@@ -2493,9 +2528,7 @@ def test_dry_run_logs_full_would_be_created(
 
     # Patch _should_create_bucket_full to force a new FULL
     with (
-        patch.object(
-            Core, "_should_create_bucket_full", return_value=(True, "weekly")
-        ),
+        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
         patch.object(
             backup_provider,
             "create_full_backup",
@@ -2507,15 +2540,11 @@ def test_dry_run_logs_full_would_be_created(
     # The dry-run log includes the creation spec.
     assert "[dry-run] Would create FULL backup" in caplog.text
     assert "bucket=weekly" in caplog.text
-    assert "method=NBD" in caplog.text, (
-        "Running VM should use NBD method"
-    )
+    assert "method=NBD" in caplog.text, "Running VM should use NBD method"
     assert "VM=running" in caplog.text
 
     # create_full_backup() was NOT actually called.
-    assert not full_spy.called, (
-        "create_full_backup() must NOT be called in dry-run mode"
-    )
+    assert not full_spy.called, "create_full_backup() must NOT be called in dry-run mode"
 
 
 def test_dry_run_detects_vm_running_state_for_method(
@@ -2549,22 +2578,16 @@ def test_dry_run_detects_vm_running_state_for_method(
     caplog.set_level(logging.INFO)
 
     # --- Case A: VM running (default fixture dominfo returns State: running) ---
-    with patch.object(
-        Core, "_should_create_bucket_full", return_value=(True, "weekly")
-    ):
+    with patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")):
         core._backup_target(vm, target, [snap])
 
-    assert "method=NBD" in caplog.text, (
-        "Running VM should produce method=NBD in dry-run log"
-    )
+    assert "method=NBD" in caplog.text, "Running VM should produce method=NBD in dry-run log"
     assert "VM=running" in caplog.text
 
     # --- Case B: VM stopped — patch is_vm_running to return False ---
     caplog.clear()
     with (
-        patch.object(
-            Core, "_should_create_bucket_full", return_value=(True, "weekly")
-        ),
+        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
         patch("qsnap.core.is_vm_running", return_value=False),
     ):
         core._backup_target(vm, target, [snap])
@@ -2607,9 +2630,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
     caplog.set_level(logging.INFO)
 
     with (
-        patch.object(
-            Core, "_should_create_bucket_full", return_value=(True, "weekly")
-        ),
+        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
         patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
     ):
         core._backup_target(vm, target, [snap])
@@ -2619,12 +2640,11 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 
     # No virsh backup-begin or qemu-img convert was executed.
     mutating_cmds = [
-        c for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list)
-        and any(
-            m in " ".join(c.args[0])
-            for m in ("backup-begin", "qemu-img convert")
-        )
+        c
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and any(m in " ".join(c.args[0]) for m in ("backup-begin", "qemu-img convert"))
     ]
     assert len(mutating_cmds) == 0, (
         f"No mutating commands should be executed in dry-run, got: {mutating_cmds}"
@@ -2730,17 +2750,17 @@ def test_check_integrity_uses_force_share_on_active_layer(
 
     # Find the qemu-img info call for snap1
     info_calls = [
-        c for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and "qemu-img" in c.args[0][0]
+        c
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0]
         and "info" in " ".join(c.args[0])
     ]
     assert len(info_calls) >= 1, "qemu-img info should be called"
 
     # Every qemu-img info --backing-chain call must include --force-share
-    backing_chain_calls = [
-        c for c in info_calls
-        if "--backing-chain" in " ".join(c.args[0])
-    ]
+    backing_chain_calls = [c for c in info_calls if "--backing-chain" in " ".join(c.args[0])]
     for call in backing_chain_calls:
         cmd_str = " ".join(call.args[0])
         assert "--force-share" in cmd_str, (
@@ -2782,15 +2802,16 @@ def test_deep_check_uses_force_share_on_active_layer(
         )
 
     check_calls = [
-        c for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list)
-        and "qemu-img" in c.args[0][0] and "check" in " ".join(c.args[0])
+        c
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0]
+        and "check" in " ".join(c.args[0])
     ]
     assert len(check_calls) == 1, "qemu-img check should be called exactly once"
     cmd_str = " ".join(check_calls[0].args[0])
-    assert "--force-share" in cmd_str, (
-        f"qemu-img check must include --force-share, got: {cmd_str}"
-    )
+    assert "--force-share" in cmd_str, f"qemu-img check must include --force-share, got: {cmd_str}"
 
 
 # ── test_core_passes_vm_name_to_create_full_backup ───────────────────────
@@ -2831,9 +2852,7 @@ def test_core_passes_vm_name_to_create_full_backup(
     backup_provider = mock_factory._backup_provider
 
     with (
-        patch.object(
-            Core, "_should_create_bucket_full", return_value=(True, "monthly")
-        ),
+        patch.object(Core, "_should_create_bucket_full", return_value=(True, "monthly")),
         patch.object(
             backup_provider,
             "create_full_backup",
@@ -2848,6 +2867,5 @@ def test_core_passes_vm_name_to_create_full_backup(
         f"got: {full_spy.call_args.args[0]!r}"
     )
     assert full_spy.call_args.args[0] == vm.name, (
-        f"vm_name should equal vm_config.name, "
-        f"got: {full_spy.call_args.args[0]!r}"
+        f"vm_name should equal vm_config.name, got: {full_spy.call_args.args[0]!r}"
     )
