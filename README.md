@@ -10,13 +10,19 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 - **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode)
 - **Incremental backups** — file-copy or NBD bitmap-based backup to remote targets
 - **Periodic full backups** — standalone qcow2 via `qemu-img convert`, with optional compression
-- **Backup verification** — four tiers: `off`, `metadata`, `hash` (SHA-256), or `full` (`qemu-img compare`)
+- **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced before cascade-deletion
+- **Incremental backup verification** — four tiers: `off`, `metadata`, `hash` (SHA-256), or `full` (`qemu-img compare`)
 - **Retention policies** — time-based retention with hourly/daily/weekly/monthly/yearly buckets
 - **Minimum retention floor** — `preserve_min` keeps recent snapshots/backups regardless of bucket counts
+- **Config validation** — rejects all-zero retention buckets when backup targets are configured
 - **Schedule preview** — `--print-schedule` / `-S` simulates retention against synthetic timestamps
 - **Backing chain integrity** — automatic `blockcommit` or `qemu-img commit` to merge old snapshots
+- **Stale state self-healing** — automatically cleans up state entries for already-blockcommitted snapshots and externally-deleted FULL backups
+- **Lock-conflict retry** — snapshot creation retries up to 3 times with exponential backoff on libvirt lock conflicts
+- **NBD job cleanup** — `virsh domjobabort` ensures NBD backup jobs are terminated even on failure
 - **Deferred operations** — AppArmor/SELinux-blocked blockcommits queued and retried on VM shutdown
-- **Pre-flight validation** — environment checks before every pipeline run
+- **Pre-flight validation** — environment checks including truncated rsync artifact detection
+- **State consistency audit** — `qsnap check --state` detects phantom entries and corrupt state files
 - **Quiesce support** — optional `--quiesce` flag for filesystem-consistent snapshots
 
 ## Installation
@@ -95,7 +101,7 @@ qsnap prune debiantest       # retention + cleanup only
 | `qsnap list latest [vm]` | Show most recent snapshot per VM |
 | `qsnap list config` | Show parsed VM configurations |
 | `qsnap stats [vm]` | Show snapshot/backup counts and sizes |
-| `qsnap check [vm]` | Verify backing-chain integrity (`--deep` for corruption check) |
+| `qsnap check [vm]` | Verify backing-chain integrity (`--deep` for corruption check, `--state` for state consistency audit) |
 | `qsnap restore <name> <dir> [vm]` | Restore a backup chain to a directory |
 | `qsnap fork <snapshot> --as-vm <name>` | Create a standalone VM from a snapshot or backup |
 | `qsnap deploy <backup> --as-vm <name>` | Deploy a backup as a standalone VM |
@@ -142,6 +148,10 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | none | Retention policy for backups on targets, e.g. `"48h 14d 8w 12m 1y"` |
 | `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
 | `compress` | bool | `true` | Compress full backups with zlib (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
+| `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
+| `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
+| `full_verify_before_delete` | string | `"check"` | FULL verification before cascade-deletion: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
+| `deep_check_targets` | bool | `false` | When `true`, `qsnap check --deep` also scans backup target directories |
 
 ### VM Keys
 
@@ -171,7 +181,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
 | `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"` |
 | `compress` | bool | `true` | Compress full backups with zlib. Inherits from global → VM → target |
-| `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is always a FULL via `qemu-img convert` |
+| `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is created as a FULL by the bucket-driven mechanism in `Core._backup_target()` (not via `transfer_missing()`) |
 
 ## Retention Policy Guide
 
@@ -351,9 +361,9 @@ When a FULL backup falls out of all retention buckets, qsnap checks whether any 
 - **If dependents exist in the keep-set** — the FULL is retained as a "ghost" (kept but not counted by retention). This prevents breaking the incremental chain.
 - **If no dependents remain** — the FULL is deleted, and any orphaned incrementals (not in the keep-set) are cascade-deleted.
 
-## Backup Verification
+## Incremental Backup Verification (per-transfer)
 
-qsnap offers four verification tiers, configured per target via the `verify` key:
+qsnap offers four verification tiers for incremental backups, configured per target via the `verify` key:
 
 | Tier | Description | Overhead | When to use |
 |---|---|---|---|
@@ -374,6 +384,32 @@ qsnap offers four verification tiers, configured per target via the `verify` key
 - **Home host with USB drive** — `"metadata"` is sufficient; the transfer is local and fast
 - **Server with network target** — `"hash"` provides integrity without the overhead of `qemu-img compare`
 - **Compliance/audit** — `"full"` gives maximum assurance at the cost of reading both files
+
+## FULL Backup Verification
+
+Beyond per-backup verification of incrementals (above), qsnap applies a separate **three-tier verification** to FULL backup files at critical lifecycle points:
+
+| Tier | Name | What it checks | When |
+|:----:|------|---------------|------|
+| M1 | Metadata | Format is `qcow2`, no `corrupt` feature bit | Post-create, pre-rebase, pre-deletion |
+| M2 | Structural | `qemu-img check` — zero errors and leaks | Post-create, pre-deletion (when configured) |
+| M3 | Content | `qemu-img compare -q --force-share <source> <target>` — byte-level content comparison | Post-create (when configured as `"hash"`) |
+
+### Lifecycle Points
+
+| Point | Config key | Default | Notes |
+|-------|-----------|---------|-------|
+| **Post-create** | `full_verify_after_create` | `"check"` | Runs immediately after `qemu-img convert` completes. Failed FULLs are deleted and NOT recorded in state |
+| **Pre-rebase** | `full_verify_before_rebase` | `"metadata"` | Runs on FULL anchor before rebasing incrementals. Failing anchors are skipped; alternative (older) anchors are tried |
+| **Pre-deletion** | `full_verify_before_delete` | `"check"` | Runs before cascade-deletion. **M1 is always enforced** regardless of this setting — it cannot be disabled. Failed FULLs block deletion entirely with a CRITICAL log |
+
+### Why Separate FULL Verification?
+
+Unlike incremental backups (which are verified against their source via `verify_backup()`), FULL backups are standalone qcow2 files created by `qemu-img convert`. They have no source file to compare against in the traditional sense. M3 solves this with `qemu-img compare`, which traverses the qcow2 backing chain to compare the virtual-disk content that the guest OS sees — a fundamentally different approach from SHA-256 file hashing (which would always differ between a snapshot delta and a standalone NBD-converted FULL).
+
+### Phantom FULL Detection
+
+Before making bucket-driven FULL creation decisions, qsnap verifies that every FULL in state actually exists on disk. Phantom FULLs (deleted externally but still recorded in state) are automatically removed from state with a WARNING. This prevents phantom entries from blocking legitimate FULL creation.
 
 ## `--force-share` Safety Classification
 
@@ -403,6 +439,7 @@ qsnap applies `--force-share` on these metadata-only calls when the file may be 
 - `Core._verify_backing_chain()` / `Core._get_chain_length()` — `qemu-img info --backing-chain` (already had it)
 - `Core.fork()` — `qemu-img info --backing-chain` for chain-size estimation
 - `verify_backup()` — source-side `qemu-img info` (source may be active layer). `qemu-img compare` (full verify) does NOT get `--force-share`; a WARNING is logged instead advising that `verify=full` on a running VM's active layer may produce unreliable results.
+- `verify_full_backup()` — M3 (`qemu-img compare` in `"hash"` mode) uses `--force-share` to safely compare source snapshot content (which may be the active layer of a running VM) against the FULL backup. This is safe because qemu-img compare reads both files read-only and `--force-share` allows shared read access to the active layer.
 
 ## Restore
 
