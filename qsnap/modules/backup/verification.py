@@ -76,26 +76,26 @@ def verify_backup(
     # VM, which has an exclusive write lock.  --force-share requests a
     # shared lock for this metadata-only read (design D5).
     source_info_cmd = [
-        "qemu-img", "info", "--force-share",
-        "--output=json", str(source_path),
+        "qemu-img",
+        "info",
+        "--force-share",
+        "--output=json",
+        str(source_path),
     ]
     source_result = shell.run(source_info_cmd, timeout=60)
     if not source_result.success:
-        return (
-            f"verification failed: cannot get source info: "
-            f"{source_result.error}"
-        )
+        return f"verification failed: cannot get source info: {source_result.error}"
 
     # Target info
     target_info_cmd = [
-        "qemu-img", "info", "--output=json", str(target_path),
+        "qemu-img",
+        "info",
+        "--output=json",
+        str(target_path),
     ]
     target_result = shell.run(target_info_cmd, timeout=60)
     if not target_result.success:
-        return (
-            f"verification failed: cannot get target info: "
-            f"{target_result.error}"
-        )
+        return f"verification failed: cannot get target info: {target_result.error}"
 
     try:
         source_info = json.loads(source_result.stdout)
@@ -110,10 +110,7 @@ def verify_backup(
     # (a) format check
     target_format = target_info.get("format", "")
     if target_format != "qcow2":
-        return (
-            f"verification failed: expected format qcow2, "
-            f"got {target_format}"
-        )
+        return f"verification failed: expected format qcow2, got {target_format}"
 
     # (b) virtual-size match (exact)
     source_vsize = int(source_info.get("virtual-size", 0))
@@ -156,16 +153,18 @@ def verify_backup(
             source_path,
         )
         compare_cmd = [
-            "qemu-img", "compare", "-q",
-            str(source_path), str(target_path),
+            "qemu-img",
+            "compare",
+            "-q",
+            str(source_path),
+            str(target_path),
         ]
         compare_result = shell.run(
-            compare_cmd, timeout=_VERIFY_COMPARE_TIMEOUT,
+            compare_cmd,
+            timeout=_VERIFY_COMPARE_TIMEOUT,
         )
         if not compare_result.success:
-            error_detail = (
-                compare_result.error or compare_result.stderr or ""
-            )
+            error_detail = compare_result.error or compare_result.stderr or ""
             if "lock" in error_detail.lower() or "shared" in error_detail.lower():
                 return (
                     "verification failed: data comparison failed "

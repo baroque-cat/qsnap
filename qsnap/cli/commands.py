@@ -74,9 +74,7 @@ def _latest_to_rows(
     rows: list[dict[str, str]] = []
     for vm_name, snap in data.items():
         if snap is None:
-            rows.append(
-                {"vm": vm_name, "name": "-", "timestamp": "-", "allocation": "-"}
-            )
+            rows.append({"vm": vm_name, "name": "-", "timestamp": "-", "allocation": "-"})
         else:
             rows.append(
                 {
@@ -119,9 +117,7 @@ def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
                 "vm": vm_name,
                 "status": result.status,
                 "broken_snapshots": (
-                    ", ".join(result.broken_snapshots)
-                    if result.broken_snapshots
-                    else "-"
+                    ", ".join(result.broken_snapshots) if result.broken_snapshots else "-"
                 ),
             }
         )
@@ -260,15 +256,24 @@ def handle_list(core: Core, args: Namespace) -> int:
         vms = core.list_config()
         rows = _config_to_rows(vms)
         columns = [
-            "name", "base_image", "snapshot_dir", "snapshot_create",
-            "targets", "blockcommit_deep_verify", "snapshot_deep_verify",
+            "name",
+            "base_image",
+            "snapshot_dir",
+            "snapshot_create",
+            "targets",
+            "blockcommit_deep_verify",
+            "snapshot_deep_verify",
         ]
         # Print global safety settings header
         global_cfg = core._config.get_global()
         print("Global safety settings:")
         print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
-        print(f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}")
-        print(f"  chain_verify_after_commit: {'ON' if global_cfg.chain_verify_after_commit else 'OFF'}")
+        print(
+            f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}"
+        )
+        print(
+            f"  chain_verify_after_commit: {'ON' if global_cfg.chain_verify_after_commit else 'OFF'}"
+        )
         print(f"  deep_check_schedule: {global_cfg.deep_check_schedule}")
         print()
     elif sub == "latest":
@@ -309,7 +314,9 @@ def handle_check(core: Core, args: Namespace) -> int:
     global_cfg = core._config.get_global()
     print("Safety configuration:")
     print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
-    print(f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}")
+    print(
+        f"  chain_verify_before_commit: {'ON' if global_cfg.chain_verify_before_commit else 'OFF'}"
+    )
     print(f"  chain_verify_after_commit: {'ON' if global_cfg.chain_verify_after_commit else 'OFF'}")
     print(f"  Deep check schedule: {core.get_deep_check_schedule_info()}")
     print()

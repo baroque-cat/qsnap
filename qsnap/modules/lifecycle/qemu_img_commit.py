@@ -75,6 +75,7 @@ class QemuImgCommitManager(ILifecycleManager):
         # Deep verify: run qemu-img check on base image after commit
         if deep_verify:
             import json
+
             chk = self._shell.run(
                 ["qemu-img", "check", "--output=json", str(vm_config.base_image)],
                 timeout=3600,

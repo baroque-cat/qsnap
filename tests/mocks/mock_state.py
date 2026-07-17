@@ -39,6 +39,17 @@ class InMemoryStateManager(IStateManager):
         snapshots = self._state[vm_name].setdefault("snapshots", [])
         snapshots.append(info)
 
+    def remove_snapshot(self, vm_name: str, snapshot_name: str) -> bool:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return False
+        snapshots = vm_state.get("snapshots", [])
+        for s in snapshots:
+            if s.name == snapshot_name:  # type: ignore[union-attr]
+                snapshots.remove(s)
+                return True
+        return False
+
     def get_snapshots(self, vm_name: str) -> list[SnapshotInfo]:
         vm_state = self._state.get(vm_name)
         if vm_state is None:
@@ -57,9 +68,7 @@ class InMemoryStateManager(IStateManager):
             return []
         return list(deferred)  # type: ignore[return-value]
 
-    def add_deferred_blockcommit(
-        self, vm_name: str, snapshots: list[str], reason: str
-    ) -> None:
+    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
         if vm_name not in self._state:
             self._state[vm_name] = {}
         deferred = self._state[vm_name].setdefault("deferred_operations", [])
@@ -76,9 +85,7 @@ class InMemoryStateManager(IStateManager):
             return
         self._state[vm_name]["deferred_operations"] = []
 
-    def update_deferred_warning(
-        self, vm_name: str, index: int, timestamp: datetime
-    ) -> None:
+    def update_deferred_warning(self, vm_name: str, index: int, timestamp: datetime) -> None:
         """Update ``last_warned_at`` on the deferred operation at *index*."""
         vm_state = self._state.get(vm_name)
         if vm_state is None:
@@ -102,9 +109,7 @@ class InMemoryStateManager(IStateManager):
             return None
         return entries[-1]
 
-    def set_last_full_backup(
-        self, target_path: str, name: str, timestamp: datetime
-    ) -> None:
+    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
         self.record_full_backup(target_path, name, timestamp, "monthly")
 
     def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
@@ -137,8 +142,6 @@ class InMemoryStateManager(IStateManager):
         if incremental_name not in deps:
             deps.append(incremental_name)
 
-    def get_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> list[str]:
+    def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         target_deps = self._dependencies.get(target_path, {})
         return list(target_deps.get(full_name, []))

@@ -74,7 +74,6 @@ def parse_retry_duration(raw: str) -> int:
     match = re.match(r"^(\d+)s$", raw.strip())
     if not match:
         raise ValueError(
-            f"Invalid duration string: {raw!r}. "
-            "Expected format like '1s', '5s', '10s'."
+            f"Invalid duration string: {raw!r}. Expected format like '1s', '5s', '10s'."
         )
     return int(match.group(1))

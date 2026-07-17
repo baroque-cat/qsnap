@@ -94,20 +94,24 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -152,21 +156,25 @@ def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     error_msg = "error: operation failed: blockcommit"
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=error_msg,
-        returncode=1,
-        error=error_msg,
-    ))
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=error_msg,
+            returncode=1,
+            error=error_msg,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -220,20 +228,24 @@ def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr="",
-        returncode=-1,
-        error="virsh blockcommit timed out after 3600 seconds",
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error="virsh blockcommit timed out after 3600 seconds",
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -249,9 +261,7 @@ def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_multiple_snapshots_sequential(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_vm_config):
     """Multiple snapshots are merged one at a time (design D4).
 
     Success path:
@@ -279,20 +289,24 @@ def test_blockcommit_multiple_snapshots_sequential(
 
     # ── Success path: both snapshots merged ───────────────────────────
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -315,21 +329,25 @@ def test_blockcommit_multiple_snapshots_sequential(
     # If the first blockcommit fails, the second is NOT executed.
 
     fail_shell = MockShell()
-    fail_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    fail_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     fail_error = "error: blockcommit failed for snap1"
-    fail_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=fail_error,
-        returncode=1,
-        error=fail_error,
-    ))
+    fail_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=fail_error,
+            returncode=1,
+            error=fail_error,
+        )
+    )
 
     fail_counting = CountingShell(fail_shell)
     fail_manager = BlockCommitManager(shell=fail_counting)
@@ -363,24 +381,28 @@ def test_blockcommit_blocked_by_apparmor(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     apparmor_stderr = (
         "error: Failed to pivot snapshot: Permission denied\n"
         "libvirt: AppArmor denial: cannot access /var/lib/libvirt/images"
     )
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=apparmor_stderr,
-        returncode=1,
-        error=apparmor_stderr,
-    ))
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=apparmor_stderr,
+            returncode=1,
+            error=apparmor_stderr,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -409,24 +431,27 @@ def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    selinux_stderr = (
-        "error: internal error: Operation not permitted\n"
-        "SELinux: AVC denied: { read } for qemu"
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=selinux_stderr,
-        returncode=1,
-        error=selinux_stderr,
-    ))
+    selinux_stderr = (
+        "error: internal error: Operation not permitted\nSELinux: AVC denied: { read } for qemu"
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=selinux_stderr,
+            returncode=1,
+            error=selinux_stderr,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -443,9 +468,7 @@ def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_blocked_by_apparmor_returns_deferred(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_blocked_by_apparmor_returns_deferred(mock_shell: MockShell, make_vm_config):
     """The AppArmor error string enables Core's deferral logic.
 
     Core defers a blockcommit when ``result.error`` contains "apparmor" or
@@ -457,21 +480,25 @@ def test_blockcommit_blocked_by_apparmor_returns_deferred(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     apparmor_stderr = "Permission denied: apparmor profile violation"
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=apparmor_stderr,
-        returncode=1,
-        error=apparmor_stderr,
-    ))
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=apparmor_stderr,
+            returncode=1,
+            error=apparmor_stderr,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -489,9 +516,7 @@ def test_blockcommit_blocked_by_apparmor_returns_deferred(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_blocked_by_selinux_returns_deferred(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_blocked_by_selinux_returns_deferred(mock_shell: MockShell, make_vm_config):
     """The SELinux error string enables Core's deferral logic.
 
     Core defers a blockcommit when ``result.error`` contains "apparmor" or
@@ -503,21 +528,25 @@ def test_blockcommit_blocked_by_selinux_returns_deferred(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     selinux_stderr = "Operation not permitted: AVC denied"
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=selinux_stderr,
-        returncode=1,
-        error=selinux_stderr,
-    ))
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=selinux_stderr,
+            returncode=1,
+            error=selinux_stderr,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -535,9 +564,7 @@ def test_blockcommit_blocked_by_selinux_returns_deferred(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_normal_failure_no_deferral(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_normal_failure_no_deferral(mock_shell: MockShell, make_vm_config):
     """A non-MAC failure does not produce a deferral error string.
 
     - ``domblklist`` returns success.
@@ -551,21 +578,25 @@ def test_blockcommit_normal_failure_no_deferral(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     io_error = "error: No such file or directory"
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=io_error,
-        returncode=1,
-        error=io_error,
-    ))
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=io_error,
+            returncode=1,
+            error=io_error,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -597,27 +628,33 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("qemu-img check").returns(ShellResult(
-        success=True,
-        stdout='{"corruptions": 0}',
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     manager = BlockCommitManager(shell=mock_shell)
     result = manager.blockcommit(vm_config, [snap], deep_verify=True)
@@ -627,9 +664,7 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     assert result.committed_snapshot == snap.name
 
 
-def test_blockcommit_deep_verify_fails_corruptions(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_vm_config):
     """deep_verify=True with corruptions > 0 returns failure.
 
     - domblklist and blockcommit both succeed.
@@ -640,27 +675,33 @@ def test_blockcommit_deep_verify_fails_corruptions(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("qemu-img check").returns(ShellResult(
-        success=True,
-        stdout='{"corruptions": 5}',
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 5}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     manager = BlockCommitManager(shell=mock_shell)
     result = manager.blockcommit(vm_config, [snap], deep_verify=True)
@@ -670,9 +711,7 @@ def test_blockcommit_deep_verify_fails_corruptions(
     assert "5" in result.error
 
 
-def test_blockcommit_deep_verify_false_no_check(
-    mock_shell: MockShell, make_vm_config
-):
+def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_config):
     """deep_verify=False does NOT call qemu-img check.
 
     - domblklist and blockcommit both succeed.
@@ -684,20 +723,24 @@ def test_blockcommit_deep_verify_false_no_check(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     # Intentionally NO qemu-img check expectation set.
 
     manager = BlockCommitManager(shell=mock_shell)
@@ -723,27 +766,33 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("qemu-img check").returns(ShellResult(
-        success=True,
-        stdout='{"corruptions": 0}',
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -755,9 +804,7 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
 
     # Verify qemu-img check does NOT include --force-share
     qemu_calls = [c for c in shell.calls if "qemu-img" in " ".join(c)]
-    assert len(qemu_calls) == 1, (
-        f"Expected exactly 1 qemu-img check call, got {len(qemu_calls)}"
-    )
+    assert len(qemu_calls) == 1, f"Expected exactly 1 qemu-img check call, got {len(qemu_calls)}"
     qemu_cmd_str = " ".join(qemu_calls[0])
     assert "--force-share" not in qemu_cmd_str, (
         f"qemu-img check must NOT include --force-share (lifecycle ops are offline-only), "

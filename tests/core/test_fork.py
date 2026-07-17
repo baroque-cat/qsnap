@@ -60,7 +60,9 @@ def _make_shell_convert_expectations(shell) -> None:
         ShellResult(
             success=True,
             stdout="Id: -\nName: sourcevm\nState: shut off\n",
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     # Chain size info (JSON list with actual-size per image)
@@ -83,7 +85,9 @@ def _make_shell_convert_expectations(shell) -> None:
     )
     # virsh define
     shell.expect("virsh define").returns(
-        ShellResult(success=True, stdout="Domain newvm defined", stderr="", returncode=0, error=None)
+        ShellResult(
+            success=True, stdout="Domain newvm defined", stderr="", returncode=0, error=None
+        )
     )
     # mkdir
     shell.expect("mkdir").returns(
@@ -146,13 +150,9 @@ def test_fork_direct_convert_stopped_vm(
 
     # Verify NBD was NOT used (stopped VM path)
     nbd_calls = [c for c in call_cmds if "nbd:unix:" in c]
-    assert len(nbd_calls) == 0, (
-        "NBD should not be used for stopped VM"
-    )
+    assert len(nbd_calls) == 0, "NBD should not be used for stopped VM"
     backup_begin_calls = [c for c in call_cmds if "virsh backup-begin" in c]
-    assert len(backup_begin_calls) == 0, (
-        "virsh backup-begin should not be called for stopped VM"
-    )
+    assert len(backup_begin_calls) == 0, "virsh backup-begin should not be called for stopped VM"
 
 
 # ── NBD helper ─────────────────────────────────────────────────────────────
@@ -202,7 +202,9 @@ def _make_shell_nbd_expectations(shell) -> None:
     )
     # virsh define
     shell.expect("virsh define").returns(
-        ShellResult(success=True, stdout="Domain newvm defined", stderr="", returncode=0, error=None)
+        ShellResult(
+            success=True, stdout="Domain newvm defined", stderr="", returncode=0, error=None
+        )
     )
 
 
@@ -243,15 +245,11 @@ def test_fork_nbd_running_vm(
 
     # virsh backup-begin should be called (NBD export)
     backup_begin_calls = [c for c in call_cmds if "virsh backup-begin" in c]
-    assert len(backup_begin_calls) >= 1, (
-        "virsh backup-begin should be called for NBD export"
-    )
+    assert len(backup_begin_calls) >= 1, "virsh backup-begin should be called for NBD export"
 
     # qemu-img convert via NBD should be called
     nbd_convert_calls = [c for c in call_cmds if "nbd:unix:" in c]
-    assert len(nbd_convert_calls) >= 1, (
-        "qemu-img convert nbd:unix: should be called for NBD path"
-    )
+    assert len(nbd_convert_calls) >= 1, "qemu-img convert nbd:unix: should be called for NBD path"
 
     # direct qemu-img convert (without NBD) should NOT be called
     all_convert_calls = [c for c in call_cmds if "qemu-img convert" in c]
@@ -262,9 +260,7 @@ def test_fork_nbd_running_vm(
 
     # rm -f socket cleanup should be called
     socket_cleanup_calls = [c for c in call_cmds if "rm" in c and "qsnap-backup" in c]
-    assert len(socket_cleanup_calls) >= 1, (
-        "socket cleanup (rm -f) should be called"
-    )
+    assert len(socket_cleanup_calls) >= 1, "socket cleanup (rm -f) should be called"
 
 
 # ── test_fork_chain_size_estimation_uses_force_share ────────────────────────
@@ -300,12 +296,9 @@ def test_fork_chain_size_estimation_uses_force_share(
 
     # Verify that qemu-img info --backing-chain includes --force-share
     backing_calls = [
-        " ".join(c.args[0]) for c in spy.call_args_list
-        if "backing-chain" in " ".join(c.args[0])
+        " ".join(c.args[0]) for c in spy.call_args_list if "backing-chain" in " ".join(c.args[0])
     ]
-    assert len(backing_calls) >= 1, (
-        "qemu-img info --backing-chain should be called"
-    )
+    assert len(backing_calls) >= 1, "qemu-img info --backing-chain should be called"
     backing_cmd = backing_calls[0]
     assert "--force-share" in backing_cmd, (
         "qemu-img info --backing-chain must include --force-share"
@@ -344,10 +337,7 @@ def test_fork_defines_new_libvirt_vm_with_modified_xml(
         (storage_dir / "newvm2").mkdir(parents=True, exist_ok=True)
         core.fork("snap1", "newvm2", storage_dir)
 
-    define_calls = [
-        c for c in spy.call_args_list
-        if "define" in " ".join(c.args[0])
-    ]
+    define_calls = [c for c in spy.call_args_list if "define" in " ".join(c.args[0])]
     assert len(define_calls) >= 1, "virsh define should have been called"
 
     # Verify the written XML has new VM name (not sourcevm)
@@ -355,8 +345,9 @@ def test_fork_defines_new_libvirt_vm_with_modified_xml(
     assert xml_path.exists(), f"XML should exist at {xml_path}"
     xml_text = xml_path.read_text()
     assert "newvm2" in xml_text, "XML should contain new VM name"
-    assert "sourcevm" not in xml_text or "sourcevm" not in ET.fromstring(xml_text).find("name").text, \
-        "XML should NOT contain source VM name as <name>"
+    assert (
+        "sourcevm" not in xml_text or "sourcevm" not in ET.fromstring(xml_text).find("name").text
+    ), "XML should NOT contain source VM name as <name>"
 
 
 # ── test_fork_from_backup_resolves_via_backup_provider ────────────────────
@@ -383,9 +374,7 @@ def test_fork_from_backup_resolves_via_backup_provider(
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1048576,
     )
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[backup_info]
-    ):
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup_info]):
         _make_shell_convert_expectations(mock_shell)
         storage_dir = tmp_path / "storage"
         (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
@@ -601,9 +590,7 @@ def test_deploy_full_backup_delegates_to_fork(
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1048576,
     )
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[backup_info]
-    ):
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup_info]):
         _make_shell_convert_expectations(mock_shell)
         storage_dir = tmp_path / "storage"
         (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
@@ -636,9 +623,7 @@ def test_deploy_incremental_backup_flattens_chain(
         timestamp=datetime(2025, 7, 14, 10, 0),
         allocation=524288,
     )
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[inc_backup]
-    ):
+    with patch.object(mock_factory._backup_provider, "list", return_value=[inc_backup]):
         _make_shell_convert_expectations(mock_shell)
         storage_dir = tmp_path / "storage"
         (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
@@ -649,10 +634,7 @@ def test_deploy_incremental_backup_flattens_chain(
     assert result.success is True
 
     # Verify qemu-img convert was called (flattening the chain)
-    convert_calls = [
-        c for c in spy.call_args_list
-        if "convert" in " ".join(c.args[0])
-    ]
+    convert_calls = [c for c in spy.call_args_list if "convert" in " ".join(c.args[0])]
     assert len(convert_calls) >= 1, "qemu-img convert should flatten chain"
 
 
@@ -737,9 +719,7 @@ def test_resolve_snapshot_finds_in_backup(
         allocation=1048576,
     )
 
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[backup_snap]
-    ):
+    with patch.object(mock_factory._backup_provider, "list", return_value=[backup_snap]):
         result = core._resolve_snapshot("backup1")
 
     assert isinstance(result, tuple)

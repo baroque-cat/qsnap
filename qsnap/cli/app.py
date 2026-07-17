@@ -49,12 +49,14 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     # Global flags
     parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         default="/etc/qsnap/qsnap.toml",
         help="Path to TOML configuration file (default: /etc/qsnap/qsnap.toml)",
     )
     parser.add_argument(
-        "--dry-run", "-n",
+        "--dry-run",
+        "-n",
         action="store_true",
         help="Print planned actions without executing them",
     )
@@ -74,17 +76,20 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Skip backup deletion only",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable DEBUG-level logging",
     )
     parser.add_argument(
-        "--quiet", "-q",
+        "--quiet",
+        "-q",
         action="store_true",
         help="Enable ERROR-level logging only",
     )
     parser.add_argument(
-        "--loglevel", "-l",
+        "--loglevel",
+        "-l",
         choices=["error", "warn", "info", "debug"],
         help="Set log level explicitly",
     )
@@ -94,7 +99,9 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Output format: table (default), long, raw, col:<columns>",
     )
     parser.add_argument(
-        "--long", "-L", dest="long_format",
+        "--long",
+        "-L",
+        dest="long_format",
         action="store_true",
         help="Shortcut for --format long",
     )
@@ -111,7 +118,8 @@ def build_argparser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(cmd)
         sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
         sub.add_argument(
-            "--print-schedule", "-S",
+            "--print-schedule",
+            "-S",
             action="store_true",
             help="Print retention schedule before executing",
         )
@@ -152,13 +160,17 @@ def build_argparser() -> argparse.ArgumentParser:
     )
 
     # restore subcommand
-    restore_parser = subparsers.add_parser("restore", help="Restore a backup chain to a target directory")
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore a backup chain to a target directory"
+    )
     restore_parser.add_argument("snapshot_name", help="Snapshot name to restore")
     restore_parser.add_argument("target_dir", help="Target directory for restored files")
     restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
 
     # estimate subcommand
-    estimate_parser = subparsers.add_parser("estimate", help="Show projected backup sizes and retention schedule")
+    estimate_parser = subparsers.add_parser(
+        "estimate", help="Show projected backup sizes and retention schedule"
+    )
     estimate_parser.add_argument("vm", nargs="*", help="VM name(s) to filter")
 
     # fork subcommand

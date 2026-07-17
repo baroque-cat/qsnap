@@ -589,9 +589,7 @@ def test_corrupt_state_file_renamed_and_empty_state_returned(
     assert result is None
 
     # Original state file must no longer exist.
-    assert not state_file.exists(), (
-        "Original state file should be renamed away after corruption"
-    )
+    assert not state_file.exists(), "Original state file should be renamed away after corruption"
 
     # A broken file should exist.
     broken_files = list(tmp_path.glob("testvm.json.broken.*"))
@@ -600,8 +598,7 @@ def test_corrupt_state_file_renamed_and_empty_state_returned(
         f"{[f.name for f in broken_files]}"
     )
     assert broken_files[0].name.startswith("testvm.json.broken."), (
-        f"Broken file name should start with 'testvm.json.broken.', "
-        f"got {broken_files[0].name}"
+        f"Broken file name should start with 'testvm.json.broken.', got {broken_files[0].name}"
     )
 
 
@@ -661,9 +658,7 @@ def test_first_save_creates_state_file_only(tmp_path: Path) -> None:
     # No backup files should exist — nothing to rotate.
     for i in range(1, 4):
         backup = tmp_path / f"testvm.json.{i}"
-        assert not backup.exists(), (
-            f"Backup file {backup.name} should NOT exist on first save"
-        )
+        assert not backup.exists(), f"Backup file {backup.name} should NOT exist on first save"
 
     # Verify content is correct.
     assert manager.get_last_allocation("testvm") == 4096
@@ -740,9 +735,7 @@ def test_backup_count_limit_enforced(tmp_path: Path) -> None:
 
     # Backup 3 must NOT exist — limit is 2, oldest (100) discarded.
     backup3 = tmp_path / "testvm.json.3"
-    assert not backup3.exists(), (
-        "testvm.json.3 should NOT exist — backup count limit is 2"
-    )
+    assert not backup3.exists(), "testvm.json.3 should NOT exist — backup count limit is 2"
 
 
 def test_state_backup_count_zero_disables_rotation(tmp_path: Path) -> None:
@@ -767,6 +760,5 @@ def test_state_backup_count_zero_disables_rotation(tmp_path: Path) -> None:
     for i in range(1, 5):
         backup = tmp_path / f"testvm.json.{i}"
         assert not backup.exists(), (
-            f"Backup file {backup.name} should NOT exist when "
-            f"state_backup_count=0"
+            f"Backup file {backup.name} should NOT exist when state_backup_count=0"
         )

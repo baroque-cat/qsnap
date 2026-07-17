@@ -12,9 +12,7 @@ class IChangeDetector(ABC):
     """Abstract interface for detecting whether a VM disk has changed."""
 
     @abstractmethod
-    def has_changed(
-        self, vm_config: VMConfig, disk: str | None = None
-    ) -> ChangeResult:
+    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         """Check whether the VM disk allocation has grown since last run.
 
         When *disk* is provided, scope detection to that specific disk.

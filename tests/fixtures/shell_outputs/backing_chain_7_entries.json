@@ -1,0 +1,56 @@
+[
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap6.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 7340032,
+    "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap5.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap5.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 6291456,
+    "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap4.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap4.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 5242880,
+    "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap3.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap3.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 4194304,
+    "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 3145728,
+    "backing-filename": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 2097152,
+    "backing-filename": "/var/lib/libvirt/images/testvm.qcow2",
+    "backing-format": "qcow2"
+  },
+  {
+    "image": "/var/lib/libvirt/images/testvm.qcow2",
+    "format": "qcow2",
+    "virtual-size": 21474836480,
+    "actual-size": 1073741824
+  }
+]

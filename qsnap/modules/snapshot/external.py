@@ -121,9 +121,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         try:
             content_hash = _file_sha256(snapshot_path)
         except OSError as exc:
-            logger.warning(
-                "Failed to compute SHA-256 for %s: %s", snapshot_path, exc
-            )
+            logger.warning("Failed to compute SHA-256 for %s: %s", snapshot_path, exc)
 
         return SnapshotResult(
             success=True,

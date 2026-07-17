@@ -204,9 +204,7 @@ class TimeBasedRetention(IRetentionEngine):
             if count <= 0:
                 result[bucket_name] = {"count": 0}
                 continue
-            kept = self._select_by_bucket(
-                sorted_items, bucket_name, count, preserve_day_of_week
-            )
+            kept = self._select_by_bucket(sorted_items, bucket_name, count, preserve_day_of_week)
             if kept:
                 result[bucket_name] = {
                     "count": len(kept),

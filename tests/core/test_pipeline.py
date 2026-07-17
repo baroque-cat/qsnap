@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
 from qsnap.models.results import (
@@ -1431,6 +1433,29 @@ def _add_snapshots_for_chain(state, vm_name: str) -> None:
     )
 
 
+def _add_snapshots_6_for_chain(state, vm_name: str) -> None:
+    """Add 6 snapshots (snap1-snap6) to state for chain verification tests."""
+    base_path = "/var/lib/libvirt/snapshots/testvm"
+    timestamps = [
+        datetime(2025, 7, 13, 8, 0),  # snap1
+        datetime(2025, 7, 13, 9, 0),  # snap2
+        datetime(2025, 7, 13, 10, 0),  # snap3
+        datetime(2025, 7, 13, 11, 0),  # snap4
+        datetime(2025, 7, 13, 12, 0),  # snap5
+        datetime(2025, 7, 13, 13, 0),  # snap6
+    ]
+    for i, ts in enumerate(timestamps, start=1):
+        state.record_snapshot(
+            vm_name,
+            SnapshotInfo(
+                name=f"snap{i}",
+                path=Path(f"{base_path}/snap{i}.qcow2"),
+                timestamp=ts,
+                allocation=1048576 * i,
+            ),
+        )
+
+
 _OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
@@ -1804,10 +1829,16 @@ def test_post_commit_chain_shortened_as_expected(
     mock_factory,
     mock_state,
     mock_shell,
+    caplog,
 ):
-    """Post-commit verification: chain shortened → blockcommit completes without CRITICAL."""
+    """Post-commit verification: chain shortened from 7→6 → passes silently.
+
+    Retention removes snap6.  Pre-commit queries snap6 (7 entries),
+    blockcommit succeeds, post-commit queries snap5 (6 entries).
+    Verifies that 6 < 7 and no CRITICAL log is emitted.
+    """
     global_cfg = make_global_config(
-        chain_verify_before_commit=False,
+        chain_verify_before_commit=True,
         chain_verify_after_commit=True,
     )
     vm = make_vm_config(
@@ -1823,18 +1854,105 @@ def test_post_commit_chain_shortened_as_expected(
         shell=mock_shell,
     )
 
-    _add_snapshots_for_chain(mock_state, "testvm")
+    _add_snapshots_6_for_chain(mock_state, "testvm")
 
-    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+    chain_6 = _load_fixture("backing_chain_6_entries.json")
+    snap6_path = "/var/lib/libvirt/snapshots/testvm/snap6.qcow2"
+    snap5_path = "/var/lib/libvirt/snapshots/testvm/snap5.qcow2"
+
+    # Pre-commit queries snap6 → 7 entries
+    mock_shell.expect(f"qemu-img info.*{snap6_path}").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
+    # Post-commit queries snap5 → 6 entries
+    mock_shell.expect(f"qemu-img info.*{snap5_path}").returns(
+        ShellResult(success=True, stdout=chain_6, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(
+        keep=["snap1", "snap2", "snap3", "snap4", "snap5"],
+        remove=["snap6"],
+    )
     manager = mock_factory._lifecycle_manager
 
-    with (
-        patch.object(core, "_get_chain_length", side_effect=[5, 4]),
-        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
-    ):
+    caplog.set_level(logging.INFO)
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
         core._blockcommit_snapshots(vm, retention)
 
-    assert bc_spy.called, "blockcommit should proceed when chain is intact"
+    assert bc_spy.called, "blockcommit should proceed"
+    # Verify no CRITICAL log — chain shortened as expected
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert not critical_logs, f"Expected no CRITICAL log, got: {[r.message for r in critical_logs]}"
+    assert "Post-commit chain verification passed" in caplog.text
+
+
+def test_post_commit_chain_shortened_intermediate_removal(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Post-commit passes even when virsh --delete removed intermediate snapshots.
+
+    snap3--snap5 are removed from state before blockcommit (simulating
+    ``virsh --delete`` removing them from disk).  After snap6 is merged,
+    the most recent surviving snapshot is snap2 → 3 entries.
+    3 < 7 → passes.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=True,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_6_for_chain(mock_state, "testvm")
+    # Simulate virsh --delete removing snap3, snap4, snap5 from disk
+    mock_state.remove_snapshot("testvm", "snap3")
+    mock_state.remove_snapshot("testvm", "snap4")
+    mock_state.remove_snapshot("testvm", "snap5")
+
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+    chain_3 = _load_fixture("backing_chain_3_entries.json")
+    snap6_path = "/var/lib/libvirt/snapshots/testvm/snap6.qcow2"
+    snap2_path = "/var/lib/libvirt/snapshots/testvm/snap2.qcow2"
+
+    # Pre-commit queries snap6 → 7 entries
+    mock_shell.expect(f"qemu-img info.*{snap6_path}").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
+    # Post-commit queries snap2 → 3 entries
+    mock_shell.expect(f"qemu-img info.*{snap2_path}").returns(
+        ShellResult(success=True, stdout=chain_3, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(
+        keep=["snap1", "snap2", "snap6"],
+        remove=["snap6"],
+    )
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.INFO)
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should proceed"
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert not critical_logs, f"Expected no CRITICAL log, got: {[r.message for r in critical_logs]}"
+    assert "Post-commit chain verification passed" in caplog.text
 
 
 def test_post_commit_chain_length_unchanged_critical(
@@ -1845,9 +1963,15 @@ def test_post_commit_chain_length_unchanged_critical(
     mock_shell,
     caplog,
 ):
-    """Post-commit verification: chain length unchanged → CRITICAL logged."""
+    """Post-commit chain length unchanged → CRITICAL log (silent blockcommit failure).
+
+    Both pre-commit and post-commit queries return 7 entries.  After
+    snap6 is removed from state, the post-commit query hits snap5 but
+    still returns 7 entries — simulating that the blockcommit did not
+    actually reduce the chain.
+    """
     global_cfg = make_global_config(
-        chain_verify_before_commit=False,
+        chain_verify_before_commit=True,
         chain_verify_after_commit=True,
     )
     vm = make_vm_config(
@@ -1863,23 +1987,34 @@ def test_post_commit_chain_length_unchanged_critical(
         shell=mock_shell,
     )
 
-    _add_snapshots_for_chain(mock_state, "testvm")
+    _add_snapshots_6_for_chain(mock_state, "testvm")
 
-    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+
+    # Single generic expectation — matches both pre‑commit and post‑commit
+    # qemu-img calls, returning 7 entries each time.
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(
+        keep=["snap1", "snap2", "snap3", "snap4", "snap5"],
+        remove=["snap6"],
+    )
     manager = mock_factory._lifecycle_manager
-    caplog.set_level(logging.CRITICAL)
 
-    with (
-        patch.object(core, "_get_chain_length", return_value=5),
-        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
-    ):
+    caplog.set_level(logging.CRITICAL)
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
         core._blockcommit_snapshots(vm, retention)
 
-    assert bc_spy.called, "blockcommit should be called before post-commit check"
-    assert "chain length mismatch" in caplog.text
+    assert bc_spy.called, "blockcommit should be attempted"
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "Expected CRITICAL log for unchanged chain length"
+    assert "chain length unchanged" in critical_logs[0].message
+    assert "snap6.qcow2" in critical_logs[0].message
 
 
-def test_post_commit_verification_fails_snapshots_preserved(
+def test_post_commit_measurement_fails_graceful(
     make_vm_config,
     make_global_config,
     mock_factory,
@@ -1887,7 +2022,84 @@ def test_post_commit_verification_fails_snapshots_preserved(
     mock_shell,
     caplog,
 ):
-    """Post-commit verification: chain length increased → CRITICAL, snapshots preserved."""
+    """Post-commit measurement fails → WARNING logged but verification passes.
+
+    Blockcommit succeeds but the post-commit qemu-img call fails.
+    chain_length_after is None → WARNING is logged, "passed" also logged.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=True,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_6_for_chain(mock_state, "testvm")
+
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+    snap6_path = "/var/lib/libvirt/snapshots/testvm/snap6.qcow2"
+    snap5_path = "/var/lib/libvirt/snapshots/testvm/snap5.qcow2"
+
+    # Pre-commit: snap6 → 7 entries
+    mock_shell.expect(f"qemu-img info.*{snap6_path}").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
+    # Post-commit: snap5 path → failure
+    mock_shell.expect(f"qemu-img info.*{snap5_path}").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="permission denied",
+            returncode=1,
+            error="permission denied",
+        )
+    )
+
+    retention = RetentionResult(
+        keep=["snap1", "snap2", "snap3", "snap4", "snap5"],
+        remove=["snap6"],
+    )
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.INFO)
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should proceed"
+    # WARNING logged — measurement failed but blockcommit itself succeeded
+    warning_logs = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning_logs, "Expected WARNING log for failed post-commit measurement"
+    assert any("blockcommit itself succeeded" in r.message for r in warning_logs), (
+        f"Expected 'blockcommit itself succeeded' in WARNING, got: "
+        f"{[r.message for r in warning_logs]}"
+    )
+    # INFO-level "passed" log is also emitted after the WARNING
+    assert "Post-commit chain verification passed" in caplog.text
+
+
+def test_post_commit_skipped_when_pre_commit_unavailable(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """When pre-commit chain_length is None, post-commit verification is skipped.
+
+    Qemu-img fails for the pre-commit measurement → chain_length_before = None.
+    The code logs an INFO message and skips the post-commit check entirely.
+    """
     global_cfg = make_global_config(
         chain_verify_before_commit=False,
         chain_verify_after_commit=True,
@@ -1905,20 +2117,75 @@ def test_post_commit_verification_fails_snapshots_preserved(
         shell=mock_shell,
     )
 
-    _add_snapshots_for_chain(mock_state, "testvm")
+    _add_snapshots_6_for_chain(mock_state, "testvm")
 
-    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    # Qemu-img fails — chain_length_before will be None
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=False, stdout="", stderr="timeout", returncode=124, error="timeout")
+    )
+
+    retention = RetentionResult(
+        keep=["snap1", "snap2", "snap3", "snap4", "snap5"],
+        remove=["snap6"],
+    )
     manager = mock_factory._lifecycle_manager
-    caplog.set_level(logging.CRITICAL)
 
-    with (
-        patch.object(core, "_get_chain_length", side_effect=[3, 4]),
-        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
-    ):
+    caplog.set_level(logging.INFO)
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
         core._blockcommit_snapshots(vm, retention)
 
-    assert bc_spy.called, "blockcommit should be called before post-commit check"
-    assert "chain length mismatch" in caplog.text
+    assert bc_spy.called, "blockcommit should proceed despite measurement failure"
+    assert "Pre-commit chain length unavailable" in caplog.text
+
+
+def test_get_chain_length_no_use_base_image_param(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_get_chain_length() no longer accepts use_base_image parameter.
+
+    - State empty → queries vm_config.base_image.
+    - State has snapshots → queries most recent snapshot path.
+    - Passing use_base_image=True raises TypeError.
+    """
+    global_cfg = make_global_config()
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    chain_3 = _load_fixture("backing_chain_3_entries.json")
+
+    # State is empty → should query base_image
+    mock_shell.expect("qemu-img info.*/var/lib/libvirt/images/testvm.qcow2").returns(
+        ShellResult(success=True, stdout=chain_3, stderr="", returncode=0, error=None)
+    )
+    length = core._get_chain_length(vm)
+    assert length == 3, f"Expected 3 entries when querying base image, got {length}"
+
+    # State has snapshots → should query most recent (snap2)
+    _add_snapshots_6_for_chain(mock_state, "testvm")
+    snap6_path = "/var/lib/libvirt/snapshots/testvm/snap6.qcow2"
+    mock_shell.expect(f"qemu-img info.*{snap6_path}").returns(
+        ShellResult(success=True, stdout=chain_3, stderr="", returncode=0, error=None)
+    )
+    length = core._get_chain_length(vm)
+    assert length == 3, f"Expected 3 entries when querying most recent snapshot, got {length}"
+
+    # use_base_image param no longer accepted
+    with pytest.raises(TypeError, match="use_base_image"):
+        core._get_chain_length(vm, use_base_image=True)  # type: ignore[call-arg]
 
 
 # ── Chain Verify Disabled ──────────────────────────────────────────────────

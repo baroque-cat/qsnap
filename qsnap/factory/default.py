@@ -64,8 +64,7 @@ class DefaultFactory(IVMModuleFactory):
                 return BitmapBackupProvider(self._shell)
             except RuntimeError as exc:
                 logger.warning(
-                    "BitmapBackupProvider unavailable (%s); "
-                    "falling back to FileCopyBackupProvider",
+                    "BitmapBackupProvider unavailable (%s); falling back to FileCopyBackupProvider",
                     exc,
                 )
                 return FileCopyBackupProvider(self._shell, self._state)

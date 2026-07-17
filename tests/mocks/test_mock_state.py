@@ -94,9 +94,7 @@ def test_inmemory_state_manager_full_backup_methods():
 
     # Set and get.
     ts = datetime.now()
-    state_manager.set_last_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.qcow2", ts
-    )
+    state_manager.set_last_full_backup("/mnt/backup/testvm", "testvm.FULL.qcow2", ts)
 
     info = state_manager.get_last_full_backup("/mnt/backup/testvm")
     assert info is not None
@@ -306,33 +304,25 @@ def test_mock_state_get_incremental_dependencies():
     state_manager = InMemoryStateManager()
 
     # Unknown target_path → empty list.
-    deps = state_manager.get_incremental_dependencies(
-        "/mnt/backup/nonexistent", "some.FULL.qcow2"
-    )
+    deps = state_manager.get_incremental_dependencies("/mnt/backup/nonexistent", "some.FULL.qcow2")
     assert deps == []
 
     # Record a dependency, then query for the known full.
-    state_manager.record_incremental_dependency(
-        "/mnt/backup/testvm", "incr1.qcow2", "full1.qcow2"
-    )
+    state_manager.record_incremental_dependency("/mnt/backup/testvm", "incr1.qcow2", "full1.qcow2")
 
     # Known full → returns list.
-    deps = state_manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "full1.qcow2"
-    )
+    deps = state_manager.get_incremental_dependencies("/mnt/backup/testvm", "full1.qcow2")
     assert deps == ["incr1.qcow2"]
 
     # Unknown full (same target) → empty list.
-    deps = state_manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "full2.qcow2"
-    )
+    deps = state_manager.get_incremental_dependencies("/mnt/backup/testvm", "full2.qcow2")
     assert deps == []
 
     # get_incremental_dependencies returns a copy.
     deps.append("extra")
-    assert state_manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "full1.qcow2"
-    ) == ["incr1.qcow2"]
+    assert state_manager.get_incremental_dependencies("/mnt/backup/testvm", "full1.qcow2") == [
+        "incr1.qcow2"
+    ]
 
 
 def test_mock_state_multiple_fulls():
@@ -362,9 +352,7 @@ def test_mock_state_multiple_fulls():
 
     # set_last_full_backup delegates to record_full_backup (bucket_level="monthly").
     ts3 = datetime(2025, 7, 1, 0, 0, 0)
-    state_manager.set_last_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250701.qcow2", ts3
-    )
+    state_manager.set_last_full_backup("/mnt/backup/testvm", "testvm.FULL.20250701.qcow2", ts3)
 
     fulls = state_manager.get_full_backups("/mnt/backup/testvm")
     assert len(fulls) == 3

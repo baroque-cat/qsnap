@@ -176,9 +176,7 @@ def test_ibackup_provider_create_full_backup_abstract():
             return []
 
         def delete(self, backup):
-            return ShellResult(
-                success=True, stdout="", stderr="", returncode=0, error=None
-            )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
     bare = _BareBackupProvider()
     with pytest.raises(NotImplementedError):
@@ -269,7 +267,8 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
     ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
-    cls, init_kwargs,
+    cls,
+    init_kwargs,
 ):
     """Every concrete provider that overrides create_full_backup() has bucket_level parameter.
 
@@ -294,7 +293,8 @@ def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
     ids=["mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_bucket_level_custom_value(
-    cls, init_kwargs,
+    cls,
+    init_kwargs,
 ):
     """create_full_backup() correctly uses a non-default bucket_level value.
 
@@ -310,7 +310,11 @@ def test_backup_provider_create_full_backup_bucket_level_custom_value(
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup(
-        "testvm", source_snapshot, target, compress=False, bucket_level="yearly",
+        "testvm",
+        source_snapshot,
+        target,
+        compress=False,
+        bucket_level="yearly",
     )
     assert isinstance(result, BackupResult)
     assert result.success

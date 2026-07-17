@@ -52,7 +52,9 @@ def test_retention_engine_evaluate_accepts_preserve_day_of_week(engine_cls):
         RetentionItem(name="snap2", timestamp=datetime(2025, 1, 13, 12, 0)),
     ]
     engine = _make_engine(engine_cls, policy)
-    result = engine.evaluate(items, policy, now=datetime(2025, 1, 13, 12, 0), preserve_day_of_week="tuesday")
+    result = engine.evaluate(
+        items, policy, now=datetime(2025, 1, 13, 12, 0), preserve_day_of_week="tuesday"
+    )
     assert isinstance(result, RetentionResult)
 
 

@@ -28,9 +28,7 @@ def test_long_format_produces_yyyymmdd_thhmm() -> None:
 
 def test_long_iso_format_produces_yyyymmdd_thhmmss_offset() -> None:
     """The 'long-iso' format produces YYYYMMDDTHHMMSS followed by a tz offset."""
-    result = format_snapshot_timestamp(
-        datetime(2025, 7, 13, 15, 31, 23), "long-iso"
-    )
+    result = format_snapshot_timestamp(datetime(2025, 7, 13, 15, 31, 23), "long-iso")
 
     assert result.startswith("20250713T153123")
     assert len(result) > len("20250713T153123")

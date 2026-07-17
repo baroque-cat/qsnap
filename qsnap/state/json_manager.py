@@ -67,22 +67,18 @@ class JsonStateManager(IStateManager):
             return data
         except json.JSONDecodeError:
             timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-            broken_path = (
-                self._state_dir / f"{vm_name}.json.broken.{timestamp}"
-            )
+            broken_path = self._state_dir / f"{vm_name}.json.broken.{timestamp}"
             try:
                 shutil.move(str(path), str(broken_path))
             except OSError as exc:
                 logger.critical(
-                    "State file for VM %s is corrupt and could not be "
-                    "renamed: %s",
+                    "State file for VM %s is corrupt and could not be renamed: %s",
                     vm_name,
                     exc,
                 )
                 return {}
             logger.critical(
-                "State file for VM %s was corrupt — renamed to %s. "
-                "Starting with empty state.",
+                "State file for VM %s was corrupt — renamed to %s. Starting with empty state.",
                 vm_name,
                 broken_path,
             )
@@ -182,6 +178,20 @@ class JsonStateManager(IStateManager):
         data["snapshots"] = snapshots
         self._save(vm_name, data)
 
+    def remove_snapshot(self, vm_name: str, snapshot_name: str) -> bool:
+        data = self._load(vm_name)
+        raw_list = data.get("snapshots", [])
+        if not raw_list:
+            return False
+        snapshots: list[dict[str, str | int]] = list(raw_list)  # type: ignore[arg-type]
+        original_len = len(snapshots)
+        snapshots = [s for s in snapshots if s.get("name") != snapshot_name]
+        if len(snapshots) == original_len:
+            return False
+        data["snapshots"] = snapshots
+        self._save(vm_name, data)
+        return True
+
     def get_snapshots(self, vm_name: str) -> list[SnapshotInfo]:
         data = self._load(vm_name)
         raw_list = data.get("snapshots", [])
@@ -230,9 +240,7 @@ class JsonStateManager(IStateManager):
             for d in raw_list  # type: ignore[union-attr]
         ]
 
-    def add_deferred_blockcommit(
-        self, vm_name: str, snapshots: list[str], reason: str
-    ) -> None:
+    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
         data = self._load(vm_name)
         raw_list: list[dict[str, object]] = list(data.get("deferred_operations", []))  # type: ignore[arg-type]
         raw_list.append(
@@ -252,9 +260,7 @@ class JsonStateManager(IStateManager):
         data["deferred_operations"] = []
         self._save(vm_name, data)
 
-    def update_deferred_warning(
-        self, vm_name: str, index: int, timestamp: datetime
-    ) -> None:
+    def update_deferred_warning(self, vm_name: str, index: int, timestamp: datetime) -> None:
         """Update ``last_warned_at`` on the deferred operation at *index*."""
         data = self._load(vm_name)
         raw_list: list[dict[str, object]] = list(data.get("deferred_operations", []))  # type: ignore[arg-type]
@@ -318,9 +324,7 @@ class JsonStateManager(IStateManager):
             bucket_level=str(entry.get("bucket_level", "monthly")),
         )
 
-    def set_last_full_backup(
-        self, target_path: str, name: str, timestamp: datetime
-    ) -> None:
+    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
         """Record a full backup (backward-compatible, appends to list)."""
         self.record_full_backup(target_path, name, timestamp, "monthly")
 
@@ -376,9 +380,7 @@ class JsonStateManager(IStateManager):
             data: dict[str, dict[str, list[str]]] = json.load(fh)
         return data
 
-    def _save_dependencies(
-        self, data: dict[str, dict[str, list[str]]]
-    ) -> None:
+    def _save_dependencies(self, data: dict[str, dict[str, list[str]]]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self._state_dir / "_dependencies.json.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -398,9 +400,7 @@ class JsonStateManager(IStateManager):
         data[target_path] = target_deps
         self._save_dependencies(data)
 
-    def get_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> list[str]:
+    def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         """Return the incremental backup names that depend on *full_name*."""
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})

@@ -363,9 +363,7 @@ def test_weekly_retention_default_monday_boundary_keeps_two():
         RetentionItem(name="w3_mon", timestamp=datetime(2025, 1, 20, 12, 0)),
     ]
     policy = RetentionPolicy(weekly=2, preserve_min="0h")
-    result = TimeBasedRetention(policy).evaluate(
-        items, policy, now=items[-1].timestamp
-    )
+    result = TimeBasedRetention(policy).evaluate(items, policy, now=items[-1].timestamp)
     assert len(result.keep) == 2
     assert "w2_mon" in result.keep
     assert "w3_mon" in result.keep
@@ -425,9 +423,7 @@ def test_preserve_day_of_week_does_not_affect_other_buckets():
     r1 = TimeBasedRetention(policy).evaluate(
         items, policy, now=now, preserve_day_of_week="wednesday"
     )
-    r2 = TimeBasedRetention(policy).evaluate(
-        items, policy, now=now, preserve_day_of_week="monday"
-    )
+    r2 = TimeBasedRetention(policy).evaluate(items, policy, now=now, preserve_day_of_week="monday")
     assert r1.keep == r2.keep
     assert r1.remove == r2.remove
 
@@ -448,7 +444,9 @@ def test_preserve_min_latest_keeps_only_most_recent():
     are removed.
     """
     items = [
-        RetentionItem(name=f"snap.{i:02d}", timestamp=datetime(2025, 1, 1, 0, 0) + timedelta(hours=i))
+        RetentionItem(
+            name=f"snap.{i:02d}", timestamp=datetime(2025, 1, 1, 0, 0) + timedelta(hours=i)
+        )
         for i in range(10)
     ]
     now = items[-1].timestamp  # 2025-01-01T09:00:00
@@ -513,9 +511,7 @@ def test_explain_returns_per_bucket_counts():
     for bucket_name, bucket_info in explanation.items():
         assert isinstance(bucket_info, dict), f"{bucket_name} value is not a dict"
         assert "count" in bucket_info, f"{bucket_name} missing 'count' key"
-        assert isinstance(bucket_info["count"], int), (
-            f"{bucket_name} count is not an int"
-        )
+        assert isinstance(bucket_info["count"], int), f"{bucket_name} count is not an int"
 
     # daily=7 → 7 kept items with a range tuple
     assert explanation["daily"]["count"] == 7
@@ -576,12 +572,8 @@ def test_explain_is_pure_function():
             )
 
     # Also verify with preserve_day_of_week for good measure
-    result3 = engine.explain(
-        items, policy, now=now, preserve_day_of_week="wednesday"
-    )
-    result4 = engine.explain(
-        items, policy, now=now, preserve_day_of_week="wednesday"
-    )
+    result3 = engine.explain(items, policy, now=now, preserve_day_of_week="wednesday")
+    result4 = engine.explain(items, policy, now=now, preserve_day_of_week="wednesday")
     assert result3 == result4
 
 
@@ -608,7 +600,12 @@ def test_retention_engine_returns_pure_keep_remove():
     ]
     now = datetime(2025, 6, 1, 14, 0)
     policy = RetentionPolicy(
-        hourly=1, daily=0, weekly=0, monthly=0, yearly=0, preserve_min="0h",
+        hourly=1,
+        daily=0,
+        weekly=0,
+        monthly=0,
+        yearly=0,
+        preserve_min="0h",
     )
     engine = TimeBasedRetention(policy)
 
@@ -662,8 +659,6 @@ def test_retention_engine_returns_pure_keep_remove():
 
     # When preserve_min="all", both are kept — again, no name-based logic.
     all_policy = RetentionPolicy(preserve_min="all")
-    all_result = TimeBasedRetention(all_policy).evaluate(
-        typed_items, all_policy, now=typed_now
-    )
+    all_result = TimeBasedRetention(all_policy).evaluate(typed_items, all_policy, now=typed_now)
     assert set(all_result.keep) == {"FULL-backup", "INCR-backup"}
     assert all_result.remove == []

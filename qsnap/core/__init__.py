@@ -1985,27 +1985,18 @@ class Core:
     def _get_chain_length(
         self,
         vm_config: VMConfig,
-        *,
-        use_base_image: bool = False,
     ) -> int | None:
-        """Get the backing chain length.
+        """Return the number of files in the backing chain.
 
-        When *use_base_image* is True, query ``vm_config.base_image``
-        (used for post-commit verification).  Otherwise query the active
-        disk (the most recent snapshot, or the base image if no
-        snapshots exist).
-
-        Returns the number of files in the backing chain, or ``None``
-        if the chain could not be queried.
+        Queries the most recent snapshot recorded in ``IStateManager``,
+        falling back to ``vm_config.base_image`` when no snapshots
+        exist.  Returns ``None`` if the chain could not be queried.
         """
-        if use_base_image:
-            active_path = vm_config.base_image
+        snapshots = self._state.get_snapshots(vm_config.name)
+        if snapshots:
+            active_path = max(snapshots, key=lambda s: s.timestamp).path
         else:
-            snapshots = self._state.get_snapshots(vm_config.name)
-            if snapshots:
-                active_path = max(snapshots, key=lambda s: s.timestamp).path
-            else:
-                active_path = vm_config.base_image
+            active_path = vm_config.base_image
 
         result = self._shell.run(
             [
@@ -2120,24 +2111,39 @@ class Core:
 
         # Post-commit chain verification
         if global_cfg.chain_verify_after_commit:
-            chain_length_after = self._get_chain_length(
-                vm_config,
-                use_base_image=True,
-            )
-            if chain_length_before is not None and chain_length_after is not None:
-                expected_length = chain_length_before - len(to_merge)
-                if chain_length_after != expected_length:
-                    logger.critical(
-                        "Blockcommit may have failed for VM %s: "
-                        "chain length mismatch (expected %d, got %d). "
-                        "Snapshot paths for manual recovery: %s",
+            if chain_length_before is None:
+                logger.info(
+                    "Pre-commit chain length unavailable — "
+                    "skipping post-commit verification for VM %s",
+                    vm_config.name,
+                )
+            else:
+                # Remove merged snapshots from state so that
+                # post-commit measurement finds the current active
+                # layer (the most recent surviving snapshot).
+                for sn in to_merge:
+                    self._state.remove_snapshot(vm_config.name, sn.name)
+
+                chain_length_after = self._get_chain_length(vm_config)
+                if chain_length_after is not None:
+                    if chain_length_after >= chain_length_before:
+                        logger.critical(
+                            "Blockcommit may have failed for VM %s: "
+                            "chain length unchanged "
+                            "(before=%d, after=%d). "
+                            "Snapshot paths for manual recovery: %s",
+                            vm_config.name,
+                            chain_length_before,
+                            chain_length_after,
+                            ", ".join(str(s.path) for s in to_merge),
+                        )
+                        return
+                else:
+                    logger.warning(
+                        "Post-commit chain measurement failed for VM %s "
+                        "(blockcommit itself succeeded)",
                         vm_config.name,
-                        expected_length,
-                        chain_length_after,
-                        ", ".join(str(s.path) for s in to_merge),
                     )
-                    # Preserve snapshots in state — do NOT remove
-                    return
             logger.info(
                 "Post-commit chain verification passed for VM %s",
                 vm_config.name,

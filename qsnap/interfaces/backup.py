@@ -60,6 +60,4 @@ class IBackupProvider(ABC):
         Default implementation raises ``NotImplementedError``.  Concrete
         providers that support full backups should override this.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support full backups"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support full backups")

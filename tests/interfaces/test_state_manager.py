@@ -106,12 +106,12 @@ def test_istate_manager_concrete_implementations_have_new_methods(tmp_path):
     ]:
         assert callable(mgr.get_full_backups), f"{label} missing get_full_backups"
         assert callable(mgr.record_full_backup), f"{label} missing record_full_backup"
-        assert callable(
-            mgr.record_incremental_dependency
-        ), f"{label} missing record_incremental_dependency"
-        assert callable(
-            mgr.get_incremental_dependencies
-        ), f"{label} missing get_incremental_dependencies"
+        assert callable(mgr.record_incremental_dependency), (
+            f"{label} missing record_incremental_dependency"
+        )
+        assert callable(mgr.get_incremental_dependencies), (
+            f"{label} missing get_incremental_dependencies"
+        )
 
 
 def test_istate_manager_new_methods_cause_typeerror_on_instantiation():
@@ -127,26 +127,16 @@ def test_istate_manager_new_methods_cause_typeerror_on_instantiation():
 
     # A subclass that is missing the new methods must fail to instantiate.
     class _MissingNewMethods(IStateManager):
-        def get_last_allocation(self, vm_name):
-            ...
-        def set_last_allocation(self, vm_name, alloc):
-            ...
-        def record_snapshot(self, vm_name, info):
-            ...
-        def get_snapshots(self, vm_name):
-            ...
-        def get_deferred_operations(self, vm_name):
-            ...
-        def add_deferred_blockcommit(self, vm_name, snapshots, reason):
-            ...
-        def clear_deferred_operations(self, vm_name):
-            ...
-        def update_deferred_warning(self, vm_name, index, timestamp):
-            ...
-        def get_last_full_backup(self, target_path):
-            ...
-        def set_last_full_backup(self, target_path, name, timestamp):
-            ...
+        def get_last_allocation(self, vm_name): ...
+        def set_last_allocation(self, vm_name, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp): ...
 
     with pytest.raises(TypeError):
         _MissingNewMethods()
@@ -176,12 +166,9 @@ def test_json_state_manager_passes_isinstance_after_corruption_recovery(
 
     # Loading triggers corruption recovery (rename + empty state).
     last_alloc = manager.get_last_allocation("testvm_corrupt")
-    assert last_alloc is None, (
-        "Corrupt state should return None after recovery"
-    )
+    assert last_alloc is None, "Corrupt state should return None after recovery"
 
     # After corruption recovery — still passes isinstance.
     assert isinstance(manager, IStateManager), (
-        "JsonStateManager should still be an IStateManager "
-        "after corruption recovery"
+        "JsonStateManager should still be an IStateManager after corruption recovery"
     )

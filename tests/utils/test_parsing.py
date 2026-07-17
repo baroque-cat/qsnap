@@ -124,9 +124,7 @@ def test_parse_timestamp_dotted_vm_name():
 def test_parse_timestamp_short_format():
     """Parse ``vm.20250101_vda`` → datetime(2025, 1, 1, 0, 0) using short
     format ``%Y%m%d``."""
-    result = parse_timestamp(
-        "vm.20250101_vda", Path("/path/vm.20250101_vda.qcow2")
-    )
+    result = parse_timestamp("vm.20250101_vda", Path("/path/vm.20250101_vda.qcow2"))
     assert result == datetime(2025, 1, 1, 0, 0)
 
 
@@ -142,17 +140,13 @@ def test_parse_timestamp_long_iso_format():
 
 def test_parse_timestamp_full_backup_name():
     """Parse timestamp from a FULL backup filename."""
-    result = parse_timestamp(
-        "vm.FULL.20250101", Path("/path/vm.FULL.20250101.qcow2")
-    )
+    result = parse_timestamp("vm.FULL.20250101", Path("/path/vm.FULL.20250101.qcow2"))
     assert result == datetime(2025, 1, 1, 0, 0)
 
 
 def test_parse_timestamp_collision_suffix():
     """Parse timestamp when a collision suffix (``_1``) is present."""
-    result = parse_timestamp(
-        "vm.20250101T1200_vda_1", Path("/path/vm.20250101T1200_vda_1.qcow2")
-    )
+    result = parse_timestamp("vm.20250101T1200_vda_1", Path("/path/vm.20250101T1200_vda_1.qcow2"))
     assert result == datetime(2025, 1, 1, 12, 0)
 
 

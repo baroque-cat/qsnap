@@ -49,9 +49,7 @@ def test_commands_py_has_no_business_logic_imports():
     source = (_PROJECT_ROOT / "qsnap" / "cli" / "commands.py").read_text()
     modules = _imported_modules(source)
     violations = [m for m in modules if _starts_with_any(m, _FORBIDDEN_COMMANDS)]
-    assert not violations, (
-        f"commands.py imports forbidden business-logic modules: {violations}"
-    )
+    assert not violations, f"commands.py imports forbidden business-logic modules: {violations}"
 
 
 # ── app.py ────────────────────────────────────────────────────────────────
@@ -66,6 +64,4 @@ def test_app_py_has_no_business_logic_imports():
     source = (_PROJECT_ROOT / "qsnap" / "cli" / "app.py").read_text()
     modules = _imported_modules(source)
     violations = [m for m in modules if _starts_with_any(m, _FORBIDDEN_APP)]
-    assert not violations, (
-        f"app.py imports forbidden business-logic modules: {violations}"
-    )
+    assert not violations, f"app.py imports forbidden business-logic modules: {violations}"

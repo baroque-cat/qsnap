@@ -48,6 +48,7 @@ def _add_deferred_with_since(
         )
     )
 
+
 # ── test_list_snapshots_returns_all_vms_sorted_ascending ──────────────────
 
 
@@ -863,9 +864,7 @@ def test_list_deferred_returns_per_vm_summaries(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(hours=3)
-    _add_deferred_with_since(
-        mock_state, "testvm", ["snap1", "snap2"], "apparmor", since
-    )
+    _add_deferred_with_since(mock_state, "testvm", ["snap1", "snap2"], "apparmor", since)
 
     with frozen_clock(frozen_dt):
         result = core.list_deferred()

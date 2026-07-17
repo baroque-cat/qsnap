@@ -125,8 +125,7 @@ def test_deep_check_timer_weekly_schedule():
     scheduling."""
     content = CHECK_TIMER_FILE.read_text()
     oncalendar_line = [
-        line for line in content.splitlines()
-        if line.strip().startswith("OnCalendar=")
+        line for line in content.splitlines() if line.strip().startswith("OnCalendar=")
     ]
     assert oncalendar_line
     assert "Sun" in oncalendar_line[0]

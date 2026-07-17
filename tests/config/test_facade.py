@@ -124,10 +124,7 @@ def test_target_inherits_vm_target_preserve_min() -> None:
     """Target 'vm_override_inherit' inherits VM's target_preserve_min='12h'."""
     facade = ConfigFacade(FIXTURES / "preserve_min.toml")
     vm = facade.get_vm("vm_override")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_override_inherit")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_override_inherit"))
     assert target.target_preserve_min == "12h"
 
 
@@ -136,10 +133,7 @@ def test_target_overrides_vm_target_preserve_min() -> None:
     """Target 'vm_override_override' has target_preserve_min='24h' (overrides VM's '12h')."""
     facade = ConfigFacade(FIXTURES / "preserve_min.toml")
     vm = facade.get_vm("vm_override")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_override_override")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_override_override"))
     assert target.target_preserve_min == "24h"
 
 
@@ -153,10 +147,7 @@ def test_facade_parses_target_compress() -> None:
     """ConfigFacade parses compress=True from a [[vm.target]] section."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vm = facade.get_vm("vm_with_full")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_with_full")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
     assert target.compress is True
 
 
@@ -165,10 +156,7 @@ def test_facade_parses_target_copy_base() -> None:
     """ConfigFacade parses copy_base=False from a [[vm.target]] section."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vm = facade.get_vm("vm_with_full")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_with_full")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
     assert target.copy_base is False
 
 
@@ -177,10 +165,7 @@ def test_facade_target_compress_defaults_to_global() -> None:
     """When no compress is set on a target, it inherits the global default (True)."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vm = facade.get_vm("vm_no_full")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_no_full")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_no_full"))
     # vm_no_full does not set compress, so inherits global default True.
     assert target.compress is True
     # copy_base defaults to False.
@@ -211,10 +196,7 @@ def test_target_overrides_global_rate_limit() -> None:
     """A target-level rate_limit='500K' overrides the global '100M'."""
     facade = ConfigFacade(FIXTURES / "rate_limit_target_override.toml")
     vm = facade.get_vm("testvm")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/testvm")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/testvm"))
     assert target.rate_limit == "500K"
 
 
@@ -223,10 +205,7 @@ def test_target_inherits_global_rate_limit() -> None:
     """A target with no rate_limit inherits the global '100M'."""
     facade = ConfigFacade(FIXTURES / "rate_limit_global.toml")
     vm = facade.get_vm("testvm")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/testvm")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/testvm"))
     assert target.rate_limit == "100M"
 
 
@@ -257,14 +236,14 @@ def test_facade_parses_global_safety_fields(tmp_path: Path) -> None:
     """ConfigFacade parses all global fault-tolerance safety fields from TOML."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
-        'auto_cleanup = false\n'
-        'state_backup_count = 5\n'
-        'chain_verify_before_commit = false\n'
-        'chain_verify_after_commit = true\n'
+        "auto_cleanup = false\n"
+        "state_backup_count = 5\n"
+        "chain_verify_before_commit = false\n"
+        "chain_verify_after_commit = true\n"
         'deep_check_schedule = "monthly"\n'
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
@@ -285,13 +264,13 @@ def test_facade_parses_vm_deep_verify_fields(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
-        'blockcommit_deep_verify = true\n'
-        'snapshot_deep_verify = true\n'
+        "blockcommit_deep_verify = true\n"
+        "snapshot_deep_verify = true\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -306,15 +285,15 @@ def test_facade_parses_target_retry_fields(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
-        '  backup_retry_max = 5\n'
+        "  backup_retry_max = 5\n"
         '  backup_retry_base = "10s"\n'
     )
     facade = ConfigFacade(config_file)
@@ -352,13 +331,13 @@ def test_facade_invalid_retry_base_raises_config_error(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         '  backup_retry_base = "abc"\n'
     )
@@ -374,9 +353,7 @@ def test_facade_invalid_retry_base_raises_config_error(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_example_config_parseable_all_fields() -> None:
     """The project's qsnap.toml.example is parseable with all fields documented."""
-    example_path = (
-        Path(__file__).resolve().parent.parent.parent / "qsnap.toml.example"
-    )
+    example_path = Path(__file__).resolve().parent.parent.parent / "qsnap.toml.example"
     facade = ConfigFacade(example_path)
 
     # Should have at least one VM (debiantest).
@@ -411,15 +388,15 @@ def test_preserve_min_without_buckets_rejected(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "0h 0d 0w 0m 0y"\n'
         'target_preserve_min = "6h"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     with pytest.raises(ConfigError, match="nothing would be retained"):
@@ -432,15 +409,15 @@ def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "0h 0d 0w 0m 0y"\n'
         'target_preserve_min = "all"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     # Should not raise — preserve_min='all' bypasses the all-zero check.
@@ -454,15 +431,15 @@ def test_preserve_min_with_buckets_allowed(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "24h 7d 0w 0m 0y"\n'
         'target_preserve_min = "6h"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     # Should not raise — there are non-zero bucket counts (24h, 7d).
@@ -482,15 +459,15 @@ def test_f_anchor_zero_count_raises_config_error(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "0Fh 7d"\n'
         'target_preserve_min = "6h"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     with pytest.raises(ConfigError, match="F-anchor on bucket 'h' requires count > 0"):
@@ -503,15 +480,15 @@ def test_preserve_min_without_buckets_raises_config_error(tmp_path: Path) -> Non
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "0h 0d 0w 0m 0y"\n'
         'target_preserve_min = "48h"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     with pytest.raises(ConfigError, match="nothing would be retained"):
@@ -524,15 +501,15 @@ def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        '\n'
-        '[[vm]]\n'
+        "\n"
+        "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         'target_preserve = "0h 0d 0w 0m 0y"\n'
         'target_preserve_min = "all"\n'
-        '\n'
-        '  [[vm.target]]\n'
+        "\n"
+        "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
     )
     # Should not raise — preserve_min='all' is the safe default.

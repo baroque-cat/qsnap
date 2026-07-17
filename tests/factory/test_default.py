@@ -85,7 +85,9 @@ def test_default_factory_all_five_methods_return_instances(
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     assert isinstance(factory.create_snapshot_provider(make_vm_config()), ISnapshotProvider)
-    assert isinstance(factory.create_backup_provider(make_vm_config(), make_target()), IBackupProvider)
+    assert isinstance(
+        factory.create_backup_provider(make_vm_config(), make_target()), IBackupProvider
+    )
     assert isinstance(factory.create_retention_engine(RetentionPolicy()), IRetentionEngine)
     assert isinstance(factory.create_change_detector("always"), IChangeDetector)
     assert isinstance(factory.create_lifecycle_manager(), ILifecycleManager)
@@ -327,27 +329,33 @@ def test_factory_create_lifecycle_manager_accepts_deep_verify(
         allocation=65536,
     )
 
-    mock_shell.expect("virsh domblklist").returns(ShellResult(
-        success=True,
-        stdout=_DOMBLKLIST_OUTPUT,
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("virsh blockcommit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
-    mock_shell.expect("qemu-img check").returns(ShellResult(
-        success=True,
-        stdout='{"corruptions": 0}',
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     result = manager.blockcommit(vm_config, [snap], deep_verify=True)
     assert isinstance(result, CommitResult)

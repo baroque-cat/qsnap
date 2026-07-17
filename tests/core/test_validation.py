@@ -22,9 +22,7 @@ from qsnap.models.results import CheckResult, ShellResult
 from tests.mocks import MockConfigFacade, MockShell
 
 _OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-_FAIL = ShellResult(
-    success=False, stdout="", stderr="", returncode=1, error="not found"
-)
+_FAIL = ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
 
 
 def _override(shell: MockShell, pattern: str, result: ShellResult) -> None:
@@ -34,9 +32,7 @@ def _override(shell: MockShell, pattern: str, result: ShellResult) -> None:
     To override a default success expectation, we remove the old entry
     and append a new one so it becomes the sole match for that pattern.
     """
-    shell._expectations = [
-        e for e in shell._expectations if e.pattern != pattern
-    ]
+    shell._expectations = [e for e in shell._expectations if e.pattern != pattern]
     shell.expect(pattern).returns(result)
 
 
@@ -247,10 +243,7 @@ def test_rsync_check_always_runs_regardless_of_rate_limit(
     assert result.broken_snapshots == []
 
     # ``which rsync`` WAS called — the check always runs.
-    rsync_calls = [
-        call for call in run_spy.call_args_list
-        if call.args and "rsync" in call.args[0]
-    ]
+    rsync_calls = [call for call in run_spy.call_args_list if call.args and "rsync" in call.args[0]]
     assert len(rsync_calls) > 0, "which rsync must always run regardless of rate_limit"
 
 
@@ -453,14 +446,10 @@ def _fresh_shell_with_cleanup_defaults() -> MockShell:
     return shell
 
 
-def _insert_specific_find(
-    shell: MockShell, pattern: str, stdout: str
-) -> None:
+def _insert_specific_find(shell: MockShell, pattern: str, stdout: str) -> None:
     """Insert a specific ``find`` expectation at the front of *shell*."""
     exp = MockShell.__dict__["expect"](shell, pattern)
-    exp.returns(
-        ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None)
-    )
+    exp.returns(ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None))
     # Move the just-added expectation to the front
     shell._expectations.insert(0, shell._expectations.pop())
 
@@ -483,15 +472,14 @@ def test_preflight_cleanup_tmp_files_in_snapshot_dir_removed(
         "/var/lib/libvirt/snapshots/testvm/stale.tmp\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with patch.object(shell, "run", wraps=shell.run) as run_spy:
         core._preflight_cleanup(vm)
 
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 1
@@ -518,15 +506,14 @@ def test_preflight_cleanup_tmp_files_in_target_dirs_removed(
         "/mnt/backup/testvm/incomplete.tmp\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with patch.object(shell, "run", wraps=shell.run) as run_spy:
         core._preflight_cleanup(vm)
 
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 1
@@ -554,15 +541,14 @@ def test_preflight_cleanup_stale_nbd_sockets_removed(
         "/tmp/qsnap-backup-abc123.sock\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with patch.object(shell, "run", wraps=shell.run) as run_spy:
         core._preflight_cleanup(vm)
 
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 1
@@ -586,15 +572,14 @@ def test_preflight_cleanup_no_stale_files_no_action(
     shell = _fresh_shell_with_cleanup_defaults()
     # All finds return empty — no inserts needed, defaults suffice.
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with patch.object(shell, "run", wraps=shell.run) as run_spy:
         core._preflight_cleanup(vm)
 
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 0
@@ -638,9 +623,7 @@ def test_preflight_cleanup_orphan_snapshot_detected(
         "/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with caplog.at_level(logging.WARNING, logger="qsnap.core"):
         with patch.object(shell, "run", wraps=shell.run) as run_spy:
@@ -648,15 +631,15 @@ def test_preflight_cleanup_orphan_snapshot_detected(
 
     # The orphan .qcow2 must NOT be deleted
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 0  # no rm calls at all (no tmp/partial/sock either)
 
     # Orphan WARNING logged
     assert any(
-        "Orphan snapshot file detected" in r.message
-        and "testvm.20250101T120000.qcow2" in r.message
+        "Orphan snapshot file detected" in r.message and "testvm.20250101T120000.qcow2" in r.message
         for r in caplog.records
     ), f"Expected orphan warning, got: {[r.message for r in caplog.records]}"
 
@@ -682,17 +665,13 @@ def test_preflight_cleanup_non_matching_qcow2_not_orphan(
         "/var/lib/libvirt/snapshots/testvm/testvm.backup.qcow2\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with caplog.at_level(logging.WARNING, logger="qsnap.core"):
         core._preflight_cleanup(vm)
 
     # No orphan WARNING — file doesn't match qsnap naming pattern
-    orphan_warnings = [
-        r for r in caplog.records if "Orphan" in r.message
-    ]
+    orphan_warnings = [r for r in caplog.records if "Orphan" in r.message]
     assert len(orphan_warnings) == 0
 
 
@@ -731,9 +710,7 @@ def test_preflight_cleanup_all_snapshots_accounted_no_warning(
         "/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2\n",
     )
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with caplog.at_level(logging.WARNING, logger="qsnap.core"):
         with patch.object(shell, "run", wraps=shell.run) as run_spy:
@@ -741,15 +718,14 @@ def test_preflight_cleanup_all_snapshots_accounted_no_warning(
 
     # No rm calls for .qcow2 files
     rm_calls = [
-        c for c in run_spy.call_args_list
+        c
+        for c in run_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 0
 
     # No orphan WARNING
-    orphan_warnings = [
-        r for r in caplog.records if "Orphan" in r.message
-    ]
+    orphan_warnings = [r for r in caplog.records if "Orphan" in r.message]
     assert len(orphan_warnings) == 0
 
 
@@ -770,9 +746,7 @@ def test_preflight_cleanup_auto_cleanup_disabled(
 
     shell = _fresh_shell_with_cleanup_defaults()
 
-    core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=shell
-    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
     with caplog.at_level(logging.INFO, logger="qsnap.core"):
         with patch.object(shell, "run", wraps=shell.run) as run_spy:
@@ -783,9 +757,9 @@ def test_preflight_cleanup_auto_cleanup_disabled(
 
     # INFO log about disabled cleanup
     info_messages = [r.message for r in caplog.records]
-    assert any(
-        "auto_cleanup is disabled" in msg for msg in info_messages
-    ), f"Expected 'auto_cleanup is disabled' in: {info_messages}"
+    assert any("auto_cleanup is disabled" in msg for msg in info_messages), (
+        f"Expected 'auto_cleanup is disabled' in: {info_messages}"
+    )
 
 
 # ── validate_environment: cleanup integration ────────────────────────────
@@ -801,7 +775,10 @@ def test_validate_env_cleanup_before_main_checks(
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=mock_shell,
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
     )
 
     with patch.object(core, "_preflight_cleanup") as mock_cleanup:
@@ -826,7 +803,10 @@ def test_validate_env_cleanup_skipped_when_auto_cleanup_false(
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
 
     core = Core(
-        config=config, factory=mock_factory, state=mock_state, shell=mock_shell,
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
     )
 
     with patch.object(core, "_preflight_cleanup") as mock_cleanup:
@@ -880,8 +860,7 @@ def test_dry_run_runs_validation_non_fatal_warnings(
 
     # Validation failure is logged as WARNING in dry-run mode.
     assert any(
-        "Environment validation failed" in r.message
-        and "dry-run" in r.message
+        "Environment validation failed" in r.message and "dry-run" in r.message
         for r in caplog.records
     ), f"Expected dry-run validation WARNING in: {[r.message for r in caplog.records]}"
 

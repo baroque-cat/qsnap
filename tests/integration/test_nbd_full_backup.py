@@ -96,19 +96,18 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     # Step 5: Create full backup — this should use the NBD path
     # because the VM is running and libvirt is new enough.
     result = provider.create_full_backup(
-        vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
+        vm_name,
+        source_snapshot,
+        target,
+        compress=False,
+        bucket_level="monthly",
     )
 
     assert result.success, (
-        f"NBD full backup failed: {result.error}. "
-        f"QEMU/libvirt may not support backup-begin."
+        f"NBD full backup failed: {result.error}. QEMU/libvirt may not support backup-begin."
     )
-    assert result.target_path.exists(), (
-        f"Backup file not found at {result.target_path}"
-    )
-    assert result.bytes_transferred > 0, (
-        "Backup should contain non-zero bytes"
-    )
+    assert result.target_path.exists(), f"Backup file not found at {result.target_path}"
+    assert result.bytes_transferred > 0, "Backup should contain non-zero bytes"
 
     # Step 6: Verify the backup is a standalone qcow2 — no backing
     # file dependency (the whole point of a FULL anchor).
@@ -120,8 +119,7 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     info = json.loads(info_result.stdout)
     backing = info.get("backing-filename")
     assert backing is None or backing == "", (
-        f"FULL backup should be standalone (no backing file), "
-        f"got: {backing!r}"
+        f"FULL backup should be standalone (no backing file), got: {backing!r}"
     )
 
     # Step 7: Verify no lock conflict — the backup succeeded despite
@@ -157,9 +155,7 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
 
-    assert not is_vm_running(shell, vm_name), (
-        "VM should be stopped for direct convert test"
-    )
+    assert not is_vm_running(shell, vm_name), "VM should be stopped for direct convert test"
 
     # Step 2: Create backup provider.
     provider = FileCopyBackupProvider(shell)
@@ -178,15 +174,15 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
 
     # Step 3: Create full backup — should use direct qemu-img convert.
     result = provider.create_full_backup(
-        vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
+        vm_name,
+        source_snapshot,
+        target,
+        compress=False,
+        bucket_level="monthly",
     )
 
-    assert result.success, (
-        f"Direct convert full backup failed: {result.error}"
-    )
-    assert result.target_path.exists(), (
-        f"Backup file not found at {result.target_path}"
-    )
+    assert result.success, f"Direct convert full backup failed: {result.error}"
+    assert result.target_path.exists(), f"Backup file not found at {result.target_path}"
     assert result.bytes_transferred > 0
 
     # Step 4: Verify standalone qcow2.
@@ -204,8 +200,7 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
     # Step 5: Verify no NBD socket was created (confirm direct path).
     socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
     assert not socket_path.exists(), (
-        f"NBD socket {socket_path} should not exist — "
-        f"direct convert path should not touch NBD"
+        f"NBD socket {socket_path} should not exist — direct convert path should not touch NBD"
     )
 
 
@@ -264,7 +259,11 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         result = provider.create_full_backup(
-            vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
+            vm_name,
+            source_snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
         # The socket MUST be gone — either removed by step (a) (rm -f
@@ -294,17 +293,17 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         result = provider.create_full_backup(
-            vm_name, source_snapshot, target, compress=False, bucket_level="monthly",
+            vm_name,
+            source_snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
         assert not result.success, "Expected failure with nonexistent source"
-        assert not tmp_file.exists(), (
-            f"Temporary file {tmp_file} was not cleaned up on failure"
-        )
+        assert not tmp_file.exists(), f"Temporary file {tmp_file} was not cleaned up on failure"
 
     # Final safety check: ensure the socket is gone regardless.
-    assert not socket_path.exists(), (
-        f"Socket {socket_path} should be cleaned up in all code paths"
-    )
+    assert not socket_path.exists(), f"Socket {socket_path} should be cleaned up in all code paths"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -386,17 +385,15 @@ def test_fork_running_vm_nbd_integration(test_vm):
         storage_dir=storage_dir,
     )
 
-    assert result.success, (
-        f"Fork from running VM via NBD failed: {result.error}"
-    )
-    assert result.restored_path.exists(), (
-        f"Forked qcow2 not found at {result.restored_path}"
-    )
+    assert result.success, f"Fork from running VM via NBD failed: {result.error}"
+    assert result.restored_path.exists(), f"Forked qcow2 not found at {result.restored_path}"
 
     # Step 5: Verify the forked qcow2 is standalone (no backing file).
     info_result = shell.run(
         [
-            "qemu-img", "info", "--output=json",
+            "qemu-img",
+            "info",
+            "--output=json",
             str(result.restored_path),
         ],
         timeout=30,

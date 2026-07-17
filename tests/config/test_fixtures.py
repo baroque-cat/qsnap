@@ -115,19 +115,13 @@ def test_bucket_driven_toml_parses_without_error() -> None:
     # vm_bucket: global compress=True, target compress=True, copy_base=False.
     vm_bucket = facade.get_vm("vm_bucket")
     assert vm_bucket.name == "vm_bucket"
-    target1 = next(
-        t for t in vm_bucket.targets
-        if t.path == Path("/mnt/backup/vm_bucket")
-    )
+    target1 = next(t for t in vm_bucket.targets if t.path == Path("/mnt/backup/vm_bucket"))
     assert target1.compress is True
     assert target1.copy_base is False
 
     # vm_no_compress: compress=False, copy_base=True.
     vm_nc = facade.get_vm("vm_no_compress")
-    target2 = next(
-        t for t in vm_nc.targets
-        if t.path == Path("/mnt/backup/vm_no_compress")
-    )
+    target2 = next(t for t in vm_nc.targets if t.path == Path("/mnt/backup/vm_no_compress"))
     assert target2.compress is False
     assert target2.copy_base is True
 
@@ -139,6 +133,7 @@ def test_bucket_driven_toml_parses_without_error() -> None:
 def test_bucket_driven_toml_no_deprecated_fields() -> None:
     """bucket_driven.toml has no full_every or full_compress — no warnings."""
     import tomllib
+
     with open(FIXTURES / "bucket_driven.toml", "rb") as f:
         raw = tomllib.load(f)
 
@@ -223,10 +218,7 @@ def test_full_backup_toml_parses_compress_and_copy_base() -> None:
 
     # vm_with_full: explicit compress=true, copy_base=false.
     vm = facade.get_vm("vm_with_full")
-    target = next(
-        t for t in vm.targets
-        if t.path == Path("/mnt/backup/vm_with_full")
-    )
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
     assert target.compress is True
     assert target.copy_base is False
     assert target.verify == "hash"
@@ -234,7 +226,7 @@ def test_full_backup_toml_parses_compress_and_copy_base() -> None:
     # vm_no_full: no compress/copy_base set → defaults.
     vm2 = facade.get_vm("vm_no_full")
     target2 = vm2.targets[0]
-    assert target2.compress is True   # global default
+    assert target2.compress is True  # global default
     assert target2.copy_base is False  # default
 
 
@@ -242,6 +234,7 @@ def test_full_backup_toml_parses_compress_and_copy_base() -> None:
 def test_full_backup_toml_no_deprecated_fields() -> None:
     """full_backup.toml has no deprecated full_every or full_compress keys."""
     import tomllib
+
     with open(FIXTURES / "full_backup.toml", "rb") as f:
         raw = tomllib.load(f)
 
@@ -297,6 +290,7 @@ def test_safety_fields_toml_parses_correctly() -> None:
 def test_safety_fields_toml_no_deprecated_fields() -> None:
     """safety_fields.toml has no deprecated full_every or full_compress keys."""
     import tomllib
+
     with open(FIXTURES / "safety_fields.toml", "rb") as f:
         raw = tomllib.load(f)
 

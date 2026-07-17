@@ -45,9 +45,7 @@ def test_parse_minimal_valid_config() -> None:
 def test_parse_missing_required_field_raises(tmp_path: Path) -> None:
     """Valid TOML that omits a required VM field raises ConfigError."""
     # Valid TOML syntax, but missing the required ``base_image`` field.
-    config_text = (
-        "[[vm]]\n" 'name = "testvm"\n' 'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
-    )
+    config_text = '[[vm]]\nname = "testvm"\nsnapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
     config_file = tmp_path / "missing_field.toml"
     config_file.write_text(config_text)
 

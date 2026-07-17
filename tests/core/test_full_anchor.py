@@ -17,6 +17,7 @@ from qsnap.models.results import FullBackupInfo
 
 # ── Scenario 1: all five active buckets trigger FULL on period change ───
 
+
 def test_all_active_buckets_trigger_fulls_on_period_change(make_target):
     """Short-circuit: yearly period change returns (True, "yearly").
 
@@ -25,7 +26,11 @@ def test_all_active_buckets_trigger_fulls_on_period_change(make_target):
     new day, and new hour.  Yearly is checked first and triggers.
     """
     policy = RetentionPolicy(
-        hourly=24, daily=7, weekly=4, monthly=12, yearly=1,
+        hourly=24,
+        daily=7,
+        weekly=4,
+        monthly=12,
+        yearly=1,
         preserve_min="all",
     )
     target = make_target()
@@ -66,13 +71,17 @@ def test_all_active_buckets_trigger_fulls_on_period_change(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Yearly period changed — should create FULL"
     assert level == "yearly", "Yearly is highest bucket and changed period"
 
 
 # ── Scenario 2: first backup checks all active buckets ──────────────────
+
 
 def test_first_backup_checks_all_active_buckets(make_target):
     """Empty all_fulls list → first active bucket (descending) triggers.
@@ -85,13 +94,17 @@ def test_first_backup_checks_all_active_buckets(make_target):
     snapshot_ts = datetime(2025, 7, 13, 10, 0)
 
     should, level = Core._should_create_bucket_full(
-        target, policy, [], snapshot_ts,
+        target,
+        policy,
+        [],
+        snapshot_ts,
     )
     assert should is True, "No prior FULL — should create first FULL"
     assert level == "yearly", "Yearly is the first (highest) active bucket"
 
 
 # ── Scenario 3: same period for every bucket → skip FULL ────────────────
+
 
 def test_same_period_all_buckets_skips_full(make_target):
     """When all prior FULLs are in the same period as the snapshot, skip.
@@ -103,7 +116,11 @@ def test_same_period_all_buckets_skips_full(make_target):
     snapshot_ts = datetime(2025, 7, 14, 14, 30)
 
     policy = RetentionPolicy(
-        hourly=24, daily=7, weekly=4, monthly=12, yearly=1,
+        hourly=24,
+        daily=7,
+        weekly=4,
+        monthly=12,
+        yearly=1,
         preserve_min="all",
     )
     target = make_target()
@@ -143,13 +160,17 @@ def test_same_period_all_buckets_skips_full(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is False, "All buckets in same period — should skip FULL"
     assert level == ""
 
 
 # ── Scenario 4: single active bucket (monthly) ──────────────────────────
+
 
 def test_single_active_bucket_behaves_like_highest_only(make_target):
     """Only ``monthly`` active — same behaviour as old highest-only logic."""
@@ -168,13 +189,17 @@ def test_single_active_bucket_behaves_like_highest_only(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Monthly period changed — should create FULL"
     assert level == "monthly"
 
 
 # ── Scenario 5: list of FULLs with multiple bucket levels ───────────────
+
 
 def test_backup_target_passes_full_list_to_bucket_check(make_target):
     """Method receives a list of FULLs at different bucket levels.
@@ -204,7 +229,10 @@ def test_backup_target_passes_full_list_to_bucket_check(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Monthly period changed — should create FULL"
     assert level == "monthly", (
@@ -213,6 +241,7 @@ def test_backup_target_passes_full_list_to_bucket_check(make_target):
 
 
 # ── Scenario 6: only ONE FULL despite multiple period changes ───────────
+
 
 def test_one_full_per_snapshot_despite_multiple_period_changes(make_target):
     """Short-circuit: yearly wins, no second FULL.
@@ -247,16 +276,19 @@ def test_one_full_per_snapshot_despite_multiple_period_changes(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Yearly changed — exactly one FULL needed"
     assert level == "yearly", (
-        "Yearly short-circuits; only one FULL returned even though all "
-        "buckets changed periods"
+        "Yearly short-circuits; only one FULL returned even though all buckets changed periods"
     )
 
 
 # ── Scenario 7: F-anchor ignores non-F buckets ─────────────────────────
+
 
 def test_f_anchor_disables_auto_multi_level_non_f_buckets_ignored(make_target):
     """F-anchor mode: only F-marked buckets are checked.
@@ -266,8 +298,11 @@ def test_f_anchor_disables_auto_multi_level_non_f_buckets_ignored(make_target):
     daily, so no FULL is created.
     """
     policy = RetentionPolicy(
-        daily=7, weekly=4, preserve_min="all",
-        anchor_weekly=True, anchor_daily=False,
+        daily=7,
+        weekly=4,
+        preserve_min="all",
+        anchor_weekly=True,
+        anchor_daily=False,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 7, 15, 10, 0)  # Tuesday
@@ -284,15 +319,17 @@ def test_f_anchor_disables_auto_multi_level_non_f_buckets_ignored(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
-    assert should is False, (
-        "F-anchor mode: daily is ignored; weekly is same period → skip"
-    )
+    assert should is False, "F-anchor mode: daily is ignored; weekly is same period → skip"
     assert level == ""
 
 
 # ── Scenario 8: multiple F-anchors, highest triggers first ──────────────
+
 
 def test_multiple_f_anchors_all_checked_highest_first(make_target):
     """Multiple F-anchored buckets: monthly checked before weekly.
@@ -302,8 +339,11 @@ def test_multiple_f_anchors_all_checked_highest_first(make_target):
     Snapshot in new month → monthly triggers.
     """
     policy = RetentionPolicy(
-        monthly=12, weekly=4, preserve_min="all",
-        anchor_monthly=True, anchor_weekly=True,
+        monthly=12,
+        weekly=4,
+        preserve_min="all",
+        anchor_monthly=True,
+        anchor_weekly=True,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 8, 11, 10, 0)  # Monday, ISO week 33
@@ -324,13 +364,17 @@ def test_multiple_f_anchors_all_checked_highest_first(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Monthly (higher F-anchor) period changed"
     assert level == "monthly", "Monthly checked before weekly in descending F-anchor order"
 
 
 # ── Scenario 9: descending iteration order — yearly triumphs ────────────
+
 
 def test_all_buckets_checked_yearly_monthly_weekly_daily_hourly(make_target):
     """Descending order: yearly → monthly → weekly → daily → hourly.
@@ -339,7 +383,11 @@ def test_all_buckets_checked_yearly_monthly_weekly_daily_hourly(make_target):
     Yearly triggers immediately.
     """
     policy = RetentionPolicy(
-        yearly=1, monthly=12, weekly=4, daily=7, hourly=24,
+        yearly=1,
+        monthly=12,
+        weekly=4,
+        daily=7,
+        hourly=24,
         preserve_min="all",
     )
     target = make_target()
@@ -380,13 +428,17 @@ def test_all_buckets_checked_yearly_monthly_weekly_daily_hourly(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Yearly period changed — should trigger"
     assert level == "yearly", "Yearly is highest bucket — triggered first"
 
 
 # ── Scenario 10: F-anchor daily only ignores monthly/weekly ────────────
+
 
 def test_f_anchor_daily_only_ignores_other_buckets(make_target):
     """Only daily is F-anchored — monthly/weekly are ignored even if active.
@@ -396,7 +448,10 @@ def test_f_anchor_daily_only_ignores_other_buckets(make_target):
     Monthly period changes but only daily is checked — same daily period → skip.
     """
     policy = RetentionPolicy(
-        daily=7, monthly=12, weekly=4, preserve_min="all",
+        daily=7,
+        monthly=12,
+        weekly=4,
+        preserve_min="all",
         anchor_daily=True,
     )
     target = make_target()
@@ -420,16 +475,19 @@ def test_f_anchor_daily_only_ignores_other_buckets(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is False, (
-        "F-anchor mode: only daily checked.  Monthly period changed "
-        "but is NOT F-marked → ignored."
+        "F-anchor mode: only daily checked.  Monthly period changed but is NOT F-marked → ignored."
     )
     assert level == ""
 
 
 # ── Scenario 11: no active buckets and no F-anchors → False ─────────────
+
 
 def test_no_active_buckets_no_f_anchors_returns_false(make_target):
     """Policy with all counts zero and no F-anchors returns (False, "")."""
@@ -438,13 +496,17 @@ def test_no_active_buckets_no_f_anchors_returns_false(make_target):
     snapshot_ts = datetime(2025, 7, 13, 10, 0)
 
     should, level = Core._should_create_bucket_full(
-        target, policy, None, snapshot_ts,
+        target,
+        policy,
+        None,
+        snapshot_ts,
     )
     assert should is False
     assert level == ""
 
 
 # ── Scenario 12: first backup with empty list creates first active bucket FULL ─
+
 
 def test_first_backup_empty_fulls_list_creates_first_active_bucket_full(make_target):
     """Empty list → first active bucket in descending order triggers."""
@@ -453,13 +515,17 @@ def test_first_backup_empty_fulls_list_creates_first_active_bucket_full(make_tar
     snapshot_ts = datetime(2025, 7, 13, 10, 0)
 
     should, level = Core._should_create_bucket_full(
-        target, policy, [], snapshot_ts,
+        target,
+        policy,
+        [],
+        snapshot_ts,
     )
     assert should is True, "Empty list — no prior FULLs, first active bucket triggers"
     assert level == "yearly", "Yearly is the first (highest) active bucket"
 
 
 # ── Scenario 13: accepts list, None, and single FullBackupInfo ──────────
+
 
 def test_should_create_bucket_full_accepts_list_not_single(make_target):
     """Parameter accepts list[FullBackupInfo], single FullBackupInfo, and None.
@@ -479,21 +545,30 @@ def test_should_create_bucket_full_accepts_list_not_single(make_target):
 
     # (a) List[FullBackupInfo] — should work.
     should, level = Core._should_create_bucket_full(
-        target, policy, [single_full], snapshot_ts,
+        target,
+        policy,
+        [single_full],
+        snapshot_ts,
     )
     assert should is True, "List param: monthly period changed"
     assert level == "monthly"
 
     # (b) Single FullBackupInfo (backward compat) — should work.
     should2, level2 = Core._should_create_bucket_full(
-        target, policy, single_full, snapshot_ts,
+        target,
+        policy,
+        single_full,
+        snapshot_ts,
     )
     assert should2 is True, "Single FullBackupInfo param: monthly period changed"
     assert level2 == "monthly"
 
     # (c) None (backward compat) — should work, treated as empty list.
     should3, level3 = Core._should_create_bucket_full(
-        target, policy, None, snapshot_ts,
+        target,
+        policy,
+        None,
+        snapshot_ts,
     )
     assert should3 is True, "None param: treated as [], first active bucket triggers"
     assert level3 == "monthly", "Monthly is the only active bucket"
@@ -509,6 +584,7 @@ def test_should_create_bucket_full_accepts_list_not_single(make_target):
 
 # ── Scenario 14: descending iteration — yearly skipped, monthly triggers ─
 
+
 def test_should_create_bucket_full_iterates_descending_yearly_first(make_target):
     """Descending order: yearly skipped (same period), monthly triggers.
 
@@ -517,7 +593,11 @@ def test_should_create_bucket_full_iterates_descending_yearly_first(make_target)
     Yearly does NOT trigger → iteration continues to monthly → triggers.
     """
     policy = RetentionPolicy(
-        yearly=1, monthly=12, weekly=4, daily=7, hourly=24,
+        yearly=1,
+        monthly=12,
+        weekly=4,
+        daily=7,
+        hourly=24,
         preserve_min="all",
     )
     target = make_target()
@@ -546,15 +626,17 @@ def test_should_create_bucket_full_iterates_descending_yearly_first(make_target)
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "Yearly skipped (same period), monthly triggers"
-    assert level == "monthly", (
-        "Monthly is next in descending order and changed period"
-    )
+    assert level == "monthly", "Monthly is next in descending order and changed period"
 
 
 # ── Scenario 15: F-anchor bucket with no prior FULL creates FULL ────────
+
 
 def test_f_anchor_bucket_no_prior_full_creates_full(make_target):
     """F-anchor bucket has no prior FULL → triggers creation.
@@ -563,8 +645,11 @@ def test_f_anchor_bucket_no_prior_full_creates_full(make_target):
     Only weekly is F-anchored.  No weekly FULL exists → should create one.
     """
     policy = RetentionPolicy(
-        weekly=4, monthly=12, preserve_min="all",
-        anchor_weekly=True, anchor_monthly=False,
+        weekly=4,
+        monthly=12,
+        preserve_min="all",
+        anchor_weekly=True,
+        anchor_monthly=False,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 7, 14, 10, 0)  # Monday, W29
@@ -580,9 +665,10 @@ def test_f_anchor_bucket_no_prior_full_creates_full(make_target):
     ]
 
     should, level = Core._should_create_bucket_full(
-        target, policy, all_fulls, snapshot_ts,
+        target,
+        policy,
+        all_fulls,
+        snapshot_ts,
     )
     assert should is True, "F-anchor weekly has no prior FULL — should create one"
-    assert level == "weekly", (
-        "Weekly is the only F-anchored bucket with no prior FULL"
-    )
+    assert level == "weekly", "Weekly is the only F-anchored bucket with no prior FULL"

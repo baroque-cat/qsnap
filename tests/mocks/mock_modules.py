@@ -190,9 +190,7 @@ class MockRetentionEngine(IRetentionEngine):
 class MockChangeDetector(IChangeDetector):
     """Mock change detector returning a valid ChangeResult."""
 
-    def has_changed(
-        self, vm_config: VMConfig, disk: str | None = None
-    ) -> ChangeResult:
+    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         return ChangeResult(
             changed=True,
             last_allocation=1000000,

@@ -62,10 +62,7 @@ def test_vm():
         timeout=30,
     )
     if not create_result.success:
-        pytest.skip(
-            f"qemu-img create failed (qemu-img not available?): "
-            f"{create_result.error}"
-        )
+        pytest.skip(f"qemu-img create failed (qemu-img not available?): {create_result.error}")
 
     # Build minimal VM XML — no bootable media so QEMU starts but
     # doesn't boot an OS (sufficient for NBD export tests).
@@ -97,10 +94,7 @@ def test_vm():
     )
     if not define_result.success:
         shutil.rmtree(str(tmpdir), ignore_errors=True)
-        pytest.skip(
-            f"virsh define failed (libvirt daemon not available?): "
-            f"{define_result.error}"
-        )
+        pytest.skip(f"virsh define failed (libvirt daemon not available?): {define_result.error}")
 
     try:
         yield {

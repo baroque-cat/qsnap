@@ -69,14 +69,10 @@ def test_metadata_verification_passes(mock_shell):
     virtual-size and actual-size within 10% tolerance,
     ``verify_backup(..., "metadata")`` returns ``None``.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata")
 
     assert result is None
 
@@ -109,9 +105,7 @@ def test_metadata_verification_wrong_format(mock_shell):
         _ok_result(stdout=json.dumps(target_info))
     )
 
-    result = verify_backup(
-        mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata"
-    )
+    result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata")
 
     assert result is not None
     assert "format" in result
@@ -132,9 +126,7 @@ def test_metadata_verification_size_mismatch(mock_shell):
         _ok_result(stdout=json.dumps(target_info))
     )
 
-    result = verify_backup(
-        mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata"
-    )
+    result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata")
 
     assert result is not None
     assert "virtual-size" in result or "size" in result
@@ -149,15 +141,11 @@ def test_full_verification_passes(mock_shell):
     """When metadata checks pass and ``qemu-img compare`` succeeds,
     ``verify_backup(..., "full")`` returns ``None``.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(_ok_result())
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "full"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "full")
 
     assert result is None
 
@@ -179,15 +167,11 @@ def test_full_verification_detects_corruption(mock_shell):
     ``verify_backup(..., "full")`` returns an error string mentioning
     the comparison failure.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(_fail_result())
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "full"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "full")
 
     assert result is not None
     assert "compare" in result or "comparison" in result
@@ -215,9 +199,7 @@ def test_no_verification_when_verify_off(mock_shell):
     ``None`` immediately without making any shell calls.
     """
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "off"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "off")
 
     assert result is None
     assert shell_spy.call_count == 0
@@ -232,9 +214,7 @@ def test_risk_full_verification_timeout_7200s(mock_shell):
     """When ``verify_mode`` is ``"full"``, the ``qemu-img compare``
     command is called with ``timeout=7200`` (2 hours).
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(_ok_result())
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
@@ -242,9 +222,7 @@ def test_risk_full_verification_timeout_7200s(mock_shell):
 
     # Find the compare call and verify its timeout
     compare_calls = [
-        call
-        for call in shell_spy.call_args_list
-        if "qemu-img compare" in " ".join(call.args[0])
+        call for call in shell_spy.call_args_list if "qemu-img compare" in " ".join(call.args[0])
     ]
     assert len(compare_calls) == 1
     assert compare_calls[0].kwargs.get("timeout") == 7200
@@ -284,9 +262,7 @@ def test_hash_verification_match_passes(mock_shell, tmp_path):
     target_file.write_bytes(content)
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
     result = verify_backup(
         mock_shell,
@@ -309,9 +285,7 @@ def test_hash_verification_mismatch_fails(mock_shell, tmp_path):
 
     wrong_hash = "b" * 64  # does not match the real hash
 
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
     result = verify_backup(
         mock_shell,
@@ -332,9 +306,7 @@ def test_hash_verification_skipped_when_no_expected_hash(mock_shell):
 
     No real file is needed because ``_file_sha256`` is never called.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
     result = verify_backup(
         mock_shell,
@@ -372,13 +344,9 @@ def test_metadata_mode_unchanged_after_hash_addition(mock_shell):
     Patches ``_file_sha256`` and asserts it was never called, proving the
     hash code path is exclusive to ``verify_mode="hash"``.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
-    with patch(
-        "qsnap.modules.backup.verification._file_sha256"
-    ) as mock_sha:
+    with patch("qsnap.modules.backup.verification._file_sha256") as mock_sha:
         result = verify_backup(
             mock_shell,
             _SOURCE_PATH,
@@ -404,25 +372,17 @@ def test_source_side_info_uses_force_share_on_active_layer(mock_shell):
     The target-side ``qemu-img info`` does NOT use ``--force-share``
     because the backup is not locked by a running VM.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata")
 
     assert result is None
 
     # Separate source-side and target-side info calls
     all_calls = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
-    source_info_calls = [
-        cmd for cmd in all_calls if "qemu-img info" in cmd and _SOURCE_PATH in cmd
-    ]
-    target_info_calls = [
-        cmd for cmd in all_calls if "qemu-img info" in cmd and _TARGET_PATH in cmd
-    ]
+    source_info_calls = [cmd for cmd in all_calls if "qemu-img info" in cmd and _SOURCE_PATH in cmd]
+    target_info_calls = [cmd for cmd in all_calls if "qemu-img info" in cmd and _TARGET_PATH in cmd]
 
     assert len(source_info_calls) == 1, (
         f"Expected exactly 1 source-side qemu-img info call, got {len(source_info_calls)}"
@@ -447,18 +407,14 @@ def test_full_verification_live_source_logs_warning(mock_shell):
     ``qemu-img compare`` is still executed without ``--force-share``
     because it is a data-copying operation.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(_ok_result())
 
     import logging
     from qsnap.modules.backup import verification as ver_module
 
     with patch.object(ver_module.logger, "warning") as mock_warning:
-        result = verify_backup(
-            mock_shell, _SOURCE_PATH, _TARGET_PATH, "full"
-        )
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "full")
 
     assert result is None
 
@@ -480,24 +436,18 @@ def test_full_verification_live_source_lock_conflict(mock_shell):
     currently detect the specific lock-conflict condition or recommend
     ``verify=metadata``. This is the behavior being tested.
     """
-    mock_shell.expect(r"qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_QCOW2_INFO))
-    )
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(
         ShellResult(
             success=False,
             stdout="",
-            stderr="qemu-img: Could not open '/source.qcow2': "
-                   "Failed to get shared \"write\" lock",
+            stderr="qemu-img: Could not open '/source.qcow2': Failed to get shared \"write\" lock",
             returncode=1,
-            error="qemu-img: Could not open '/source.qcow2': "
-                   "Failed to get shared \"write\" lock",
+            error="qemu-img: Could not open '/source.qcow2': Failed to get shared \"write\" lock",
         )
     )
 
-    result = verify_backup(
-        mock_shell, _SOURCE_PATH, _TARGET_PATH, "full"
-    )
+    result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "full")
 
     assert result is not None
     assert "verification failed" in result

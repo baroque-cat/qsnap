@@ -43,22 +43,40 @@ The JSON parsing SHALL accept both `"image"` (legacy QEMU, e.g. QEMU < 11.0) and
 - **AND** the CRITICAL message includes guidance: "Check file existence, run qemu-img check, or restore from backup"
 
 ### Requirement: Post-commit chain length verification
-After a blockcommit, Core SHALL re-run `qemu-img info --force-share --backing-chain --output=json` on the base image and compare the chain length before and after the commit. The `--force-share` flag is used because the base image may still be locked by QEMU as a backing file. The chain length after commit SHALL be strictly less than before commit (minus the number of snapshots merged).
+After a blockcommit, Core SHALL re-run `qemu-img info --force-share --backing-chain --output=json` on the **current active layer** (the most recent snapshot that survived the blockcommit, obtained from `IStateManager` after removing merged snapshots). The `--force-share` flag is used because the active layer may still be locked by QEMU.
+
+The chain length after commit SHALL be directionally compared to the chain length before commit: if ``chain_length_after >= chain_length_before`` (the chain was not reduced), a CRITICAL log SHALL be emitted. Any actual reduction is accepted — this correctly handles both normal merging and intermediate file removal by ``virsh blockcommit --delete``.
+
+The `use_base_image` parameter previously added to `Core._get_chain_length()` for this specific purpose SHALL be removed. The post-commit query SHALL use the same `_get_chain_length(vm_config)` method as the pre-commit query, relying on the updated state (merged snapshots already removed from `IStateManager`).
 
 #### Scenario: Chain shortened as expected
-- **WHEN** chain had 6 files before commit and 2 snapshots were merged
-- **AND** `qemu-img info --backing-chain` after commit shows 4 files
+- **WHEN** chain had 7 files before commit and 1 snapshot was merged
+- **AND** the merged snapshot had no intermediate files between it and the base image
+- **AND** `qemu-img info --backing-chain` on the current active layer after commit shows 6 files
 - **THEN** verification passes silently
 
+#### Scenario: Chain shortened with intermediate file removal
+- **WHEN** chain had 7 files before commit and 1 snapshot was merged
+- **AND** `virsh blockcommit --delete` also removed 3 intermediate files between the merged snapshot and the base
+- **AND** `qemu-img info --backing-chain` on the current active layer after commit shows 3 files
+- **THEN** verification passes (the actual reduction is accepted — `virsh --delete` semantics are respected)
+
 #### Scenario: Chain length unchanged — CRITICAL
-- **WHEN** chain had 6 files before commit and 2 snapshots should have been merged
-- **AND** `qemu-img info --backing-chain` after commit still shows 6 files
+- **WHEN** chain had 7 files before commit and 1 snapshot should have been merged
+- **AND** `qemu-img info --backing-chain` on the current active layer after commit still shows 7 files
 - **THEN** a CRITICAL log is emitted: "Blockcommit may have failed: chain length unchanged"
 - **AND** the snapshot file paths are included in the log for manual recovery
 
-#### Scenario: Post-commit verification fails — snapshots preserved
-- **WHEN** post-commit verification detects chain length unchanged
-- **THEN** the snapshot removal from `IStateManager` is NOT performed (snapshots remain in state for manual investigation)
+#### Scenario: Post-commit measurement fails — snapshots preserved
+- **WHEN** `qemu-img info --backing-chain` on the current active layer fails after a successful blockcommit
+- **THEN** `chain_length_after` is `None`
+- **AND** verification is skipped with a WARNING log (the blockcommit succeeded but chain measurement failed)
+- **AND** snapshot removal from `IStateManager` still proceeds (blockcommit itself succeeded)
+
+#### Scenario: Pre-commit chain length unavailable — skip post-commit
+- **WHEN** `chain_length_before` is `None` (measurement failed before blockcommit)
+- **THEN** post-commit chain length comparison is skipped
+- **AND** an INFO log is emitted
 
 ### Requirement: GlobalConfig chain verification fields
 `GlobalConfig` SHALL include `chain_verify_before_commit: bool` and `chain_verify_after_commit: bool` fields, both defaulting to `True`.

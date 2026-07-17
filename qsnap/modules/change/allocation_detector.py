@@ -35,9 +35,7 @@ class AllocationSizeDetector(IChangeDetector):
 
     # ── IChangeDetector implementation ────────────────────────────────
 
-    def has_changed(
-        self, vm_config: VMConfig, disk: str | None = None
-    ) -> ChangeResult:
+    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         """Check whether the VM disk allocation has grown since last run.
 
         When *disk* is provided, scope detection to that specific disk.
@@ -75,9 +73,7 @@ class AllocationSizeDetector(IChangeDetector):
 
         # Resolve the target disk path.
         if disk is not None:
-            active_disk = next(
-                (path for target, path in disks if target == disk), None
-            )
+            active_disk = next((path for target, path in disks if target == disk), None)
             if active_disk is None:
                 return ChangeResult(
                     changed=True,

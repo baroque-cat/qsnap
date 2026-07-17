@@ -787,9 +787,10 @@ def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
 
     fake_hash = "a" * 64  # 64-char hex string simulating a SHA-256 digest
 
-    with patch(
-        "qsnap.modules.snapshot.external._file_sha256", return_value=fake_hash
-    ), patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with (
+        patch("qsnap.modules.snapshot.external._file_sha256", return_value=fake_hash),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
         provider = ExternalSnapshotProvider(mock_shell)
         result = provider.create(
             vm_config=vm_config,

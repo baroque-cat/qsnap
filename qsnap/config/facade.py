@@ -82,13 +82,9 @@ class ConfigFacade(IConfigFacade):
         if "state_backup_count" in raw:
             global_kwargs["state_backup_count"] = int(raw["state_backup_count"])
         if "chain_verify_before_commit" in raw:
-            global_kwargs["chain_verify_before_commit"] = bool(
-                raw["chain_verify_before_commit"]
-            )
+            global_kwargs["chain_verify_before_commit"] = bool(raw["chain_verify_before_commit"])
         if "chain_verify_after_commit" in raw:
-            global_kwargs["chain_verify_after_commit"] = bool(
-                raw["chain_verify_after_commit"]
-            )
+            global_kwargs["chain_verify_after_commit"] = bool(raw["chain_verify_after_commit"])
         if "deep_check_schedule" in raw:
             global_kwargs["deep_check_schedule"] = str(raw["deep_check_schedule"])
 
@@ -156,17 +152,11 @@ class ConfigFacade(IConfigFacade):
         lifecycle_mode = str(vm_raw.get("lifecycle_mode", "virsh"))
 
         # change_detection_mode: "allocation-size" (default) or "allocation-map".
-        change_detection_mode = str(
-            vm_raw.get("change_detection_mode", "allocation-size")
-        )
+        change_detection_mode = str(vm_raw.get("change_detection_mode", "allocation-size"))
 
         # Deep verification fields (T2 — per-VM, default OFF).
-        blockcommit_deep_verify = bool(
-            vm_raw.get("blockcommit_deep_verify", False)
-        )
-        snapshot_deep_verify = bool(
-            vm_raw.get("snapshot_deep_verify", False)
-        )
+        blockcommit_deep_verify = bool(vm_raw.get("blockcommit_deep_verify", False))
+        snapshot_deep_verify = bool(vm_raw.get("snapshot_deep_verify", False))
 
         # snapshot_preserve: VM overrides global.
         snapshot_preserve: str | None
@@ -289,9 +279,7 @@ class ConfigFacade(IConfigFacade):
             for m in tokens:
                 if m.group(2) == "F" and int(m.group(1)) == 0:
                     bucket = m.group(3)
-                    raise ConfigError(
-                        f"F-anchor on bucket '{bucket}' requires count > 0"
-                    )
+                    raise ConfigError(f"F-anchor on bucket '{bucket}' requires count > 0")
 
             # Only reject if ALL bucket counts are 0 AND no F-anchors present.
             if counts and all(c == 0 for c in counts) and not f_anchors:
@@ -306,6 +294,7 @@ class ConfigFacade(IConfigFacade):
         # full_every is deprecated — log warning and ignore.
         if "full_every" in tgt_raw:
             import logging
+
             logging.getLogger("qsnap.config").warning(
                 "full_every is deprecated and ignored — FULL backups are now "
                 "triggered by the retention policy's highest active bucket. "
@@ -319,6 +308,7 @@ class ConfigFacade(IConfigFacade):
             compress = bool(tgt_raw["compress"])
         elif "full_compress" in tgt_raw:
             import logging
+
             logging.getLogger("qsnap.config").warning(
                 "full_compress is deprecated — use 'compress' instead. "
                 "Mapping full_compress → compress for this target."

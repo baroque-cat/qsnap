@@ -141,13 +141,15 @@ def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("qemu-img commit").returns(ShellResult(
-        success=True,
-        stdout="",
-        stderr="",
-        returncode=0,
-        error=None,
-    ))
+    mock_shell.expect("qemu-img commit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
@@ -192,13 +194,15 @@ def test_qemu_img_commit_fails(mock_shell: MockShell, make_vm_config):
     snap = _make_snapshot()
 
     error_msg = "qemu-img: No space left on device"
-    mock_shell.expect("qemu-img commit").returns(ShellResult(
-        success=False,
-        stdout="",
-        stderr=error_msg,
-        returncode=1,
-        error=error_msg,
-    ))
+    mock_shell.expect("qemu-img commit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=error_msg,
+            returncode=1,
+            error=error_msg,
+        )
+    )
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)

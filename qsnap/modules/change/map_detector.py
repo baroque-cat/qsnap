@@ -40,9 +40,7 @@ class MapChangeDetector(IChangeDetector):
 
     # ── IChangeDetector implementation ────────────────────────────────
 
-    def has_changed(
-        self, vm_config: VMConfig, disk: str | None = None
-    ) -> ChangeResult:
+    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         """Check whether the VM disk allocation map has changed since last run.
 
         Fail-safe: any command failure returns ``changed=True``.
@@ -76,9 +74,7 @@ class MapChangeDetector(IChangeDetector):
 
         # Resolve the target disk path.
         if disk is not None:
-            active_disk = next(
-                (path for target, path in disks if target == disk), None
-            )
+            active_disk = next((path for target, path in disks if target == disk), None)
             if active_disk is None:
                 return ChangeResult(
                     changed=True,
@@ -117,13 +113,9 @@ class MapChangeDetector(IChangeDetector):
                     current_allocation=0,
                 )
             # Build a deterministic hash from sorted (offset, length) tuples.
-            offsets = sorted(
-                (int(r.get("offset", 0)), int(r.get("length", 0))) for r in regions
-            )
+            offsets = sorted((int(r.get("offset", 0)), int(r.get("length", 0))) for r in regions)
             map_hash = int(
-                hashlib.sha256(
-                    repr(offsets).encode()
-                ).hexdigest(),
+                hashlib.sha256(repr(offsets).encode()).hexdigest(),
                 16,
             )
             # Truncate to fit in a standard integer range.

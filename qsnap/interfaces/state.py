@@ -31,6 +31,15 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
+    def remove_snapshot(self, vm_name: str, snapshot_name: str) -> bool:
+        """Remove the named snapshot for *vm_name*.
+
+        Returns ``True`` if the snapshot was found and removed, ``False``
+        if no matching snapshot existed.
+        """
+        ...
+
+    @abstractmethod
     def get_snapshots(self, vm_name: str) -> list[SnapshotInfo]:
         """Return all recorded snapshots for *vm_name*, sorted by creation time."""
         ...
@@ -41,9 +50,7 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def add_deferred_blockcommit(
-        self, vm_name: str, snapshots: list[str], reason: str
-    ) -> None:
+    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
         """Queue a deferred blockcommit for *vm_name* with the given *reason*."""
         ...
 
@@ -53,9 +60,7 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def update_deferred_warning(
-        self, vm_name: str, index: int, timestamp: datetime
-    ) -> None:
+    def update_deferred_warning(self, vm_name: str, index: int, timestamp: datetime) -> None:
         """Update ``last_warned_at`` on the deferred operation at *index*."""
         ...
 
@@ -65,9 +70,7 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def set_last_full_backup(
-        self, target_path: str, name: str, timestamp: datetime
-    ) -> None:
+    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
         """Record a full backup for *target_path* with the given *name* and *timestamp*."""
         ...
 
@@ -91,8 +94,6 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def get_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> list[str]:
+    def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         """Return the incremental backup names that depend on *full_name*."""
         ...

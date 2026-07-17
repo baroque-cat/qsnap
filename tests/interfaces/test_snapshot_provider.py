@@ -64,9 +64,7 @@ def test_snapshot_provider_create_returns_result(cls, init_kwargs):
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
-    result = provider.create(
-        vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False
-    )
+    result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False)
     assert isinstance(result, SnapshotResult)
     assert isinstance(result.success, bool)
 
@@ -140,9 +138,7 @@ def test_snapshot_provider_create_returns_content_hash(cls, init_kwargs):
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
-    result = provider.create(
-        vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False
-    )
+    result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False)
     assert isinstance(result, SnapshotResult)
     # content_hash must be None or a 64-char lowercase hex string.
     assert result.content_hash is None or (

@@ -20,7 +20,17 @@ def test_help_text_lists_subcommands_and_flags(capsys):
         parser.parse_args(["--help"])
     captured = capsys.readouterr()
     text = captured.out
-    for subcommand in ("run", "snapshot", "backup", "prune", "list", "stats", "check", "restore", "estimate"):
+    for subcommand in (
+        "run",
+        "snapshot",
+        "backup",
+        "prune",
+        "list",
+        "stats",
+        "check",
+        "restore",
+        "estimate",
+    ):
         assert subcommand in text
     for flag in (
         "--config",
@@ -108,9 +118,7 @@ def test_success_returns_exit_code_zero(
     mock_config_cls.return_value = mock_config
 
     mock_core = Mock()
-    mock_core.run.return_value = PipelineResult(
-        results=[VMRunResult(vm_name="vm1", success=True)]
-    )
+    mock_core.run.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
     mock_core_cls.return_value = mock_core
 
     code = main(["run"])

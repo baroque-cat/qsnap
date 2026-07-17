@@ -112,30 +112,21 @@ def _assert_d3_paths(tracking_shell: CallTrackingShell) -> None:
       output (``ACTIVE_DISK_PATH``), NOT ``OLD_BASE_IMAGE``.
     """
     # domblklist was called
-    domblklist_calls = [
-        c for c in tracking_shell.calls if "domblklist" in " ".join(c)
-    ]
+    domblklist_calls = [c for c in tracking_shell.calls if "domblklist" in " ".join(c)]
     assert len(domblklist_calls) == 1, (
-        "Expected exactly one domblklist call, got "
-        f"{len(domblklist_calls)}"
+        f"Expected exactly one domblklist call, got {len(domblklist_calls)}"
     )
 
     # qemu-img info was called with the domblklist path, not base_image
-    qemu_calls = [
-        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
-    ]
-    assert len(qemu_calls) == 1, (
-        "Expected exactly one qemu-img call, got "
-        f"{len(qemu_calls)}"
-    )
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 1, f"Expected exactly one qemu-img call, got {len(qemu_calls)}"
     qemu_cmd_str = " ".join(qemu_calls[0])
     assert ACTIVE_DISK_PATH in qemu_cmd_str, (
         f"qemu-img info should use the domblklist path "
         f"({ACTIVE_DISK_PATH}), but command was: {qemu_cmd_str}"
     )
     assert OLD_BASE_IMAGE not in qemu_cmd_str, (
-        f"qemu-img info must NOT use base_image ({OLD_BASE_IMAGE}), "
-        f"but command was: {qemu_cmd_str}"
+        f"qemu-img info must NOT use base_image ({OLD_BASE_IMAGE}), but command was: {qemu_cmd_str}"
     )
 
 
@@ -162,9 +153,7 @@ def test_has_changed_allocation_grown(
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     # Pattern includes the domblklist path — only matches if D3 is respected
-    tracking_shell.expect("qemu-img info.*new/active/path").returns(
-        _ok_qemu_img_result(131072)
-    )
+    tracking_shell.expect("qemu-img info.*new/active/path").returns(_ok_qemu_img_result(131072))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
@@ -199,9 +188,7 @@ def test_has_changed_allocation_unchanged(
     mock_state.set_last_allocation("testvm", 65536)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
-    tracking_shell.expect("qemu-img info.*new/active/path").returns(
-        _ok_qemu_img_result(65536)
-    )
+    tracking_shell.expect("qemu-img info.*new/active/path").returns(_ok_qemu_img_result(65536))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
@@ -290,17 +277,11 @@ def test_has_changed_command_fails_failsafe(
     )
 
     # domblklist was called (and failed), qemu-img info was NOT called
-    domblklist_calls = [
-        c for c in tracking_shell.calls if "domblklist" in " ".join(c)
-    ]
+    domblklist_calls = [c for c in tracking_shell.calls if "domblklist" in " ".join(c)]
     assert len(domblklist_calls) == 1
 
-    qemu_calls = [
-        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
-    ]
-    assert len(qemu_calls) == 0, (
-        "qemu-img info should NOT be called when domblklist fails"
-    )
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
+    assert len(qemu_calls) == 0, "qemu-img info should NOT be called when domblklist fails"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -337,9 +318,7 @@ def test_has_changed_per_disk_vdb_uses_vdb_path(
             error=None,
         )
     )
-    tracking_shell.expect("qemu-img info").returns(
-        _ok_qemu_img_result(131072)
-    )
+    tracking_shell.expect("qemu-img info").returns(_ok_qemu_img_result(131072))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
@@ -352,18 +331,14 @@ def test_has_changed_per_disk_vdb_uses_vdb_path(
     )
 
     # Verify qemu-img info was called with vdb path, not vda path
-    qemu_calls = [
-        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
-    ]
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
     assert len(qemu_calls) == 1
     qemu_cmd_str = " ".join(qemu_calls[0])
     assert vdb_path in qemu_cmd_str, (
-        f"qemu-img info should use vdb path ({vdb_path}), "
-        f"but command was: {qemu_cmd_str}"
+        f"qemu-img info should use vdb path ({vdb_path}), but command was: {qemu_cmd_str}"
     )
     assert vda_path not in qemu_cmd_str, (
-        f"qemu-img info must NOT use vda path ({vda_path}), "
-        f"but command was: {qemu_cmd_str}"
+        f"qemu-img info must NOT use vda path ({vda_path}), but command was: {qemu_cmd_str}"
     )
 
 
@@ -400,9 +375,7 @@ def test_has_changed_no_disk_uses_first_disk_backward_compatible(
             error=None,
         )
     )
-    tracking_shell.expect("qemu-img info").returns(
-        _ok_qemu_img_result(65536)
-    )
+    tracking_shell.expect("qemu-img info").returns(_ok_qemu_img_result(65536))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
@@ -415,14 +388,11 @@ def test_has_changed_no_disk_uses_first_disk_backward_compatible(
     )
 
     # Verify qemu-img info was called with vda path (first disk)
-    qemu_calls = [
-        c for c in tracking_shell.calls if "qemu-img" in " ".join(c)
-    ]
+    qemu_calls = [c for c in tracking_shell.calls if "qemu-img" in " ".join(c)]
     assert len(qemu_calls) == 1
     qemu_cmd_str = " ".join(qemu_calls[0])
     assert vda_path in qemu_cmd_str, (
-        f"qemu-img info should use first disk path ({vda_path}), "
-        f"but command was: {qemu_cmd_str}"
+        f"qemu-img info should use first disk path ({vda_path}), but command was: {qemu_cmd_str}"
     )
     assert vdb_path not in qemu_cmd_str
 
@@ -448,9 +418,7 @@ def test_allocation_detector_imports_shared_parsers():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_state_recovery_triggers_first_run_changed_true(
-    tmp_path, make_vm_config
-):
+def test_state_recovery_triggers_first_run_changed_true(tmp_path, make_vm_config):
     """Corrupt state file → recovered state returns None → first-run behavior.
 
     When ``get_last_allocation`` returns ``None`` (due to corruption
@@ -481,7 +449,4 @@ def test_state_recovery_triggers_first_run_changed_true(
         changed=True,
         last_allocation=0,
         current_allocation=0,
-    ), (
-        "Corrupt state recovery should trigger first-run behavior "
-        "(changed=True, allocations=0)"
-    )
+    ), "Corrupt state recovery should trigger first-run behavior (changed=True, allocations=0)"
