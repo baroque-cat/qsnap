@@ -69,7 +69,7 @@ class DefaultFactory(IVMModuleFactory):
                     "falling back to FileCopyBackupProvider",
                 )
                 return FileCopyBackupProvider(self._shell, self._state)
-            return BitmapBackupProvider(self._shell)
+            return BitmapBackupProvider(self._shell, self._state)
         return FileCopyBackupProvider(self._shell, self._state)
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:

@@ -670,3 +670,33 @@ def test_global_config_deep_check_targets_true():
     """GlobalConfig(deep_check_targets=True) stores True."""
     cfg = GlobalConfig(deep_check_targets=True)
     assert cfg.deep_check_targets is True
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.transaction_log — btrbk-compatible transaction log path
+# ---------------------------------------------------------------------------
+
+
+def test_transaction_log_defaults_to_none():
+    """GlobalConfig() with no arguments defaults transaction_log to None."""
+    cfg = GlobalConfig()
+    assert cfg.transaction_log is None
+
+    # Verify the field exists in the dataclass.
+    field_names = {f.name for f in dataclasses.fields(GlobalConfig)}
+    assert "transaction_log" in field_names
+
+
+def test_transaction_log_validates_absolute_path():
+    """GlobalConfig stores the transaction_log string as-is.
+
+    The model layer does not validate path absoluteness; validation
+    (if any) happens at a higher layer (ConfigFacade or Core).
+    """
+    # Absolute path — stored as-is.
+    cfg = GlobalConfig(transaction_log="/var/log/qsnap/transactions.log")
+    assert cfg.transaction_log == "/var/log/qsnap/transactions.log"
+
+    # Relative path — also stored as-is (no model-layer validation).
+    cfg_rel = GlobalConfig(transaction_log="logs/transactions.log")
+    assert cfg_rel.transaction_log == "logs/transactions.log"

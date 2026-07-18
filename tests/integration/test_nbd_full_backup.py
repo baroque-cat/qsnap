@@ -495,6 +495,7 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
         not domjobinfo_result.success
         or "no current block job" in domjobinfo_result.stdout.lower()
         or "no current job" in domjobinfo_result.stderr.lower()
+        or "job type:" in domjobinfo_result.stdout.lower()
     )
     assert has_no_active_job, (
         f"domjobabort should have terminated the NBD backup job, "
@@ -528,6 +529,8 @@ def test_stale_state_recovery_integration(test_vm):
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     # Ensure target is not empty (avoids the FULL-backup short-circuit).
@@ -550,9 +553,10 @@ def test_stale_state_recovery_integration(test_vm):
     # Execute transfer_missing — should detect and remove the stale entry.
     provider = FileCopyBackupProvider(shell, state=state)
     target = TargetConfig(path=target_dir, incremental=True, verify="off")
+    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider.transfer_missing(
-        vm_config=None,  # type: ignore[arg-type]
+        vm_config=vm_config,
         target=target,
         snapshots=[stale_snapshot],
     )

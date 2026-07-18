@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import cast
 
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
@@ -102,6 +103,10 @@ class ConfigFacade(IConfigFacade):
         if "deep_check_targets" in raw:
             global_kwargs["deep_check_targets"] = bool(raw["deep_check_targets"])
 
+        # Transaction log (optional absolute path).
+        if "transaction_log" in raw:
+            global_kwargs["transaction_log"] = str(raw["transaction_log"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate rate_limit format.
@@ -150,8 +155,8 @@ class ConfigFacade(IConfigFacade):
             )
 
         # Build VM configs.
-        vm_sections = raw.get("vm", [])
-        if not isinstance(vm_sections, list):
+        vm_sections = cast(list[dict[str, object]], raw.get("vm", []))
+        if not isinstance(vm_sections, list):  # type: ignore[reportUnnecessaryIsInstance]
             raise ConfigError("[[vm]] must be an array of tables")
 
         self._vms = []
@@ -229,8 +234,8 @@ class ConfigFacade(IConfigFacade):
             disks = None
 
         # Build targets.
-        target_sections = vm_raw.get("target", [])
-        if not isinstance(target_sections, list):
+        target_sections = cast(list[dict[str, object]], vm_raw.get("target", []))
+        if not isinstance(target_sections, list):  # type: ignore[reportUnnecessaryIsInstance]
             raise ConfigError("[[vm.target]] must be an array of tables")
 
         targets: list[TargetConfig] = []
@@ -303,7 +308,6 @@ class ConfigFacade(IConfigFacade):
         ):
             # Parse bucket counts and F-anchors from the preserve string.
             # Regex: count, optional F prefix, bucket char.
-            bucket_char_map = {"h": "h", "d": "d", "w": "w", "m": "m", "y": "y"}
             tokens = list(re.finditer(r"(\d+)(F?)([hdwmy])", target_preserve))
             counts = [int(m.group(1)) for m in tokens]
             f_anchors = [m for m in tokens if m.group(2) == "F"]
@@ -364,7 +368,7 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(f"Invalid target rate_limit: {exc}") from exc
 
         # Backup retry fields (target-level — network reliability varies).
-        backup_retry_max = int(tgt_raw.get("backup_retry_max", 3))
+        backup_retry_max = cast(int, tgt_raw.get("backup_retry_max", 3))
         backup_retry_base = str(tgt_raw.get("backup_retry_base", "2s"))
 
         # Validate backup_retry_base — must be a duration string like "2s".

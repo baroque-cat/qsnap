@@ -65,3 +65,38 @@ def test_app_py_has_no_business_logic_imports():
     modules = _imported_modules(source)
     violations = [m for m in modules if _starts_with_any(m, _FORBIDDEN_APP)]
     assert not violations, f"app.py imports forbidden business-logic modules: {violations}"
+
+
+# ── summary.py ─────────────────────────────────────────────────────────────
+
+_FORBIDDEN_SUMMARY = ("qsnap.modules", "qsnap.config", "qsnap.retention", "qsnap.state")
+
+
+def test_summary_formatter_no_business_logic():
+    """``summary.py`` must be a pure formatter — no imports from
+    ``qsnap.modules``, ``qsnap.config``, ``qsnap.retention``, or
+    ``qsnap.state``."""
+    source = (_PROJECT_ROOT / "qsnap" / "cli" / "summary.py").read_text()
+    modules = _imported_modules(source)
+    violations = [m for m in modules if _starts_with_any(m, _FORBIDDEN_SUMMARY)]
+    assert not violations, f"summary.py imports forbidden business-logic modules: {violations}"
+
+
+def test_no_business_logic_in_cli():
+    """Both ``commands.py`` and ``summary.py`` must avoid business-logic
+    imports from ``qsnap.modules``, ``qsnap.config``, ``qsnap.retention``,
+    or ``qsnap.state``."""
+    cli_files = [
+        _PROJECT_ROOT / "qsnap" / "cli" / "commands.py",
+        _PROJECT_ROOT / "qsnap" / "cli" / "summary.py",
+    ]
+    all_violations: dict[str, list[str]] = {}
+    for path in cli_files:
+        source = path.read_text()
+        modules = _imported_modules(source)
+        violations = [m for m in modules if _starts_with_any(m, _FORBIDDEN_SUMMARY)]
+        if violations:
+            all_violations[path.name] = violations
+    assert not all_violations, (
+        f"CLI files import forbidden business-logic modules: {all_violations}"
+    )

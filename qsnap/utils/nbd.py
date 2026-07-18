@@ -19,7 +19,7 @@ Functions:
 - :func:`is_libvirt_new_enough` — verify libvirt >= 6.0 for ``backup-begin``.
 - :func:`nbd_full_export` — run the full NBD export + convert lifecycle.
 - :func:`write_backup_xml` — write the libvirt pull-model backup XML.
-- :func:`_get_first_disk_target` — get the first disk target device name.
+- :func:`get_first_disk_target` — get the first disk target device name.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def is_libvirt_new_enough(shell: IShell, min_major: int = _MIN_LIBVIRT_MAJOR) ->
     return major >= min_major
 
 
-def _get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
+def get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
     """Get the first disk target device name via ``virsh domblklist``.
 
     Returns the target device name (e.g., ``"vda"``) or ``None`` if
@@ -199,7 +199,7 @@ def nbd_full_export(
         # libvirt's NBD server exports each disk under its target
         # device name (e.g., "vda").  We must specify exportname in
         # the NBD URI to connect to the correct export.
-        disk_target = _get_first_disk_target(shell, vm_name)
+        disk_target = get_first_disk_target(shell, vm_name)
         nbd_uri = f"nbd:unix:{socket_path}"
         if disk_target:
             nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"

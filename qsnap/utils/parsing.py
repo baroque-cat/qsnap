@@ -141,8 +141,6 @@ def parse_rate_limit(value: str) -> int:
     Raises:
         ValueError: When *value* is not a recognised rate-limit string.
     """
-    if not isinstance(value, str):
-        raise ValueError(f"rate_limit must be a string, got {type(value).__name__}")
     cleaned = value.strip().lower()
     if cleaned in ("no", "0", ""):
         return 0

@@ -29,13 +29,15 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
+from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
-from qsnap.utils.nbd import _get_first_disk_target, nbd_full_export
+from qsnap.utils.nbd import get_first_disk_target, nbd_full_export
 from qsnap.utils.parsing import parse_timestamp
 from qsnap.utils.verification import verify_backup
 
@@ -45,8 +47,13 @@ logger = logging.getLogger(__name__)
 class BitmapBackupProvider(IBackupProvider):
     """Backup provider using NBD pull-model via ``virsh backup-begin``."""
 
-    def __init__(self, shell: IShell) -> None:
+    def __init__(
+        self,
+        shell: IShell,
+        state: IStateManager | None = None,
+    ) -> None:
         self._shell = shell
+        self._state = state
 
     # ── IBackupProvider implementation ────────────────────────────────
 
@@ -126,7 +133,7 @@ class BitmapBackupProvider(IBackupProvider):
                 # target device name (e.g., "vda").  We must specify
                 # exportname in the NBD URI to connect to the correct
                 # export.
-                disk_target = _get_first_disk_target(
+                disk_target = get_first_disk_target(
                     self._shell,
                     vm_config.name,
                 )
@@ -142,7 +149,9 @@ class BitmapBackupProvider(IBackupProvider):
                     nbd_uri,
                     str(target_file),
                 ]
+                start_time = time.monotonic()
                 convert_result = self._shell.run(convert_cmd, timeout=600)
+                elapsed = time.monotonic() - start_time
                 if not convert_result.success:
                     # Preserve checkpoint for retry.
                     results.append(
@@ -228,11 +237,33 @@ class BitmapBackupProvider(IBackupProvider):
                         target_path=target_file,
                         bytes_transferred=bytes_transferred,
                         error=None,
+                        duration=elapsed,
                     )
                 )
 
             finally:
-                # Step 8: Socket cleanup (always, even on failure).
+                # Step 8: NBD job abort + socket cleanup (always, even on
+                # failure).  Abort the virsh backup-begin job to release
+                # the VM state change lock (mirrors nbd_full_export in
+                # qsnap/utils/nbd.py).  domjobabort is idempotent — safe
+                # to call when no job is running.  On failure, log a
+                # WARNING but do NOT propagate the error — the socket
+                # cleanup is the critical path and must still proceed.
+                abort_cmd = [
+                    "virsh",
+                    "domjobabort",
+                    "--domain",
+                    vm_config.name,
+                ]
+                abort_result = self._shell.run(abort_cmd, timeout=30)
+                if not abort_result.success:
+                    logger.warning(
+                        "virsh domjobabort failed for VM %s (job may have "
+                        "already terminated): %s",
+                        vm_config.name,
+                        abort_result.error,
+                    )
+                # Socket cleanup.
                 self._shell.run(["rm", "-f", socket_path], timeout=10)
 
         return results
@@ -306,6 +337,17 @@ class BitmapBackupProvider(IBackupProvider):
             bytes_transferred = target_file.stat().st_size
         except OSError:
             bytes_transferred = 0
+
+        # Record FULL in state (mirrors FileCopyBackupProvider parity —
+        # design D4).  Called after successful FULL creation and atomic
+        # rename, before returning success.
+        if self._state is not None:
+            self._state.record_full_backup(
+                str(target.path),
+                f"{full_name}.qcow2",
+                source_snapshot.timestamp,
+                bucket_level,
+            )
 
         return BackupResult(
             success=True,

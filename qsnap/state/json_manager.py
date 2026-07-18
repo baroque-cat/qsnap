@@ -8,6 +8,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
@@ -152,7 +153,7 @@ class JsonStateManager(IStateManager):
             name=str(d["name"]),
             path=Path(str(d["path"])),
             timestamp=datetime.fromisoformat(str(d["timestamp"])),
-            allocation=int(d["allocation"]),
+            allocation=int(str(d["allocation"])),
             content_hash=str(d["content_hash"]) if "content_hash" in d else None,
         )
 
@@ -174,7 +175,7 @@ class JsonStateManager(IStateManager):
         data = self._load(vm_name)
         raw_list = data.get("snapshots", [])
         snapshots: list[dict[str, str | int]] = list(raw_list)  # type: ignore[arg-type]
-        snapshots.append(self._snapshot_to_dict(info))
+        snapshots.append(cast(dict[str, str | int], self._snapshot_to_dict(info)))
         data["snapshots"] = snapshots
         self._save(vm_name, data)
 

@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import cast
 
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
@@ -194,19 +195,19 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             return []
 
         try:
-            chain = json.loads(chain_result.stdout)
+            chain = cast(list[dict[str, object]], json.loads(chain_result.stdout))
         except json.JSONDecodeError:
             return []
 
-        if not isinstance(chain, list) or len(chain) <= 1:
+        if not isinstance(chain, list) or len(chain) <= 1:  # type: ignore[reportUnnecessaryIsInstance]
             return []
 
         # Step 3: Build SnapshotInfo for each element after the base
         snapshots: list[SnapshotInfo] = []
         for element in chain[1:]:
-            filename = element.get("filename", "")
+            filename = cast(str, element.get("filename", ""))
             name = Path(filename).stem
-            actual_size = int(element.get("actual-size", 0))
+            actual_size = int(cast(int, element.get("actual-size", 0)))
             timestamp = parse_timestamp(name, Path(filename))
             snapshots.append(
                 SnapshotInfo(

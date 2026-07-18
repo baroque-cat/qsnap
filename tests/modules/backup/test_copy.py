@@ -320,9 +320,12 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
     assert len(rebase_cmds) == 0
 
 
-def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target, tmp_path):
+def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target, tmp_path, caplog):
     """When ``rsync`` returns a non-zero exit code (e.g. disk full), the
     provider returns ``BackupResult(success=False, error=<stderr>)``.
+
+    A WARNING log is emitted before returning the failure result so that
+    silent failures are impossible to miss in production logs.
 
     Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
@@ -355,6 +358,8 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
         )
     )
 
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
     provider = FileCopyBackupProvider(mock_shell)
     results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -367,13 +372,20 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
     assert results[0].source_path == snapshot.path
     assert results[0].target_path == expected_target_file
 
+    # Assert WARNING was logged before returning failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "rsync failed for testvm.20250101T000000" in msg for msg in warnings
+    ), f"Expected 'rsync failed' WARNING, got: {warnings}"
 
-def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_target, tmp_path):
+
+def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_target, tmp_path, caplog):
     """When rsync is not available (``MockShell`` returns failure for
     ``rsync``), the transfer fails with no ``cp`` fallback (design D3).
 
     A fresh ``MockShell`` is used (without conftest's pre-configured
-    expectations) so the rsync command returns failure.
+    expectations) so the rsync command returns failure.  A WARNING log is
+    emitted to ensure the failure is visible in production logs.
     """
     shell = MockShell()
     # rsync → failure (not installed or unavailable)
@@ -403,6 +415,8 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_ta
         allocation=65536,
     )
 
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
     with patch.object(shell, "run", wraps=shell.run) as shell_spy:
         provider = FileCopyBackupProvider(shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
@@ -416,6 +430,12 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_ta
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
     assert len(cp_cmds) == 0, "cp should NOT be used as fallback when rsync fails (design D3)"
+
+    # Assert WARNING was logged before returning failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "rsync failed for testvm.20250101T000000" in msg for msg in warnings
+    ), f"Expected 'rsync failed' WARNING, got: {warnings}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -544,18 +564,158 @@ def test_delete_backup_file_not_found(mock_shell):
 
 
 def test_transfer_rebase_failure_returns_backup_result_failure(
-    mock_shell, make_vm_config, make_target, tmp_path
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
 ):
-    """When ``qemu-img rebase`` fails (MockShell returns failure),
-    ``transfer_missing`` returns a ``BackupResult`` with ``success=False``
-    and an error message containing ``"rebase failed"``.
+    """When ``qemu-img rebase`` fails (MockShell returns failure) while
+    rebasing to a FULL anchor, ``transfer_missing`` returns a
+    ``BackupResult`` with ``success=False`` and an error message
+    containing ``"rebase failed"``.
 
-    The rebase step is part of the incremental backup flow: after copying
-    the snapshot file via rsync, the backing path is rebased.  If the
-    rebase command itself fails, the provider must report the failure
-    rather than silently returning success.
+    A ``WARNING`` log is emitted before returning the failure so that
+    silent rebase failures are visible in production logs.
 
-    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    This test targets the *FULL-anchor rebase* path (``rebase to FULL
+    failed``), which runs when a valid FULL anchor exists in the target
+    directory.  The anchor passes M1 verification and the rebase command
+    itself fails.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=True,
+        verify="off",
+        copy_base=True,
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create a FULL anchor file so the rebase-to-FULL path is taken
+    anchor_name = "testvm.FULL.20250101.qcow2"
+    anchor_file = target.path / anchor_name
+    anchor_file.write_bytes(b"\x00" * 1024)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # qemu-img info returns valid qcow2 metadata for:
+    #   - list() on the anchor file
+    #   - verify_full_backup() M1 check on the anchor
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1024,
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # Mock qemu-img rebase returns FAILURE
+    rebase_error = "rebase error: backing file not found"
+    mock_shell.expect("qemu-img rebase").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=rebase_error,
+            returncode=1,
+            error=rebase_error,
+        )
+    )
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "rebase failed" in results[0].error
+
+    # Assert WARNING was logged for rebase-to-FULL failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "rebase to FULL failed for testvm.20250101T000000" in msg
+        for msg in warnings
+    ), f"Expected 'rebase to FULL failed' WARNING, got: {warnings}"
+
+
+def test_transfer_verify_failure_logs_warning(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """When ``verify_backup()`` returns an error (e.g. metadata mismatch),
+    a ``WARNING`` log is emitted before returning
+    ``BackupResult(success=False)``.
+
+    This prevents verification failures from silently producing a failed
+    result with no accompanying log message — operators monitoring logs
+    will see the warning even if they don't inspect the return value.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="metadata",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    verify_error = "verification failed: metadata mismatch — virtual-size differs"
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
+
+    with patch(
+        "qsnap.modules.backup.file_copy.verify_backup",
+        return_value=verify_error,
+    ):
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert failure with the verify error
+    assert len(results) == 1
+    assert results[0].success is False
+    assert verify_error in results[0].error
+
+    # Assert WARNING was logged before returning failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "backup verification failed for testvm.20250101T000000" in msg
+        for msg in warnings
+    ), f"Expected 'backup verification failed' WARNING, got: {warnings}"
+
+
+def test_transfer_json_decode_failure_logs_warning(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """When ``qemu-img info --output=json`` returns invalid JSON in the
+    no-FULL-anchor fallback rebase path, a ``WARNING`` log is emitted
+    before returning ``BackupResult(success=False)``.
+
+    This covers the ``json.JSONDecodeError`` exception path in
+    ``transfer_missing()`` — the backing info parse failure is logged at
+    WARNING level so operators can detect corrupted qemu-img output.
     """
     vm_config = make_vm_config()
     target = make_target(
@@ -576,39 +736,33 @@ def test_transfer_rebase_failure_returns_backup_result_failure(
     mock_shell.expect(r"^rsync").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    # Mock qemu-img info returns JSON with backing-filename
+    # Mock qemu-img info returns success but with invalid JSON
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {
-                    "actual-size": 65536,
-                    "backing-filename": "/source/path/backing.qcow2",
-                }
-            ),
+            stdout="not valid json {{{",
             stderr="",
             returncode=0,
             error=None,
         )
     )
-    # Mock qemu-img rebase returns FAILURE
-    rebase_error = "rebase error: backing file not found"
-    mock_shell.expect("qemu-img rebase").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr=rebase_error,
-            returncode=1,
-            error=rebase_error,
-        )
-    )
+
+    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
     provider = FileCopyBackupProvider(mock_shell)
     results = provider.transfer_missing(vm_config, target, [snapshot])
 
+    # Assert failure due to JSON parse error
     assert len(results) == 1
     assert results[0].success is False
     assert "rebase failed" in results[0].error
+
+    # Assert WARNING was logged before returning failure
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "backing info parse failed for testvm.20250101T000000" in msg
+        for msg in warnings
+    ), f"Expected 'backing info parse failed' WARNING, got: {warnings}"
 
 
 def test_file_copy_provider_imports_shared_parsers():

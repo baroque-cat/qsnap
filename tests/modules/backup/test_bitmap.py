@@ -1501,10 +1501,8 @@ def test_bitmap_incremental_dirty_blocks_via_nbd(
 
     This test exercises the incremental NBD path where a prior
     checkpoint exists.  ``transfer_missing()`` manages its own socket
-    lifecycle (stale removal + finally cleanup) and does NOT call
-    ``nbd_full_export()`` or ``domjobabort`` — those are
-    ``create_full_backup()`` concerns.  The socket cleanup in the
-    ``transfer_missing`` finally block must still execute.
+    lifecycle (stale removal + finally cleanup) and calls ``domjobabort``
+    in its own finally block to release the VM state change lock.
     """
     vm_config = make_vm_config()
     target = make_target(
@@ -1538,6 +1536,8 @@ def test_bitmap_incremental_dirty_blocks_via_nbd(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())
     # checkpoint-create-as new checkpoint
     mock_shell.expect("checkpoint-create-as").returns(_ok_result())
+    # domjobabort in transfer_missing finally
+    mock_shell.expect("domjobabort").returns(_ok_result())
     # rm -f socket (cleanup in transfer_missing's finally)
     mock_shell.expect("rm -f").returns(_ok_result())
 
@@ -1571,6 +1571,15 @@ def test_bitmap_incremental_dirty_blocks_via_nbd(
     create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
     assert len(create_cmds) == 1, "New checkpoint should be created for next incremental run"
 
+    # ── domjobabort called in transfer_missing finally ───────────────
+    abort_cmds = [cmd for cmd in all_cmds if "domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        "transfer_missing must call domjobabort in finally "
+        "to release VM state change lock"
+    )
+    assert "--domain" in abort_cmds[0]
+    assert vm_config.name in abort_cmds[0]
+
     # ── Socket cleanup in finally ────────────────────────────────────
     socket_rm_cmds = [
         cmd for cmd in all_cmds if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
@@ -1579,9 +1588,340 @@ def test_bitmap_incremental_dirty_blocks_via_nbd(
         f"Socket should be cleaned up (stale + finally), got {len(socket_rm_cmds)}: {socket_rm_cmds}"
     )
 
-    # ── No domjobabort — transfer_missing does NOT use nbd_full_export ─
-    abort_cmds = [cmd for cmd in all_cmds if "domjobabort" in cmd]
-    assert len(abort_cmds) == 0, (
-        "transfer_missing does NOT call nbd_full_export or domjobabort; "
-        "domjobabort is only in the create_full_backup/NBD full-export path"
+    # ── domjobabort called AFTER qemu-img convert, BEFORE final socket rm ──
+    abort_idx = None
+    last_rm_idx = None
+    for i, cmd in enumerate(all_cmds):
+        if "domjobabort" in cmd:
+            abort_idx = i
+        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd:
+            last_rm_idx = i
+    assert abort_idx is not None and last_rm_idx is not None
+    assert abort_idx < last_rm_idx, (
+        f"domjobabort (idx={abort_idx}) must precede final socket rm (idx={last_rm_idx})"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# backup-bitmap-enhancements: 7 new tests
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_domjobabort_called_after_successful_transfer(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Set up a successful transfer.  Verify ``virsh domjobabort --domain <vm>``
+    was called in the shell's command history (mock shell recorded commands).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
+    )
+    snapshot = _make_snapshot()
+
+    # rm -f stale socket
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # checkpoint-list returns empty (no prior checkpoint — first backup)
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # backup-begin succeeds
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # qemu-img convert succeeds
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # checkpoint-create-as succeeds
+    mock_shell.expect("checkpoint-create-as").returns(_ok_result())
+    # domjobabort in finally
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    # rm -f socket cleanup in finally
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify domjobabort was called — use "virsh domjobabort" to avoid false
+    # matches from pytest tmp_path directory names containing "domjobabort".
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        f"domjobabort should be called exactly once in finally, got {len(abort_cmds)}: {abort_cmds}"
+    )
+    assert "--domain" in abort_cmds[0]
+    assert vm_config.name in abort_cmds[0]
+
+    # Verify socket rm is still called after domjobabort
+    socket_rm_cmds = [
+        cmd for cmd in all_cmds if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_cmds) >= 2, (
+        f"Socket cleanup must happen (stale + finally), got {len(socket_rm_cmds)}"
+    )
+
+
+def test_domjobabort_called_after_failed_transfer(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Set up a failed transfer (backup-begin fails).  Verify
+    ``virsh domjobabort`` was still called in the finally block.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
+    )
+    snapshot = _make_snapshot()
+
+    # rm -f stale socket
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # checkpoint-list returns empty
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # backup-begin FAILS
+    backup_error = "backup-begin failed: domain is shut off"
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=backup_error,
+            returncode=1,
+            error=backup_error,
+        )
+    )
+    # domjobabort in finally — MUST still be called
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    # rm -f socket cleanup in finally
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert failure result (transfer failed for original reason)
+    assert len(results) == 1
+    assert results[0].success is False
+    assert results[0].error == backup_error
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify domjobabort was STILL called despite backup-begin failure
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1, (
+        f"domjobabort must be called in finally even after backup-begin failure, "
+        f"got {len(abort_cmds)}: {abort_cmds}"
+    )
+    assert "--domain" in abort_cmds[0]
+    assert vm_config.name in abort_cmds[0]
+
+    # Verify socket cleanup still happened
+    socket_rm_cmds = [
+        cmd for cmd in all_cmds if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd
+    ]
+    assert len(socket_rm_cmds) >= 2, (
+        f"Socket cleanup must happen even after backup-begin failure, "
+        f"got {len(socket_rm_cmds)}"
+    )
+
+
+def test_domjobabort_failure_is_non_fatal(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """Set up domjobabort to fail.  Verify the transfer still succeeds
+    and a WARNING is logged (domjobabort failure is non-fatal).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        verify="off",
+    )
+    snapshot = _make_snapshot()
+
+    # rm -f stale socket
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # checkpoint-list returns empty
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # backup-begin succeeds
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # qemu-img convert succeeds
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    # checkpoint-create-as succeeds
+    mock_shell.expect("checkpoint-create-as").returns(_ok_result())
+    # domjobabort FAILS — but is non-fatal
+    mock_shell.expect("domjobabort").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: domain is not running",
+            returncode=1,
+            error="error: domain is not running",
+        )
+    )
+    # rm -f socket cleanup in finally — MUST still execute
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert the transfer still succeeds (domjobabort failure is non-fatal)
+    assert len(results) == 1
+    assert results[0].success is True, (
+        "Transfer should succeed even when domjobabort fails "
+        "(abort failure is logged as WARNING, not propagated)"
+    )
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+
+    # Verify domjobabort was attempted
+    abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
+    assert len(abort_cmds) == 1
+
+    # Verify socket cleanup still happened after failed domjobabort
+    abort_idx = None
+    last_rm_idx = None
+    for i, cmd in enumerate(all_cmds):
+        if "virsh domjobabort" in cmd:
+            abort_idx = i
+        if cmd.startswith("rm -f") and "/tmp/qsnap-backup-" in cmd:
+            last_rm_idx = i
+    assert abort_idx is not None and last_rm_idx is not None
+    assert abort_idx < last_rm_idx, (
+        f"domjobabort (idx={abort_idx}) must precede socket rm (idx={last_rm_idx}) "
+        "in finally block"
+    )
+
+    # Verify WARNING was logged for domjobabort failure
+    warnings = [
+        record for record in caplog.records
+        if record.levelname == "WARNING" and "domjobabort" in record.getMessage().lower()
+    ]
+    assert len(warnings) >= 1, (
+        "domjobabort failure should log a WARNING (non-fatal)"
+    )
+
+
+def test_constructor_accepts_state_manager(mock_shell, mock_state):
+    """Construct ``BitmapBackupProvider(shell, state=mock_state)``.
+    Verify ``provider._state is mock_state``.
+    """
+    provider = BitmapBackupProvider(mock_shell, state=mock_state)
+    assert provider._state is mock_state
+
+
+def test_constructor_works_without_state_manager(mock_shell):
+    """Construct ``BitmapBackupProvider(shell)``.
+    Verify ``provider._state is None`` and no crash.
+    """
+    provider = BitmapBackupProvider(mock_shell)
+    assert provider._state is None
+
+
+def test_create_full_backup_records_in_state(
+    mock_shell, mock_state, make_target, tmp_path
+):
+    """Construct with a mock state.  Call ``create_full_backup()`` successfully.
+    Verify ``mock_state.record_full_backup()`` was called with correct arguments
+    (target_path, name, timestamp, bucket_level).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # nbd_full_export internal calls
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect("domjobabort").returns(_ok_result())  # finally in nbd_full_export
+    mock_shell.expect("rm -f").returns(_ok_result())  # finally in nbd_full_export
+    # mv (atomic rename)
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    # Spy on state.record_full_backup
+    with patch.object(mock_state, "record_full_backup", wraps=mock_state.record_full_backup) as state_spy:
+        # Side effect: simulate mv creating the final file so stat() works
+        original_run = mock_shell.run
+
+        def spied_run(cmd, timeout):
+            cmd_str = " ".join(cmd)
+            if cmd_str.startswith("mv "):
+                target_file = Path(cmd[-1])
+                target_file.write_bytes(b"\x00" * 65536)
+            return original_run(cmd, timeout)
+
+        with patch.object(mock_shell, "run", side_effect=spied_run):
+            provider = BitmapBackupProvider(mock_shell, state=mock_state)
+            result = provider.create_full_backup(
+                "testvm",
+                snapshot,
+                target,
+                compress=False,
+                bucket_level="weekly",
+            )
+
+    assert result.success is True
+
+    # Verify state.record_full_backup was called exactly once
+    state_spy.assert_called_once()
+
+    # Verify correct arguments
+    call_args = state_spy.call_args
+    assert call_args[0][0] == str(target.path)  # target_path
+    assert call_args[0][1] is not None  # name should be something like "testvm.FULL.20250101.qcow2"
+    assert "testvm.FULL." in call_args[0][1]
+    assert call_args[0][2] == snapshot.timestamp  # timestamp
+    assert call_args[0][3] == "weekly"  # bucket_level
+
+
+def test_create_full_backup_skips_state_when_none(
+    mock_shell, make_target, tmp_path
+):
+    """Construct without state.  Call ``create_full_backup()`` successfully.
+    Verify no crash (state recording is skipped when ``_state is None``).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = _make_snapshot()
+
+    # nbd_full_export internal calls
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("qemu-img convert").returns(_ok_result())
+    mock_shell.expect("domjobabort").returns(_ok_result())  # finally in nbd_full_export
+    mock_shell.expect("rm -f").returns(_ok_result())  # finally in nbd_full_export
+    # mv (atomic rename)
+    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell)  # No state
+        result = provider.create_full_backup(
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
+        )
+
+    assert result.success is True, (
+        "create_full_backup should succeed without state manager"
+    )
+    assert result.bytes_transferred == 65536
+    assert result.snapshot_name == snapshot.name

@@ -9,6 +9,8 @@ Supports four output formats (mirroring btrbk):
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from qsnap.models.results import DeferredSummary
 
 
@@ -62,7 +64,7 @@ def format_output(
     return format_table(rows, columns)
 
 
-def _format_age(age_td) -> str:
+def _format_age(age_td: timedelta) -> str:
     """Format a timedelta as a short human-readable age string."""
     total_seconds = int(age_td.total_seconds())
     if total_seconds >= 86400:

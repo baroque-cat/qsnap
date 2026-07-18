@@ -20,6 +20,7 @@ from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvider
 from tests.mocks.mock_shell import MockShell
+from tests.mocks.mock_state import InMemoryStateManager
 
 
 def test_ibackup_provider_is_abstract():
@@ -58,9 +59,10 @@ def test_bitmap_backup_provider_no_core_inheritance():
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
+        (BitmapBackupProvider, {"shell": MockShell(), "state": InMemoryStateManager()}),
         (MockBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock"],
+    ids=["file_copy", "bitmap", "bitmap_with_state", "mock"],
 )
 def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, init_kwargs):
     """transfer_missing() returns a list whose elements are all BackupResult."""

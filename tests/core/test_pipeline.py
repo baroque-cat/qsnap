@@ -1747,8 +1747,8 @@ def test_post_commit_measurement_fails_graceful(
         f"Expected 'blockcommit itself succeeded' in WARNING, got: "
         f"{[r.message for r in warning_logs]}"
     )
-    # INFO-level "passed" log is also emitted after the WARNING
-    assert "Post-commit chain verification passed" in caplog.text
+    # "passed" is NOT logged when chain_length_after is None (indent fix 2.2.1)
+    assert "Post-commit chain verification passed" not in caplog.text
 
 
 def test_post_commit_skipped_when_pre_commit_unavailable(
@@ -1803,6 +1803,8 @@ def test_post_commit_skipped_when_pre_commit_unavailable(
 
     assert bc_spy.called, "blockcommit should proceed despite measurement failure"
     assert "Pre-commit chain length unavailable" in caplog.text
+    # "passed" is NOT logged when chain_length_before is None (indent fix 2.2.1)
+    assert "Post-commit chain verification passed" not in caplog.text
 
 
 def test_get_chain_length_no_use_base_image_param(
@@ -3183,3 +3185,126 @@ def test_blockcommit_stale_guard_no_short_circuit(
         f"snap_a and snap_b should be blockcommitted, snap_stale skipped; got: {merge_names}"
     )
     assert "snap_stale" not in merge_names, "stale snapshot must be excluded from blockcommit"
+
+
+# ── Dry-Run Pipeline Result Tests ───────────────────────────────────────────
+
+
+def test_dry_run_logs_planned_actions(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run mode: PipelineResult.dry_run is True and planned actions are logged.
+
+    Verifies that running in dry-run mode:
+    - Returns a PipelineResult with dry_run=True.
+    - Logs ``[dry-run] Would create snapshot for VM`` at INFO level.
+    - No mutations (snapshot creation, backup transfer) are executed.
+    """
+    caplog.set_level(logging.INFO)
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snapshot_provider = mock_factory._snapshot_provider
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch.object(
+            snapshot_provider,
+            "create",
+            wraps=snapshot_provider.create,
+        ) as create_spy,
+        patch.object(
+            backup_provider,
+            "transfer_missing",
+            wraps=backup_provider.transfer_missing,
+        ) as transfer_spy,
+    ):
+        result = core.run()
+
+    # PipelineResult.dry_run is True
+    assert result.dry_run is True
+
+    # Planned actions are logged
+    assert "[dry-run]" in caplog.text
+    assert "Would create snapshot for VM" in caplog.text
+
+    # No mutations executed
+    assert not create_spy.called, "snapshot provider create() must NOT be called in dry-run"
+    assert not transfer_spy.called, "backup provider transfer_missing() must NOT be called in dry-run"
+
+    # Pipeline still "succeeds" in dry-run
+    assert result.success is True
+
+
+def test_dry_run_activated_from_cli(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Setting core.dry_run=True causes the pipeline to skip all mutations.
+
+    Verifies that when dry_run is enabled on the Core instance:
+    - ``_create_snapshot()`` returns early before any shell calls.
+    - ``_backup_target()`` skips transfer_missing().
+    - No state mutations (record_snapshot, set_last_allocation) occur.
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snapshot_provider = mock_factory._snapshot_provider
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch.object(
+            snapshot_provider,
+            "create",
+            wraps=snapshot_provider.create,
+        ) as create_spy,
+        patch.object(
+            backup_provider,
+            "transfer_missing",
+            wraps=backup_provider.transfer_missing,
+        ) as transfer_spy,
+        patch.object(
+            mock_state,
+            "record_snapshot",
+            wraps=mock_state.record_snapshot,
+        ) as record_spy,
+        patch.object(
+            mock_state,
+            "set_last_allocation",
+            wraps=mock_state.set_last_allocation,
+        ) as alloc_spy,
+    ):
+        result = core.run()
+
+    assert result.dry_run is True
+    # No snapshot creation
+    assert not create_spy.called
+    # No backup transfer
+    assert not transfer_spy.called
+    # No state mutations
+    assert not record_spy.called, "record_snapshot must not be called in dry-run"
+    assert not alloc_spy.called, "set_last_allocation must not be called in dry-run"
+    assert result.success is True

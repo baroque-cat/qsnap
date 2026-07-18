@@ -28,10 +28,11 @@ from qsnap.models.config import GlobalConfig
 from qsnap.models.results import (
     BackupResult,
     RestoreResult,
+    RetentionResult,
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockBucketFullStrategy, MockConfigFacade
+from tests.mocks import MockBucketFullStrategy, MockConfigFacade, MockRetentionEngine
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
 
@@ -1330,3 +1331,1015 @@ def test_core_imports_from_utils_not_backup_modules():
     assert "qsnap.modules.backup.verification" not in source, (
         "Core must NOT import from qsnap.modules.backup.verification"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Action Audit Trail Tests (core-audit-trail)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── test_actions_cleared_at_run_start ──────────────────────────────────────
+
+
+def test_actions_cleared_at_run_start(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() twice; verify actions from first run don't persist to second run."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result1 = core.run()
+    result2 = core.run()
+
+    assert len(result1.actions) == 1, "First run should have 1 snapshot_create action"
+    assert result1.actions[0].action == "snapshot_create"
+    assert len(result2.actions) == 1, (
+        "Second run should also have exactly 1 action (actions are cleared between runs)"
+    )
+
+
+# ── test_action_appended_on_snapshot_create ────────────────────────────────
+
+
+def test_action_appended_on_snapshot_create(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.snapshot(); verify PipelineResult.actions contains snapshot_create ActionRecord."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.snapshot()
+
+    assert len(result.actions) >= 1
+    snap_actions = [a for a in result.actions if a.action == "snapshot_create"]
+    assert len(snap_actions) == 1, "Should contain exactly one snapshot_create action"
+    assert snap_actions[0].vm_name == "testvm"
+    assert snap_actions[0].size == 65536  # MockSnapshotProvider default
+    assert snap_actions[0].error is None
+
+
+# ── test_action_appended_on_snapshot_delete ────────────────────────────────
+
+
+def test_action_appended_on_snapshot_delete(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() with blockcommit; verify actions contains snapshot_delete ActionRecord."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        disks=["vda"],
+        snapshot_preserve="0h",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with a snapshot so retention has something to remove.
+    snap = SnapshotInfo(
+        name="snap_old",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
+        timestamp=datetime(2025, 1, 1),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            return_value=RetentionResult(keep=[], remove=["snap_old"]),
+        ),
+    ):
+        result = core.run()
+
+    # Should have snapshot_create action (always mode) + snapshot_delete action.
+    delete_actions = [a for a in result.actions if a.action == "snapshot_delete"]
+    assert len(delete_actions) == 1, "Should contain one snapshot_delete action"
+    assert delete_actions[0].vm_name == "testvm"
+    assert delete_actions[0].name == "snap_old"
+
+
+# ── test_action_appended_on_backup_transfer ────────────────────────────────
+
+
+def test_action_appended_on_backup_transfer(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.backup(); verify actions contains backup_transfer ActionRecord."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Need to mock transfer_missing to produce a result with duration for the
+    # ActionRecord.  Default mock already returns success results.
+    result = core.backup()
+
+    transfer_actions = [a for a in result.actions if a.action == "backup_transfer"]
+    assert len(transfer_actions) == 1, "Should contain one backup_transfer action"
+    assert transfer_actions[0].vm_name == "testvm"
+    assert transfer_actions[0].name == "snap1"
+    assert transfer_actions[0].size == 1048576  # MockBackupProvider default
+
+
+# ── test_action_appended_on_full_backup ────────────────────────────────────
+
+
+def test_action_appended_on_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() with FULL backup; verify actions contains backup_full ActionRecord."""
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Configure MockBucketFullStrategy to trigger FULL creation.
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "monthly")
+    )
+
+    # Need to mock qemu-img info and du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="524288 /mnt/backup/testvm\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch("qsnap.core.verify_full_backup", return_value=None):
+        result = core.run()
+
+    full_actions = [a for a in result.actions if a.action == "backup_full"]
+    assert len(full_actions) == 1, "Should contain one backup_full action"
+    assert full_actions[0].vm_name == "testvm"
+    assert full_actions[0].size == 1048576  # MockBackupProvider default
+
+
+# ── test_action_appended_on_backup_delete ──────────────────────────────────
+
+
+def test_action_appended_on_backup_delete(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() with backup retention; verify actions contains backup_delete ActionRecord."""
+    target = make_target(target_preserve="0h")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock backup provider list to return a backup that retention will remove.
+    backup = SnapshotInfo(
+        name="backup1",
+        path=target.path / "backup1.qcow2",
+        timestamp=datetime(2025, 1, 1),
+        allocation=1000,
+    )
+
+    # Also need qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=[backup]),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            return_value=RetentionResult(keep=[], remove=["backup1"]),
+        ),
+    ):
+        result = core.run()
+
+    delete_actions = [a for a in result.actions if a.action == "backup_delete"]
+    assert len(delete_actions) == 1, "Should contain one backup_delete action"
+    assert delete_actions[0].vm_name == "testvm"
+    assert delete_actions[0].name == "backup1"
+
+
+# ── test_error_action_appended_on_failure ──────────────────────────────────
+
+
+def test_error_action_appended_on_failure(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Make a VM step raise an exception; verify actions contains error ActionRecord."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    def raise_error(vm_config):
+        raise RuntimeError("Simulated failure in pipeline")
+
+    with patch.object(
+        mock_factory,
+        "create_snapshot_provider",
+        side_effect=raise_error,
+    ):
+        result = core.run()
+
+    error_actions = [a for a in result.actions if a.action == "error"]
+    assert len(error_actions) == 1, "Should contain exactly one error action"
+    assert error_actions[0].vm_name == "testvm"
+    assert "Simulated failure" in error_actions[0].error or "" in (error_actions[0].error or ""), (
+        "Error message should be captured"
+    )
+    assert result.success is False
+
+
+# ── test_no_actions_in_dry_run_mutations ───────────────────────────────────
+
+
+def test_no_actions_in_dry_run_mutations(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() with dry_run=True; verify actions list is empty (no mutation actions)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    # Mock qemu-img info + du for size estimation (runs even in dry-run).
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    result = core.run()
+
+    assert len(result.actions) == 0, (
+        f"Dry-run should produce no mutation actions, got: {result.actions}"
+    )
+
+
+# ── test_pipeline_result_includes_actions_success ──────────────────────────
+
+
+def test_pipeline_result_includes_actions_success(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run core.run() successfully; verify PipelineResult.actions is a list and is populated."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.run()
+
+    assert isinstance(result.actions, list)
+    assert len(result.actions) > 0, "Actions should be populated after successful run"
+    assert result.success is True
+
+
+# ── test_pipeline_result_includes_error_actions ────────────────────────────
+
+
+def test_pipeline_result_includes_error_actions(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Run with a failing VM; verify PipelineResult.actions contains error ActionRecords."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    def raise_error(vm_config):
+        raise RuntimeError("Simulated failure in pipeline")
+
+    with patch.object(
+        mock_factory,
+        "create_snapshot_provider",
+        side_effect=raise_error,
+    ):
+        result = core.run()
+
+    assert isinstance(result.actions, list)
+    assert len(result.actions) > 0, "Error actions should be populated"
+    assert any(a.action == "error" for a in result.actions), (
+        "Actions should contain error ActionRecord"
+    )
+    assert result.success is False
+
+
+# ── test_backup_failed_warning_with_transfer_failures ───────────────────────
+
+
+def test_backup_failed_warning_with_transfer_failures(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify logger.warning for backup transfer failure is emitted."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    failed_backup = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1.qcow2",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+
+    caplog.set_level(logging.WARNING)
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "transfer_missing",
+        return_value=[failed_backup],
+    ):
+        result = core.run()
+
+    assert isinstance(result, PipelineResult)
+    assert result.results[0].backup_failed is True
+    assert "Backup transfer failed for VM" in caplog.text
+    assert "snapshot(s) failed" in caplog.text
+    assert "snap1" in caplog.text
+    assert "Connection refused" in caplog.text
+
+
+# ── test_no_backup_failed_warning_when_all_succeed ─────────────────────────
+
+
+def test_no_backup_failed_warning_when_all_succeed(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify no backup_failed WARNING when all transfers succeed."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.WARNING)
+
+    result = core.run()
+
+    assert result.results[0].backup_failed is False
+    # No "Backup transfer failed" warning should be logged.
+    backup_failed_warnings = [
+        r.message for r in caplog.records
+        if "Backup transfer failed" in r.message
+    ]
+    assert len(backup_failed_warnings) == 0, (
+        f"No backup_failed warnings expected when all succeed, got: {backup_failed_warnings}"
+    )
+
+
+# ── test_transaction_log_not_written_in_dry_run ────────────────────────────
+
+
+def test_transaction_log_not_written_in_dry_run(
+    tmp_path,
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Set transaction_log config; run in dry-run; verify no transaction log is written."""
+    tx_log = tmp_path / "transaction.log"
+    global_cfg = make_global_config(transaction_log=str(tx_log))
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    result = core.run()
+
+    assert isinstance(result, PipelineResult)
+    assert result.dry_run is True
+    assert not tx_log.exists(), (
+        f"Transaction log should NOT be written in dry-run mode, but found: {tx_log}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     INFO Log Tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── test_snapshot_create_info_log ──────────────────────────────────────────
+
+
+def test_snapshot_create_info_log(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [snapshot] info log is emitted after snapshot creation."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    caplog.set_level(logging.INFO)
+    core.snapshot()
+
+    assert "[snapshot]" in caplog.text
+    assert "created" in caplog.text
+    assert "testvm" in caplog.text
+    assert "65536" in caplog.text, "Log should include allocation size in bytes"
+
+
+# ── test_snapshot_delete_info_log ──────────────────────────────────────────
+
+
+def test_snapshot_delete_info_log(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [blockcommit] info log is emitted after blockcommit."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        disks=["vda"],
+        snapshot_preserve="0h",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap_old",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
+        timestamp=datetime(2025, 1, 1),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            return_value=RetentionResult(keep=[], remove=["snap_old"]),
+        ),
+    ):
+        core.run()
+
+    assert "[blockcommit]" in caplog.text
+    assert "merged" in caplog.text
+    assert "testvm" in caplog.text
+    assert "snap_old" in caplog.text
+
+
+# ── test_backup_transfer_info_log ──────────────────────────────────────────
+
+
+def test_backup_transfer_info_log(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [backup] transfer info log is emitted for each successful transfer."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Mock qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+    core.run()
+
+    # Find the transfer info log line.
+    transfer_lines = [
+        r.message for r in caplog.records
+        if "[backup]" in r.message and "transferred" in r.message
+    ]
+    assert len(transfer_lines) >= 1, (
+        f"Should have at least one backup transfer log line, got: {transfer_lines}"
+    )
+    assert "testvm" in transfer_lines[0]
+    assert "snap1" in transfer_lines[0]
+    assert "MiB/s" in transfer_lines[0]
+    assert "1048576" in transfer_lines[0], "Log should include bytes_transferred"
+
+
+# ── test_full_backup_create_info_log ───────────────────────────────────────
+
+
+def test_full_backup_create_info_log(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [backup] FULL creation info log is emitted for FULL creation."""
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "monthly")
+    )
+
+    # Mock qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="524288 /mnt/backup/testvm\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+    with patch("qsnap.core.verify_full_backup", return_value=None):
+        core.run()
+
+    full_lines = [
+        r.message for r in caplog.records
+        if "[backup]" in r.message and "created FULL" in r.message
+    ]
+    assert len(full_lines) == 1, (
+        f"Should have exactly one FULL creation log line, got: {full_lines}"
+    )
+    assert "testvm" in full_lines[0]
+    assert "FULL" in full_lines[0]
+    assert "monthly" in full_lines[0], "Bucket level should be in the log"
+    assert "1048576" in full_lines[0], "Log should include bytes_transferred"
+
+
+# ── test_backup_delete_info_log ────────────────────────────────────────────
+
+
+def test_backup_delete_info_log(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [delete] info log is emitted for each deleted backup."""
+    target = make_target(target_preserve="0h")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup = SnapshotInfo(
+        name="backup1",
+        path=target.path / "backup1.qcow2",
+        timestamp=datetime(2025, 1, 1),
+        allocation=1000,
+    )
+
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=[backup]),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            return_value=RetentionResult(keep=[], remove=["backup1"]),
+        ),
+    ):
+        core.run()
+
+    delete_lines = [
+        r.message for r in caplog.records
+        if "[delete]" in r.message and "removed backup" in r.message
+    ]
+    assert len(delete_lines) >= 1, (
+        f"Should have at least one backup delete log line, got: {delete_lines}"
+    )
+    assert "testvm" in delete_lines[0]
+    assert "backup1" in delete_lines[0]
+
+
+# ── test_ghost_retention_info_log ──────────────────────────────────────────
+
+
+def test_ghost_retention_info_log(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Verify [delete] ghost-retained info log is emitted for ghost retention."""
+    target = make_target(target_preserve="0h")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc_name = "snap2.qcow2"
+    now = datetime.now()
+
+    # Pre-populate state: FULL with dependent incremental.
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+    ]
+
+    # Mock qemu-img info + du for size estimation.
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"actual-size": 1048576}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("du").returns(
+        ShellResult(
+            success=True,
+            stdout="0 /mnt\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=backups),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            return_value=RetentionResult(keep=[inc_name], remove=[full_name]),
+        ),
+    ):
+        core.run()
+
+    ghost_lines = [
+        r.message for r in caplog.records
+        if "[delete]" in r.message and "ghost-retained" in r.message
+    ]
+    assert len(ghost_lines) >= 1, (
+        f"Should have a ghost-retained log line, got: {ghost_lines}"
+    )
+    assert "testvm" in ghost_lines[0]
+    assert "ghost-retained FULL" in ghost_lines[0]
+    assert "dependent(s) in keep-set" in ghost_lines[0]

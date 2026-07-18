@@ -10,6 +10,7 @@ imports.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 from xml.etree import ElementTree as ET
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -29,6 +31,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
+    ActionRecord,
     BackupResult,
     ChainVerifyResult,
     CheckResult,
@@ -43,11 +46,12 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.retention.time_based import _parse_duration
+from qsnap.retention.time_based import parse_duration
 from qsnap.utils.nbd import is_vm_running, nbd_full_export
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
+from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import verify_full_backup
 
 logger = logging.getLogger(__name__)
@@ -70,7 +74,10 @@ class VMRunResult:
 class PipelineResult:
     """Aggregate pipeline result for all processed VMs."""
 
-    results: list[VMRunResult] = field(default_factory=list)
+    results: list[VMRunResult] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    actions: list[ActionRecord] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    dry_run: bool = False
+    config_path: str | None = None
 
     @property
     def success(self) -> bool:
@@ -102,8 +109,16 @@ class Core:
         self._dry_run = False
         self._preserve_snapshots = False
         self._preserve_backups = False
+        # Action audit trail — accumulated during _run_pipeline(), cleared
+        # at the start of each run (design D1: ephemeral, single-run scope).
+        self._actions: list[ActionRecord] = []
 
     # ── properties ─────────────────────────────────────────────────────
+
+    @property
+    def config(self) -> IConfigFacade:
+        """Public read-only access to the config facade."""
+        return self._config
 
     @property
     def dry_run(self) -> bool:
@@ -480,10 +495,8 @@ class Core:
                 if du_result.success:
                     parts = du_result.stdout.split()
                     if parts:
-                        try:
+                        with contextlib.suppress(ValueError):
                             current_target_size = int(parts[0])
-                        except ValueError:
-                            pass
 
                 lines.append(f"  Backups [{target.path}]:")
                 lines.append(
@@ -636,8 +649,8 @@ class Core:
                 try:
                     warn_count = int(global_cfg.deferred_warn_count)
                     crit_count = int(global_cfg.deferred_crit_count)
-                    warn_age = _parse_duration(global_cfg.deferred_warn_age)
-                    crit_age = _parse_duration(global_cfg.deferred_crit_age)
+                    warn_age = parse_duration(global_cfg.deferred_warn_age)
+                    crit_age = parse_duration(global_cfg.deferred_crit_age)
 
                     if deferred_count >= crit_count or age >= crit_age:
                         deferred_severity = "critical"
@@ -950,10 +963,10 @@ class Core:
         )
         if info_result.success:
             try:
-                chain_data = json.loads(info_result.stdout)
-                if isinstance(chain_data, list):
+                chain_data = cast(list[dict[str, object]], json.loads(info_result.stdout))
+                if isinstance(chain_data, list):  # type: ignore[reportUnnecessaryIsInstance]
                     for item in chain_data:
-                        chain_size += int(item.get("actual-size", 0))
+                        chain_size += int(cast(int, item.get("actual-size", 0)))
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
@@ -1252,6 +1265,9 @@ class Core:
         step_fn: Callable[[VMConfig], bool],
     ) -> PipelineResult:
         """Iterate VMs, call *step_fn* for each, isolate errors."""
+        # Clear the action audit trail at the start of each run
+        # (design D1: ephemeral, single-run scope).
+        self._actions = []
         vms = self._filter_vms(vm_filter)
         results: list[VMRunResult] = []
         for vm in vms:
@@ -1266,6 +1282,15 @@ class Core:
                 )
             except Exception as exc:
                 logger.error("Pipeline failed for VM %s: %s", vm.name, exc)
+                self._actions.append(
+                    ActionRecord(
+                        action="error",
+                        vm_name=vm.name,
+                        name=vm.name,
+                        path=Path(),
+                        error=str(exc),
+                    )
+                )
                 results.append(
                     VMRunResult(
                         vm_name=vm.name,
@@ -1277,7 +1302,34 @@ class Core:
         # Post-pipeline: check deferred operation thresholds (non-fatal)
         self._check_deferred_thresholds()
 
-        return PipelineResult(results=results)
+        # Transaction log (spec: transaction-log/spec.md).
+        # Write one line per ActionRecord if transaction_log is configured.
+        # Skipped in dry-run mode.
+        global_cfg = self._config.get_global()
+        if global_cfg.transaction_log and not self._dry_run:
+            tx_path = Path(global_cfg.transaction_log)
+            for action in self._actions:
+                try:
+                    TransactionWriter.write(tx_path, action)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to write transaction log entry: %s",
+                        exc,
+                    )
+            try:
+                TransactionWriter.write_finished(tx_path)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to write transaction log finished line: %s",
+                    exc,
+                )
+
+        return PipelineResult(
+            results=results,
+            actions=list(self._actions),
+            dry_run=self._dry_run,
+            config_path=str(self._config.config_path),
+        )
 
     def _check_deferred_thresholds(self) -> None:
         """Check deferred blockcommit thresholds across all VMs.
@@ -1295,8 +1347,8 @@ class Core:
         try:
             warn_count = int(global_cfg.deferred_warn_count)
             crit_count = int(global_cfg.deferred_crit_count)
-            warn_age = _parse_duration(global_cfg.deferred_warn_age)
-            crit_age = _parse_duration(global_cfg.deferred_crit_age)
+            warn_age = parse_duration(global_cfg.deferred_warn_age)
+            crit_age = parse_duration(global_cfg.deferred_crit_age)
         except (ValueError, TypeError) as exc:
             logger.warning(
                 "Invalid deferred threshold config: %s — skipping check",
@@ -1791,6 +1843,22 @@ class Core:
                 )
                 self._state.record_snapshot(vm_config.name, info)
                 self._state.set_last_allocation(vm_config.name, result.new_allocation)
+                # Audit trail + btrbk-style INFO log (design D4, D5).
+                self._actions.append(
+                    ActionRecord(
+                        action="snapshot_create",
+                        vm_name=vm_config.name,
+                        name=result.name,
+                        path=result.path,
+                        size=result.new_allocation,
+                    )
+                )
+                logger.info(
+                    "[snapshot] %s: created %s (%d B)",
+                    vm_config.name,
+                    result.name,
+                    result.new_allocation,
+                )
             else:
                 logger.error(
                     "Snapshot creation failed for %s disk %s: %s",
@@ -1883,7 +1951,7 @@ class Core:
             )
 
         try:
-            chain_data = json.loads(result.stdout)
+            chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
         except json.JSONDecodeError as exc:
             return ChainVerifyResult(
                 success=False,
@@ -1891,7 +1959,7 @@ class Core:
                 broken_file=None,
             )
 
-        if not isinstance(chain_data, list) or not chain_data:
+        if not isinstance(chain_data, list) or not chain_data:  # type: ignore[reportUnnecessaryIsInstance]
             return ChainVerifyResult(
                 success=False,
                 error="Empty or invalid backing chain data",
@@ -1901,7 +1969,7 @@ class Core:
         seen_files: set[str] = set()
         for i, item in enumerate(chain_data):
             # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-            image = item.get("image") or item.get("filename", "")
+            image = cast(str, item.get("image") or item.get("filename", ""))
             if not image:
                 return ChainVerifyResult(
                     success=False,
@@ -1934,7 +2002,7 @@ class Core:
                 )
 
             # (b) Check format is qcow2
-            fmt = item.get("format", "")
+            fmt = cast(str, item.get("format", ""))
             if fmt != "qcow2":
                 return ChainVerifyResult(
                     success=False,
@@ -1943,7 +2011,7 @@ class Core:
                 )
 
             # (c) Check backing-filename consistency
-            backing = item.get("backing-filename")
+            backing = cast(str | None, item.get("backing-filename"))
             if backing is not None:
                 backing_path = Path(backing)
                 backing_existence = self._shell.run(
@@ -1962,10 +2030,10 @@ class Core:
                 # entry's image in the chain array.
                 if i + 1 < len(chain_data):
                     # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-                    next_image = chain_data[i + 1].get("image") or chain_data[i + 1].get(
+                    next_image = cast(str, chain_data[i + 1].get("image") or chain_data[i + 1].get(
                         "filename", ""
-                    )
-                    if next_image is not None and str(backing_path) != next_image:
+                    ))
+                    if next_image and str(backing_path) != next_image:
                         return ChainVerifyResult(
                             success=False,
                             error=(
@@ -2008,8 +2076,8 @@ class Core:
             return None
 
         try:
-            chain_data = json.loads(result.stdout)
-            if isinstance(chain_data, list):
+            chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
+            if isinstance(chain_data, list):  # type: ignore[reportUnnecessaryIsInstance]
                 return len(chain_data)
         except json.JSONDecodeError:
             pass
@@ -2127,6 +2195,27 @@ class Core:
             )
             return
 
+        # Blockcommit succeeded — record audit trail + btrbk-style INFO log
+        # (design D4, D5).  Emitted before post-commit verification; if
+        # verification later detects a problem, a separate CRITICAL log
+        # is emitted.
+        merged_names = ", ".join(s.name for s in to_merge)
+        logger.info(
+            "[blockcommit] %s: merged %d snapshot(s) — %s",
+            vm_config.name,
+            len(to_merge),
+            merged_names,
+        )
+        for sn in to_merge:
+            self._actions.append(
+                ActionRecord(
+                    action="snapshot_delete",
+                    vm_name=vm_config.name,
+                    name=sn.name,
+                    path=sn.path,
+                )
+            )
+
         # Post-commit chain verification
         if global_cfg.chain_verify_after_commit:
             if chain_length_before is None:
@@ -2156,16 +2245,17 @@ class Core:
                             ", ".join(str(s.path) for s in to_merge),
                         )
                         return
+                    else:
+                        logger.info(
+                            "Post-commit chain verification passed for VM %s",
+                            vm_config.name,
+                        )
                 else:
                     logger.warning(
                         "Post-commit chain measurement failed for VM %s "
                         "(blockcommit itself succeeded)",
                         vm_config.name,
                     )
-            logger.info(
-                "Post-commit chain verification passed for VM %s",
-                vm_config.name,
-            )
         else:
             logger.info(
                 "chain_verify_after_commit is disabled — "
@@ -2246,7 +2336,6 @@ class Core:
                 return results
 
             # Check if any failure is retryable
-            retryable_errors = [r for r in failed if r.error and is_retryable(r.error)]
             non_retryable = [r for r in failed if r.error and not is_retryable(r.error)]
 
             # If any non-retryable error, fail immediately
@@ -2350,10 +2439,8 @@ class Core:
         if du_result.success:
             parts = du_result.stdout.split()
             if parts:
-                try:
+                with contextlib.suppress(ValueError):
                     current_target_size = int(parts[0])
-                except ValueError:
-                    pass
 
         logger.info(
             "Size estimate for VM %s target %s: "
@@ -2489,12 +2576,21 @@ class Core:
                                 most_recent.timestamp,
                                 bucket_level,
                             )
+                            # Audit trail + btrbk-style INFO log (design D4, D5).
+                            self._actions.append(
+                                ActionRecord(
+                                    action="backup_full",
+                                    vm_name=vm_config.name,
+                                    name=full_name,
+                                    path=full_result.target_path,
+                                    size=full_result.bytes_transferred,
+                                )
+                            )
                             logger.info(
-                                "Created %s-bucket FULL backup for VM %s target %s: %s",
-                                bucket_level,
+                                "[backup] %s: created FULL %s (%d B)",
                                 vm_config.name,
-                                target.path,
                                 full_name,
+                                full_result.bytes_transferred,
                             )
                     else:
                         logger.warning(
@@ -2515,8 +2611,50 @@ class Core:
                 snapshots,
                 full_verify_before_rebase=full_verify_mode,
             )
-            if any(not r.success for r in results):
+            failed = [r for r in results if not r.success]
+            if failed:
                 backup_failed = True
+                failure_details = "; ".join(
+                    f"{r.snapshot_name}: {r.error}" for r in failed
+                )
+                logger.warning(
+                    "Backup transfer failed for VM %s target %s: "
+                    "%d snapshot(s) failed — %s",
+                    vm_config.name,
+                    target.path,
+                    len(failed),
+                    failure_details,
+                )
+
+            # Audit trail + btrbk-style INFO log for successful transfers
+            # (design D4, D5).
+            for r in results:
+                if r.success:
+                    speed = (
+                        r.bytes_transferred / (1024 * 1024) / r.duration
+                        if r.duration > 0
+                        else 0.0
+                    )
+                    self._actions.append(
+                        ActionRecord(
+                            action="backup_transfer",
+                            vm_name=vm_config.name,
+                            name=r.snapshot_name,
+                            path=r.target_path,
+                            size=r.bytes_transferred,
+                            duration=r.duration,
+                        )
+                    )
+                    logger.info(
+                        "[backup] %s: transferred %s → %s "
+                        "(%d B in %.1fs, %.1f MiB/s)",
+                        vm_config.name,
+                        r.snapshot_name,
+                        target.path,
+                        r.bytes_transferred,
+                        r.duration,
+                        speed,
+                    )
 
         # Backup retention + cleanup
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)
@@ -2613,8 +2751,9 @@ class Core:
                 ghosted = [d for d in dependents if d in keep_set]
                 if ghosted:
                     logger.info(
-                        "Ghost retention: FULL %s has %d dependent(s) "
-                        "in keep-set — skipping deletion",
+                        "[delete] %s: ghost-retained FULL %s "
+                        "(%d dependent(s) in keep-set)",
+                        vm_config.name,
                         backup.name,
                         len(ghosted),
                     )
@@ -2659,7 +2798,20 @@ class Core:
                 # No dependents in keep-set AND M1 (and optionally M2) passed
                 # — delete FULL
                 provider.delete(backup)
-                logger.info("Deleted FULL backup: %s", backup.name)
+                logger.info(
+                    "[delete] %s: removed backup %s from %s",
+                    vm_config.name,
+                    backup.name,
+                    target.path,
+                )
+                self._actions.append(
+                    ActionRecord(
+                        action="backup_delete",
+                        vm_name=vm_config.name,
+                        name=backup.name,
+                        path=backup.path,
+                    )
+                )
                 # Clean up state: remove FullBackupInfo from persistent state
                 # to prevent phantom FULLs from blocking future FULL creation.
                 self._state.remove_full_backup(str(target.path), backup.name)
@@ -2680,11 +2832,35 @@ class Core:
                             str(target.path), dep_name, backup.name
                         )
                         logger.info(
-                            "Cascade-deleted orphaned incremental: %s",
+                            "[delete] %s: removed backup %s from %s",
+                            vm_config.name,
                             dep_name,
+                            target.path,
+                        )
+                        self._actions.append(
+                            ActionRecord(
+                                action="backup_delete",
+                                vm_name=vm_config.name,
+                                name=dep_name,
+                                path=target.path / f"{dep_name}.qcow2",
+                            )
                         )
             else:
                 provider.delete(backup)
+                logger.info(
+                    "[delete] %s: removed backup %s from %s",
+                    vm_config.name,
+                    backup.name,
+                    target.path,
+                )
+                self._actions.append(
+                    ActionRecord(
+                        action="backup_delete",
+                        vm_name=vm_config.name,
+                        name=backup.name,
+                        path=backup.path,
+                    )
+                )
 
     def _generate_snapshot_name(self, vm_config: VMConfig, disk: str) -> str:
         """Generate a unique snapshot name using the configured timestamp format.

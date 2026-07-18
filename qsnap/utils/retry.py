@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 
-
 # Error patterns that indicate a transient (retryable) failure.
 _RETRYABLE_PATTERNS = [
     "connection refused",
@@ -47,11 +46,7 @@ def is_retryable(error: str) -> bool:
             return False
 
     # Check retryable patterns.
-    for pattern in _RETRYABLE_PATTERNS:
-        if pattern in lower:
-            return True
-
-    return False
+    return any(pattern in lower for pattern in _RETRYABLE_PATTERNS)
 
 
 def compute_backoff(base_seconds: int, attempt: int) -> float:

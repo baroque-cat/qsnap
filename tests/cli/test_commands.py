@@ -29,10 +29,11 @@ from qsnap.cli.commands import (
     handle_snapshot,
     handle_stats,
 )
-from qsnap.cli.errors import EXIT_GENERIC, EXIT_SUCCESS
+from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
 from qsnap.models.config import GlobalConfig, VMConfig
 from qsnap.models.results import (
+    ActionRecord,
     CheckResult,
     DeferredSummary,
     RestoreResult,
@@ -415,6 +416,94 @@ def test_timer_invocation_logs_schedule_at_info(caplog):
     assert any("TIMER SCHEDULE" in r.getMessage() for r in info_records)
 
 
+# ── summary table printed via _format_pipeline_result ────────────────────
+
+
+def test_summary_printed_after_successful_run(capsys):
+    """After a successful pipeline run, the btrbk-style summary table is
+    printed to stdout via format_summary()."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[VMRunResult(vm_name="vm1", success=True)],
+        actions=[
+            ActionRecord(
+                action="snapshot_create",
+                vm_name="vm1",
+                name="snap_a",
+                path=Path("/var/lib/libvirt/snapshots/vm1/snap_a.qcow2"),
+                size=1048576,
+            ),
+        ],
+        dry_run=False,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    # Per-VM OK line
+    assert "vm1: OK" in captured.out
+    # Summary table header
+    assert "qsnap Backup Summary" in captured.out
+    # Action row visible
+    assert "snap_a" in captured.out
+    assert "+++" in captured.out
+
+
+def test_summary_printed_after_run_with_failures(capsys):
+    """After a pipeline run with backup failures (exit code 10), the
+    summary table is still printed and error actions are marked with !!!."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm1", success=True, backup_failed=True),
+        ],
+        actions=[
+            ActionRecord(
+                action="error",
+                vm_name="vm1",
+                name="backup_target",
+                path=Path("/mnt/backup/vm1"),
+                error="rsync failed: permission denied",
+            ),
+        ],
+        dry_run=False,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    # backup_failed → EXIT_BACKUP_ABORT (10)
+    assert result == EXIT_BACKUP_ABORT
+    captured = capsys.readouterr()
+    # VM itself succeeded but backup failed
+    assert "vm1: OK" in captured.out
+    # Summary table still printed
+    assert "qsnap Backup Summary" in captured.out
+    # Error marked with !!!
+    assert "!!!" in captured.out
+    assert "permission denied" in captured.out
+
+
+def test_summary_printed_after_dry_run(capsys):
+    """After a dry run, the summary includes the 'Dryrun: YES' header
+    and the dry-run disclaimer footer."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[VMRunResult(vm_name="vm1", success=True)],
+        actions=[],
+        dry_run=True,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "qsnap Backup Summary" in captured.out
+    assert "Dryrun: YES" in captured.out
+    assert "NOTE: Dryrun was active" in captured.out
+    assert "none of the operations above were actually executed" in captured.out
+
+
 # ── list deferred subcommand dispatch tests ─────────────────────────────
 
 
@@ -556,8 +645,8 @@ def test_list_config_shows_off_for_default_deep_verify(capsys):
     Also verifies the "Global safety settings" header is printed.
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig(
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig(
         auto_cleanup=True,
         chain_verify_before_commit=True,
         chain_verify_after_commit=True,
@@ -591,8 +680,8 @@ def test_list_config_shows_on_for_enabled_deep_verify(capsys):
     and snapshot_deep_verify when both are enabled.
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig(
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig(
         auto_cleanup=True,
         chain_verify_before_commit=True,
         chain_verify_after_commit=True,
@@ -628,8 +717,8 @@ def test_check_output_shows_disabled_safety_features(capsys):
     disabled in the global config and deep_check_schedule is "off".
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig(
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig(
         auto_cleanup=False,
         chain_verify_before_commit=False,
         chain_verify_after_commit=False,
@@ -654,8 +743,8 @@ def test_check_deep_all_images_pass_exit_zero(capsys):
     CheckResults have status="ok".
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig()
     mock_core.get_deep_check_schedule_info.return_value = "OFF"
     mock_core.check.return_value = {
         "vm1": CheckResult(vm_name="vm1", status="ok"),
@@ -674,8 +763,8 @@ def test_check_deep_corruption_detected_exit_zero_warning(capsys):
     not critical errors.
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig()
     mock_core.get_deep_check_schedule_info.return_value = "OFF"
     mock_core.check.return_value = {
         "vm1": CheckResult(
@@ -697,8 +786,8 @@ def test_check_deep_image_unreadable_exit_one(capsys):
     CheckResult has status="broken" — unreadable images are critical.
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig()
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig()
     mock_core.get_deep_check_schedule_info.return_value = "OFF"
     mock_core.check.return_value = {
         "vm1": CheckResult(
@@ -719,8 +808,8 @@ def test_check_output_displays_deep_check_schedule_overdue(capsys):
     "OVERDUE" when the schedule is overdue.
     """
     mock_core = _make_mock_core()
-    mock_core._config = Mock()
-    mock_core._config.get_global.return_value = GlobalConfig(
+    mock_core.config = Mock()
+    mock_core.config.get_global.return_value = GlobalConfig(
         deep_check_schedule="weekly",
     )
     mock_core.check.return_value = {}

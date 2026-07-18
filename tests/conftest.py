@@ -182,6 +182,7 @@ def make_global_config():
         full_verify_before_rebase: str = "metadata",
         full_verify_before_delete: str = "check",
         deep_check_targets: bool = False,
+        transaction_log: str | None = None,
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -207,6 +208,7 @@ def make_global_config():
             full_verify_before_rebase=full_verify_before_rebase,
             full_verify_before_delete=full_verify_before_delete,
             deep_check_targets=deep_check_targets,
+            transaction_log=transaction_log,
         )
 
     return _make

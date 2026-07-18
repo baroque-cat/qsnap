@@ -162,6 +162,11 @@ class FileCopyBackupProvider(IBackupProvider):
             elapsed = time.monotonic() - start_time
 
             if not transfer_result.success:
+                logger.warning(
+                    "rsync failed for %s: %s",
+                    snapshot.name,
+                    transfer_result.error,
+                )
                 results.append(
                     BackupResult(
                         success=False,
@@ -251,6 +256,11 @@ class FileCopyBackupProvider(IBackupProvider):
                     ]
                     rebase_result = self._shell.run(rebase_cmd, timeout=60)
                     if not rebase_result.success:
+                        logger.warning(
+                            "rebase to FULL failed for %s: %s",
+                            snapshot.name,
+                            rebase_result.error,
+                        )
                         results.append(
                             BackupResult(
                                 success=False,
@@ -296,6 +306,11 @@ class FileCopyBackupProvider(IBackupProvider):
                                 ]
                                 rebase_result = self._shell.run(rebase_cmd, timeout=60)
                                 if not rebase_result.success:
+                                    logger.warning(
+                                        "rebase failed for %s: %s",
+                                        snapshot.name,
+                                        rebase_result.error,
+                                    )
                                     results.append(
                                         BackupResult(
                                             success=False,
@@ -308,6 +323,11 @@ class FileCopyBackupProvider(IBackupProvider):
                                     )
                                     continue
                         except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                            logger.warning(
+                                "backing info parse failed for %s: %s",
+                                snapshot.name,
+                                exc,
+                            )
                             results.append(
                                 BackupResult(
                                     success=False,
@@ -329,6 +349,11 @@ class FileCopyBackupProvider(IBackupProvider):
                 expected_hash=snapshot.content_hash,
             )
             if verify_error is not None:
+                logger.warning(
+                    "backup verification failed for %s: %s",
+                    snapshot.name,
+                    verify_error,
+                )
                 results.append(
                     BackupResult(
                         success=False,
@@ -349,6 +374,7 @@ class FileCopyBackupProvider(IBackupProvider):
                     target_path=target_file,
                     bytes_transferred=bytes_transferred,
                     error=None,
+                    duration=elapsed,
                 )
             )
 

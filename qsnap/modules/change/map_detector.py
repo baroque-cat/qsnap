@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from typing import cast
 
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.shell import IShell
@@ -105,15 +106,15 @@ class MapChangeDetector(IChangeDetector):
 
         # Step 4: Compute hash of allocated regions
         try:
-            regions = json.loads(map_result.stdout)
-            if not isinstance(regions, list):
+            regions = cast(list[dict[str, object]], json.loads(map_result.stdout))
+            if not isinstance(regions, list):  # type: ignore[reportUnnecessaryIsInstance]
                 return ChangeResult(
                     changed=True,
                     last_allocation=last_alloc,
                     current_allocation=0,
                 )
             # Build a deterministic hash from sorted (offset, length) tuples.
-            offsets = sorted((int(r.get("offset", 0)), int(r.get("length", 0))) for r in regions)
+            offsets = sorted((int(cast(int, r.get("offset", 0))), int(cast(int, r.get("length", 0)))) for r in regions)
             map_hash = int(
                 hashlib.sha256(repr(offsets).encode()).hexdigest(),
                 16,

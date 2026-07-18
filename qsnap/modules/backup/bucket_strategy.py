@@ -103,17 +103,14 @@ class BucketFullStrategy(IBucketFullStrategy):
         """
         # Handle backward compatibility: old callers may pass None or a
         # single FullBackupInfo instead of a list.
-        if all_fulls is None:
+        if all_fulls is None:  # type: ignore[reportUnnecessaryComparison]
             all_fulls = []
         elif isinstance(all_fulls, FullBackupInfo):
             all_fulls = [all_fulls]
 
         # Determine which buckets to check.
         f_buckets = self._f_anchor_buckets(policy)
-        if f_buckets:
-            buckets_to_check = f_buckets
-        else:
-            buckets_to_check = self._active_buckets(policy)
+        buckets_to_check = f_buckets or self._active_buckets(policy)
 
         if not buckets_to_check:
             return False, ""

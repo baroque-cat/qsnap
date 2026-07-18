@@ -88,6 +88,12 @@ class GlobalConfig:
     #   verifies FULL and incremental backup files on backup target
     #   directories (not just snapshot files).
     deep_check_targets: bool = False
+    # ``transaction_log``: optional absolute path to a btrbk-compatible
+    #   transaction log file.  When ``None`` (default), no transaction
+    #   log is written.  When set, one line per ``ActionRecord`` is
+    #   appended in ``localtime type status target_url source_url parent_url``
+    #   format.  Skipped in dry-run mode.
+    transaction_log: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +177,7 @@ class VMConfig:
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False
     snapshot_deep_verify: bool = False
-    targets: list[TargetConfig] = field(default_factory=list)
+    targets: list[TargetConfig] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
     def __post_init__(self) -> None:
         # Defensive copy: replace the list with a shallow copy so that

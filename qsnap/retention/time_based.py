@@ -32,7 +32,7 @@ _WEEKDAY_MAP: dict[str, int] = {
 }
 
 
-def _parse_duration(text: str) -> timedelta:
+def parse_duration(text: str) -> timedelta:
     """Parse a duration string like ``"6h"``, ``"2d"`` into a ``timedelta``.
 
     ``"all"`` returns ``timedelta.max`` (effectively infinite).
@@ -109,7 +109,7 @@ class TimeBasedRetention(IRetentionEngine):
             if sorted_items:
                 keep_names.add(sorted_items[-1].name)
         else:
-            min_delta = _parse_duration(policy.preserve_min)
+            min_delta = parse_duration(policy.preserve_min)
             threshold = now - min_delta
             keep_names.update(it.name for it in sorted_items if it.timestamp >= threshold)
 
@@ -180,7 +180,7 @@ class TimeBasedRetention(IRetentionEngine):
         elif policy.preserve_min == "latest":
             pm_items = [sorted_items[-1]] if sorted_items else []
         else:
-            min_delta = _parse_duration(policy.preserve_min)
+            min_delta = parse_duration(policy.preserve_min)
             threshold = now - min_delta
             pm_items = [it for it in sorted_items if it.timestamp >= threshold]
 

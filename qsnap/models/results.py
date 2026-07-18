@@ -53,6 +53,7 @@ class BackupResult:
     target_path: Path
     bytes_transferred: int
     error: str | None
+    duration: float = 0.0
 
 
 # ── Commit (blockcommit) ─────────────────────────────────────────────────
@@ -146,8 +147,8 @@ class RetentionResult:
     should be preserved or removed, respectively.
     """
 
-    keep: list[str] = field(default_factory=list)
-    remove: list[str] = field(default_factory=list)
+    keep: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    remove: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
 
 # ── Deferred operations ──────────────────────────────────────────────────
@@ -222,7 +223,7 @@ class CheckResult:
 
     vm_name: str
     status: str
-    broken_snapshots: list[str] = field(default_factory=list)
+    broken_snapshots: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     deferred_count: int = 0
     deferred_reason: str | None = None
     deferred_age: str | None = None
@@ -281,7 +282,36 @@ class StateCheckResult:
 
     vm_name: str
     status: str  # "ok" or combination of flags joined by ":"
-    phantom_snapshots: list[str] = field(default_factory=list)
-    phantom_fulls: list[str] = field(default_factory=list)
-    stale_deps: list[str] = field(default_factory=list)
-    corrupt_files: list[str] = field(default_factory=list)
+    phantom_snapshots: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    phantom_fulls: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    stale_deps: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    corrupt_files: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+
+
+# ── Action audit trail ───────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ActionRecord:
+    """A single pipeline action for the audit trail / summary table.
+
+    Accumulated by Core during ``_run_pipeline()`` in ``self._actions``
+    and attached to :class:`PipelineResult` at the end of the run.
+    Consumed by the CLI summary formatter
+    (:func:`qsnap.cli.summary.format_summary`) and the optional
+    transaction log writer (:class:`qsnap.utils.transaction.TransactionWriter`).
+
+    ``action`` is one of ``"snapshot_create"``, ``"snapshot_delete"``,
+    ``"backup_transfer"``, ``"backup_full"``, ``"backup_delete"``,
+    ``"error"``.  ``size`` is bytes transferred/created (0 for
+    deletions).  ``duration`` is seconds elapsed (0.0 when not measured).
+    ``error`` is non-None iff ``action == "error"``.
+    """
+
+    action: str
+    vm_name: str
+    name: str
+    path: Path
+    size: int = 0
+    duration: float = 0.0
+    error: str | None = None

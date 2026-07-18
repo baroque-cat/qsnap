@@ -107,7 +107,9 @@ def test_factory_selects_bitmap_provider_for_bitmap_mode(
     BitmapBackupProvider when libvirt version >= 6.0.
 
     Verifies that the factory gates construction on ``is_libvirt_new_enough``
-    before returning BitmapBackupProvider.
+    before returning BitmapBackupProvider, and that the factory injects its
+    ``_state`` reference into the provider so the provider can persist
+    cross-run data.
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -128,6 +130,7 @@ def test_factory_selects_bitmap_provider_for_bitmap_mode(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
+    assert provider._state is mock_state
     mock_check.assert_called_once_with(mock_shell)
 
 
@@ -236,7 +239,8 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
     """bitmap mode + libvirt >= 6.0 → BitmapBackupProvider.
 
     When ``is_libvirt_new_enough`` returns True, the factory constructs
-    a ``BitmapBackupProvider`` for the bitmap incremental mode.
+    a ``BitmapBackupProvider`` for the bitmap incremental mode and injects
+    the factory's ``_state`` reference into the provider.
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
@@ -248,7 +252,36 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
+    assert provider._state is mock_state
     mock_check.assert_called_once_with(mock_shell)
+
+
+def test_factory_passes_state_to_bitmap_provider(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """DefaultFactory.create_backup_provider() injects its ``_state`` into
+    BitmapBackupProvider so the provider can persist cross-run data.
+
+    This test isolates the state-injection concern: it patches
+    ``is_libvirt_new_enough`` to return True and then verifies the
+    returned provider holds a reference to the factory's state manager.
+    """
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+
+    with patch(
+        "qsnap.factory.default.is_libvirt_new_enough",
+        return_value=True,
+    ):
+        provider = factory.create_backup_provider(make_vm_config(), target)
+
+    assert isinstance(provider, BitmapBackupProvider)
+    assert provider._state is mock_state, (
+        "Factory must inject its IStateManager into BitmapBackupProvider"
+    )
 
 
 def test_factory_non_bitmap_mode_no_version_check(

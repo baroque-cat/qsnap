@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import cast
 
 from qsnap.interfaces.shell import IShell
 from qsnap.utils.hash import file_sha256
@@ -79,7 +80,7 @@ def verify_full_backup(
         return f"verification failed: qemu-img info returned {error_detail}"
 
     try:
-        info = json.loads(info_result.stdout)
+        info = cast(dict[str, object], json.loads(info_result.stdout))
     except json.JSONDecodeError as exc:
         return f"verification failed: cannot parse qemu-img info JSON: {exc}"
 
@@ -89,14 +90,15 @@ def verify_full_backup(
         return f"verification failed: expected format qcow2, got {target_format}"
 
     # (b) corrupt-bit detection — check incompatible-features for "corrupt"
-    format_specific = info.get("format-specific")
-    if isinstance(format_specific, dict):
+    format_specific_raw = info.get("format-specific")
+    if isinstance(format_specific_raw, dict):
+        format_specific = cast(dict[str, object], format_specific_raw)
         data = format_specific.get("data", {})
         if isinstance(data, dict):
-            incompatible = data.get("incompatible-features", [])
+            incompatible = data.get("incompatible-features", [])  # type: ignore[reportUnknownVariableType]
             if isinstance(incompatible, list):
-                for feature in incompatible:
-                    if isinstance(feature, dict) and feature.get("name") == "corrupt":
+                for feature in incompatible:  # type: ignore[reportUnknownVariableType]
+                    if isinstance(feature, dict) and feature.get("name") == "corrupt":  # type: ignore[reportUnknownMemberType]
                         return (
                             "verification failed: FULL backup has corrupt bit set "
                             "— file is damaged"
@@ -109,7 +111,7 @@ def verify_full_backup(
 
     # (c) optional virtual-size match
     if expected_virtual_size is not None:
-        target_vsize = int(info.get("virtual-size", 0))
+        target_vsize = int(cast(int, info.get("virtual-size", 0)))
         if target_vsize != expected_virtual_size:
             return (
                 f"verification failed: virtual-size mismatch "

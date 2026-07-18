@@ -20,9 +20,10 @@ from qsnap.cli.format import (
     format_deferred_table,
     format_output,
 )
+from qsnap.cli.summary import format_summary
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import CheckResult, ScheduleResult, SnapshotInfo, StateCheckResult
+from qsnap.models.results import CheckResult, SnapshotInfo, StateCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -170,34 +171,24 @@ def _stats_to_rows(
     return rows
 
 
-def _print_schedule(schedule: dict[str, ScheduleResult]) -> None:
-    """Print retention schedule (keep/remove) per VM to stdout."""
-    for vm_name, result in schedule.items():
-        print(f"=== {vm_name} ===")
-        keep_str = ", ".join(result.snapshots.keep) if result.snapshots.keep else "(none)"
-        remove_str = ", ".join(result.snapshots.remove) if result.snapshots.remove else "(none)"
-        print("  Snapshots:")
-        print(f"    Keep:   {keep_str}")
-        print(f"    Remove: {remove_str}")
-        for target_path, backup_ret in result.backups.items():
-            print(f"  Backups [{target_path}]:")
-            b_keep = ", ".join(backup_ret.keep) if backup_ret.keep else "(none)"
-            b_remove = ", ".join(backup_ret.remove) if backup_ret.remove else "(none)"
-            print(f"    Keep:   {b_keep}")
-            print(f"    Remove: {b_remove}")
-
-
 def _format_pipeline_result(result: PipelineResult) -> int:
     """Print pipeline results and return exit code.
 
     Returns ``EXIT_BACKUP_ABORT`` (10) if any VM had a backup failure,
     even if the pipeline itself succeeded.
+
+    After computing the exit code, prints a btrbk-style summary table
+    to stdout via :func:`qsnap.cli.summary.format_summary`.
     """
     for r in result.results:
         if r.success:
             print(f"  {r.vm_name}: OK")
         else:
             print(f"  {r.vm_name}: FAILED - {r.error or 'unknown error'}")
+
+    # Print btrbk-style summary table (spec: cli-interface/backup-summary).
+    print(format_summary(result))
+
     if not result.success:
         return EXIT_GENERIC
     if any(r.backup_failed for r in result.results):
@@ -290,7 +281,7 @@ def handle_list(core: Core, args: Namespace) -> int:
             "snapshot_deep_verify",
         ]
         # Print global safety settings header
-        global_cfg = core._config.get_global()
+        global_cfg = core.config.get_global()
         print("Global safety settings:")
         print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
         print(
@@ -347,7 +338,7 @@ def handle_check(core: Core, args: Namespace) -> int:
     data = core.check(vm_filter, deep=deep)
 
     # Print safety configuration summary
-    global_cfg = core._config.get_global()
+    global_cfg = core.config.get_global()
     print("Safety configuration:")
     print(f"  auto_cleanup: {'ON' if global_cfg.auto_cleanup else 'OFF'}")
     print(
@@ -408,10 +399,7 @@ def handle_list_deferred(core: Core, args: Namespace) -> int:
     fmt: str = getattr(args, "format", "table")
     summaries = core.list_deferred(vm_filter)
 
-    if fmt == "raw":
-        output = format_deferred_raw(summaries)
-    else:
-        output = format_deferred_table(summaries)
+    output = format_deferred_raw(summaries) if fmt == "raw" else format_deferred_table(summaries)
 
     if output:
         print(output)
@@ -452,7 +440,7 @@ def handle_fork(core: Core, args: Namespace) -> int:
         print(f"Forked '{snapshot_name}' to VM '{new_vm_name}'")
         print(f"  Disk: {result.restored_path}")
         if add_to_config:
-            print(f"  Added to config: {core._config.config_path}")
+            print(f"  Added to config: {core.config.config_path}")
         return EXIT_SUCCESS
     else:
         print(f"Error: {result.error}", file=sys.stderr)
@@ -482,7 +470,7 @@ def handle_deploy(core: Core, args: Namespace) -> int:
         print(f"Deployed '{backup_name}' to VM '{new_vm_name}'")
         print(f"  Disk: {result.restored_path}")
         if add_to_config:
-            print(f"  Added to config: {core._config.config_path}")
+            print(f"  Added to config: {core.config.config_path}")
         return EXIT_SUCCESS
     else:
         print(f"Error: {result.error}", file=sys.stderr)

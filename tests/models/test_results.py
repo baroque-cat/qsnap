@@ -15,6 +15,7 @@ import pytest
 
 from qsnap.core import VMRunResult
 from qsnap.models.results import (
+    ActionRecord,
     BackupResult,
     ChangeResult,
     CommitResult,
@@ -275,3 +276,78 @@ def test_deferred_blockcommit_explicit_last_warned_at():
         last_warned_at=warned,
     )
     assert item.last_warned_at == warned
+
+
+# ── ActionRecord ──────────────────────────────────────────────────────────
+
+
+def test_action_record_is_immutable():
+    """ActionRecord is a frozen dataclass; mutation raises FrozenInstanceError."""
+    record = ActionRecord(
+        action="snapshot_create",
+        vm_name="testvm",
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+    )
+
+    # Verify the dataclass is declared frozen.
+    assert record.__dataclass_params__.frozen is True
+
+    # Verify setting any attribute raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.action = "snapshot_delete"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.vm_name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.path = Path("/other")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.size = 999
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.duration = 5.0
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.error = "mutated"
+
+
+def test_action_record_defaults_zero():
+    """Constructing ActionRecord with only required fields gives zero/none defaults."""
+    record = ActionRecord(
+        action="backup_transfer",
+        vm_name="testvm",
+        name="backup-snap1.qcow2",
+        path=Path("/mnt/backup/backup-snap1.qcow2"),
+    )
+
+    # Verify explicit fields.
+    assert record.action == "backup_transfer"
+    assert record.vm_name == "testvm"
+    assert record.name == "backup-snap1.qcow2"
+    assert record.path == Path("/mnt/backup/backup-snap1.qcow2")
+
+    # Verify default values.
+    assert record.size == 0
+    assert record.duration == 0.0
+    assert record.error is None
+
+
+def test_action_record_handles_unicode_error():
+    """ActionRecord with a Unicode error string does not crash on repr/str."""
+    record = ActionRecord(
+        action="error",
+        vm_name="testvm",
+        name="",
+        path=Path(""),
+        error="失败 — disk full 💾",
+    )
+
+    # Verify the error is stored correctly.
+    assert record.error == "失败 — disk full 💾"
+
+    # Verify repr and str do not crash (they must work without exception).
+    r = repr(record)
+    s = str(record)
+    assert isinstance(r, str)
+    assert isinstance(s, str)
+    # Sanity: the unicode error text is present in the repr.
+    assert "失败 — disk full 💾" in r

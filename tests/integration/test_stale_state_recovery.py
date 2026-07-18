@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from qsnap.models.config import TargetConfig
+from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -45,6 +45,7 @@ def test_stale_state_snapshot_removed_when_file_missing(test_vm):
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     # Step 1: Create a sentinel file in the target directory so that
@@ -79,12 +80,13 @@ def test_stale_state_snapshot_removed_when_file_missing(test_vm):
         compress=False,
         verify="off",
     )
+    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     # Step 4: Call transfer_missing with the stale snapshot.
     # The stale snapshot is not on disk, so the provider should detect
     # this, remove it from state, and skip the transfer.
     results = provider.transfer_missing(
-        vm_config=None,  # type: ignore[arg-type]  # not used for stale check
+        vm_config=vm_config,
         target=target,
         snapshots=[stale_snapshot],
     )
@@ -127,6 +129,7 @@ def test_stale_state_crash_recovery_simulated(test_vm):
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     # Ensure the target directory has at least one file to avoid the
@@ -169,9 +172,10 @@ def test_stale_state_crash_recovery_simulated(test_vm):
         compress=False,
         verify="off",
     )
+    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider.transfer_missing(
-        vm_config=None,  # type: ignore[arg-type]
+        vm_config=vm_config,
         target=target,
         snapshots=[stale_snapshot, valid_snapshot],
     )
