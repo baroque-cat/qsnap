@@ -587,9 +587,7 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
                     returncode=1,
                     error="error: internal error: cannot acquire state change lock",
                 )
-            return ShellResult(
-                success=True, stdout="", stderr="", returncode=0, error=None
-            )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
         return original_run(cmd, timeout=timeout, check=check)
 
     with (
@@ -608,8 +606,7 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     assert result.new_allocation == 1048576
     assert result.error is None
     assert len(virsh_attempts) == 2, (
-        f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), "
-        f"got {len(virsh_attempts)}"
+        f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), got {len(virsh_attempts)}"
     )
 
 
@@ -653,8 +650,7 @@ def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config
     assert result.success is False
     assert result.error == lock_error
     assert len(virsh_attempts) == 3, (
-        f"Expected 3 virsh attempts (1 initial + 2 retries), "
-        f"got {len(virsh_attempts)}"
+        f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
     )
 
 
@@ -696,8 +692,7 @@ def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
         if "snapshot-create-as" in " ".join(c.args[0])
     ]
     assert len(virsh_cmds) == 1, (
-        f"Non-lock errors must NOT be retried; "
-        f"expected 1 virsh call, got {len(virsh_cmds)}"
+        f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_cmds)}"
     )
 
 
@@ -737,14 +732,9 @@ def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config)
                     stdout="",
                     stderr="",
                     returncode=-1,
-                    error=(
-                        "Command timed out after 120s: "
-                        "cannot acquire state change lock"
-                    ),
+                    error=("Command timed out after 120s: cannot acquire state change lock"),
                 )
-            return ShellResult(
-                success=True, stdout="", stderr="", returncode=0, error=None
-            )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
         return original_run(cmd, timeout=timeout, check=check)
 
     with (
@@ -1229,9 +1219,7 @@ def test_create_snapshot_uses_hash_from_utils():
     from qsnap.modules.snapshot import external
     from qsnap.utils.hash import file_sha256 as hash_fn
 
-    assert hasattr(external, "file_sha256"), (
-        "external.py module must import file_sha256"
-    )
+    assert hasattr(external, "file_sha256"), "external.py module must import file_sha256"
     assert external.file_sha256 is hash_fn, (
         "external.file_sha256 must be the same function as qsnap.utils.hash.file_sha256"
     )

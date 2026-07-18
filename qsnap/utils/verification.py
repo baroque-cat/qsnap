@@ -10,11 +10,16 @@ boundaries, so they live in ``qsnap.utils`` rather than under
 
 Verification levels (``TargetConfig.verify``):
 - ``"off"``: no verification.
-- ``"metadata"``: ``qemu-img info`` consistency check (format, virtual-size,
-  actual-size tolerance).
+- ``"metadata"``: ``qemu-img info`` consistency check (format,
+  virtual-size).  ``actual-size`` is intentionally NOT checked — it is
+  unreliable for live sources because the running VM writes data to the
+  active snapshot layer between transfer and verification.
 - ``"hash"``: SHA-256 hash comparison (computed at snapshot creation time,
   stored in ``SnapshotInfo.content_hash``, validated on target after transfer).
-- ``"full"``: metadata check + ``qemu-img compare -q`` byte-level comparison.
+- ``"full"``: metadata check + ``qemu-img compare -q --force-share``
+  byte-level comparison.  ``--force-share`` avoids lock errors on live
+  sources; a WARNING is logged because results may be unreliable if the
+  VM writes during the comparison.
 """
 
 from __future__ import annotations
@@ -100,13 +105,11 @@ def verify_full_backup(
                 for feature in incompatible:  # type: ignore[reportUnknownVariableType]
                     if isinstance(feature, dict) and feature.get("name") == "corrupt":  # type: ignore[reportUnknownMemberType]
                         return (
-                            "verification failed: FULL backup has corrupt bit set "
-                            "— file is damaged"
+                            "verification failed: FULL backup has corrupt bit set — file is damaged"
                         )
                     if isinstance(feature, str) and feature == "corrupt":
                         return (
-                            "verification failed: FULL backup has corrupt bit set "
-                            "— file is damaged"
+                            "verification failed: FULL backup has corrupt bit set — file is damaged"
                         )
 
     # (c) optional virtual-size match
@@ -170,10 +173,7 @@ def verify_full_backup(
                     "(source may be locked by running VM); "
                     "consider verify='metadata' or 'check'"
                 )
-            return (
-                "verification failed: content comparison mismatch: "
-                f"{error_detail}"
-            )
+            return f"verification failed: content comparison mismatch: {error_detail}"
 
     return None
 
@@ -186,6 +186,13 @@ def verify_backup(
     expected_hash: str | None = None,
 ) -> str | None:
     """Verify a backup file against its source.
+
+    Metadata verification (always runs unless ``verify_mode == "off"``)
+    checks: (a) target format is ``"qcow2"``, (b) target ``virtual-size``
+    matches the source exactly.  ``actual-size`` is intentionally NOT
+    checked — it is unreliable for live sources because the running VM
+    writes data to the active snapshot layer between transfer completion
+    and verification (design D1).
 
     Args:
         shell: IShell instance for running qemu-img commands.
@@ -252,16 +259,12 @@ def verify_backup(
     if source_vsize != target_vsize:
         return "verification failed: virtual-size mismatch"
 
-    # (c) actual-size tolerance (±10% for metadata overhead)
-    source_asize = int(source_info.get("actual-size", 0))
-    target_asize = int(target_info.get("actual-size", 0))
-    if source_asize > 0:
-        tolerance = source_asize * 0.1
-        if abs(target_asize - source_asize) > tolerance:
-            return (
-                f"verification failed: actual-size out of tolerance "
-                f"(source={source_asize}, target={target_asize})"
-            )
+    # NOTE: actual-size is intentionally NOT checked.  It is unreliable
+    # for live sources because the running VM writes data to the active
+    # snapshot layer between transfer completion and verification,
+    # causing the source's actual-size to grow beyond any reasonable
+    # tolerance (design D1).  Format + virtual-size are sufficient for
+    # metadata-level verification.
 
     # ── Hash verification (mid-level between metadata and full) ──────
 
@@ -277,19 +280,22 @@ def verify_backup(
 
     if verify_mode == "full":
         # Warn: if the source is a live VM active layer, qemu-img compare
-        # may fail with a lock error (compare is a data-copying operation
-        # that does NOT use --force-share — design D5).
+        # with --force-share opens the image in shared mode — the
+        # comparison may produce false mismatches if the VM writes
+        # during the comparison.  --force-share is used to avoid hard
+        # lock errors (design D5); a potential false mismatch is better
+        # than no verification at all.
         logger.warning(
-            "Full verification (qemu-img compare) on source %s — "
-            "if this is a live VM active layer, the compare may fail "
-            "with a lock error; consider verify='metadata' or 'hash' "
-            "for running VMs",
+            "verify=full on running VM active layer %s — "
+            "results may be unreliable, consider verify='metadata' "
+            "or verify='hash'",
             source_path,
         )
         compare_cmd = [
             "qemu-img",
             "compare",
             "-q",
+            "--force-share",
             str(source_path),
             str(target_path),
         ]
@@ -301,9 +307,8 @@ def verify_backup(
             error_detail = compare_result.error or compare_result.stderr or ""
             if "lock" in error_detail.lower() or "shared" in error_detail.lower():
                 return (
-                    "verification failed: data comparison failed "
-                    "(source may be locked by running VM); "
-                    "consider verify='metadata' or 'hash'"
+                    "verification failed: lock conflict — "
+                    "use verify='metadata' or verify='hash' for live sources"
                 )
             return f"verification failed: data comparison mismatch: {error_detail}"
 

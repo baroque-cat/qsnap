@@ -160,9 +160,7 @@ def test_stale_state_crash_recovery_simulated(test_vm):
 
     # Verify both are in state before the test.
     snapshots_before = state.get_snapshots(vm_name)
-    assert len(snapshots_before) == 2, (
-        f"Expected 2 snapshots in state, got {len(snapshots_before)}"
-    )
+    assert len(snapshots_before) == 2, f"Expected 2 snapshots in state, got {len(snapshots_before)}"
 
     # Step 2: Create provider and call transfer_missing.
     provider = FileCopyBackupProvider(shell, state=state)
@@ -187,20 +185,17 @@ def test_stale_state_crash_recovery_simulated(test_vm):
         f"got {len(snapshots_after)}: {[s.name for s in snapshots_after]}"
     )
     assert snapshots_after[0].name == valid_snapshot.name, (
-        f"Expected valid snapshot {valid_snapshot.name} to remain, "
-        f"got {snapshots_after[0].name}"
+        f"Expected valid snapshot {valid_snapshot.name} to remain, got {snapshots_after[0].name}"
     )
 
     # Step 4: Verify the valid snapshot was transferred.
     transferred_names = {r.snapshot_name for r in results if r.success}
     assert valid_snapshot.name in transferred_names, (
-        f"Valid snapshot should have been transferred. "
-        f"Transferred: {transferred_names}"
+        f"Valid snapshot should have been transferred. Transferred: {transferred_names}"
     )
 
     # Step 5: Verify no result was produced for the stale snapshot.
     stale_results = [r for r in results if r.snapshot_name == stale_snapshot.name]
     assert len(stale_results) == 0, (
-        f"No backup result should be produced for stale snapshot, "
-        f"got {len(stale_results)}"
+        f"No backup result should be produced for stale snapshot, got {len(stale_results)}"
     )

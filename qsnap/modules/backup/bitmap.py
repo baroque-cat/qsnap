@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -56,6 +57,30 @@ class BitmapBackupProvider(IBackupProvider):
         self._state = state
 
     # ── IBackupProvider implementation ────────────────────────────────
+
+    def _cleanup_partial_file(self, target_file: Path) -> None:
+        """Best-effort deletion of a partially-transferred file.
+
+        Called after a transfer or verification failure to remove the
+        partial target file so retention cleanup does not find it and
+        log a misleading ``[delete] removed backup`` message (design D2).
+        Failures are logged but never propagated — the caller is already
+        in a failure path.
+        """
+        try:
+            result = self._shell.run(["rm", "-f", str(target_file)], timeout=10)
+            if not result.success:
+                logger.warning(
+                    "Failed to delete partial backup file %s: %s",
+                    target_file,
+                    result.error,
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logger.warning(
+                "Failed to delete partial backup file %s: %s",
+                target_file,
+                exc,
+            )
 
     def transfer_missing(
         self,
@@ -91,10 +116,33 @@ class BitmapBackupProvider(IBackupProvider):
 
             target_file = target.path / f"{snapshot.name}.qcow2"
             socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
-            checkpoint_name = f"qsnap-{target_hash}-{snapshot.name}"
 
             # Determine prior checkpoint for incremental export.
             prior = prior_checkpoints[-1] if prior_checkpoints else None
+
+            # Checkpoint-only creation when a FULL already exists in state
+            # but no prior checkpoint is recorded (design D4).  The bucket
+            # strategy's ``create_full_backup()`` already produced a FULL
+            # with all data at this point in time; the checkpoint serves
+            # only as the baseline for the next incremental run.  Creating
+            # it without a data transfer avoids a redundant full NBD export.
+            #
+            # Guards:
+            # - ``prior is None``: only when no prior checkpoint exists.
+            # - ``self._state is not None``: fall through to full NBD
+            #   export when state is unavailable (design D4.3).
+            # - Snapshots already on target are skipped by the
+            #   ``existing_names`` check above (design D4.4).
+            if prior is None and self._state is not None:
+                fulls = self._state.get_full_backups(str(target.path))
+                if fulls:
+                    self._create_checkpoint_only(vm_config.name, target_hash, snapshot.name)
+                    logger.info(
+                        "Created checkpoint qsnap-%s-%s without transfer (FULL exists in state)",
+                        target_hash,
+                        snapshot.name,
+                    )
+                    continue
 
             # Step 1: Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
@@ -146,14 +194,21 @@ class BitmapBackupProvider(IBackupProvider):
                     "convert",
                     "-O",
                     "qcow2",
-                    nbd_uri,
-                    str(target_file),
                 ]
+                # Compression: -c compresses the output qcow2 (zlib
+                # per-cluster), matching FULL backup compression (D7).
+                if target.compress:
+                    convert_cmd.append("-c")
+                convert_cmd.extend([nbd_uri, str(target_file)])
                 start_time = time.monotonic()
                 convert_result = self._shell.run(convert_cmd, timeout=600)
                 elapsed = time.monotonic() - start_time
                 if not convert_result.success:
-                    # Preserve checkpoint for retry.
+                    # Preserve checkpoint for retry.  Delete the partial
+                    # target file so retention cleanup does not find it
+                    # and log a misleading ``[delete] removed backup``
+                    # message (design D2).
+                    self._cleanup_partial_file(target_file)
                     results.append(
                         BackupResult(
                             success=False,
@@ -174,6 +229,10 @@ class BitmapBackupProvider(IBackupProvider):
                     target.verify,
                 )
                 if verify_error is not None:
+                    # Delete the partially-transferred file so retention
+                    # cleanup does not find it and log a misleading
+                    # ``[delete] removed backup`` message (design D2).
+                    self._cleanup_partial_file(target_file)
                     results.append(
                         BackupResult(
                             success=False,
@@ -206,22 +265,7 @@ class BitmapBackupProvider(IBackupProvider):
                         )
 
                 # Step 7: Create new checkpoint for next incremental run.
-                create_cmd = [
-                    "virsh",
-                    "checkpoint-create-as",
-                    "--domain",
-                    vm_config.name,
-                    "--name",
-                    checkpoint_name,
-                ]
-                create_result = self._shell.run(create_cmd, timeout=120)
-                if not create_result.success:
-                    logger.warning(
-                        "Failed to create checkpoint %s for VM %s: %s",
-                        checkpoint_name,
-                        vm_config.name,
-                        create_result.error,
-                    )
+                self._create_checkpoint_only(vm_config.name, target_hash, snapshot.name)
 
                 # Get file size for bytes_transferred.
                 try:
@@ -258,8 +302,7 @@ class BitmapBackupProvider(IBackupProvider):
                 abort_result = self._shell.run(abort_cmd, timeout=30)
                 if not abort_result.success:
                     logger.warning(
-                        "virsh domjobabort failed for VM %s (job may have "
-                        "already terminated): %s",
+                        "virsh domjobabort failed for VM %s (job may have already terminated): %s",
                         vm_config.name,
                         abort_result.error,
                     )
@@ -436,6 +479,38 @@ class BitmapBackupProvider(IBackupProvider):
         """Return qsnap checkpoints matching *target_hash*."""
         prefix = f"qsnap-{target_hash}-"
         return [cp for cp in self.list_checkpoints(vm_name) if cp.startswith(prefix)]
+
+    def _create_checkpoint_only(self, vm_name: str, target_hash: str, snapshot_name: str) -> bool:
+        """Create a libvirt checkpoint without a data transfer.
+
+        Used in two places (DRY): (1) the checkpoint-only path when a
+        FULL already exists in state (design D4), and (2) Step 7 after a
+        successful incremental transfer.  The checkpoint serves as the
+        baseline for the next incremental run.
+
+        Returns ``True`` on success, ``False`` on failure (logged as
+        WARNING; callers continue regardless — checkpoint creation is
+        not fatal to the current transfer).
+        """
+        checkpoint_name = f"qsnap-{target_hash}-{snapshot_name}"
+        create_cmd = [
+            "virsh",
+            "checkpoint-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            checkpoint_name,
+        ]
+        create_result = self._shell.run(create_cmd, timeout=120)
+        if not create_result.success:
+            logger.warning(
+                "Failed to create checkpoint %s for VM %s: %s",
+                checkpoint_name,
+                vm_name,
+                create_result.error,
+            )
+            return False
+        return True
 
     @staticmethod
     def _target_hash(target_path: str) -> str:

@@ -92,16 +92,16 @@ def e2e_vm():
 
     # Write a minimal qsnap TOML config referencing the test VM.
     config_path.write_text(
-        f'[global]\n'
+        f"[global]\n"
         f'state_dir = "{tmpdir / "state"}"\n'
-        f'\n'
-        f'[[vm]]\n'
+        f"\n"
+        f"[[vm]]\n"
         f'name = "{vm_name}"\n'
         f'snapshot_dir = "{snapshot_dir}"\n'
-        f'\n'
-        f'  [[vm.target]]\n'
+        f"\n"
+        f"  [[vm.target]]\n"
         f'  path = "{target_dir}"\n'
-        f'  incremental = true\n'
+        f"  incremental = true\n"
     )
 
     try:

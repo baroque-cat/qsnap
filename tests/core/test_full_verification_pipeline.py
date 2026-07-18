@@ -80,7 +80,7 @@ def _setup_cleanup_backups_context(
     )
 
     # Record incremental dependencies
-    for dep in (dep_names or []):
+    for dep in dep_names or []:
         mock_state.record_incremental_dependency(str(target_cfg.path), dep, full_name)
 
     return core, vm, target_cfg
@@ -126,16 +126,12 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy:
+    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called, "verify_full_backup should be called"
     assert verify_spy.call_args[0][2] == "hash", "verify_mode should be 'hash'"
-    assert "source_path" in verify_spy.call_args[1], (
-        "source_path should be passed for hash mode"
-    )
+    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for hash mode"
     assert verify_spy.call_args[1]["source_path"] == snap.path, (
         "source_path should be the source snapshot's path"
     )
@@ -169,13 +165,14 @@ def test_full_created_m1_passes_recorded_in_state(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy, patch.object(
-        mock_state,
-        "record_full_backup",
-        wraps=mock_state.record_full_backup,
-    ) as record_spy:
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called, "verify_full_backup should be called"
@@ -218,14 +215,17 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-    ), patch.object(
-        mock_state,
-        "record_full_backup",
-        wraps=mock_state.record_full_backup,
-    ) as record_spy:
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
         core._backup_target(vm, target, [snap])
 
     assert not record_spy.called, "record_full_backup should NOT be called when verification fails"
@@ -265,14 +265,17 @@ def test_full_created_m1_fails_not_qcow2_deleted(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: expected format qcow2, got raw",
-    ), patch.object(
-        mock_state,
-        "record_full_backup",
-        wraps=mock_state.record_full_backup,
-    ) as record_spy:
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: expected format qcow2, got raw",
+        ),
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
         core._backup_target(vm, target, [snap])
 
     assert not record_spy.called, "record_full_backup should NOT be called on verify failure"
@@ -341,16 +344,15 @@ def test_cleanup_backups_m1_passes_full_deleted(
         remove=[full_name],
     )
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy, patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
-        core._cleanup_backups(
-            vm, target, [full_info, inc1_info, inc2_info], retention
-        )
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
+        core._cleanup_backups(vm, target, [full_info, inc1_info, inc2_info], retention)
 
     # M1 verification was called for the FULL
     assert verify_spy.called, "M1 verification should be called"
@@ -406,14 +408,17 @@ def test_cleanup_backups_m1_fails_cascade_blocked(
 
     caplog.set_level(logging.CRITICAL)
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
     # delete() should NOT be called — cascade is blocked
@@ -462,14 +467,17 @@ def test_cleanup_backups_m1_fails_no_dependents_still_blocked(
 
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: expected format qcow2, got raw",
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: expected format qcow2, got raw",
+        ),
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
     assert not delete_spy.called, (
@@ -572,16 +580,12 @@ def test_full_verify_hash_match_success(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy:
+    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called
     assert verify_spy.call_args[0][2] == "hash", "verify_mode should be 'hash'"
-    assert "source_path" in verify_spy.call_args[1], (
-        "source_path should be passed for hash mode"
-    )
+    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for hash mode"
     assert verify_spy.call_args[1]["source_path"] == snap.path, (
         "source_path should be the source snapshot's path"
     )
@@ -683,10 +687,9 @@ def test_full_backup_verified_before_state_recording(
         call_order.append("record")
         return orig_record(*args, **kwargs)
 
-    with patch(
-        "qsnap.core.verify_full_backup", side_effect=track_verify
-    ), patch.object(
-        mock_state, "record_full_backup", side_effect=track_record
+    with (
+        patch("qsnap.core.verify_full_backup", side_effect=track_verify),
+        patch.object(mock_state, "record_full_backup", side_effect=track_record),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -727,14 +730,17 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: qemu-img check found 3 errors",
-    ), patch.object(
-        mock_state,
-        "record_full_backup",
-        wraps=mock_state.record_full_backup,
-    ) as record_spy:
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: qemu-img check found 3 errors",
+        ),
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
         result = core._backup_target(vm, target, [snap])
 
     assert not record_spy.called, "record_full_backup should NOT be called"
@@ -775,13 +781,14 @@ def test_first_backup_creates_full_with_verification(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
-    with patch.object(
-        mock_factory._backup_provider,
-        "create_full_backup",
-        wraps=mock_factory._backup_provider.create_full_backup,
-    ) as full_spy, patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy:
+    with (
+        patch.object(
+            mock_factory._backup_provider,
+            "create_full_backup",
+            wraps=mock_factory._backup_provider.create_full_backup,
+        ) as full_spy,
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+    ):
         core._backup_target(vm, target, [snap])
 
     assert full_spy.called, "create_full_backup should be called on first backup"
@@ -834,14 +841,14 @@ def test_new_weekly_creates_full_with_verification(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
 
-    with patch.object(
-        mock_factory._backup_provider,
-        "create_full_backup",
-        wraps=mock_factory._backup_provider.create_full_backup,
-    ) as full_spy, patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy, patch(
-        "qsnap.core.os.path.exists", return_value=True
+    with (
+        patch.object(
+            mock_factory._backup_provider,
+            "create_full_backup",
+            wraps=mock_factory._backup_provider.create_full_backup,
+        ) as full_spy,
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+        patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -893,13 +900,14 @@ def test_cleanup_proceeds_on_m1_pass(
 
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
     assert delete_spy.called, "delete should be called when M1 passes"
@@ -946,16 +954,19 @@ def test_cleanup_blocked_on_m1_fail(
 
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        side_effect=lambda shell, path, mode, **kw: (
-            "verification failed: qemu-img info returned error" if mode == "metadata" else None
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            side_effect=lambda shell, path, mode, **kw: (
+                "verification failed: qemu-img info returned error" if mode == "metadata" else None
+            ),
         ),
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
     assert not delete_spy.called, "delete should be blocked when M1 fails"
@@ -1007,17 +1018,18 @@ def test_cascade_deletion_blocked_on_corrupt_full(
 
     caplog.set_level(logging.CRITICAL)
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
-        core._cleanup_backups(
-            vm, target, [full_info], retention
-        )
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
+        core._cleanup_backups(vm, target, [full_info], retention)
 
     # Nothing should be deleted — cascade is blocked
     assert not delete_spy.called, (
@@ -1077,19 +1089,22 @@ def test_orphaned_incrementals_cascade_deleted(
     # Only FULL is explicitly in remove; incremental is implicitly orphaned
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ), patch.object(
-        mock_factory._backup_provider,
-        "delete",
-        wraps=mock_factory._backup_provider.delete,
-    ) as delete_spy:
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_factory._backup_provider,
+            "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info, inc1_info], retention)
 
     # Both FULL and orphaned incremental should be deleted
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
     assert full_name in deleted_names, f"FULL {full_name} should be deleted"
-    assert "inc1.qcow2" in deleted_names, "Orphaned incremental inc1.qcow2 should be cascade-deleted"
+    assert "inc1.qcow2" in deleted_names, (
+        "Orphaned incremental inc1.qcow2 should be cascade-deleted"
+    )
     assert delete_spy.call_count == 2, (
         f"FULL + 1 dependent = 2 deletions, got {delete_spy.call_count}"
     )
@@ -1133,23 +1148,19 @@ def test_phantom_full_detected_removed_from_state(
         "monthly",
     )
 
-    with patch.object(
-        mock_state,
-        "remove_full_backup",
-        wraps=mock_state.remove_full_backup,
-    ) as remove_spy, patch(
-        "qsnap.core.os.path.exists", return_value=False
-    ), patch(
-        "qsnap.core.verify_full_backup", return_value=None
+    with (
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        patch("qsnap.core.os.path.exists", return_value=False),
+        patch("qsnap.core.verify_full_backup", return_value=None),
     ):
         core._backup_target(vm, target, [snap])
 
-    assert remove_spy.called, (
-        "remove_full_backup should be called for phantom FULL"
-    )
-    assert remove_spy.call_args[0] == (
-        str(target.path), phantom_full_name
-    ), (
+    assert remove_spy.called, "remove_full_backup should be called for phantom FULL"
+    assert remove_spy.call_args[0] == (str(target.path), phantom_full_name), (
         f"remove_full_backup called incorrectly: {remove_spy.call_args[0]}"
     )
 
@@ -1189,12 +1200,13 @@ def test_all_fulls_exist_no_phantom_cleanup(
         "daily",
     )
 
-    with patch.object(
-        mock_state,
-        "remove_full_backup",
-        wraps=mock_state.remove_full_backup,
-    ) as remove_spy, patch(
-        "qsnap.core.os.path.exists", return_value=True
+    with (
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -1245,18 +1257,17 @@ def test_full_deleted_fullbackupinfo_removed_from_state(
 
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ), patch.object(
-        mock_state,
-        "remove_full_backup",
-        wraps=mock_state.remove_full_backup,
-    ) as remove_spy:
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+    ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
-    assert remove_spy.called, (
-        "remove_full_backup should be called after FULL is deleted"
-    )
+    assert remove_spy.called, "remove_full_backup should be called after FULL is deleted"
     assert remove_spy.call_args[0] == (str(target.path), full_name), (
         f"remove_full_backup called with wrong args: {remove_spy.call_args[0]}"
     )
@@ -1308,23 +1319,20 @@ def test_incremental_deleted_dependency_removed_from_state(
     # Only FULL is in remove set; inc1 is implicitly orphaned (cascade)
     retention = RetentionResult(keep=[], remove=[full_name])
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ), patch.object(
-        mock_state,
-        "remove_incremental_dependency",
-        wraps=mock_state.remove_incremental_dependency,
-    ) as remove_spy:
-        core._cleanup_backups(
-            vm, target, [full_info, inc1_info], retention
-        )
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_state,
+            "remove_incremental_dependency",
+            wraps=mock_state.remove_incremental_dependency,
+        ) as remove_spy,
+    ):
+        core._cleanup_backups(vm, target, [full_info, inc1_info], retention)
 
     assert remove_spy.called, (
         "remove_incremental_dependency should be called for cascade-deleted incremental"
     )
-    assert remove_spy.call_args[0] == (
-        str(target.path), "inc1.qcow2", full_name
-    ), (
+    assert remove_spy.call_args[0] == (str(target.path), "inc1.qcow2", full_name), (
         f"remove_incremental_dependency called with wrong args: {remove_spy.call_args[0]}"
     )
 
@@ -1368,9 +1376,7 @@ def test_hash_mode_passes_source_path_to_verify(
     # Configure strategy to trigger FULL creation
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
-    with patch(
-        "qsnap.core.verify_full_backup", return_value=None
-    ) as verify_spy:
+    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called, "verify_full_backup should be called"

@@ -114,7 +114,10 @@ class MapChangeDetector(IChangeDetector):
                     current_allocation=0,
                 )
             # Build a deterministic hash from sorted (offset, length) tuples.
-            offsets = sorted((int(cast(int, r.get("offset", 0))), int(cast(int, r.get("length", 0)))) for r in regions)
+            offsets = sorted(
+                (int(cast(int, r.get("offset", 0))), int(cast(int, r.get("length", 0))))
+                for r in regions
+            )
             map_hash = int(
                 hashlib.sha256(repr(offsets).encode()).hexdigest(),
                 16,

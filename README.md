@@ -8,7 +8,7 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 
 - **External snapshots** — disk-only, no-metadata snapshots via `virsh snapshot-create-as`
 - **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode)
-- **Incremental backups** — file-copy or NBD bitmap-based backup to remote targets
+- **Incremental backups** — NBD bitmap-based (default) or file-copy (rsync) backup to remote targets, with compression support in both modes
 - **Periodic full backups** — standalone qcow2 via `qemu-img convert`, with optional compression
 - **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced before cascade-deletion
 - **Incremental backup verification** — four tiers: `off`, `metadata`, `hash` (SHA-256), or `full` (`qemu-img compare`)
@@ -176,11 +176,11 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 |---|---|---|---|
 | `path` | string | **required** | Directory where backup qcow2 files are stored |
 | `incremental` | bool | `true` | Whether to do incremental backups (file-copy with backing chain) |
-| `incremental_mode` | string | `"file-copy"` | Backup method: `"file-copy"` or `"nbd-bitmap"` |
+| `incremental_mode` | string | `"bitmap"` | Backup method: `"bitmap"` (NBD dirty-block extraction, default) or `"file-copy"` (rsync whole-file copy). The factory automatically falls back to `"file-copy"` when libvirt < 6.0 |
 | `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
-| `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"` |
-| `compress` | bool | `true` | Compress full backups with zlib. Inherits from global → VM → target |
+| `verify` | string | mode-dependent | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Effective default is `"hash"` for file-copy mode, `"metadata"` for bitmap mode (resolved by ConfigFacade). Explicit value takes precedence |
+| `compress` | bool | `true` | Compress backups with zlib. Applies to FULL backups (`qemu-img convert -c`), NBD incrementals (`-c` flag), and rsync incrementals (`--compress` transfer-level flag). Inherits from global → VM → target |
 | `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is created as a FULL by the bucket-driven mechanism in `Core._backup_target()` (not via `transfer_missing()`) |
 
 ## Retention Policy Guide
@@ -341,9 +341,17 @@ This mechanism is used by **both** backup providers:
 | Provider | FULL Backup Method | Notes |
 |---|---|---|
 | `FileCopyBackupProvider` (`incremental_mode = "file-copy"`) | NBD for running VMs, direct `qemu-img convert` for stopped | Logs WARNING if `compress = true` and NBD is used (NBD path doesn't support `-c`) |
-| `BitmapBackupProvider` (`incremental_mode = "nbd-bitmap"`) | NBD full export (no checkpoint) | Previously raised `NotImplementedError` on bucket boundaries — now supported. No checkpoint is created or deleted during FULL creation; checkpoint lifecycle remains exclusively in `transfer_missing()`. |
+| `BitmapBackupProvider` (`incremental_mode = "bitmap"`) | NBD full export (no checkpoint) | Previously raised `NotImplementedError` on bucket boundaries — now supported. No checkpoint is created or deleted during FULL creation; checkpoint lifecycle remains exclusively in `transfer_missing()`. |
 
 The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
+
+### Bitmap Mode (NBD Incremental Backups)
+
+When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model for incremental transfers via `virsh backup-begin` with checkpoint-based dirty-block tracking. This produces standalone qcow2 files (no backing chain) that are easier to restore.
+
+**Fixed first-run behavior:** On the first bitmap run, the bucket strategy creates a FULL via `create_full_backup()` (which does not create a checkpoint). Then `transfer_missing()` detects that no prior checkpoint exists. Instead of performing a redundant full NBD export, it checks the state manager for existing FULLs. If a FULL exists, it creates a checkpoint via `virsh checkpoint-create-as` **without a data transfer** — the FULL already contains all data at this point in time, and the checkpoint serves only as the baseline for the next incremental run. Subsequent runs use `virsh backup-begin --incremental <checkpoint>` to export only dirty blocks.
+
+This eliminates the previous double-FULL bug where the first run produced two full NBD exports (one from the bucket strategy, one from `transfer_missing()`).
 
 ### `compress` Trade-off
 
@@ -368,9 +376,22 @@ qsnap offers four verification tiers for incremental backups, configured per tar
 | Tier | Description | Overhead | When to use |
 |---|---|---|---|
 | `"off"` | No verification after backup | None | When target is trusted and speed is critical |
-| `"metadata"` | Compare qcow2 metadata: format, virtual size, actual size (tolerance) | Low | Default. Catches format mismatches and size corruption |
-| `"hash"` | Compute SHA-256 of the qcow2 file at snapshot creation, compare after transfer | Medium (hash at creation + hash at target) | Detects silent bit-rot or transfer corruption |
-| `"full"` | Metadata check + `qemu-img compare` against the source | High (reads entire source and target) | Maximum integrity, detects all corruption |
+| `"metadata"` | Compare qcow2 metadata: format and virtual-size (actual-size is NOT checked — unreliable for live sources) | Low | Default for bitmap mode. Catches format mismatches and size corruption |
+| `"hash"` | Compute SHA-256 of the qcow2 file at snapshot creation, compare after transfer | Medium (hash at creation + hash at target) | Default for file-copy mode. Detects silent bit-rot or transfer corruption. NOT supported in bitmap mode (NBD-converted qcow2 has different internal structure) |
+| `"full"` | Metadata check + `qemu-img compare -q --force-share` against the source | High (reads entire source and target) | Maximum integrity, detects all corruption. `--force-share` avoids lock errors on live sources; a WARNING is logged because results may be unreliable if the VM writes during comparison |
+
+### Mode-Dependent Default
+
+The effective `verify` default depends on `incremental_mode` (resolved by `ConfigFacade`, not by the dataclass field default):
+
+- **`"file-copy"` mode** → `"hash"` (SHA-256 is race-condition-immune and has negligible overhead for small incrementals)
+- **`"bitmap"` mode** → `"metadata"` (hash is unsupported for NBD-converted qcow2)
+
+When the user explicitly sets `verify`, the explicit value takes precedence.
+
+### Bitmap Mode + `verify="hash"` Limitation
+
+`verify="hash"` is NOT supported in bitmap (NBD) mode because NBD-converted qcow2 files have different internal structure than the source snapshot — their SHA-256 digests will never match. If configured together, ConfigFacade logs a WARNING and automatically downgrades `verify` to `"metadata"`. Use `verify="full"` for content-level verification in bitmap mode.
 
 ### How `hash` Verification Works
 
@@ -384,6 +405,16 @@ qsnap offers four verification tiers for incremental backups, configured per tar
 - **Home host with USB drive** — `"metadata"` is sufficient; the transfer is local and fast
 - **Server with network target** — `"hash"` provides integrity without the overhead of `qemu-img compare`
 - **Compliance/audit** — `"full"` gives maximum assurance at the cost of reading both files
+
+### Migration from rsync to NBD
+
+Starting with this version, `incremental_mode` defaults to `"bitmap"` (NBD) instead of `"file-copy"` (rsync). The transition is graceful:
+
+- **Existing rsync backups remain valid** — they stay on the target and are managed by retention alongside new NBD backups.
+- **New NBD backups coexist as standalone files** — NBD incrementals are standalone qcow2 files (no backing chain), while existing rsync incrementals use the backing chain. Both types are listed and retained together.
+- **No state migration needed** — no `IStateManager` schema changes.
+- **Automatic fallback** — if libvirt < 6.0, the factory automatically falls back to `FileCopyBackupProvider` (rsync mode). Old systems are unaffected.
+- **Keep rsync mode** — users who want to stay on rsync can explicitly set `incremental_mode = "file-copy"` in their target config.
 
 ## FULL Backup Verification
 
@@ -425,7 +456,7 @@ qsnap adds the `--force-share` flag to `qemu-img` commands that operate on files
 | `qemu-img check` | **Yes** | Read-only consistency check; safe to share |
 | `qemu-img rebase -u` | **Yes** | Unsafe rebase only changes metadata (no data copy); safe to share |
 | `qemu-img convert` | **No** | Data-copying operation; `--force-share` would corrupt the output if the source is being written to |
-| `qemu-img compare` | **No** | Data-copying read of both files; `--force-share` may produce inconsistent results on a live source |
+| `qemu-img compare` | **Yes** (in `verify_backup` full mode) | `--force-share` is added to avoid hard lock errors on live sources. A WARNING is logged because results may be unreliable if the VM writes during comparison. A potential false mismatch is better than no verification |
 | `qemu-img commit` | **No** | Data-merging operation; `--force-share` is not applicable |
 
 ### Where `--force-share` Is Applied
@@ -438,7 +469,7 @@ qsnap applies `--force-share` on these metadata-only calls when the file may be 
 - `Core._deep_check_file()` — `qemu-img check` when the file may be the active layer
 - `Core._verify_backing_chain()` / `Core._get_chain_length()` — `qemu-img info --backing-chain` (already had it)
 - `Core.fork()` — `qemu-img info --backing-chain` for chain-size estimation
-- `verify_backup()` — source-side `qemu-img info` (source may be active layer). `qemu-img compare` (full verify) does NOT get `--force-share`; a WARNING is logged instead advising that `verify=full` on a running VM's active layer may produce unreliable results.
+- `verify_backup()` — source-side `qemu-img info` (source may be active layer). `qemu-img compare` (full verify) now uses `--force-share` to avoid lock errors on live sources; a WARNING is logged advising that `verify=full` on a running VM's active layer may produce unreliable results.
 - `verify_full_backup()` — M3 (`qemu-img compare` in `"hash"` mode) uses `--force-share` to safely compare source snapshot content (which may be the active layer of a running VM) against the FULL backup. This is safe because qemu-img compare reads both files read-only and `--force-share` allows shared read access to the active layer.
 
 ## Restore

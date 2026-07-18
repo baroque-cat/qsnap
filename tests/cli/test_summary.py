@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from qsnap.cli.summary import format_summary
 from qsnap.core import PipelineResult, VMRunResult
 from qsnap.models.results import ActionRecord
@@ -272,6 +270,7 @@ def test_formatter_no_side_effects():
 # that the pure contract is honoured.  format_summary() is a module-level
 # function; it cannot access IStateManager, IConfigFacade, or the
 # filesystem.
+
 
 def test_formatter_reads_from_pipeline_result_only():
     """Verify that format_summary produces output when PipelineResult fields are set."""

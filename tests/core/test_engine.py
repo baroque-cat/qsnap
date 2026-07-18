@@ -32,7 +32,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockBucketFullStrategy, MockConfigFacade, MockRetentionEngine
+from tests.mocks import MockBucketFullStrategy, MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
 
@@ -935,9 +935,7 @@ def test_size_estimation_logged_during_dry_run(
     caplog.set_level(logging.INFO)
 
     # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "weekly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
     core._log_size_estimate(vm, target)
 
     assert "Size estimate" in caplog.text, "Size estimation should be logged during dry-run"
@@ -1521,9 +1519,7 @@ def test_action_appended_on_full_backup(
     mock_state.record_snapshot("testvm", snap)
 
     # Configure MockBucketFullStrategy to trigger FULL creation.
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "monthly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
 
     # Need to mock qemu-img info and du for size estimation.
     mock_shell.expect("qemu-img info").returns(
@@ -1910,8 +1906,7 @@ def test_no_backup_failed_warning_when_all_succeed(
     assert result.results[0].backup_failed is False
     # No "Backup transfer failed" warning should be logged.
     backup_failed_warnings = [
-        r.message for r in caplog.records
-        if "Backup transfer failed" in r.message
+        r.message for r in caplog.records if "Backup transfer failed" in r.message
     ]
     assert len(backup_failed_warnings) == 0, (
         f"No backup_failed warnings expected when all succeed, got: {backup_failed_warnings}"
@@ -2096,8 +2091,7 @@ def test_backup_transfer_info_log(
 
     # Find the transfer info log line.
     transfer_lines = [
-        r.message for r in caplog.records
-        if "[backup]" in r.message and "transferred" in r.message
+        r.message for r in caplog.records if "[backup]" in r.message and "transferred" in r.message
     ]
     assert len(transfer_lines) >= 1, (
         f"Should have at least one backup transfer log line, got: {transfer_lines}"
@@ -2138,9 +2132,7 @@ def test_full_backup_create_info_log(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "monthly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
 
     # Mock qemu-img info + du for size estimation.
     mock_shell.expect("qemu-img info").returns(
@@ -2167,8 +2159,7 @@ def test_full_backup_create_info_log(
         core.run()
 
     full_lines = [
-        r.message for r in caplog.records
-        if "[backup]" in r.message and "created FULL" in r.message
+        r.message for r in caplog.records if "[backup]" in r.message and "created FULL" in r.message
     ]
     assert len(full_lines) == 1, (
         f"Should have exactly one FULL creation log line, got: {full_lines}"
@@ -2248,7 +2239,8 @@ def test_backup_delete_info_log(
         core.run()
 
     delete_lines = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if "[delete]" in r.message and "removed backup" in r.message
     ]
     assert len(delete_lines) >= 1, (
@@ -2334,12 +2326,11 @@ def test_ghost_retention_info_log(
         core.run()
 
     ghost_lines = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if "[delete]" in r.message and "ghost-retained" in r.message
     ]
-    assert len(ghost_lines) >= 1, (
-        f"Should have a ghost-retained log line, got: {ghost_lines}"
-    )
+    assert len(ghost_lines) >= 1, f"Should have a ghost-retained log line, got: {ghost_lines}"
     assert "testvm" in ghost_lines[0]
     assert "ghost-retained FULL" in ghost_lines[0]
     assert "dependent(s) in keep-set" in ghost_lines[0]

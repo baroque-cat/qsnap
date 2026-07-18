@@ -223,8 +223,7 @@ def nbd_full_export(
         abort_result = shell.run(abort_cmd, timeout=30)
         if not abort_result.success:
             logger.warning(
-                "virsh domjobabort failed for VM %s (job may have "
-                "already terminated): %s",
+                "virsh domjobabort failed for VM %s (job may have already terminated): %s",
                 vm_name,
                 abort_result.error,
             )

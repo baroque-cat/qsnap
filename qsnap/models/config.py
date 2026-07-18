@@ -100,19 +100,32 @@ class GlobalConfig:
 class TargetConfig:
     """A single backup target for a VM.
 
-    ``incremental_mode`` selects the backup strategy: ``"file-copy"``
-    (whole-file copy, current behaviour) or ``"bitmap"`` (dirty-block
-    extraction via checkpoint).
+    ``incremental_mode`` selects the backup strategy: ``"bitmap"``
+    (default — dirty-block extraction via NBD/checkpoint, crash-consistent
+    and produces standalone backups) or ``"file-copy"`` (whole-file copy
+    via rsync).  The dataclass-level default is ``"bitmap"``; the factory
+    automatically falls back to ``FileCopyBackupProvider`` (file-copy)
+    when libvirt is too old (< 6.0) for NBD backup-begin, so old systems
+    are unaffected.  Users who want rsync mode must explicitly set
+    ``incremental_mode = "file-copy"``.
 
     ``target_preserve`` is a raw retention-policy string resolved via
     option inheritance (global → VM → target).
 
-    ``verify`` controls post-transfer verification: ``"metadata"``
-    (default) checks qcow2 format and virtual-size match, ``"full"``
-    additionally runs ``qemu-img compare``, ``"off"`` skips verification.
+    ``verify`` controls post-transfer verification.  The dataclass-level
+    default is ``"metadata"`` (checks qcow2 format and virtual-size
+    match), but the *effective* default is mode-dependent and resolved
+    by ``ConfigFacade._build_target()``: ``"hash"`` for file-copy mode
+    (race-condition-immune SHA-256), ``"metadata"`` for bitmap mode
+    (hash is unsupported for NBD-converted qcow2).  When the user
+    explicitly sets ``verify``, the explicit value takes precedence.
+    ``"full"`` additionally runs ``qemu-img compare``, ``"off"`` skips
+    verification.
 
-    ``compress`` controls whether full backups are compressed (default
-    ``True``).  Inherited from global → VM → target.
+    ``compress`` controls whether backups are compressed (default
+    ``True``).  Applies to FULL backups (``qemu-img convert -c``), NBD
+    incrementals (``-c`` flag), and rsync incrementals (``--compress``
+    transfer-level flag).  Inherited from global → VM → target.
 
     ``copy_base`` controls whether the base image is copied to the
     target on first backup (default ``False`` — first backup is always
@@ -121,7 +134,7 @@ class TargetConfig:
 
     path: Path
     incremental: bool = True
-    incremental_mode: str = "file-copy"
+    incremental_mode: str = "bitmap"
     target_preserve: str | None = None
     verify: str = "metadata"
     target_preserve_min: str | None = None

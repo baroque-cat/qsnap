@@ -76,6 +76,7 @@ def _ensure_snapshot_paths_exist(monkeypatch):
 
     monkeypatch.setattr(os.path, "exists", _fake_exists)
 
+
 # ──────────────────────────────────────────────────────────────────────────
 # Transfer Missing — rsync-based (no cp fallback — design D3)
 # ──────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,11 @@ def test_transfer_missing_new_snapshot_rsync_empty_target(
     assert "--bwlimit" not in rsync_cmds[0]
     # Has --partial for resumability
     assert "--partial" in rsync_cmds[0]
+    # --compress should appear because target.compress defaults to True
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
     # No cp fallback
     cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
     assert len(cp_cmds) == 0
@@ -279,6 +285,14 @@ def test_transfer_incremental_rebase_backing_path(
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
+    # Verify --compress in rsync command (target.compress defaults to True)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
+
 
 def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_target, tmp_path):
     """When ``target.incremental`` is False, the snapshot is copied without
@@ -319,6 +333,14 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 0
 
+    # Verify --compress in rsync command (target.compress defaults to True)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
+
 
 def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target, tmp_path, caplog):
     """When ``rsync`` returns a non-zero exit code (e.g. disk full), the
@@ -326,6 +348,9 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
 
     A WARNING log is emitted before returning the failure result so that
     silent failures are impossible to miss in production logs.
+
+    The partial file left by ``rsync --partial`` is cleaned up via
+    ``rm -f`` before returning the failure result (design D2).
 
     Uses ``copy_base=True`` to skip the empty-target FULL creation path.
     """
@@ -357,11 +382,16 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
             error=error_msg,
         )
     )
+    # Mock rm -f for partial file cleanup
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
-    provider = FileCopyBackupProvider(mock_shell)
-    results = provider.transfer_missing(vm_config, target, [snapshot])
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
 
     # Assert failure with error message
     assert len(results) == 1
@@ -374,18 +404,33 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
 
     # Assert WARNING was logged before returning failure
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "rsync failed for testvm.20250101T000000" in msg for msg in warnings
-    ), f"Expected 'rsync failed' WARNING, got: {warnings}"
+    assert any("rsync failed for testvm.20250101T000000" in msg for msg in warnings), (
+        f"Expected 'rsync failed' WARNING, got: {warnings}"
+    )
+
+    # Assert rm -f was called to clean up the partial target file (design D2)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    assert len(rm_cmds) >= 1, (
+        f"Expected rm -f to clean up partial file after rsync failure, got: {all_cmds}"
+    )
+    assert any(str(expected_target_file) in cmd for cmd in rm_cmds), (
+        f"rm -f should target {expected_target_file}, got: {rm_cmds}"
+    )
 
 
-def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_target, tmp_path, caplog):
+def test_rsync_unavailable_transfer_fails_no_cp_fallback(
+    make_vm_config, make_target, tmp_path, caplog
+):
     """When rsync is not available (``MockShell`` returns failure for
     ``rsync``), the transfer fails with no ``cp`` fallback (design D3).
 
     A fresh ``MockShell`` is used (without conftest's pre-configured
     expectations) so the rsync command returns failure.  A WARNING log is
     emitted to ensure the failure is visible in production logs.
+
+    The partial file left by ``rsync --partial`` is cleaned up via
+    ``rm -f`` before returning the failure result (design D2).
     """
     shell = MockShell()
     # rsync → failure (not installed or unavailable)
@@ -398,6 +443,10 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_ta
             returncode=127,
             error=error_msg,
         )
+    )
+    # rm -f for partial file cleanup
+    shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
     vm_config = make_vm_config()
@@ -414,6 +463,8 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_ta
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
     )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
@@ -433,9 +484,18 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(make_vm_config, make_ta
 
     # Assert WARNING was logged before returning failure
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "rsync failed for testvm.20250101T000000" in msg for msg in warnings
-    ), f"Expected 'rsync failed' WARNING, got: {warnings}"
+    assert any("rsync failed for testvm.20250101T000000" in msg for msg in warnings), (
+        f"Expected 'rsync failed' WARNING, got: {warnings}"
+    )
+
+    # Assert rm -f was called to clean up the partial target file (design D2)
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    assert len(rm_cmds) >= 1, (
+        f"Expected rm -f to clean up partial file after rsync failure, got: {all_cmds}"
+    )
+    assert any(str(expected_target_file) in cmd for cmd in rm_cmds), (
+        f"rm -f should target {expected_target_file}, got: {rm_cmds}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -645,22 +705,20 @@ def test_transfer_rebase_failure_returns_backup_result_failure(
 
     # Assert WARNING was logged for rebase-to-FULL failure
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "rebase to FULL failed for testvm.20250101T000000" in msg
-        for msg in warnings
-    ), f"Expected 'rebase to FULL failed' WARNING, got: {warnings}"
+    assert any("rebase to FULL failed for testvm.20250101T000000" in msg for msg in warnings), (
+        f"Expected 'rebase to FULL failed' WARNING, got: {warnings}"
+    )
 
 
-def test_transfer_verify_failure_logs_warning(
+def test_transfer_verify_failure_deletes_file_and_logs_warning(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
 ):
     """When ``verify_backup()`` returns an error (e.g. metadata mismatch),
-    a ``WARNING`` log is emitted before returning
-    ``BackupResult(success=False)``.
+    a ``WARNING`` log is emitted AND the partially-transferred target file
+    is deleted via ``rm -f`` before returning ``BackupResult(success=False)``.
 
-    This prevents verification failures from silently producing a failed
-    result with no accompanying log message — operators monitoring logs
-    will see the warning even if they don't inspect the return value.
+    The file deletion (design D2) ensures retention cleanup does not find a
+    broken backup and log a misleading ``[delete] removed backup`` message.
     """
     vm_config = make_vm_config()
     target = make_target(
@@ -677,8 +735,14 @@ def test_transfer_verify_failure_logs_warning(
         allocation=65536,
     )
 
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
     # Mock rsync returns success
     mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # Mock rm -f for partial file cleanup
+    mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
@@ -686,9 +750,12 @@ def test_transfer_verify_failure_logs_warning(
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
-    with patch(
-        "qsnap.modules.backup.file_copy.verify_backup",
-        return_value=verify_error,
+    with (
+        patch(
+            "qsnap.modules.backup.file_copy.verify_backup",
+            return_value=verify_error,
+        ),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
     ):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -701,9 +768,19 @@ def test_transfer_verify_failure_logs_warning(
     # Assert WARNING was logged before returning failure
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "backup verification failed for testvm.20250101T000000" in msg
-        for msg in warnings
+        "backup verification failed for testvm.20250101T000000" in msg for msg in warnings
     ), f"Expected 'backup verification failed' WARNING, got: {warnings}"
+
+    # Assert rm -f was called to clean up the partial target file
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    assert len(rm_cmds) >= 1, (
+        f"Expected rm -f to be called for partial file cleanup, got: {all_cmds}"
+    )
+    target_rm_cmds = [cmd for cmd in rm_cmds if str(expected_target_file) in cmd]
+    assert len(target_rm_cmds) >= 1, (
+        f"Expected rm -f {expected_target_file}, got rm commands: {rm_cmds}"
+    )
 
 
 def test_transfer_json_decode_failure_logs_warning(
@@ -759,10 +836,9 @@ def test_transfer_json_decode_failure_logs_warning(
 
     # Assert WARNING was logged before returning failure
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "backing info parse failed for testvm.20250101T000000" in msg
-        for msg in warnings
-    ), f"Expected 'backing info parse failed' WARNING, got: {warnings}"
+    assert any("backing info parse failed for testvm.20250101T000000" in msg for msg in warnings), (
+        f"Expected 'backing info parse failed' WARNING, got: {warnings}"
+    )
 
 
 def test_file_copy_provider_imports_shared_parsers():
@@ -856,6 +932,16 @@ def test_transfer_missing_metadata_verification_default(
     info_cmds = [cmd for cmd in all_cmds if "qemu-img info" in cmd]
     assert len(info_cmds) >= 2
 
+    # Verify --compress in rsync command (target.compress defaults to True)
+    # NOTE: At the dataclass level, default verify is "metadata", but
+    # ConfigFacade would resolve to "hash" for file-copy mode.
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
+
 
 def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_target, tmp_path):
     """When ``target.verify`` is ``"full"``, after the metadata check,
@@ -933,6 +1019,14 @@ def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_tar
     compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
     assert len(compare_cmds) == 1
 
+    # Verify --compress in rsync command (target.compress defaults to True)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
+
 
 def test_transfer_missing_no_verification_when_off(
     mock_shell, make_vm_config, make_target, tmp_path
@@ -988,6 +1082,14 @@ def test_transfer_missing_no_verification_when_off(
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     qemu_cmds = [cmd for cmd in all_cmds if "qemu-img" in cmd]
     assert len(qemu_cmds) == 0
+
+    # Verify --compress in rsync command (target.compress defaults to True)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1804,8 +1906,7 @@ def test_nbd_full_timestamp_matches_snapshot_not_export_time(
     # Verify the result filename still embeds the snapshot timestamp
     # (callers use source_snapshot.timestamp for retention alignment).
     assert "20250101" in str(result.target_path), (
-        f"FULL filename should embed snapshot date 20250101, "
-        f"got: {result.target_path}"
+        f"FULL filename should embed snapshot date 20250101, got: {result.target_path}"
     )
 
 
@@ -2877,8 +2978,7 @@ def test_copy_base_false_prevents_base_copy(
     # No FULL backup state was recorded
     full_backups = mock_state.get_full_backups(str(target.path))
     assert len(full_backups) == 0, (
-        "transfer_missing should NOT record FULL backup state — "
-        "D4 code path has been removed"
+        "transfer_missing should NOT record FULL backup state — D4 code path has been removed"
     )
 
 
@@ -2969,8 +3069,7 @@ def test_transfer_missing_does_not_create_full_when_empty_target(
     # No FULL backup state was recorded
     full_backups = mock_state.get_full_backups(str(target.path))
     assert len(full_backups) == 0, (
-        "transfer_missing should NOT record FULL backup state — "
-        "D4 code path has been removed"
+        "transfer_missing should NOT record FULL backup state — D4 code path has been removed"
     )
 
 
@@ -3065,6 +3164,7 @@ def test_provider_remains_retry_unaware(mock_shell, make_vm_config, make_target,
     expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
     error_msg = "Connection refused"
+    # rsync transfer fails — simulating a transient error
     mock_shell.expect(r"^rsync").returns(
         ShellResult(
             success=False,
@@ -3308,8 +3408,7 @@ def test_transfer_missing_passes_vm_name_to_create_full(
     # No FULL backup state was recorded
     full_backups = mock_state.get_full_backups(str(target.path))
     assert len(full_backups) == 0, (
-        "transfer_missing should NOT record FULL backup state — "
-        "D4 code path has been removed"
+        "transfer_missing should NOT record FULL backup state — D4 code path has been removed"
     )
 
 
@@ -3449,8 +3548,6 @@ def test_transfer_incremental_rebase_with_F_qcow2(
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
     )
-
-    expected_target_file = target.path / f"{snapshot.name}.qcow2"
 
     # rsync succeeds
     mock_shell.expect(r"^rsync").returns(
@@ -3709,28 +3806,20 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
 
     # ── qemu-img info mocks ──
     # Newer anchor → M1 FAILS (format is "raw", not "qcow2")
-    mock_shell.expect_first(
-        rf"qemu-img info.*{newer_anchor_name}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*{newer_anchor_name}").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}
-            ),
+            stdout=json.dumps({"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}),
             stderr="",
             returncode=0,
             error=None,
         )
     )
     # Older anchor → M1 PASSES (format is "qcow2")
-    mock_shell.expect_first(
-        rf"qemu-img info.*{older_anchor_name}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*{older_anchor_name}").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": 1073741824, "actual-size": 1024}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": 1073741824, "actual-size": 1024}),
             stderr="",
             returncode=0,
             error=None,
@@ -3766,9 +3855,7 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], rate_limit="no"
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
     assert len(results) == 1
     assert results[0].success is True
@@ -3783,8 +3870,7 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
         f"(the one that passed M1), got: {rebase_cmds[0]}"
     )
     assert f"./{newer_anchor_name}" not in rebase_cmds[0], (
-        f"Rebase should NOT use newer anchor '{newer_anchor_name}' "
-        f"(it failed M1)"
+        f"Rebase should NOT use newer anchor '{newer_anchor_name}' (it failed M1)"
     )
     assert "-F qcow2" in rebase_cmds[0]
 
@@ -3822,14 +3908,10 @@ def test_transfer_missing_no_rebase_when_no_valid_full(
     )
 
     # Anchor → M1 FAILS (format is not qcow2)
-    mock_shell.expect_first(
-        rf"qemu-img info.*{anchor_name}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*{anchor_name}").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}
-            ),
+            stdout=json.dumps({"format": "raw", "virtual-size": 1073741824, "actual-size": 1024}),
             stderr="",
             returncode=0,
             error=None,
@@ -3861,9 +3943,7 @@ def test_transfer_missing_no_rebase_when_no_valid_full(
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], rate_limit="no"
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
     # Transfer succeeds — no rebase performed (all anchors failed M1)
     assert len(results) == 1
@@ -3871,9 +3951,7 @@ def test_transfer_missing_no_rebase_when_no_valid_full(
 
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
-    assert len(rebase_cmds) == 0, (
-        "No rebase should be performed when all FULL anchors fail M1"
-    )
+    assert len(rebase_cmds) == 0, "No rebase should be performed when all FULL anchors fail M1"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3938,9 +4016,7 @@ def test_transfer_missing_stale_snapshot_skipped(
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_nbd_socket_and_domjobabort_on_success(
-    mock_shell, make_target, tmp_path
-):
+def test_nbd_socket_and_domjobabort_on_success(mock_shell, make_target, tmp_path):
     """When ``create_full_backup`` via NBD succeeds, ``virsh domjobabort``
     is called in the ``finally`` block before the socket ``rm -f``.
 
@@ -3958,9 +4034,7 @@ def test_nbd_socket_and_domjobabort_on_success(
     )
 
     mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
-        )
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -4004,9 +4078,7 @@ def test_nbd_socket_and_domjobabort_on_success(
 
     # Verify domjobabort was called
     abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
-    assert len(abort_cmds) == 1, (
-        f"Expected 1 domjobabort call in finally block, got: {abort_cmds}"
-    )
+    assert len(abort_cmds) == 1, f"Expected 1 domjobabort call in finally block, got: {abort_cmds}"
     assert "--domain testvm" in abort_cmds[0]
 
     # Verify socket rm -f was called (before backup-begin AND in finally)
@@ -4020,14 +4092,10 @@ def test_nbd_socket_and_domjobabort_on_success(
     backup_cmds_list = [cmd for cmd in all_cmds if "backup-begin" in cmd]
     backup_idx = all_cmds.index(backup_cmds_list[0]) if backup_cmds_list else -1
     abort_idx = all_cmds.index(abort_cmds[0])
-    assert abort_idx > backup_idx, (
-        "domjobabort should run after backup-begin"
-    )
+    assert abort_idx > backup_idx, "domjobabort should run after backup-begin"
 
 
-def test_nbd_cleanup_on_failure_domjobabort(
-    mock_shell, make_target, tmp_path
-):
+def test_nbd_cleanup_on_failure_domjobabort(mock_shell, make_target, tmp_path):
     """When ``qemu-img convert`` (NBD pull) fails, ``virsh domjobabort``
     is still called in the ``finally`` block.
 
@@ -4044,9 +4112,7 @@ def test_nbd_cleanup_on_failure_domjobabort(
     )
 
     mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
-        )
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -4099,9 +4165,7 @@ def test_nbd_cleanup_on_failure_domjobabort(
     )
 
 
-def test_risk_domjobabort_fails_gracefully(
-    mock_shell, make_target, tmp_path, caplog
-):
+def test_risk_domjobabort_fails_gracefully(mock_shell, make_target, tmp_path, caplog):
     """When ``virsh domjobabort`` itself fails (e.g. job already
     terminated), a WARNING is logged but the failure does NOT propagate
     — socket cleanup proceeds and the backup result is still returned.
@@ -4120,9 +4184,7 @@ def test_risk_domjobabort_fails_gracefully(
     )
 
     mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None
-        )
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -4161,7 +4223,7 @@ def test_risk_domjobabort_fails_gracefully(
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
-        result = provider.create_full_backup(
+        provider.create_full_backup(
             "testvm",
             snapshot,
             target,
@@ -4185,8 +4247,7 @@ def test_risk_domjobabort_fails_gracefully(
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     socket_rm_cmds = [cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd]
     assert len(socket_rm_cmds) == 2, (
-        f"Socket rm -f should still proceed after domjobabort failure, "
-        f"got: {socket_rm_cmds}"
+        f"Socket rm -f should still proceed after domjobabort failure, got: {socket_rm_cmds}"
     )
 
     # 3. The domjobabort failure is non-fatal — the mv (atomic rename)
@@ -4220,9 +4281,7 @@ def test_nbd_imports_from_utils():
         nbd_full_export as nbd_export,
     )
 
-    assert hasattr(file_copy, "is_vm_running"), (
-        "file_copy must import is_vm_running"
-    )
+    assert hasattr(file_copy, "is_vm_running"), "file_copy must import is_vm_running"
     assert file_copy.is_vm_running is nbd_vm_running, (
         "file_copy.is_vm_running must be qsnap.utils.nbd.is_vm_running"
     )
@@ -4251,12 +4310,305 @@ def test_verify_backup_imported_from_utils():
         verify_full_backup as vfy_full,
     )
 
-    assert hasattr(file_copy, "verify_backup"), (
-        "file_copy must import verify_backup"
-    )
+    assert hasattr(file_copy, "verify_backup"), "file_copy must import verify_backup"
     assert file_copy.verify_backup is vfy_backup, (
         "file_copy.verify_backup must be qsnap.utils.verification.verify_backup"
     )
     assert file_copy.verify_full_backup is vfy_full, (
         "file_copy.verify_full_backup must be qsnap.utils.verification.verify_full_backup"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# rsync --compress flag
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_rsync_with_compress_flag(mock_shell, make_vm_config, make_target, tmp_path):
+    """When ``target.compress=True`` (default), the rsync command includes
+    the ``--compress`` flag BEFORE ``--partial``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        copy_base=True,
+        # compress defaults to True
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0], (
+        f"--compress should be in rsync command when compress=True, got: {rsync_cmds[0]}"
+    )
+    # verify ordering: --compress before --partial
+    assert "--compress" in rsync_cmds[0].split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmds[0]}"
+    )
+
+
+def test_rsync_compress_with_rate_limit(mock_shell, make_vm_config, make_target, tmp_path):
+    """When both ``compress=True`` and ``rate_limit`` is set, the rsync
+    command includes both ``--bwlimit`` and ``--compress``, with
+    ``--compress`` appearing before ``--partial``.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        rate_limit="100M",
+        copy_base=True,
+        # compress defaults to True
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    rsync_cmd = rsync_cmds[0]
+    assert "--bwlimit=102400" in rsync_cmd, (
+        f"--bwlimit should be present when rate_limit set, got: {rsync_cmd}"
+    )
+    assert "--compress" in rsync_cmd, (
+        f"--compress should coexist with --bwlimit when compress=True, got: {rsync_cmd}"
+    )
+    # verify ordering: --compress before --partial
+    assert "--compress" in rsync_cmd.split("--partial")[0], (
+        f"--compress should appear before --partial in: {rsync_cmd}"
+    )
+
+
+def test_rsync_without_compress(mock_shell, make_vm_config, make_target, tmp_path):
+    """When ``target.compress=False``, the rsync command does NOT include
+    the ``--compress`` flag.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        compress=False,
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" not in rsync_cmds[0], (
+        f"--compress should NOT be in rsync command when compress=False, got: {rsync_cmds[0]}"
+    )
+    # --partial should still be present
+    assert "--partial" in rsync_cmds[0]
+
+
+def test_rsync_compress_hash_verification_passes(mock_shell, make_vm_config, make_target, tmp_path):
+    """Verify that ``--compress`` does not affect hash/byte-level
+    verification.  When ``verify="full"`` and ``compress=True``, the
+    transfer succeeds even though rsync uses compression — the resulting
+    files are byte-identical after decompression by rsync.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=False,
+        verify="full",
+        copy_base=True,
+        # compress defaults to True
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    qcow2_info = json.dumps(
+        {
+            "format": "qcow2",
+            "virtual-size": 1073741824,
+            "actual-size": 1048576,
+        }
+    )
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # Mock qemu-img info (for metadata verification)
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qcow2_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Mock qemu-img compare returns success (full byte-level verification)
+    mock_shell.expect(r"qemu-img compare").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # Side effect: simulate rsync creating the target file so stat() works.
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert successful result — --compress did not break verification
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+
+    # Verify rsync command includes --compress
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+
+    # Verify qemu-img compare was called (full verification passed)
+    compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
+    assert len(compare_cmds) == 1, (
+        "qemu-img compare should be called for verify='full', "
+        "proving --compress does not break byte-level verification"
+    )
+
+
+def test_failed_backup_deletion_before_retention_cleanup(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When verification fails, the partially-transferred backup file is
+    deleted via ``rm -f`` IMMEDIATELY, before ``BackupResult(success=False)``
+    is returned — ensuring retention cleanup does not find a broken backup
+    and log a misleading ``[delete] removed backup`` message (design D2).
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="metadata",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # Mock rm -f for partial file cleanup
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    verify_error = "verification failed: virtual-size mismatch"
+
+    with (
+        patch(
+            "qsnap.modules.backup.file_copy.verify_backup",
+            return_value=verify_error,
+        ),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    # Assert failure result — deletion already happened
+    assert len(results) == 1
+    assert results[0].success is False
+    assert verify_error in results[0].error
+
+    # Verify rm -f was called: the deletion happens inside transfer_missing
+    # (before the function returns), NOT in the caller's retention cleanup
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
+    assert len(rm_cmds) >= 1, (
+        f"Expected rm -f for failed backup cleanup before function returns, got: {all_cmds}"
+    )
+    assert any(str(expected_target_file) in cmd for cmd in rm_cmds), (
+        f"rm -f should target {expected_target_file}, ensuring retention "
+        f"cleanup never sees the partial file. Got: {rm_cmds}"
     )

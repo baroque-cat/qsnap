@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from qsnap.models.results import ActionRecord
 from qsnap.utils.transaction import TransactionWriter
 
@@ -258,7 +256,9 @@ def test_writer_has_no_core_dependency() -> None:
     Reads the source file directly and checks that no import lines
     reference ``qsnap.core``, ``qsnap.config``, or ``qsnap.modules``.
     """
-    source_path = Path(__file__).resolve().parent.parent.parent / "qsnap" / "utils" / "transaction.py"
+    source_path = (
+        Path(__file__).resolve().parent.parent.parent / "qsnap" / "utils" / "transaction.py"
+    )
     source = source_path.read_text(encoding="utf-8")
 
     forbidden = ["qsnap.core", "qsnap.config", "qsnap.modules"]
@@ -266,6 +266,4 @@ def test_writer_has_no_core_dependency() -> None:
         stripped = line.strip()
         if stripped.startswith(("import ", "from ")):
             for f in forbidden:
-                assert f not in stripped, (
-                    f"Forbidden import '{f}' found in line: {stripped}"
-                )
+                assert f not in stripped, f"Forbidden import '{f}' found in line: {stripped}"

@@ -7,6 +7,7 @@ target), and produces immutable frozen dataclasses.  Implements
 
 from __future__ import annotations
 
+import logging
 import re
 import tomllib
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import cast
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from qsnap.utils.parsing import parse_rate_limit
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -281,7 +284,7 @@ class ConfigFacade(IConfigFacade):
 
         path = Path(str(tgt_raw["path"]))
         incremental = bool(tgt_raw.get("incremental", True))
-        incremental_mode = str(tgt_raw.get("incremental_mode", "file-copy"))
+        incremental_mode = str(tgt_raw.get("incremental_mode", "bitmap"))
 
         # target_preserve: target overrides VM.
         target_preserve: str | None
@@ -357,8 +360,48 @@ class ConfigFacade(IConfigFacade):
         # copy_base: target-level, default False.
         copy_base = bool(tgt_raw.get("copy_base", False))
 
-        # verify: "metadata" (default), "hash", "full", or "off".
-        verify = str(tgt_raw.get("verify", "metadata"))
+        # verify: mode-dependent default ("hash" for file-copy,
+        # "metadata" for bitmap), or explicit user value (design D3).
+        # The dataclass field default is "metadata", but the *effective*
+        # default is resolved here based on incremental_mode.
+        verify_raw = tgt_raw.get("verify")
+        if verify_raw is None:
+            # Mode-dependent default — hash for file-copy (race-condition-
+            # immune SHA-256), metadata for bitmap (hash is unsupported
+            # for NBD-converted qcow2).
+            verify = "hash" if incremental_mode == "file-copy" else "metadata"
+        else:
+            verify = str(verify_raw)
+            # Validate user-provided value.
+            if verify not in ("off", "metadata", "hash", "full"):
+                raise ConfigError(
+                    f"Invalid verify={verify!r}. Must be one of: off, metadata, hash, full."
+                )
+
+        # Bitmap + hash is not supported (NBD-converted qcow2 has
+        # different internal structure than the source snapshot).
+        # Warn and auto-downgrade to metadata (design D8).  This runs
+        # AFTER the mode-dependent default resolution, so it only
+        # triggers when the user explicitly sets verify="hash" for
+        # bitmap mode (the default for bitmap is already "metadata").
+        if incremental_mode == "bitmap" and verify == "hash":
+            logger.warning(
+                "verify='hash' is not supported in bitmap mode "
+                "(NBD-converted qcow2 has different internal "
+                "structure). Downgrading to verify='metadata'. "
+                "Use verify='full' for content-level verification."
+            )
+            verify = "metadata"
+
+        # Deprecation warning: verify='metadata' for file-copy mode is
+        # weaker than verify='hash' (race-condition-immune SHA-256).
+        # Informational only — the explicit value is still honored.
+        if incremental_mode == "file-copy" and verify == "metadata":
+            logger.warning(
+                "verify='metadata' for file-copy mode — consider "
+                "verify='hash' for stronger, race-condition-immune "
+                "verification."
+            )
 
         # rate_limit: target overrides global default.
         rate_limit = str(tgt_raw.get("rate_limit", global_rate_limit))

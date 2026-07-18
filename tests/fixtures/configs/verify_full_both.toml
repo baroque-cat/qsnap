@@ -1,0 +1,24 @@
+# verify="full" works for both file-copy and bitmap modes
+# Test: test_facade_verify_full_works_for_both_modes
+
+[[vm]]
+name = "vm_fc_full"
+base_image = "/var/lib/libvirt/images/vm_fc_full.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_fc_full"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_fc_full"
+  incremental = true
+  incremental_mode = "file-copy"
+  verify = "full"
+
+[[vm]]
+name = "vm_bitmap_full"
+base_image = "/var/lib/libvirt/images/vm_bitmap_full.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_bitmap_full"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_bitmap_full"
+  incremental = true
+  incremental_mode = "bitmap"
+  verify = "full"

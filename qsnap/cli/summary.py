@@ -149,8 +149,7 @@ def format_summary(result: PipelineResult) -> str:
     # ── Dry-run footer ─────────────────────────────────────────────────
     if result.dry_run:
         lines.append(
-            "NOTE: Dryrun was active, "
-            "none of the operations above were actually executed!"
+            "NOTE: Dryrun was active, none of the operations above were actually executed!"
         )
         lines.append("")
 

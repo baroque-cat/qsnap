@@ -659,7 +659,7 @@ def test_deploy_delegates_to_fork(
     storage_dir = tmp_path / "storage"
     (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
     with patch.object(core, "fork", wraps=core.fork) as fork_spy:
-        result = core.deploy("snap1", "newvm", storage_dir, add_to_config=True, vm_filter=None)
+        core.deploy("snap1", "newvm", storage_dir, add_to_config=True, vm_filter=None)
 
     assert fork_spy.called, "deploy() must delegate to fork()"
     assert fork_spy.call_args[0] == ("snap1", "newvm", storage_dir)

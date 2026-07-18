@@ -76,8 +76,11 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             create_result = self._shell.run(create_cmd, timeout=timeout)
             if create_result.success:
                 break
-            if "cannot acquire state change lock" in (create_result.error or "") and attempt < _LOCK_RETRY_MAX - 1:
-                backoff = _LOCK_RETRY_BASE * (2 ** attempt)
+            if (
+                "cannot acquire state change lock" in (create_result.error or "")
+                and attempt < _LOCK_RETRY_MAX - 1
+            ):
+                backoff = _LOCK_RETRY_BASE * (2**attempt)
                 logger.warning(
                     "Snapshot creation lock conflict for VM %s "
                     "(attempt %d/%d, retrying in %.1fs): %s",

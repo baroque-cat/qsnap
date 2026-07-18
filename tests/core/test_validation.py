@@ -625,9 +625,11 @@ def test_preflight_cleanup_orphan_snapshot_detected(
 
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-        with patch.object(shell, "run", wraps=shell.run) as run_spy:
-            core._preflight_cleanup(vm)
+    with (
+        caplog.at_level(logging.WARNING, logger="qsnap.core"),
+        patch.object(shell, "run", wraps=shell.run) as run_spy,
+    ):
+        core._preflight_cleanup(vm)
 
     # The orphan .qcow2 must NOT be deleted
     rm_calls = [
@@ -712,9 +714,11 @@ def test_preflight_cleanup_all_snapshots_accounted_no_warning(
 
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-        with patch.object(shell, "run", wraps=shell.run) as run_spy:
-            core._preflight_cleanup(vm)
+    with (
+        caplog.at_level(logging.WARNING, logger="qsnap.core"),
+        patch.object(shell, "run", wraps=shell.run) as run_spy,
+    ):
+        core._preflight_cleanup(vm)
 
     # No rm calls for .qcow2 files
     rm_calls = [
@@ -748,9 +752,11 @@ def test_preflight_cleanup_auto_cleanup_disabled(
 
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with caplog.at_level(logging.INFO, logger="qsnap.core"):
-        with patch.object(shell, "run", wraps=shell.run) as run_spy:
-            core._preflight_cleanup(vm)
+    with (
+        caplog.at_level(logging.INFO, logger="qsnap.core"),
+        patch.object(shell, "run", wraps=shell.run) as run_spy,
+    ):
+        core._preflight_cleanup(vm)
 
     # No shell commands at all — cleanup was skipped immediately
     assert len(run_spy.call_args_list) == 0
@@ -844,12 +850,8 @@ def test_preflight_cleanup_truncated_qcow2_detected_deleted(
     truncated_file = target_path / "snap-incomplete.qcow2"
 
     shell = _fresh_shell_with_cleanup_defaults()
-    shell.expect_first(
-        "qemu-img info.*--output=json.*snap-incomplete\\.qcow2"
-    ).returns(
-        ShellResult(
-            success=False, stdout="", stderr="corrupt", returncode=1, error="truncated"
-        )
+    shell.expect_first("qemu-img info.*--output=json.*snap-incomplete\\.qcow2").returns(
+        ShellResult(success=False, stdout="", stderr="corrupt", returncode=1, error="truncated")
     )
 
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
@@ -859,10 +861,12 @@ def test_preflight_cleanup_truncated_qcow2_detected_deleted(
             return [truncated_file]
         return []
 
-    with patch.object(Path, "glob", _glob_side_effect):
-        with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-            with patch.object(shell, "run", wraps=shell.run) as run_spy:
-                core._preflight_cleanup(vm)
+    with (
+        patch.object(Path, "glob", _glob_side_effect),
+        caplog.at_level(logging.WARNING, logger="qsnap.core"),
+        patch.object(shell, "run", wraps=shell.run) as run_spy,
+    ):
+        core._preflight_cleanup(vm)
 
     # Verify rm -f was called for the truncated file
     rm_calls = [
@@ -875,8 +879,7 @@ def test_preflight_cleanup_truncated_qcow2_detected_deleted(
 
     # WARNING was logged for stale partial transfer
     assert any(
-        "Stale partial transfer detected and deleted" in r.message
-        for r in caplog.records
+        "Stale partial transfer detected and deleted" in r.message for r in caplog.records
     ), f"Expected stale partial transfer warning, got: {[r.message for r in caplog.records]}"
 
 
@@ -902,9 +905,7 @@ def test_preflight_cleanup_valid_qcow2_not_deleted(
     valid_file = target_path / "snap-valid.qcow2"
 
     shell = _fresh_shell_with_cleanup_defaults()
-    shell.expect_first(
-        "qemu-img info.*--output=json.*snap-valid\\.qcow2"
-    ).returns(
+    shell.expect_first("qemu-img info.*--output=json.*snap-valid\\.qcow2").returns(
         ShellResult(
             success=True,
             stdout='{"format": "qcow2", "virtual-size": 1073741824}',
@@ -921,10 +922,12 @@ def test_preflight_cleanup_valid_qcow2_not_deleted(
             return [valid_file]
         return []
 
-    with patch.object(Path, "glob", _glob_side_effect):
-        with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-            with patch.object(shell, "run", wraps=shell.run) as run_spy:
-                core._preflight_cleanup(vm)
+    with (
+        patch.object(Path, "glob", _glob_side_effect),
+        caplog.at_level(logging.WARNING, logger="qsnap.core"),
+        patch.object(shell, "run", wraps=shell.run) as run_spy,
+    ):
+        core._preflight_cleanup(vm)
 
     # No rm calls at all — valid file not deleted, no stale tmp/partial/sockets found
     rm_calls = [
@@ -933,14 +936,11 @@ def test_preflight_cleanup_valid_qcow2_not_deleted(
         if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
     ]
     assert len(rm_calls) == 0, (
-        f"Expected 0 rm calls for valid qcow2, got {len(rm_calls)}: "
-        f"{[c.args for c in rm_calls]}"
+        f"Expected 0 rm calls for valid qcow2, got {len(rm_calls)}: {[c.args for c in rm_calls]}"
     )
 
     # No stale transfer warning
-    stale_warnings = [
-        r for r in caplog.records if "Stale partial transfer" in r.message
-    ]
+    stale_warnings = [r for r in caplog.records if "Stale partial transfer" in r.message]
     assert len(stale_warnings) == 0, (
         f"Expected no stale warnings, got: {[r.message for r in stale_warnings]}"
     )

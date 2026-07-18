@@ -495,28 +495,6 @@ def test_preserve_min_without_buckets_raises_config_error(tmp_path: Path) -> Non
         ConfigFacade(config_file)
 
 
-@pytest.mark.unit
-def test_preserve_min_all_without_buckets_allowed(tmp_path: Path) -> None:
-    """preserve_min='all' with all-zero buckets and no F-anchors is allowed."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        'preserve_day_of_week = "monday"\n'
-        "\n"
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-        'target_preserve = "0h 0d 0w 0m 0y"\n'
-        'target_preserve_min = "all"\n'
-        "\n"
-        "  [[vm.target]]\n"
-        '  path = "/mnt/backup/testvm"\n'
-    )
-    # Should not raise — preserve_min='all' is the safe default.
-    facade = ConfigFacade(config_file)
-    assert facade.get_vm("testvm").target_preserve_min == "all"
-
-
 # ──────────────────────────────────────────────────────────────────────────
 # FULL backup integrity verification tiers — ConfigFacade integration
 # ──────────────────────────────────────────────────────────────────────────

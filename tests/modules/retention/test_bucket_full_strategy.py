@@ -47,7 +47,11 @@ def test_period_key_unknown_bucket():
 def test_active_buckets_descending_order():
     policy = RetentionPolicy(yearly=1, monthly=12, weekly=4, daily=7, hourly=24)
     assert BucketFullStrategy._active_buckets(policy) == [
-        "yearly", "monthly", "weekly", "daily", "hourly",
+        "yearly",
+        "monthly",
+        "weekly",
+        "daily",
+        "hourly",
     ]
 
 
@@ -63,7 +67,10 @@ def test_active_buckets_none():
 
 def test_f_anchor_buckets_descending():
     policy = RetentionPolicy(
-        anchor_monthly=True, anchor_weekly=True, weekly=4, monthly=12,
+        anchor_monthly=True,
+        anchor_weekly=True,
+        weekly=4,
+        monthly=12,
     )
     assert BucketFullStrategy._f_anchor_buckets(policy) == ["monthly", "weekly"]
 
@@ -115,8 +122,10 @@ def test_should_create_full_same_period_returns_false(make_target):
 def test_should_create_full_multi_level_anchors(make_target):
     """Multi-level F-anchor configuration: only F-marked buckets checked."""
     policy = RetentionPolicy(
-        weekly=4, anchor_weekly=True,
-        daily=7, anchor_daily=False,
+        weekly=4,
+        anchor_weekly=True,
+        daily=7,
+        anchor_daily=False,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 6, 17, 10, 0)  # Wednesday W25
@@ -158,7 +167,8 @@ def test_highest_bucket_yearly(make_target):
 
     # Same year + same month — should NOT create
     should, level = strategy.should_create_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.yearly.qcow2",
@@ -173,13 +183,15 @@ def test_highest_bucket_yearly(make_target):
                 bucket_level="monthly",
             ),
         ],
-        snapshot_ts, now,
+        snapshot_ts,
+        now,
     )
     assert should is False
 
     # New year — should create (yearly is checked first)
     should, level = strategy.should_create_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.yearly.qcow2",
@@ -194,7 +206,8 @@ def test_highest_bucket_yearly(make_target):
                 bucket_level="monthly",
             ),
         ],
-        snapshot_ts, now,
+        snapshot_ts,
+        now,
     )
     assert should is True
     assert level == "yearly"
@@ -216,7 +229,8 @@ def test_highest_bucket_daily(make_target):
 
     # Same day + same hour — should NOT create
     should, level = strategy.should_create_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.daily.qcow2",
@@ -231,13 +245,15 @@ def test_highest_bucket_daily(make_target):
                 bucket_level="hourly",
             ),
         ],
-        snapshot_ts, now,
+        snapshot_ts,
+        now,
     )
     assert should is False
 
     # Next day — should create (daily is checked before hourly)
     should, level = strategy.should_create_full(
-        target, policy,
+        target,
+        policy,
         [
             FullBackupInfo(
                 name="full1.FULL.daily.qcow2",
@@ -252,7 +268,8 @@ def test_highest_bucket_daily(make_target):
                 bucket_level="hourly",
             ),
         ],
-        snapshot_ts, now,
+        snapshot_ts,
+        now,
     )
     assert should is True
     assert level == "daily"
@@ -304,8 +321,10 @@ def test_new_weekly_period_triggers_full_all_buckets(make_target):
 def test_f_anchor_weekly_only_full_on_week_boundary(make_target):
     """F-anchor mode: only F-marked buckets checked, daily is ignored."""
     policy = RetentionPolicy(
-        weekly=4, anchor_weekly=True,
-        daily=7, anchor_daily=False,
+        weekly=4,
+        anchor_weekly=True,
+        daily=7,
+        anchor_daily=False,
     )
     target = make_target()
 
@@ -320,16 +339,22 @@ def test_f_anchor_weekly_only_full_on_week_boundary(make_target):
 
     # Case A: Same week (W24 Tuesday), day changed → skip (daily ignored)
     should, level = strategy.should_create_full(
-        target, policy, [weekly_full],
-        datetime(2025, 6, 10), datetime(2025, 6, 10),
+        target,
+        policy,
+        [weekly_full],
+        datetime(2025, 6, 10),
+        datetime(2025, 6, 10),
     )
     assert should is False
     assert level == ""
 
     # Case B: New week (W25 Monday) → trigger
     should, level = strategy.should_create_full(
-        target, policy, [weekly_full],
-        datetime(2025, 6, 16), datetime(2025, 6, 16),
+        target,
+        policy,
+        [weekly_full],
+        datetime(2025, 6, 16),
+        datetime(2025, 6, 16),
     )
     assert should is True
     assert level == "weekly"
@@ -341,18 +366,48 @@ def test_f_anchor_weekly_only_full_on_week_boundary(make_target):
 def test_all_active_buckets_trigger_on_period_change(make_target):
     """Short-circuit: yearly period change returns (True, "yearly")."""
     policy = RetentionPolicy(
-        hourly=24, daily=7, weekly=4, monthly=12, yearly=1, preserve_min="all",
+        hourly=24,
+        daily=7,
+        weekly=4,
+        monthly=12,
+        yearly=1,
+        preserve_min="all",
     )
     target = make_target()
     snapshot_ts = datetime(2025, 1, 1, 5, 0)
     now = datetime(2025, 1, 1, 5, 0)
 
     all_fulls = [
-        FullBackupInfo(name="yearly_full.FULL.yearly.qcow2", path=Path("/backup/yearly_full.FULL.yearly.qcow2"), timestamp=datetime(2024, 6, 1), bucket_level="yearly"),
-        FullBackupInfo(name="monthly_full.FULL.monthly.qcow2", path=Path("/backup/monthly_full.FULL.monthly.qcow2"), timestamp=datetime(2024, 12, 1), bucket_level="monthly"),
-        FullBackupInfo(name="weekly_full.FULL.weekly.qcow2", path=Path("/backup/weekly_full.FULL.weekly.qcow2"), timestamp=datetime(2024, 12, 22), bucket_level="weekly"),  # ISO W51
-        FullBackupInfo(name="daily_full.FULL.daily.qcow2", path=Path("/backup/daily_full.FULL.daily.qcow2"), timestamp=datetime(2024, 12, 31), bucket_level="daily"),
-        FullBackupInfo(name="hourly_full.FULL.hourly.qcow2", path=Path("/backup/hourly_full.FULL.hourly.qcow2"), timestamp=datetime(2024, 12, 31, 23, 0), bucket_level="hourly"),
+        FullBackupInfo(
+            name="yearly_full.FULL.yearly.qcow2",
+            path=Path("/backup/yearly_full.FULL.yearly.qcow2"),
+            timestamp=datetime(2024, 6, 1),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="monthly_full.FULL.monthly.qcow2",
+            path=Path("/backup/monthly_full.FULL.monthly.qcow2"),
+            timestamp=datetime(2024, 12, 1),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="weekly_full.FULL.weekly.qcow2",
+            path=Path("/backup/weekly_full.FULL.weekly.qcow2"),
+            timestamp=datetime(2024, 12, 22),
+            bucket_level="weekly",
+        ),  # ISO W51
+        FullBackupInfo(
+            name="daily_full.FULL.daily.qcow2",
+            path=Path("/backup/daily_full.FULL.daily.qcow2"),
+            timestamp=datetime(2024, 12, 31),
+            bucket_level="daily",
+        ),
+        FullBackupInfo(
+            name="hourly_full.FULL.hourly.qcow2",
+            path=Path("/backup/hourly_full.FULL.hourly.qcow2"),
+            timestamp=datetime(2024, 12, 31, 23, 0),
+            bucket_level="hourly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -382,16 +437,46 @@ def test_same_period_all_buckets_skips_full(make_target):
     now = datetime(2025, 7, 14, 14, 30)
 
     policy = RetentionPolicy(
-        hourly=24, daily=7, weekly=4, monthly=12, yearly=1, preserve_min="all",
+        hourly=24,
+        daily=7,
+        weekly=4,
+        monthly=12,
+        yearly=1,
+        preserve_min="all",
     )
     target = make_target()
 
     all_fulls = [
-        FullBackupInfo(name="yearly_full.FULL.yearly.qcow2", path=Path("/backup/yearly_full.FULL.yearly.qcow2"), timestamp=datetime(2025, 1, 1), bucket_level="yearly"),
-        FullBackupInfo(name="monthly_full.FULL.monthly.qcow2", path=Path("/backup/monthly_full.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 1), bucket_level="monthly"),
-        FullBackupInfo(name="weekly_full.FULL.weekly.qcow2", path=Path("/backup/weekly_full.FULL.weekly.qcow2"), timestamp=datetime(2025, 7, 14, 10, 0), bucket_level="weekly"),  # W29
-        FullBackupInfo(name="daily_full.FULL.daily.qcow2", path=Path("/backup/daily_full.FULL.daily.qcow2"), timestamp=datetime(2025, 7, 14, 8, 0), bucket_level="daily"),
-        FullBackupInfo(name="hourly_full.FULL.hourly.qcow2", path=Path("/backup/hourly_full.FULL.hourly.qcow2"), timestamp=datetime(2025, 7, 14, 14, 0), bucket_level="hourly"),
+        FullBackupInfo(
+            name="yearly_full.FULL.yearly.qcow2",
+            path=Path("/backup/yearly_full.FULL.yearly.qcow2"),
+            timestamp=datetime(2025, 1, 1),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="monthly_full.FULL.monthly.qcow2",
+            path=Path("/backup/monthly_full.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 1),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="weekly_full.FULL.weekly.qcow2",
+            path=Path("/backup/weekly_full.FULL.weekly.qcow2"),
+            timestamp=datetime(2025, 7, 14, 10, 0),
+            bucket_level="weekly",
+        ),  # W29
+        FullBackupInfo(
+            name="daily_full.FULL.daily.qcow2",
+            path=Path("/backup/daily_full.FULL.daily.qcow2"),
+            timestamp=datetime(2025, 7, 14, 8, 0),
+            bucket_level="daily",
+        ),
+        FullBackupInfo(
+            name="hourly_full.FULL.hourly.qcow2",
+            path=Path("/backup/hourly_full.FULL.hourly.qcow2"),
+            timestamp=datetime(2025, 7, 14, 14, 0),
+            bucket_level="hourly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -432,8 +517,18 @@ def test_full_list_passed_to_bucket_check(make_target):
     now = datetime(2025, 8, 4, 10, 0)
 
     all_fulls = [
-        FullBackupInfo(name="weekly_old.FULL.weekly.qcow2", path=Path("/backup/weekly_old.FULL.weekly.qcow2"), timestamp=datetime(2025, 7, 28), bucket_level="weekly"),
-        FullBackupInfo(name="monthly_old.FULL.monthly.qcow2", path=Path("/backup/monthly_old.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 15), bucket_level="monthly"),
+        FullBackupInfo(
+            name="weekly_old.FULL.weekly.qcow2",
+            path=Path("/backup/weekly_old.FULL.weekly.qcow2"),
+            timestamp=datetime(2025, 7, 28),
+            bucket_level="weekly",
+        ),
+        FullBackupInfo(
+            name="monthly_old.FULL.monthly.qcow2",
+            path=Path("/backup/monthly_old.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 15),
+            bucket_level="monthly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -451,9 +546,24 @@ def test_one_full_per_snapshot_despite_multiple_changes(make_target):
     now = datetime(2025, 1, 1, 0, 0)
 
     all_fulls = [
-        FullBackupInfo(name="old_yearly.FULL.yearly.qcow2", path=Path("/backup/old_yearly.FULL.yearly.qcow2"), timestamp=datetime(2024, 6, 1), bucket_level="yearly"),
-        FullBackupInfo(name="old_monthly.FULL.monthly.qcow2", path=Path("/backup/old_monthly.FULL.monthly.qcow2"), timestamp=datetime(2024, 12, 1), bucket_level="monthly"),
-        FullBackupInfo(name="old_weekly.FULL.weekly.qcow2", path=Path("/backup/old_weekly.FULL.weekly.qcow2"), timestamp=datetime(2024, 12, 22), bucket_level="weekly"),
+        FullBackupInfo(
+            name="old_yearly.FULL.yearly.qcow2",
+            path=Path("/backup/old_yearly.FULL.yearly.qcow2"),
+            timestamp=datetime(2024, 6, 1),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="old_monthly.FULL.monthly.qcow2",
+            path=Path("/backup/old_monthly.FULL.monthly.qcow2"),
+            timestamp=datetime(2024, 12, 1),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="old_weekly.FULL.weekly.qcow2",
+            path=Path("/backup/old_weekly.FULL.weekly.qcow2"),
+            timestamp=datetime(2024, 12, 22),
+            bucket_level="weekly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -466,8 +576,11 @@ def test_one_full_per_snapshot_despite_multiple_changes(make_target):
 def test_f_anchor_disables_non_f_buckets(make_target):
     """F-anchor mode: only F-marked buckets checked, non-F ignored."""
     policy = RetentionPolicy(
-        daily=7, weekly=4, preserve_min="all",
-        anchor_weekly=True, anchor_daily=False,
+        daily=7,
+        weekly=4,
+        preserve_min="all",
+        anchor_weekly=True,
+        anchor_daily=False,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 7, 15, 10, 0)  # Tuesday
@@ -492,16 +605,29 @@ def test_f_anchor_disables_non_f_buckets(make_target):
 def test_multiple_f_anchors_highest_first(make_target):
     """Multiple F-anchored buckets: monthly checked before weekly."""
     policy = RetentionPolicy(
-        monthly=12, weekly=4, preserve_min="all",
-        anchor_monthly=True, anchor_weekly=True,
+        monthly=12,
+        weekly=4,
+        preserve_min="all",
+        anchor_monthly=True,
+        anchor_weekly=True,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 8, 11, 10, 0)  # Monday, W33
     now = datetime(2025, 8, 11, 10, 0)
 
     all_fulls = [
-        FullBackupInfo(name="prior_monthly.FULL.monthly.qcow2", path=Path("/backup/prior_monthly.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 20), bucket_level="monthly"),
-        FullBackupInfo(name="prior_weekly.FULL.weekly.qcow2", path=Path("/backup/prior_weekly.FULL.weekly.qcow2"), timestamp=datetime(2025, 8, 11, 8, 0), bucket_level="weekly"),
+        FullBackupInfo(
+            name="prior_monthly.FULL.monthly.qcow2",
+            path=Path("/backup/prior_monthly.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 20),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="prior_weekly.FULL.weekly.qcow2",
+            path=Path("/backup/prior_weekly.FULL.weekly.qcow2"),
+            timestamp=datetime(2025, 8, 11, 8, 0),
+            bucket_level="weekly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -514,18 +640,48 @@ def test_multiple_f_anchors_highest_first(make_target):
 def test_descending_order_all_buckets(make_target):
     """Descending order: yearly → monthly → weekly → daily → hourly."""
     policy = RetentionPolicy(
-        yearly=1, monthly=12, weekly=4, daily=7, hourly=24, preserve_min="all",
+        yearly=1,
+        monthly=12,
+        weekly=4,
+        daily=7,
+        hourly=24,
+        preserve_min="all",
     )
     target = make_target()
     snapshot_ts = datetime(2025, 7, 14, 14, 30)  # Monday, W29
     now = datetime(2025, 7, 14, 14, 30)
 
     all_fulls = [
-        FullBackupInfo(name="old_yearly.FULL.yearly.qcow2", path=Path("/backup/old_yearly.FULL.yearly.qcow2"), timestamp=datetime(2024, 9, 1), bucket_level="yearly"),
-        FullBackupInfo(name="curr_monthly.FULL.monthly.qcow2", path=Path("/backup/curr_monthly.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 1), bucket_level="monthly"),
-        FullBackupInfo(name="curr_weekly.FULL.weekly.qcow2", path=Path("/backup/curr_weekly.FULL.weekly.qcow2"), timestamp=datetime(2025, 7, 14, 10, 0), bucket_level="weekly"),  # W29
-        FullBackupInfo(name="curr_daily.FULL.daily.qcow2", path=Path("/backup/curr_daily.FULL.daily.qcow2"), timestamp=datetime(2025, 7, 14, 8, 0), bucket_level="daily"),
-        FullBackupInfo(name="curr_hourly.FULL.hourly.qcow2", path=Path("/backup/curr_hourly.FULL.hourly.qcow2"), timestamp=datetime(2025, 7, 14, 14, 0), bucket_level="hourly"),
+        FullBackupInfo(
+            name="old_yearly.FULL.yearly.qcow2",
+            path=Path("/backup/old_yearly.FULL.yearly.qcow2"),
+            timestamp=datetime(2024, 9, 1),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="curr_monthly.FULL.monthly.qcow2",
+            path=Path("/backup/curr_monthly.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 1),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="curr_weekly.FULL.weekly.qcow2",
+            path=Path("/backup/curr_weekly.FULL.weekly.qcow2"),
+            timestamp=datetime(2025, 7, 14, 10, 0),
+            bucket_level="weekly",
+        ),  # W29
+        FullBackupInfo(
+            name="curr_daily.FULL.daily.qcow2",
+            path=Path("/backup/curr_daily.FULL.daily.qcow2"),
+            timestamp=datetime(2025, 7, 14, 8, 0),
+            bucket_level="daily",
+        ),
+        FullBackupInfo(
+            name="curr_hourly.FULL.hourly.qcow2",
+            path=Path("/backup/curr_hourly.FULL.hourly.qcow2"),
+            timestamp=datetime(2025, 7, 14, 14, 0),
+            bucket_level="hourly",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -538,7 +694,10 @@ def test_descending_order_all_buckets(make_target):
 def test_f_anchor_daily_only_ignores_others(make_target):
     """Only daily is F-anchored — monthly/weekly ignored even if active."""
     policy = RetentionPolicy(
-        daily=7, monthly=12, weekly=4, preserve_min="all",
+        daily=7,
+        monthly=12,
+        weekly=4,
+        preserve_min="all",
         anchor_daily=True,
     )
     target = make_target()
@@ -546,8 +705,18 @@ def test_f_anchor_daily_only_ignores_others(make_target):
     now = datetime(2025, 8, 15, 10, 0)
 
     all_fulls = [
-        FullBackupInfo(name="old_monthly.FULL.monthly.qcow2", path=Path("/backup/old_monthly.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 20), bucket_level="monthly"),
-        FullBackupInfo(name="same_daily.FULL.daily.qcow2", path=Path("/backup/same_daily.FULL.daily.qcow2"), timestamp=datetime(2025, 8, 15, 8, 0), bucket_level="daily"),
+        FullBackupInfo(
+            name="old_monthly.FULL.monthly.qcow2",
+            path=Path("/backup/old_monthly.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 20),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="same_daily.FULL.daily.qcow2",
+            path=Path("/backup/same_daily.FULL.daily.qcow2"),
+            timestamp=datetime(2025, 8, 15, 8, 0),
+            bucket_level="daily",
+        ),
     ]
 
     strategy = BucketFullStrategy()
@@ -620,16 +789,36 @@ def test_accepts_list_single_and_none(make_target):
 def test_descending_yearly_skipped_monthly_triggers(make_target):
     """Descending order: yearly skipped (same period), monthly triggers."""
     policy = RetentionPolicy(
-        yearly=1, monthly=12, weekly=4, daily=7, hourly=24, preserve_min="all",
+        yearly=1,
+        monthly=12,
+        weekly=4,
+        daily=7,
+        hourly=24,
+        preserve_min="all",
     )
     target = make_target()
     snapshot_ts = datetime(2025, 8, 4, 14, 30)  # Monday, W32
     now = datetime(2025, 8, 4, 14, 30)
 
     all_fulls = [
-        FullBackupInfo(name="same_yearly.FULL.yearly.qcow2", path=Path("/backup/same_yearly.FULL.yearly.qcow2"), timestamp=datetime(2025, 1, 1), bucket_level="yearly"),
-        FullBackupInfo(name="old_monthly.FULL.monthly.qcow2", path=Path("/backup/old_monthly.FULL.monthly.qcow2"), timestamp=datetime(2025, 7, 15), bucket_level="monthly"),
-        FullBackupInfo(name="old_weekly.FULL.weekly.qcow2", path=Path("/backup/old_weekly.FULL.weekly.qcow2"), timestamp=datetime(2025, 7, 28), bucket_level="weekly"),  # W31
+        FullBackupInfo(
+            name="same_yearly.FULL.yearly.qcow2",
+            path=Path("/backup/same_yearly.FULL.yearly.qcow2"),
+            timestamp=datetime(2025, 1, 1),
+            bucket_level="yearly",
+        ),
+        FullBackupInfo(
+            name="old_monthly.FULL.monthly.qcow2",
+            path=Path("/backup/old_monthly.FULL.monthly.qcow2"),
+            timestamp=datetime(2025, 7, 15),
+            bucket_level="monthly",
+        ),
+        FullBackupInfo(
+            name="old_weekly.FULL.weekly.qcow2",
+            path=Path("/backup/old_weekly.FULL.weekly.qcow2"),
+            timestamp=datetime(2025, 7, 28),
+            bucket_level="weekly",
+        ),  # W31
     ]
 
     strategy = BucketFullStrategy()
@@ -642,8 +831,11 @@ def test_descending_yearly_skipped_monthly_triggers(make_target):
 def test_f_anchor_bucket_no_prior_full_creates_full(make_target):
     """F-anchor bucket has no prior FULL → triggers creation."""
     policy = RetentionPolicy(
-        weekly=4, monthly=12, preserve_min="all",
-        anchor_weekly=True, anchor_monthly=False,
+        weekly=4,
+        monthly=12,
+        preserve_min="all",
+        anchor_weekly=True,
+        anchor_monthly=False,
     )
     target = make_target()
     snapshot_ts = datetime(2025, 7, 14, 10, 0)  # Monday, W29

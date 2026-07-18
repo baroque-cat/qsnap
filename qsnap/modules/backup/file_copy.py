@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -48,6 +49,30 @@ class FileCopyBackupProvider(IBackupProvider):
         self._state = state
 
     # ── IBackupProvider implementation ────────────────────────────────
+
+    def _cleanup_partial_file(self, target_file: Path) -> None:
+        """Best-effort deletion of a partially-transferred file.
+
+        Called after a transfer or verification failure to remove the
+        partial target file so retention cleanup does not find it and
+        log a misleading ``[delete] removed backup`` message (design D2).
+        Failures are logged but never propagated — the caller is already
+        in a failure path.
+        """
+        try:
+            result = self._shell.run(["rm", "-f", str(target_file)], timeout=10)
+            if not result.success:
+                logger.warning(
+                    "Failed to delete partial backup file %s: %s",
+                    target_file,
+                    result.error,
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logger.warning(
+                "Failed to delete partial backup file %s: %s",
+                target_file,
+                exc,
+            )
 
     @staticmethod
     def _find_full_anchor(target: TargetConfig) -> Path | None:
@@ -112,12 +137,9 @@ class FileCopyBackupProvider(IBackupProvider):
             # and skip the transfer (per chain-integrity-verification spec).
             if not os.path.exists(str(snapshot.path)):
                 if self._state is not None:
-                    self._state.remove_snapshot(
-                        vm_config.name, snapshot.name
-                    )
+                    self._state.remove_snapshot(vm_config.name, snapshot.name)
                 logger.warning(
-                    "Stale state entry: snapshot %s file not found on "
-                    "disk — removed from state",
+                    "Stale state entry: snapshot %s file not found on disk — removed from state",
                     snapshot.name,
                 )
                 continue
@@ -130,11 +152,17 @@ class FileCopyBackupProvider(IBackupProvider):
                 transfer_cmd = [
                     "rsync",
                     f"--bwlimit={bwlimit}",
-                    "--partial",
-                    "--progress",
-                    str(snapshot.path),
-                    str(target_file),
                 ]
+                if target.compress:
+                    transfer_cmd.append("--compress")
+                transfer_cmd.extend(
+                    [
+                        "--partial",
+                        "--progress",
+                        str(snapshot.path),
+                        str(target_file),
+                    ]
+                )
                 logger.info(
                     "Transferring %s to %s (rate limit: %s)",
                     snapshot.name,
@@ -142,13 +170,17 @@ class FileCopyBackupProvider(IBackupProvider):
                     rate_limit,
                 )
             else:
-                transfer_cmd = [
-                    "rsync",
-                    "--partial",
-                    "--progress",
-                    str(snapshot.path),
-                    str(target_file),
-                ]
+                transfer_cmd = ["rsync"]
+                if target.compress:
+                    transfer_cmd.append("--compress")
+                transfer_cmd.extend(
+                    [
+                        "--partial",
+                        "--progress",
+                        str(snapshot.path),
+                        str(target_file),
+                    ]
+                )
                 logger.info(
                     "Transferring %s to %s",
                     snapshot.name,
@@ -167,6 +199,9 @@ class FileCopyBackupProvider(IBackupProvider):
                     snapshot.name,
                     transfer_result.error,
                 )
+                # Best-effort cleanup of the partial file left by
+                # ``rsync --partial`` (design D2).
+                self._cleanup_partial_file(target_file)
                 results.append(
                     BackupResult(
                         success=False,
@@ -220,24 +255,20 @@ class FileCopyBackupProvider(IBackupProvider):
                 full_anchor: Path | None = None
                 sorted_anchors = self._get_sorted_full_anchors(target)
                 for candidate in sorted_anchors:
-                    m1_error = verify_full_backup(
-                        self._shell, candidate, full_verify_before_rebase
-                    )
+                    m1_error = verify_full_backup(self._shell, candidate, full_verify_before_rebase)
                     if m1_error is None:
                         full_anchor = candidate
                         break
                     else:
                         logger.warning(
-                            "FULL anchor %s failed M1 verification — "
-                            "trying older anchor: %s",
+                            "FULL anchor %s failed M1 verification — trying older anchor: %s",
                             candidate.name,
                             m1_error,
                         )
 
                 if full_anchor is None and sorted_anchors:
                     logger.warning(
-                        "All FULL anchors in %s failed M1 verification "
-                        "— skipping rebase for %s",
+                        "All FULL anchors in %s failed M1 verification — skipping rebase for %s",
                         target.path,
                         snapshot.name,
                     )
@@ -354,6 +385,10 @@ class FileCopyBackupProvider(IBackupProvider):
                     snapshot.name,
                     verify_error,
                 )
+                # Delete the partially-transferred file so retention
+                # cleanup does not find it and log a misleading
+                # ``[delete] removed backup`` message (design D2).
+                self._cleanup_partial_file(target_file)
                 results.append(
                     BackupResult(
                         success=False,

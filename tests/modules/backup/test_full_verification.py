@@ -74,9 +74,7 @@ def test_verify_full_backup_metadata_valid_qcow2(mock_shell):
     """When ``qemu-img info`` returns ``format=qcow2`` with no corrupt bit,
     ``verify_full_backup(... , "metadata")`` returns ``None``.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
 
     result = verify_full_backup(mock_shell, Path("/backup/full.qcow2"), "metadata")
 
@@ -99,13 +97,9 @@ def test_verify_full_backup_metadata_corrupt_bit(mock_shell):
         },
     }
 
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(corrupt_info))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(corrupt_info)))
 
-    result = verify_full_backup(
-        mock_shell, Path("/backup/corrupt.qcow2"), "metadata"
-    )
+    result = verify_full_backup(mock_shell, Path("/backup/corrupt.qcow2"), "metadata")
 
     assert result is not None
     assert "corrupt bit set" in result
@@ -118,9 +112,7 @@ def test_verify_full_backup_metadata_wrong_format(mock_shell):
     """
     raw_info = {"format": "raw", "virtual-size": 1073741824}
 
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(raw_info))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(raw_info)))
 
     result = verify_full_backup(mock_shell, Path("/backup/full.raw"), "metadata")
 
@@ -133,13 +125,9 @@ def test_verify_full_backup_metadata_info_fails(mock_shell):
     ``verify_full_backup`` returns an error containing
     ``"qemu-img info returned"``.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _fail_result(error="Cannot open file")
-    )
+    mock_shell.expect("qemu-img info").returns(_fail_result(error="Cannot open file"))
 
-    result = verify_full_backup(
-        mock_shell, Path("/backup/nonexistent.qcow2"), "metadata"
-    )
+    result = verify_full_backup(mock_shell, Path("/backup/nonexistent.qcow2"), "metadata")
 
     assert result is not None
     assert "qemu-img info returned" in result
@@ -155,12 +143,8 @@ def test_verify_full_backup_check_passes(mock_shell):
     returns ``{errors: 0, leaks: 0}``, ``verify_full_backup`` returns
     ``None``.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
-    mock_shell.expect("qemu-img check").returns(
-        _ok_result(stdout=json.dumps(_VALID_CHECK))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
+    mock_shell.expect("qemu-img check").returns(_ok_result(stdout=json.dumps(_VALID_CHECK)))
 
     result = verify_full_backup(mock_shell, Path("/backup/full.qcow2"), "check")
 
@@ -171,9 +155,7 @@ def test_verify_full_backup_check_errors_detected(mock_shell):
     """When ``verify_mode="check"`` and ``qemu-img check`` reports 5 errors,
     ``verify_full_backup`` returns an error containing ``"found 5 errors"``.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
     mock_shell.expect("qemu-img check").returns(
         _ok_result(stdout=json.dumps({"errors": 5, "leaks": 0}))
     )
@@ -189,9 +171,7 @@ def test_verify_full_backup_check_no_errors(mock_shell):
     returns zero errors and zero leaks, ``verify_full_backup`` returns
     ``None`` — confirming the zero-values pass both error and leak guards.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
     mock_shell.expect("qemu-img check").returns(
         _ok_result(stdout=json.dumps({"errors": 0, "leaks": 0}))
     )
@@ -216,15 +196,9 @@ def test_verify_full_backup_hash_match(mock_shell):
     """
     source = Path("/backup/source_snapshot.qcow2")
 
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
-    mock_shell.expect("qemu-img check").returns(
-        _ok_result(stdout=json.dumps(_VALID_CHECK))
-    )
-    mock_shell.expect("qemu-img compare").returns(
-        _ok_result(stdout="Images are identical.")
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
+    mock_shell.expect("qemu-img check").returns(_ok_result(stdout=json.dumps(_VALID_CHECK)))
+    mock_shell.expect("qemu-img compare").returns(_ok_result(stdout="Images are identical."))
 
     result = verify_full_backup(
         mock_shell,
@@ -247,15 +221,9 @@ def test_verify_full_backup_hash_mismatch(mock_shell):
     """
     source = Path("/backup/source_snapshot.qcow2")
 
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
-    mock_shell.expect("qemu-img check").returns(
-        _ok_result(stdout=json.dumps(_VALID_CHECK))
-    )
-    mock_shell.expect("qemu-img compare").returns(
-        _fail_result(error="Images differ")
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
+    mock_shell.expect("qemu-img check").returns(_ok_result(stdout=json.dumps(_VALID_CHECK)))
+    mock_shell.expect("qemu-img compare").returns(_fail_result(error="Images differ"))
 
     result = verify_full_backup(
         mock_shell,
@@ -276,12 +244,8 @@ def test_verify_full_backup_hash_none_skips_m3(mock_shell):
 
     No ``qemu-img compare`` call is expected on the shell.
     """
-    mock_shell.expect("qemu-img info").returns(
-        _ok_result(stdout=json.dumps(_VALID_QCOW2_INFO))
-    )
-    mock_shell.expect("qemu-img check").returns(
-        _ok_result(stdout=json.dumps(_VALID_CHECK))
-    )
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
+    mock_shell.expect("qemu-img check").returns(_ok_result(stdout=json.dumps(_VALID_CHECK)))
 
     result = verify_full_backup(
         mock_shell,

@@ -23,7 +23,7 @@ The system SHALL provide an immutable `VMConfig` dataclass representing a single
 - **THEN** `vm.targets` contains those targets in order
 
 ### Requirement: TargetConfig dataclass
-The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, its rate limit setting, verification mode, retry controls, compression setting, and base-copy behavior.
+The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, its rate limit setting, verification mode, retry controls, compression setting, and base-copy behavior. The `verify` field SHALL default to `"metadata"` at the dataclass level. `ConfigFacade._build_target()` SHALL resolve the effective default based on `incremental_mode`: `"hash"` when `incremental_mode == "file-copy"`, `"metadata"` when `incremental_mode == "bitmap"`. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence over the mode-dependent default. The `incremental_mode` field SHALL default to `"bitmap"` (NBD dirty-block extraction); the factory SHALL fall back to `FileCopyBackupProvider` when libvirt < 6.0.
 
 #### Scenario: TargetConfig with incremental enabled
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and `incremental=True`
@@ -85,10 +85,14 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **THEN** ConfigFacade raises ConfigError with a message indicating the valid values
 
 ### Requirement: TargetConfig incremental_mode field
-`TargetConfig` SHALL gain an `incremental_mode: str` field with default value `"file-copy"`. Accepted values SHALL be `"file-copy"` (whole-file copy) and `"bitmap"` (dirty-block extraction via checkpoint). The field SHALL be immutable (`frozen=True`).
+`TargetConfig` SHALL have an `incremental_mode: str` field with default value `"bitmap"`. Accepted values SHALL be `"file-copy"` (whole-file copy via rsync) and `"bitmap"` (dirty-block extraction via NBD). The field SHALL be immutable (`frozen=True`). When `incremental_mode="bitmap"` and libvirt < 6.0, the factory SHALL fall back to `FileCopyBackupProvider` without mutating the config.
 
-#### Scenario: Default incremental_mode is file-copy
+#### Scenario: Default incremental_mode is bitmap
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and no `incremental_mode`
+- **THEN** `target.incremental_mode` is `"bitmap"`
+
+#### Scenario: Explicit file-copy mode
+- **WHEN** a TargetConfig is created with `incremental_mode="file-copy"`
 - **THEN** `target.incremental_mode` is `"file-copy"`
 
 #### Scenario: Explicit bitmap mode
@@ -108,15 +112,31 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **THEN** only `vda` and `vdb` are snapshotted
 
 ### Requirement: TargetConfig verify field
-`TargetConfig` SHALL gain a `verify: str` field with default value `"metadata"`. Accepted values SHALL be `"off"` (no verification), `"metadata"` (qemu-img info consistency check), and `"full"` (qemu-img compare byte-level verification). The field SHALL be immutable (`frozen=True`).
+`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The *effective* default SHALL be resolved by `ConfigFacade._build_target()` based on `incremental_mode`: `"hash"` when `incremental_mode == "file-copy"`, `"metadata"` when `incremental_mode == "bitmap"`. When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (qemu-img info consistency check), `"hash"` (SHA-256 digest comparison), and `"full"` (qemu-img compare byte-level verification). The field SHALL be immutable (`frozen=True`).
 
-#### Scenario: Default verify is metadata
+#### Scenario: Dataclass-level verify default is metadata
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and no `verify`
-- **THEN** `target.verify` is `"metadata"`
+- **THEN** `target.verify` is `"metadata"` (dataclass-level; effective default resolved by ConfigFacade)
+
+#### Scenario: ConfigFacade resolves hash default for file-copy mode
+- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="file-copy"` and no explicit `verify`
+- **THEN** the resulting `TargetConfig.verify` is `"hash"`
+
+#### Scenario: ConfigFacade resolves metadata default for bitmap mode
+- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="bitmap"` and no explicit `verify`
+- **THEN** the resulting `TargetConfig.verify` is `"metadata"`
 
 #### Scenario: Explicit full verification
 - **WHEN** a TargetConfig is created with `verify="full"`
 - **THEN** `target.verify` is `"full"`
+
+#### Scenario: Explicit verify overrides mode-dependent default
+- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="file-copy"` and explicit `verify="metadata"`
+- **THEN** the resulting `TargetConfig.verify` is `"metadata"` (explicit value takes precedence)
+
+#### Scenario: Bitmap mode with verify="hash" warns and downgrades
+- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="bitmap"` and `verify="hash"` explicitly set
+- **THEN** a WARNING is logged and `verify` is auto-downgraded to `"metadata"`
 
 ### Requirement: VMConfig snapshot_quiesce field
 `VMConfig` SHALL gain a `snapshot_quiesce: bool` field with default `False`. When `True`, snapshot creation SHALL request guest-agent filesystem freeze via `--quiesce`.

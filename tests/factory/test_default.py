@@ -200,6 +200,7 @@ def test_factory_default_lifecycle_returns_blockcommit(mock_shell, mock_state):
 
 # ── bitmap libvirt version gating tests ──────────────────────────────
 
+
 def test_factory_bitmap_mode_old_libvirt_falls_back(
     mock_shell,
     mock_state,

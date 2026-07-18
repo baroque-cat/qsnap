@@ -1,0 +1,38 @@
+# Verify mode-dependent default resolution
+# Tests: test_facade_resolves_hash_default_for_file_copy_mode
+#        test_facade_resolves_metadata_default_for_bitmap_mode
+#        test_facade_explicit_verify_overrides_mode_default
+
+[[vm]]
+name = "vm_fc_default"
+base_image = "/var/lib/libvirt/images/vm_fc_default.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_fc_default"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_fc_default"
+  incremental = true
+  incremental_mode = "file-copy"
+  # verify not set → should default to "hash" for file-copy mode
+
+[[vm]]
+name = "vm_bitmap_default"
+base_image = "/var/lib/libvirt/images/vm_bitmap_default.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_bitmap_default"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_bitmap_default"
+  incremental = true
+  incremental_mode = "bitmap"
+  # verify not set → should default to "metadata" for bitmap mode
+
+[[vm]]
+name = "vm_fc_override"
+base_image = "/var/lib/libvirt/images/vm_fc_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_fc_override"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_fc_override"
+  incremental = true
+  incremental_mode = "file-copy"
+  verify = "metadata"
+  # explicit verify overrides mode-dependent default (hash → metadata)

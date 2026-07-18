@@ -182,9 +182,15 @@ def test_retention_policy_defaults():
     assert policy.preserve_min == "all"
 
 
-def test_target_config_default_incremental_mode_is_file_copy():
-    """TargetConfig with no incremental_mode arg defaults to 'file-copy'."""
+def test_target_config_default_incremental_mode_is_bitmap():
+    """TargetConfig with no incremental_mode arg defaults to 'bitmap' (NBD)."""
     target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.incremental_mode == "bitmap"
+
+
+def test_target_config_explicit_file_copy_overrides_default():
+    """TargetConfig(incremental_mode='file-copy') explicitly overrides bitmap default."""
+    target = TargetConfig(path=Path("/backup/testvm"), incremental_mode="file-copy")
     assert target.incremental_mode == "file-copy"
 
 

@@ -7,10 +7,13 @@ are intercepted by ``MockShell``.
 
 Verification levels (``TargetConfig.verify``):
 - ``"off"``: no verification — returns ``None`` immediately.
-- ``"metadata"``: ``qemu-img info`` consistency check (format,
-  virtual-size exact match, actual-size ±10% tolerance).
-- ``"full"``: metadata check + ``qemu-img compare -q`` byte-level
-  comparison (timeout 7200s).
+- ``"metadata"``: ``qemu-img info`` consistency check (format and
+  virtual-size exact match; actual-size is NOT checked — unreliable
+  for live sources, design D1).
+- ``"full"``: metadata check + ``qemu-img compare -q --force-share``
+  byte-level comparison (timeout 7200s). ``--force-share`` avoids hard
+  lock errors on live sources; a WARNING is logged because results may
+  be unreliable if the VM writes during comparison (design D5).
 """
 
 from __future__ import annotations
@@ -67,8 +70,8 @@ def _fail_result(error: str = "command failed") -> ShellResult:
 
 def test_metadata_verification_passes(mock_shell):
     """When both source and target return qcow2 JSON with matching
-    virtual-size and actual-size within 10% tolerance,
-    ``verify_backup(..., "metadata")`` returns ``None``.
+    format and virtual-size, ``verify_backup(..., "metadata")`` returns
+    ``None``.  actual-size is NOT checked (design D1).
     """
     mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
 
@@ -150,12 +153,12 @@ def test_full_verification_passes(mock_shell):
 
     assert result is None
 
-    # qemu-img compare must NOT include --force-share (data-copying op, design D5)
+    # qemu-img compare includes --force-share to avoid lock errors on live sources (design D5)
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
     assert len(compare_cmds) == 1
-    assert "--force-share" not in compare_cmds[0], (
-        f"qemu-img compare must NOT include --force-share, got: {compare_cmds[0]}"
+    assert "--force-share" in compare_cmds[0], (
+        f"qemu-img compare must include --force-share, got: {compare_cmds[0]}"
     )
     # Source-side info uses --force-share
     source_info_cmds = [cmd for cmd in all_cmds if "qemu-img info" in cmd and _SOURCE_PATH in cmd]
@@ -177,12 +180,12 @@ def test_full_verification_detects_corruption(mock_shell):
     assert result is not None
     assert "compare" in result or "comparison" in result
 
-    # qemu-img compare must NOT include --force-share (data-copying op, design D5)
+    # qemu-img compare includes --force-share to avoid lock errors on live sources (design D5)
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
     assert len(compare_cmds) == 1
-    assert "--force-share" not in compare_cmds[0], (
-        f"qemu-img compare must NOT include --force-share, got: {compare_cmds[0]}"
+    assert "--force-share" in compare_cmds[0], (
+        f"qemu-img compare must include --force-share, got: {compare_cmds[0]}"
     )
     # Source-side info uses --force-share
     source_info_cmds = [cmd for cmd in all_cmds if "qemu-img info" in cmd and _SOURCE_PATH in cmd]
@@ -228,10 +231,10 @@ def test_risk_full_verification_timeout_7200s(mock_shell):
     assert len(compare_calls) == 1
     assert compare_calls[0].kwargs.get("timeout") == 7200
 
-    # qemu-img compare must NOT include --force-share
+    # qemu-img compare includes --force-share (design D5)
     compare_cmd = " ".join(compare_calls[0].args[0])
-    assert "--force-share" not in compare_cmd, (
-        f"qemu-img compare must NOT include --force-share, got: {compare_cmd}"
+    assert "--force-share" in compare_cmd, (
+        f"qemu-img compare must include --force-share, got: {compare_cmd}"
     )
 
 
@@ -402,11 +405,11 @@ def test_source_side_info_uses_force_share_on_active_layer(mock_shell):
 
 def test_full_verification_live_source_logs_warning(mock_shell):
     """When ``verify_mode="full"``, a WARNING is logged before
-    ``qemu-img compare`` to alert the user that the compare may fail
-    if the source is a live VM active layer (design D5).
+    ``qemu-img compare`` to alert the user that the compare may produce
+    false mismatches if the source is a live VM active layer (design D5).
 
-    ``qemu-img compare`` is still executed without ``--force-share``
-    because it is a data-copying operation.
+    ``qemu-img compare`` is executed WITH ``--force-share`` to avoid
+    hard lock errors on live sources.
     """
     mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(_ok_result())
@@ -421,20 +424,16 @@ def test_full_verification_live_source_logs_warning(mock_shell):
     # Verify the warning was logged
     mock_warning.assert_called_once()
     warning_msg = mock_warning.call_args[0][0]
-    assert "Full verification" in warning_msg or "qemu-img compare" in warning_msg
-    assert "lock" in warning_msg.lower()
+    assert "verify=full" in warning_msg.lower() or "running VM" in warning_msg.lower()
+    assert "unreliable" in warning_msg.lower()
     assert "verify" in warning_msg.lower()
 
 
 def test_full_verification_live_source_lock_conflict(mock_shell):
     """When ``verify_mode="full"`` and ``qemu-img compare`` on a locked
-    active layer fails with a lock conflict, ``verify_backup`` returns an
-    error string.
-
-    Note: The current implementation returns a generic error message
-    ("verification failed: data comparison mismatch"). It does NOT
-    currently detect the specific lock-conflict condition or recommend
-    ``verify=metadata``. This is the behavior being tested.
+    active layer fails with a lock conflict (even with ``--force-share``),
+    ``verify_backup`` returns a specific error string recommending
+    ``verify='metadata'`` or ``verify='hash'`` for live sources.
     """
     mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
     mock_shell.expect(r"qemu-img compare").returns(
@@ -451,5 +450,93 @@ def test_full_verification_live_source_lock_conflict(mock_shell):
 
     assert result is not None
     assert "verification failed" in result
-    # The compare failed because of the lock conflict
-    assert "compare" in result or "comparison" in result
+    # The compare failed because of the lock conflict — specific error message
+    assert "lock conflict" in result
+    assert "verify='metadata'" in result or "verify=metadata" in result
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Actual-size is intentionally NOT checked (design D1)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_metadata_passes_despite_actual_size_difference(mock_shell):
+    """When source and target have matching format (``"qcow2"``) and
+    virtual-size but wildly different actual-size values,
+    ``verify_backup(..., "metadata")`` returns ``None`` — actual-size
+    is intentionally NOT checked (design D1).
+
+    This test documents that a source with a small actual-size (e.g.
+    1 MB for a sparse active layer) and a target with a large
+    actual-size (e.g. 1 GB fully allocated) still passes metadata
+    verification because only format and virtual-size are validated.
+    """
+    source_info = {
+        "format": "qcow2",
+        "virtual-size": 1073741824,
+        "actual-size": 1048576,  # ~1 MB — sparse active layer
+    }
+    target_info = {
+        "format": "qcow2",
+        "virtual-size": 1073741824,
+        "actual-size": 1073741824,  # 1 GB — fully allocated
+    }
+
+    mock_shell.expect(r"qemu-img info.*source\.qcow2").returns(
+        _ok_result(stdout=json.dumps(source_info))
+    )
+    mock_shell.expect(r"qemu-img info.*target\.qcow2").returns(
+        _ok_result(stdout=json.dumps(target_info))
+    )
+
+    result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "metadata")
+
+    assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Full verification — live source lock error message + --force-share check
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_full_verify_live_source_lock_error_message(mock_shell):
+    """When ``verify_mode="full"`` and ``qemu-img compare`` fails with
+    a lock conflict error (e.g. ``Failed to get shared "write" lock``),
+    ``verify_backup`` returns an error string recommending
+    ``verify='metadata'`` or ``verify='hash'`` for live sources.
+
+    Also verifies that ``--force-share`` is present in the compare
+    command (design D5) — this avoids hard lock errors on live sources
+    and is the prerequisite for a user to encounter this specific
+    ``"lock conflict"`` message (i.e. the lock error happens WITH
+    ``--force-share`` already present).
+    """
+    mock_shell.expect(r"qemu-img info").returns(_ok_result(stdout=json.dumps(_QCOW2_INFO)))
+    mock_shell.expect(r"qemu-img compare").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=(
+                "qemu-img: Could not open '/source.qcow2': Failed to get shared \"write\" lock"
+            ),
+            returncode=1,
+            error=("qemu-img: Could not open '/source.qcow2': Failed to get shared \"write\" lock"),
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        result = verify_backup(mock_shell, _SOURCE_PATH, _TARGET_PATH, "full")
+
+    assert result is not None
+    assert "lock conflict" in result
+    assert "verify='metadata'" in result
+
+    # Verify --force-share is in the compare command (design D5)
+    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
+    assert len(compare_cmds) == 1, (
+        f"Expected exactly 1 qemu-img compare call, got {len(compare_cmds)}"
+    )
+    assert "--force-share" in compare_cmds[0], (
+        f"qemu-img compare must include --force-share, got: {compare_cmds[0]}"
+    )

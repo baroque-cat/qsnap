@@ -136,6 +136,7 @@ def make_target():
     def _make(
         path: str = "/mnt/backup/testvm",
         incremental: bool = True,
+        incremental_mode: str = "file-copy",
         rate_limit: str = "no",
         compress: bool = True,
         copy_base: bool = False,
@@ -144,6 +145,7 @@ def make_target():
         defaults: dict[str, object] = {
             "path": Path(path),
             "incremental": incremental,
+            "incremental_mode": incremental_mode,
             "rate_limit": rate_limit,
             "compress": compress,
             "copy_base": copy_base,

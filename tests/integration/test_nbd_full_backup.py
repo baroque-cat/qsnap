@@ -57,7 +57,6 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
     target_dir: Path = test_vm["target_dir"]
-    snapshot_dir: Path = test_vm["snapshot_dir"]
 
     # Step 1: Start the VM
     start_result = shell.run(["virsh", "start", vm_name], timeout=30)
@@ -564,8 +563,7 @@ def test_stale_state_recovery_integration(test_vm):
     # Verify stale entry was removed.
     remaining = state.get_snapshots(vm_name)
     assert len(remaining) == 0, (
-        f"Stale state entry should be removed. "
-        f"Remaining: {[s.name for s in remaining]}"
+        f"Stale state entry should be removed. Remaining: {[s.name for s in remaining]}"
     )
 
     # Verify no backup was produced for the stale entry.
@@ -609,9 +607,12 @@ def test_qemu_img_rebase_minus_F_qcow2_integration(test_vm):
         [
             "qemu-img",
             "create",
-            "-F", "qcow2",
-            "-b", str(base_image),
-            "-f", "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            str(base_image),
+            "-f",
+            "qcow2",
             str(overlay),
         ],
         timeout=30,
@@ -628,8 +629,7 @@ def test_qemu_img_rebase_minus_F_qcow2_integration(test_vm):
     info_before_data = json.loads(info_before.stdout)
     backing_before = info_before_data.get("backing-filename", "")
     assert str(base_image) in str(backing_before), (
-        f"Overlay should reference original base {base_image}, "
-        f"got {backing_before!r}"
+        f"Overlay should reference original base {base_image}, got {backing_before!r}"
     )
 
     # Step 4: Rebase the overlay to the second base using -F qcow2.
@@ -637,16 +637,16 @@ def test_qemu_img_rebase_minus_F_qcow2_integration(test_vm):
         [
             "qemu-img",
             "rebase",
-            "-u",              # unsafe/unsafe mode: metadata-only, no data copy
-            "-b", str(second_base.name),
-            "-F", "qcow2",     # verify: explicit backing format
+            "-u",  # unsafe/unsafe mode: metadata-only, no data copy
+            "-b",
+            str(second_base.name),
+            "-F",
+            "qcow2",  # verify: explicit backing format
             str(overlay),
         ],
         timeout=30,
     )
-    assert rebase_result.success, (
-        f"qemu-img rebase -F qcow2 failed: {rebase_result.error}"
-    )
+    assert rebase_result.success, f"qemu-img rebase -F qcow2 failed: {rebase_result.error}"
 
     # Step 5: Verify the overlay's backing file was updated.
     info_after = shell.run(
@@ -676,8 +676,7 @@ def test_qemu_img_rebase_minus_F_qcow2_integration(test_vm):
         timeout=30,
     )
     assert check_result.success, (
-        f"qemu-img info --backing-chain should succeed after rebase: "
-        f"{check_result.error}"
+        f"qemu-img info --backing-chain should succeed after rebase: {check_result.error}"
     )
     # The backing chain info should mention both the overlay and its
     # backing file (the second_base we rebased to).

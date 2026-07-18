@@ -10,12 +10,19 @@ from __future__ import annotations
 import re
 
 # Error patterns that indicate a transient (retryable) failure.
+# "verification failed: hash mismatch" is the ONLY verification error
+# that is retryable — a hash mismatch may indicate transient transfer
+# corruption that a retry can fix.  Other verification errors (format
+# mismatch, virtual-size mismatch) are deterministic and must NOT be
+# retried (they don't match any pattern here, so they're non-retryable
+# by default).
 _RETRYABLE_PATTERNS = [
     "connection refused",
     "no route to host",
     "timed out",
     "broken pipe",
     "eof",
+    "verification failed: hash mismatch",
 ]
 
 # Error patterns that indicate a permanent (non-retryable) failure.
@@ -31,9 +38,15 @@ def is_retryable(error: str) -> bool:
     """Check whether *error* indicates a transient, retryable failure.
 
     Returns ``True`` for errors like "Connection refused", "No route
-    to host", "timed out", "broken pipe", "EOF" (case-insensitive).
+    to host", "timed out", "broken pipe", "EOF", and "verification
+    failed: hash mismatch" (case-insensitive).  The hash mismatch is
+    the only verification error that is retryable — it may indicate
+    transient transfer corruption that a retry can fix.
+
     Returns ``False`` for "No space left on device", "Permission
     denied", and any error that does not match a retryable pattern.
+    Verification errors other than hash mismatch (e.g., format errors,
+    virtual-size mismatch) are deterministic and NOT retried.
 
     Non-retryable patterns take precedence: if an error matches both
     a retryable and a non-retryable pattern, it is non-retryable.

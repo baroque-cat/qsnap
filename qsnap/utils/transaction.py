@@ -33,11 +33,13 @@ _TYPE_MAP: dict[str, str] = {
 _SOURCE_URL_ACTIONS = frozenset({"snapshot_create", "snapshot_delete"})
 
 # Actions that store the path in ``target_url`` (backup operations).
-_TARGET_URL_ACTIONS = frozenset({
-    "backup_transfer",
-    "backup_full",
-    "backup_delete",
-})
+_TARGET_URL_ACTIONS = frozenset(
+    {
+        "backup_transfer",
+        "backup_full",
+        "backup_delete",
+    }
+)
 
 
 class TransactionWriter:
@@ -90,10 +92,7 @@ class TransactionWriter:
         elif record.action == "error" and record.error:
             parent_url = f"# {record.error}"
 
-        line = (
-            f"{localtime} {log_type} {status} "
-            f"{target_url} {source_url} {parent_url}\n"
-        )
+        line = f"{localtime} {log_type} {status} {target_url} {source_url} {parent_url}\n"
 
         # Append to file (create if it doesn't exist).
         # Ensure parent directory exists.

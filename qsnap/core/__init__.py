@@ -1204,9 +1204,7 @@ class Core:
             snapshots = self._state.get_snapshots(vm.name)
             for sn in snapshots:
                 if not os.path.exists(str(sn.path)):
-                    phantom_snapshots.append(
-                        f"{sn.name} (expected: {sn.path})"
-                    )
+                    phantom_snapshots.append(f"{sn.name} (expected: {sn.path})")
             if phantom_snapshots:
                 status_parts.append("stale_snapshots")
 
@@ -1215,21 +1213,14 @@ class Core:
                 fulls = self._state.get_full_backups(str(target.path))
                 for full in fulls:
                     if not os.path.exists(str(full.path)):
-                        phantom_fulls.append(
-                            f"{full.name} (target: {target.path})"
-                        )
+                        phantom_fulls.append(f"{full.name} (target: {target.path})")
                 # ── Stale dependencies ───────────────────────────────
                 for full in fulls:
-                    deps = self._state.get_incremental_dependencies(
-                        str(target.path), full.name
-                    )
+                    deps = self._state.get_incremental_dependencies(str(target.path), full.name)
                     for dep_name in deps:
                         dep_path = target.path / f"{dep_name}.qcow2"
                         if not os.path.exists(str(dep_path)):
-                            stale_deps.append(
-                                f"{dep_name} → {full.name} "
-                                f"(target: {target.path})"
-                            )
+                            stale_deps.append(f"{dep_name} → {full.name} (target: {target.path})")
             if phantom_fulls:
                 status_parts.append("stale_fulls")
             if stale_deps:
@@ -2030,9 +2021,9 @@ class Core:
                 # entry's image in the chain array.
                 if i + 1 < len(chain_data):
                     # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-                    next_image = cast(str, chain_data[i + 1].get("image") or chain_data[i + 1].get(
-                        "filename", ""
-                    ))
+                    next_image = cast(
+                        str, chain_data[i + 1].get("image") or chain_data[i + 1].get("filename", "")
+                    )
                     if next_image and str(backing_path) != next_image:
                         return ChainVerifyResult(
                             success=False,
@@ -2111,15 +2102,12 @@ class Core:
             else:
                 self._state.remove_snapshot(vm_config.name, sn.name)
                 logger.warning(
-                    "Stale state entry: snapshot %s file not found on disk "
-                    "— removed from state",
+                    "Stale state entry: snapshot %s file not found on disk — removed from state",
                     sn.name,
                 )
         to_merge = filtered
         if not to_merge:
-            logger.info(
-                "All snapshots in to_merge were stale — skipping blockcommit"
-            )
+            logger.info("All snapshots in to_merge were stale — skipping blockcommit")
             return
 
         if self._preserve_snapshots:
@@ -2509,12 +2497,9 @@ class Core:
                 if os.path.exists(str(full.path)):
                     filtered_fulls.append(full)
                 else:
-                    self._state.remove_full_backup(
-                        str(target.path), full.name
-                    )
+                    self._state.remove_full_backup(str(target.path), full.name)
                     logger.warning(
-                        "Phantom FULL entry: %s file not found on "
-                        "disk — removed from state",
+                        "Phantom FULL entry: %s file not found on disk — removed from state",
                         full.name,
                     )
             all_fulls = filtered_fulls
@@ -2614,12 +2599,9 @@ class Core:
             failed = [r for r in results if not r.success]
             if failed:
                 backup_failed = True
-                failure_details = "; ".join(
-                    f"{r.snapshot_name}: {r.error}" for r in failed
-                )
+                failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
                 logger.warning(
-                    "Backup transfer failed for VM %s target %s: "
-                    "%d snapshot(s) failed — %s",
+                    "Backup transfer failed for VM %s target %s: %d snapshot(s) failed — %s",
                     vm_config.name,
                     target.path,
                     len(failed),
@@ -2631,9 +2613,7 @@ class Core:
             for r in results:
                 if r.success:
                     speed = (
-                        r.bytes_transferred / (1024 * 1024) / r.duration
-                        if r.duration > 0
-                        else 0.0
+                        r.bytes_transferred / (1024 * 1024) / r.duration if r.duration > 0 else 0.0
                     )
                     self._actions.append(
                         ActionRecord(
@@ -2646,8 +2626,7 @@ class Core:
                         )
                     )
                     logger.info(
-                        "[backup] %s: transferred %s → %s "
-                        "(%d B in %.1fs, %.1f MiB/s)",
+                        "[backup] %s: transferred %s → %s (%d B in %.1fs, %.1f MiB/s)",
                         vm_config.name,
                         r.snapshot_name,
                         target.path,
@@ -2751,8 +2730,7 @@ class Core:
                 ghosted = [d for d in dependents if d in keep_set]
                 if ghosted:
                     logger.info(
-                        "[delete] %s: ghost-retained FULL %s "
-                        "(%d dependent(s) in keep-set)",
+                        "[delete] %s: ghost-retained FULL %s (%d dependent(s) in keep-set)",
                         vm_config.name,
                         backup.name,
                         len(ghosted),
@@ -2761,9 +2739,7 @@ class Core:
                 # No dependents in keep-set — verify FULL integrity before deletion
                 # M1 (metadata) verification is NON-CONFIGURABLE — always enforced
                 # to prevent data loss from cascade-deleting a corrupt FULL.
-                m1_error = verify_full_backup(
-                    self._shell, backup.path, "metadata"
-                )
+                m1_error = verify_full_backup(self._shell, backup.path, "metadata")
                 if m1_error is not None:
                     logger.critical(
                         "FULL backup %s is corrupt — blocking deletion of "
@@ -2779,9 +2755,7 @@ class Core:
                 # M2 verification (configurable via full_verify_before_delete)
                 global_cfg = self._config.get_global()
                 if global_cfg.full_verify_before_delete == "check":
-                    m2_error = verify_full_backup(
-                        self._shell, backup.path, "check"
-                    )
+                    m2_error = verify_full_backup(self._shell, backup.path, "check")
                     if m2_error is not None:
                         logger.critical(
                             "FULL backup %s failed M2 check — blocking "

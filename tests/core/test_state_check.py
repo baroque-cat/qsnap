@@ -53,7 +53,9 @@ def test_check_state_all_snapshots_exist_clean(
     full_path = backup_dir / full_name
     full_path.touch()
 
-    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly")
+    mock_state.record_full_backup(
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+    )
 
     # Record incremental dependency with existing file (check_state adds .qcow2)
     inc_name = "inc.20250713T1100_vda"
@@ -141,7 +143,9 @@ def test_check_state_phantom_full_detected(
     full_name = "full.FULL.monthly"
     # Do NOT create the file on disk
 
-    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly")
+    mock_state.record_full_backup(
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+    )
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -178,7 +182,9 @@ def test_check_state_orphaned_dependency_detected(
     full_name = "full.FULL.monthly"
     full_path = backup_dir / full_name
     full_path.touch()
-    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly")
+    mock_state.record_full_backup(
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+    )
 
     # Record an incremental dependency but do NOT create its file
     inc_name = "inc.20250713T1100_vda"
@@ -224,7 +230,9 @@ def test_check_state_detached_dependency_detected(
     # Record a FULL backup whose file does NOT exist (phantom)
     full_name = "full.FULL.monthly"
     # Do NOT create the file
-    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly")
+    mock_state.record_full_backup(
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+    )
 
     # Record an incremental dependency referencing that phantom FULL
     inc_name = "inc.20250713T1100_vda"

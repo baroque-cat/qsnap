@@ -904,9 +904,7 @@ def test_first_backup_creates_full_via_strategy(
     mock_state.record_snapshot("testvm", snap)
 
     # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "monthly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
 
     backup_provider = mock_factory._backup_provider
 
@@ -973,9 +971,7 @@ def test_backup_target_passes_full_list_to_strategy(
 
     strategy = mock_factory._bucket_full_strategy
 
-    with patch(
-        "qsnap.core.os.path.exists", return_value=True
-    ):
+    with patch("qsnap.core.os.path.exists", return_value=True):
         core._backup_target(vm, target, [snap])
 
     # Verify the strategy was called
@@ -2119,6 +2115,178 @@ def test_backup_retry_disabled_when_max_zero(
     assert any(not r.success for r in results), "results should indicate failure"
 
 
+def test_backup_retry_exhausted_returns_last_error(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When max_retries=1 and error is retryable → last error returned after exhaustion.
+
+    The retry loop calls transfer_missing once (the only allowed attempt),
+    the error is retryable so it does not fail early, and since attempt >=
+    max_retries (1 >= 1), the loop returns the failed results immediately.
+    """
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=1, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+
+    provider = mock_factory._backup_provider
+
+    with (
+        patch("qsnap.core.time.sleep"),
+        patch.object(
+            provider,
+            "transfer_missing",
+            return_value=[fail_result],
+        ) as transfer_spy,
+    ):
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 1, "with max_retries=1, exactly one call should happen"
+    assert len(results) == 1, "should return results"
+    assert results[0].success is False, "result should indicate failure"
+    assert results[0].error == "Connection refused", (
+        "last error should be returned after exhausting retries"
+    )
+
+
+def test_transfer_retries_on_hash_mismatch(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Hash mismatch verification error is retryable → retried and succeeds on second attempt."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=3, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="verification failed: hash mismatch",
+    )
+    success_result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=1048576,
+        error=None,
+    )
+
+    provider = mock_factory._backup_provider
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch("qsnap.core.time.sleep"),
+        patch.object(
+            provider,
+            "transfer_missing",
+            side_effect=[[fail_result], [success_result]],
+        ) as transfer_spy,
+    ):
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count >= 2, "hash mismatch should be retried at least once"
+    assert all(r.success for r in results), "all results should succeed after retry"
+    assert "succeeded on retry" in caplog.text
+
+
+def test_transfer_does_not_retry_format_error(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Format mismatch verification error is NOT retryable → fails immediately (one call)."""
+    vm = make_vm_config(name="testvm")
+    target = make_target(backup_retry_max=3, backup_retry_base="1s")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1",
+        bytes_transferred=0,
+        error="verification failed: expected format qcow2, got raw",
+    )
+
+    provider = mock_factory._backup_provider
+
+    with patch.object(
+        provider,
+        "transfer_missing",
+        return_value=[fail_result],
+    ) as transfer_spy:
+        results = core._transfer_with_retry(provider, vm, target, [snap])
+
+    assert transfer_spy.call_count == 1, (
+        "format error is non-retryable → should fail immediately (one call)"
+    )
+    assert any(not r.success for r in results), "results should indicate failure"
+    assert results[0].error == "verification failed: expected format qcow2, got raw", (
+        "error should be the format verification error"
+    )
+
+
 # ── Deferred Blockcommit with deep_verify ──────────────────────────────────
 
 
@@ -2500,9 +2668,7 @@ def test_dry_run_logs_full_would_be_created(
     mock_state.record_snapshot("testvm", snap)
 
     # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "weekly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
 
     backup_provider = mock_factory._backup_provider
 
@@ -2556,9 +2722,7 @@ def test_dry_run_detects_vm_running_state_for_method(
     caplog.set_level(logging.INFO)
 
     # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "weekly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
 
     # --- Case A: VM running (default fixture dominfo returns State: running) ---
     core._backup_target(vm, target, [snap])
@@ -2609,9 +2773,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
     caplog.set_level(logging.INFO)
 
     # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "weekly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         core._backup_target(vm, target, [snap])
@@ -2669,9 +2831,7 @@ def test_full_creation_works_for_file_copy_and_bitmap(
     mock_state.record_snapshot("testvm", snap)
 
     # Configure MockBucketFullStrategy to return (True, "daily")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "daily")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
 
     bitmap_provider = mock_factory._bitmap_backup_provider
 
@@ -2836,9 +2996,7 @@ def test_core_passes_vm_name_to_create_full_backup(
     mock_state.record_snapshot("3.Projects_opencode", snap)
 
     # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
-        return_value=(True, "monthly")
-    )
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
 
     backup_provider = mock_factory._backup_provider
 
@@ -2915,9 +3073,7 @@ def test_blockcommit_stale_guard_all_exist_proceeds(
     with (
         patch("os.path.exists", return_value=True) as exists_mock,
         patch.object(core, "_get_chain_length", return_value=3),
-        patch.object(
-            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
-        ) as remove_spy,
+        patch.object(mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot) as remove_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
@@ -2992,9 +3148,7 @@ def test_blockcommit_stale_guard_one_stale_removed(
     with (
         patch("os.path.exists", side_effect=path_exists),
         patch.object(core, "_get_chain_length", return_value=3),
-        patch.object(
-            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
-        ) as remove_spy,
+        patch.object(mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot) as remove_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
@@ -3012,9 +3166,7 @@ def test_blockcommit_stale_guard_one_stale_removed(
     # Blockcommit called, but only with the surviving snapshot
     assert bc_spy.called, "blockcommit should proceed with surviving snapshots"
     merge_names = [s.name for s in bc_spy.call_args[0][1]]
-    assert merge_names == ["snap_ok"], (
-        f"Only snap_ok should be blockcommitted, got: {merge_names}"
-    )
+    assert merge_names == ["snap_ok"], f"Only snap_ok should be blockcommitted, got: {merge_names}"
     assert "snap_stale" not in merge_names, "stale snapshot must not be blockcommitted"
 
 
@@ -3071,9 +3223,7 @@ def test_blockcommit_stale_guard_all_stale_skipped(
 
     with (
         patch("os.path.exists", return_value=False),
-        patch.object(
-            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
-        ) as remove_spy,
+        patch.object(mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot) as remove_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
@@ -3159,9 +3309,7 @@ def test_blockcommit_stale_guard_no_short_circuit(
     with (
         patch("os.path.exists", side_effect=path_exists),
         patch.object(core, "_get_chain_length", return_value=4),
-        patch.object(
-            mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot
-        ) as remove_spy,
+        patch.object(mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot) as remove_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
@@ -3177,9 +3325,7 @@ def test_blockcommit_stale_guard_no_short_circuit(
     assert "Stale state entry" in caplog.text
 
     # Blockcommit called with the two surviving snapshots
-    assert bc_spy.called, (
-        "blockcommit should proceed despite one stale entry in the middle"
-    )
+    assert bc_spy.called, "blockcommit should proceed despite one stale entry in the middle"
     merge_names = [s.name for s in bc_spy.call_args[0][1]]
     assert set(merge_names) == {"snap_a", "snap_b"}, (
         f"snap_a and snap_b should be blockcommitted, snap_stale skipped; got: {merge_names}"
@@ -3242,7 +3388,9 @@ def test_dry_run_logs_planned_actions(
 
     # No mutations executed
     assert not create_spy.called, "snapshot provider create() must NOT be called in dry-run"
-    assert not transfer_spy.called, "backup provider transfer_missing() must NOT be called in dry-run"
+    assert not transfer_spy.called, (
+        "backup provider transfer_missing() must NOT be called in dry-run"
+    )
 
     # Pipeline still "succeeds" in dry-run
     assert result.success is True

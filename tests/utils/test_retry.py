@@ -54,6 +54,25 @@ def test_is_retryable_unknown_error():
     assert is_retryable("Some random error") is False
 
 
+def test_is_retryable_hash_mismatch():
+    """``is_retryable("verification failed: hash mismatch")`` returns True.
+
+    Hash mismatch is the ONLY verification error that is retryable
+    — it may indicate transient transfer corruption that a retry can fix.
+    """
+    assert is_retryable("verification failed: hash mismatch") is True
+
+
+def test_is_retryable_format_verification_error():
+    """``is_retryable("verification failed: expected format qcow2, got raw")``
+    returns False.
+
+    Format verification errors are deterministic — no amount of retrying
+    will convert a raw image to qcow2, so they must NOT be retried.
+    """
+    assert is_retryable("verification failed: expected format qcow2, got raw") is False
+
+
 # ── parse_retry_duration ───────────────────────────────────────────────────
 
 
