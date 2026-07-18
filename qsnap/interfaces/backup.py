@@ -18,12 +18,20 @@ class IBackupProvider(ABC):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         """Transfer snapshots not yet present at *target*.
 
         ``rate_limit`` is a rate-limit string (e.g. ``"500K"``, ``"100M"``)
         or ``"no"`` for unlimited.  Implementations that support throttling
         should apply it; others may ignore it.
+
+        ``full_verify_before_rebase`` is the M1 verification mode
+        (``"metadata"`` or ``"off"``) to apply to a FULL anchor before
+        rebasing an incremental onto it.  Defaults to ``"metadata"``
+        for backward compatibility.  Implementations that do not use
+        rebase may ignore it.
         """
         ...
 

@@ -22,25 +22,6 @@ from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvide
 from tests.mocks.mock_shell import MockShell
 
 
-def _make_bitmap_shell() -> MockShell:
-    """Create a MockShell pre-configured for BitmapBackupProvider construction.
-
-    BitmapBackupProvider.__init__ calls ``_check_libvirt_version()`` which
-    runs ``virsh --version``.  The returned stdout must parse to libvirt >= 6.0.
-    """
-    shell = MockShell()
-    shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True,
-            stdout="virsh 8.2.0\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    return shell
-
-
 def test_ibackup_provider_is_abstract():
     """IBackupProvider is an ABC with non-empty abstract methods.
 
@@ -76,7 +57,7 @@ def test_bitmap_backup_provider_no_core_inheritance():
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
+        (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
     ],
     ids=["file_copy", "bitmap", "mock"],
@@ -108,7 +89,7 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
+        (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
     ],
     ids=["file_copy", "bitmap", "mock"],
@@ -127,7 +108,7 @@ def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
+        (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
     ],
     ids=["file_copy", "bitmap", "mock"],
@@ -161,7 +142,7 @@ def test_ibackup_provider_create_full_backup_abstract():
     """
     # The method exists on the ABC and is callable.
     assert hasattr(IBackupProvider, "create_full_backup")
-    assert callable(getattr(IBackupProvider, "create_full_backup"))
+    assert callable(IBackupProvider.create_full_backup)
 
     # It is NOT abstract — subclasses are not forced to override it.
     assert "create_full_backup" not in IBackupProvider.__abstractmethods__
@@ -169,7 +150,9 @@ def test_ibackup_provider_create_full_backup_abstract():
     # A bare subclass (implements only the abstract methods) inherits the
     # default implementation that raises NotImplementedError.
     class _BareBackupProvider(IBackupProvider):
-        def transfer_missing(self, vm_config, target, snapshots):
+        def transfer_missing(
+            self, vm_config, target, snapshots, *, full_verify_before_rebase="metadata"
+        ):
             return []
 
         def list(self, target):
@@ -193,15 +176,15 @@ def test_ibackup_provider_create_full_backup_abstract():
         )
 
     # Concrete implementations that override it expose the method.
-    assert callable(getattr(FileCopyBackupProvider, "create_full_backup"))
-    assert callable(getattr(MockBackupProvider, "create_full_backup"))
+    assert callable(FileCopyBackupProvider.create_full_backup)
+    assert callable(MockBackupProvider.create_full_backup)
 
 
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
+        (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
@@ -260,7 +243,7 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
     "cls,init_kwargs",
     [
         (FileCopyBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": _make_bitmap_shell()}),
+        (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],

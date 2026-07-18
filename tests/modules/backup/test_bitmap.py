@@ -27,8 +27,6 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
@@ -68,12 +66,36 @@ def _make_snapshot() -> SnapshotInfo:
 
 
 def test_constructor_accepts_ishell_and_implements_abc(mock_shell):
-    """BitmapBackupProvider accepts IShell and is an IBackupProvider."""
-    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    """BitmapBackupProvider accepts IShell and is an IBackupProvider.
 
+    The libvirt version check was moved to ``DefaultFactory.create_backup_provider()``.
+    Constructor no longer calls ``_check_libvirt_version()``.
+    """
     provider = BitmapBackupProvider(mock_shell)
 
     assert isinstance(provider, IBackupProvider)
+
+
+def test_bitmap_constructor_no_version_check():
+    """BitmapBackupProvider.__init__ no longer calls ``_check_libvirt_version()``.
+
+    The version check moved to ``DefaultFactory.create_backup_provider()``
+    (design D2).  Constructing with a minimal MockShell — one that has
+    NO ``virsh --version`` expectation configured — must succeed without
+    error.  If the constructor still tried to call ``virsh --version``,
+    MockShell would return a failure result, which would trigger a
+    ``RuntimeError`` from the old ``_check_libvirt_version`` logic.
+    """
+    from tests.mocks.mock_shell import MockShell
+
+    shell = MockShell()
+    provider = BitmapBackupProvider(shell)
+
+    assert isinstance(provider, IBackupProvider)
+    assert not hasattr(BitmapBackupProvider, "_check_libvirt_version"), (
+        "_check_libvirt_version method should not exist "
+        "(version check moved to factory)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -460,26 +482,15 @@ def test_list_checkpoints_filters_qsnap_prefix(mock_shell):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 8. Constructor rejects unsupported libvirt version
+# 8. Constructor no longer checks libvirt version (moved to factory)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_constructor_rejects_unsupported_libvirt_version(mock_shell):
-    """When ``virsh --version`` returns version < 6.0, the constructor
-    raises ``RuntimeError``.
-    """
-    mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True,
-            stdout="virsh 5.9.0\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with pytest.raises(RuntimeError, match="libvirt 6.0\\+ required"):
-        BitmapBackupProvider(mock_shell)
+# NOTE: ``test_constructor_rejects_unsupported_libvirt_version`` was removed.
+# The libvirt version check moved from ``BitmapBackupProvider.__init__`` to
+# ``DefaultFactory.create_backup_provider()`` (design D2).  The replacement
+# test ``test_bitmap_constructor_no_version_check`` is delegated to
+# @Mr.Tester (bitmap-unit group) per the test-plan.
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1133,7 +1144,7 @@ def test_bitmap_create_full_backup_dotted_vm_name(mock_shell, make_target, tmp_p
         return original_run(cmd, timeout)
 
     # Spy on nbd_full_export to assert it receives the full VM name
-    from qsnap.modules.backup.nbd_helper import (
+    from qsnap.utils.nbd import (
         nbd_full_export as real_nbd_full_export,
     )
 

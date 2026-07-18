@@ -22,7 +22,6 @@ from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_state import InMemoryStateManager
 
-
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: Stale state self-healing — snapshot file missing on disk
 # ──────────────────────────────────────────────────────────────────────

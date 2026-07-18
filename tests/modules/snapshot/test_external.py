@@ -24,6 +24,7 @@ Scenarios (from ``specs/snapshot-provider/spec.md``):
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime
 from pathlib import Path
@@ -1001,8 +1002,8 @@ def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
     ``SnapshotResult`` whose ``content_hash`` is a 64-character hex string
     (SHA-256 digest).
 
-    The ``_file_sha256`` call reads the snapshot file on disk; since no real
-    file exists in the unit test, we patch ``_file_sha256`` in the
+    The ``file_sha256`` call reads the snapshot file on disk; since no real
+    file exists in the unit test, we patch ``file_sha256`` in the
     ``external`` module to return a known 64-char hex digest.
     """
     vm_config = make_vm_config()
@@ -1012,7 +1013,7 @@ def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
     fake_hash = "a" * 64  # 64-char hex string simulating a SHA-256 digest
 
     with (
-        patch("qsnap.modules.snapshot.external._file_sha256", return_value=fake_hash),
+        patch("qsnap.modules.snapshot.external.file_sha256", return_value=fake_hash),
         patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
     ):
         provider = ExternalSnapshotProvider(mock_shell)
@@ -1210,3 +1211,40 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
         "This likely means --force-share was removed from qemu-img info."
     )
     assert result.new_allocation == 1048576
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 11. Architecture — hash import and cross-domain checks
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_snapshot_uses_hash_from_utils():
+    """Verify ``ExternalSnapshotProvider`` imports ``file_sha256`` from
+    ``qsnap.utils.hash`` (not from a backup module).
+
+    The module-level import ``from qsnap.utils.hash import file_sha256``
+    means ``qsnap.modules.snapshot.external.file_sha256`` is the same
+    function object as ``qsnap.utils.hash.file_sha256``.
+    """
+    from qsnap.modules.snapshot import external
+    from qsnap.utils.hash import file_sha256 as hash_fn
+
+    assert hasattr(external, "file_sha256"), (
+        "external.py module must import file_sha256"
+    )
+    assert external.file_sha256 is hash_fn, (
+        "external.file_sha256 must be the same function as qsnap.utils.hash.file_sha256"
+    )
+
+
+def test_external_snapshot_no_cross_domain_imports():
+    """``qsnap.modules.snapshot.external`` does NOT import anything from
+    ``qsnap.modules.backup`` (cross-domain import violation per AGENTS.md).
+    """
+    import qsnap.modules.snapshot.external as ext_mod
+
+    source = inspect.getsource(ext_mod)
+    assert "qsnap.modules.backup" not in source, (
+        "external.py must not import from qsnap.modules.backup "
+        "(shared utilities live in qsnap.utils.*)"
+    )

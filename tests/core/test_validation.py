@@ -845,7 +845,7 @@ def test_preflight_cleanup_truncated_qcow2_detected_deleted(
 
     shell = _fresh_shell_with_cleanup_defaults()
     shell.expect_first(
-        f"qemu-img info.*--output=json.*snap-incomplete\\.qcow2"
+        "qemu-img info.*--output=json.*snap-incomplete\\.qcow2"
     ).returns(
         ShellResult(
             success=False, stdout="", stderr="corrupt", returncode=1, error="truncated"
@@ -903,7 +903,7 @@ def test_preflight_cleanup_valid_qcow2_not_deleted(
 
     shell = _fresh_shell_with_cleanup_defaults()
     shell.expect_first(
-        f"qemu-img info.*--output=json.*snap-valid\\.qcow2"
+        "qemu-img info.*--output=json.*snap-valid\\.qcow2"
     ).returns(
         ShellResult(
             success=True,

@@ -178,12 +178,24 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **THEN** the resulting backup file is smaller than a full copy
 
 ### Requirement: Libvirt version check in BitmapBackupProvider
-`BitmapBackupProvider.__init__()` SHALL verify libvirt >= 6.0 (required for `backup-begin`). If version is older, SHALL raise `RuntimeError`. `DefaultFactory.create_backup_provider()` SHALL catch `RuntimeError` and fall back to `FileCopyBackupProvider`.
+
+`DefaultFactory.create_backup_provider()` SHALL call `is_libvirt_new_enough()` from `qsnap.utils.nbd` before constructing `BitmapBackupProvider`. If the version is insufficient, the factory SHALL log a WARNING and return `FileCopyBackupProvider`. `BitmapBackupProvider.__init__()` SHALL NOT raise `RuntimeError` for any expected operational condition — it SHALL accept only `IShell` and trust that the factory only constructs it when appropriate.
 
 #### Scenario: Libvirt too old — factory fallback
 - **WHEN** libvirt version is 5.0 and `target.incremental_mode == "bitmap"`
-- **THEN** `BitmapBackupProvider()` raises `RuntimeError`
-- **THEN** `DefaultFactory` catches it, logs a warning, and returns `FileCopyBackupProvider`
+- **THEN** `DefaultFactory` calls `is_libvirt_new_enough(shell)` which returns `False`
+- **THEN** `DefaultFactory` logs a WARNING and returns `FileCopyBackupProvider(shell)`
+- **AND** no `RuntimeError` is raised
+
+#### Scenario: Libvirt sufficient — BitmapBackupProvider constructed
+- **WHEN** libvirt version is 9.0 and `target.incremental_mode == "bitmap"`
+- **THEN** `DefaultFactory` calls `is_libvirt_new_enough(shell)` which returns `True`
+- **THEN** `DefaultFactory` constructs and returns `BitmapBackupProvider(shell)`
+
+#### Scenario: BitmapBackupProvider constructor does not check version
+- **WHEN** `BitmapBackupProvider(shell)` is constructed
+- **THEN** no `virsh --version` call is made in the constructor
+- **AND** no version-related `raise RuntimeError` exists in the constructor
 
 ### Requirement: Backup verification step
 `FileCopyBackupProvider.transfer_missing()` and `BitmapBackupProvider.transfer_missing()` SHALL perform post-transfer verification according to `target.verify`. `"metadata"`: verify `qemu-img info` output (format, virtual-size, actual-size tolerance). `"full"`: additionally run `qemu-img compare`. Both failure cases SHALL produce `BackupResult(success=False, error="verification failed: ...")`.

@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from qsnap.factory.default import DefaultFactory
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
@@ -17,11 +19,13 @@ from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import CommitResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
+from qsnap.modules.backup.bucket_strategy import BucketFullStrategy
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
 from qsnap.modules.lifecycle.qemu_img_commit import QemuImgCommitManager
+from qsnap.utils.nbd import is_libvirt_new_enough
 
 
 def test_default_factory_stores_shell_and_state(mock_shell, mock_state):
@@ -100,7 +104,11 @@ def test_factory_selects_bitmap_provider_for_bitmap_mode(
     make_target,
 ):
     """DefaultFactory.create_backup_provider() with bitmap mode returns
-    BitmapBackupProvider when libvirt version >= 6.0."""
+    BitmapBackupProvider when libvirt version >= 6.0.
+
+    Verifies that the factory gates construction on ``is_libvirt_new_enough``
+    before returning BitmapBackupProvider.
+    """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
             success=True,
@@ -112,8 +120,15 @@ def test_factory_selects_bitmap_provider_for_bitmap_mode(
     )
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
-    provider = factory.create_backup_provider(make_vm_config(), target)
+
+    with patch(
+        "qsnap.factory.default.is_libvirt_new_enough",
+        wraps=is_libvirt_new_enough,
+    ) as mock_check:
+        provider = factory.create_backup_provider(make_vm_config(), target)
+
     assert isinstance(provider, BitmapBackupProvider)
+    mock_check.assert_called_once_with(mock_shell)
 
 
 def test_factory_selects_file_copy_provider_for_default_mode(
@@ -126,29 +141,6 @@ def test_factory_selects_file_copy_provider_for_default_mode(
     FileCopyBackupProvider (no qemu-img version check needed)."""
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="file-copy")
-    provider = factory.create_backup_provider(make_vm_config(), target)
-    assert isinstance(provider, FileCopyBackupProvider)
-
-
-def test_factory_falls_back_to_file_copy_on_old_qemu(
-    mock_shell,
-    mock_state,
-    make_vm_config,
-    make_target,
-):
-    """When libvirt version < 6.0, bitmap mode falls back to
-    FileCopyBackupProvider (RuntimeError from version check is caught)."""
-    mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True,
-            stdout="virsh 5.9.0\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    factory = DefaultFactory(shell=mock_shell, state=mock_state)
-    target = make_target(incremental_mode="bitmap")
     provider = factory.create_backup_provider(make_vm_config(), target)
     assert isinstance(provider, FileCopyBackupProvider)
 
@@ -203,46 +195,22 @@ def test_factory_default_lifecycle_returns_blockcommit(mock_shell, mock_state):
     assert isinstance(manager, BlockCommitManager)
 
 
-def test_factory_falls_back_on_old_libvirt(
+# ── bitmap libvirt version gating tests ──────────────────────────────
+
+def test_factory_bitmap_mode_old_libvirt_falls_back(
     mock_shell,
     mock_state,
     make_vm_config,
     make_target,
 ):
-    """bitmap mode + libvirt < 6.0 → RuntimeError caught → FileCopyBackupProvider.
+    """bitmap mode + libvirt < 6.0 → FileCopyBackupProvider fallback.
 
-    When ``BitmapBackupProvider.__init__`` raises ``RuntimeError``
-    (libvirt too old for ``virsh backup-begin``), the factory must
-    catch it and return a ``FileCopyBackupProvider`` instead.
-    """
-    mock_shell.expect("virsh --version").returns(
-        ShellResult(
-            success=True,
-            stdout="virsh 5.9.0\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    factory = DefaultFactory(shell=mock_shell, state=mock_state)
-    target = make_target(incremental_mode="bitmap")
-    provider = factory.create_backup_provider(make_vm_config(), target)
-    assert isinstance(provider, FileCopyBackupProvider)
-
-
-def test_risk_factory_falls_back_to_file_copy_on_old_libvirt(
-    mock_shell,
-    mock_state,
-    make_vm_config,
-    make_target,
-):
-    """RISK (test-plan.md Risk 6): Factory catches RuntimeError from
-    BitmapBackupProvider on old libvirt (< 6.0) and returns
-    FileCopyBackupProvider instead of propagating the exception.
-
-    Older libvirt lacks ``virsh backup-begin``; the factory's graceful
-    fallback guarantees bitmap-mode configs still produce a working
-    backup provider rather than crashing the pipeline.
+    The factory calls ``is_libvirt_new_enough``, which returns False for
+    old libvirt versions, causing the factory to log a WARNING and return
+    a ``FileCopyBackupProvider`` instead of ``BitmapBackupProvider``.
+    This absorbs the former ``test_factory_falls_back_to_file_copy_on_old_qemu``,
+    ``test_factory_falls_back_on_old_libvirt``, and
+    ``test_risk_factory_falls_back_to_file_copy_on_old_libvirt``.
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -259,17 +227,64 @@ def test_risk_factory_falls_back_to_file_copy_on_old_libvirt(
     assert isinstance(provider, FileCopyBackupProvider)
 
 
-def test_risk_factory_fallback_logs_warning(
+def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """bitmap mode + libvirt >= 6.0 → BitmapBackupProvider.
+
+    When ``is_libvirt_new_enough`` returns True, the factory constructs
+    a ``BitmapBackupProvider`` for the bitmap incremental mode.
+    """
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+
+    with patch(
+        "qsnap.factory.default.is_libvirt_new_enough",
+        return_value=True,
+    ) as mock_check:
+        provider = factory.create_backup_provider(make_vm_config(), target)
+
+    assert isinstance(provider, BitmapBackupProvider)
+    mock_check.assert_called_once_with(mock_shell)
+
+
+def test_factory_non_bitmap_mode_no_version_check(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """Non-bitmap mode skips libvirt version check entirely.
+
+    When the target's ``incremental_mode`` is not ``"bitmap"``, the
+    factory must not call ``is_libvirt_new_enough`` at all — there is
+    no reason to check libvirt version for file-copy providers.
+    """
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="file-copy")
+
+    with patch("qsnap.factory.default.is_libvirt_new_enough") as mock_check:
+        provider = factory.create_backup_provider(make_vm_config(), target)
+
+    assert isinstance(provider, FileCopyBackupProvider)
+    mock_check.assert_not_called()
+
+
+def test_factory_bitmap_fallback_logs_warning(
     mock_shell,
     mock_state,
     make_vm_config,
     make_target,
     caplog,
 ):
-    """RISK (test-plan.md Risk 6): When the factory falls back from
-    BitmapBackupProvider to FileCopyBackupProvider, a warning is logged
-    containing "falling back" or "FileCopyBackupProvider" so operators
-    are aware of the silent degradation.
+    """When the factory falls back from BitmapBackupProvider to
+    FileCopyBackupProvider, a WARNING is logged containing "falling back"
+    so operators are aware of the silent degradation.
+
+    (Renamed from ``test_risk_factory_fallback_logs_warning``.)
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -291,6 +306,21 @@ def test_risk_factory_fallback_logs_warning(
 
     assert isinstance(provider, FileCopyBackupProvider)
     assert "falling back" in caplog.text or "FileCopyBackupProvider" in caplog.text
+
+
+def test_create_bucket_full_strategy_returns_bucketfullstrategy(
+    mock_shell,
+    mock_state,
+):
+    """DefaultFactory.create_bucket_full_strategy() returns BucketFullStrategy.
+
+    Verifies the factory method returns an instance that implements both
+    ``IBucketFullStrategy`` and the concrete ``BucketFullStrategy``.
+    """
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    strategy = factory.create_bucket_full_strategy()
+    assert isinstance(strategy, IBucketFullStrategy)
+    assert isinstance(strategy, BucketFullStrategy)
 
 
 # ── deep_verify factory test ──────────────────────────────────────────

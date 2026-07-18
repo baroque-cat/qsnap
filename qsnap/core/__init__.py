@@ -43,12 +43,12 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.modules.backup.nbd_helper import is_vm_running, nbd_full_export
-from qsnap.modules.backup.verification import verify_full_backup
 from qsnap.retention.time_based import _parse_duration
+from qsnap.utils.nbd import is_vm_running, nbd_full_export
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
+from qsnap.utils.verification import verify_full_backup
 
 logger = logging.getLogger(__name__)
 
@@ -551,118 +551,6 @@ class Core:
             items.append(RetentionItem(name=f"{prefix}_{i:04d}", timestamp=ts))
 
         return items
-
-    @staticmethod
-    def _period_key(ts: datetime, bucket: str) -> str:
-        """Compute the period key for *ts* under *bucket*.
-
-        Buckets: yearly, monthly, weekly, daily, hourly.
-        """
-        if bucket == "yearly":
-            return ts.strftime("%Y")
-        elif bucket == "monthly":
-            return ts.strftime("%Y%m")
-        elif bucket == "weekly":
-            cal = ts.isocalendar()
-            return f"{cal.year}-W{cal.week:02d}"
-        elif bucket == "daily":
-            return ts.strftime("%Y%m%d")
-        elif bucket == "hourly":
-            return ts.strftime("%Y%m%d%H")
-        return ""
-
-    @staticmethod
-    def _active_buckets(policy: RetentionPolicy) -> list[str]:
-        """Return buckets where ``policy.{bucket} > 0`` in descending order.
-
-        Order: yearly, monthly, weekly, daily, hourly.
-        """
-        result: list[str] = []
-        for bucket, count in (
-            ("yearly", policy.yearly),
-            ("monthly", policy.monthly),
-            ("weekly", policy.weekly),
-            ("daily", policy.daily),
-            ("hourly", policy.hourly),
-        ):
-            if count > 0:
-                result.append(bucket)
-        return result
-
-    @staticmethod
-    def _f_anchor_buckets(policy: RetentionPolicy) -> list[str]:
-        """Return buckets where ``policy.anchor_{bucket}`` is True, descending.
-
-        Order: yearly, monthly, weekly, daily, hourly.
-        """
-        result: list[str] = []
-        for bucket, anchor in (
-            ("yearly", policy.anchor_yearly),
-            ("monthly", policy.anchor_monthly),
-            ("weekly", policy.anchor_weekly),
-            ("daily", policy.anchor_daily),
-            ("hourly", policy.anchor_hourly),
-        ):
-            if anchor:
-                result.append(bucket)
-        return result
-
-    @staticmethod
-    def _should_create_bucket_full(
-        target: TargetConfig,
-        policy: RetentionPolicy,
-        all_fulls: list[FullBackupInfo],
-        snapshot_ts: datetime,
-    ) -> tuple[bool, str]:
-        """Check if a bucket-driven FULL backup should be created.
-
-        Determines which buckets to check:
-        1. If any ``anchor_*`` field is True, check only F-marked buckets
-           in descending order (yearly → monthly → weekly → daily → hourly).
-        2. Otherwise, check ALL buckets where ``policy.{bucket} > 0``
-           in descending order.
-
-        For each checked bucket, finds the most recent FULL from *all_fulls*
-        with matching ``bucket_level``.  Returns ``(True, bucket_level)``
-        when: (a) no previous FULL exists for that bucket, or (b) the
-        snapshot's timestamp falls in a new period of that bucket compared
-        to the matching FULL's timestamp.  Short-circuits on the first match
-        — at most one FULL is created per snapshot.
-
-        Returns ``(False, "")`` if no checked bucket triggers a new FULL.
-        """
-        # Handle backward compatibility: old callers may pass None or a
-        # single FullBackupInfo instead of a list.
-        if all_fulls is None:
-            all_fulls = []
-        elif isinstance(all_fulls, FullBackupInfo):
-            all_fulls = [all_fulls]
-
-        # Determine which buckets to check.
-        f_buckets = Core._f_anchor_buckets(policy)
-        if f_buckets:
-            buckets_to_check = f_buckets
-        else:
-            buckets_to_check = Core._active_buckets(policy)
-
-        if not buckets_to_check:
-            return False, ""
-
-        for bucket in buckets_to_check:
-            # Find the most recent FULL with matching bucket_level.
-            matching_fulls = [f for f in all_fulls if f.bucket_level == bucket]
-            if not matching_fulls:
-                # No previous FULL for this bucket — create one.
-                return True, bucket
-
-            most_recent = max(matching_fulls, key=lambda f: f.timestamp)
-            snapshot_key = Core._period_key(snapshot_ts, bucket)
-            last_key = Core._period_key(most_recent.timestamp, bucket)
-
-            if snapshot_key != last_key:
-                return True, bucket
-
-        return False, ""
 
     def check(
         self,
@@ -2305,6 +2193,8 @@ class Core:
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         """Transfer missing snapshots with exponential backoff retry.
 
@@ -2312,6 +2202,10 @@ class Core:
         ``transfer_missing()`` call in a retry loop.  Only retries on
         transient errors (determined by ``is_retryable()``).  Non-
         retryable errors fail immediately.
+
+        ``full_verify_before_rebase`` is the M1 verification mode threaded
+        from ``GlobalConfig.full_verify_before_rebase``; passed through to
+        the provider's ``transfer_missing()``.
 
         Returns the list of ``BackupResult`` objects from the last
         attempt.
@@ -2321,13 +2215,21 @@ class Core:
 
         if max_retries <= 0:
             return provider.transfer_missing(
-                vm_config, target, snapshots, rate_limit=target.rate_limit
+                vm_config,
+                target,
+                snapshots,
+                rate_limit=target.rate_limit,
+                full_verify_before_rebase=full_verify_before_rebase,
             )
 
         results: list[BackupResult] = []
         for attempt in range(1, max_retries + 1):
             results = provider.transfer_missing(
-                vm_config, target, snapshots, rate_limit=target.rate_limit
+                vm_config,
+                target,
+                snapshots,
+                rate_limit=target.rate_limit,
+                full_verify_before_rebase=full_verify_before_rebase,
             )
 
             # Check if all transfers succeeded
@@ -2473,8 +2375,9 @@ class Core:
         # Dry-run: indicate whether a FULL would be created this run
         if self._dry_run and snapshots:
             all_fulls = self._state.get_full_backups(str(target.path))
-            should_full, bucket_level = self._should_create_bucket_full(
-                target, policy, all_fulls, snapshots[-1].timestamp
+            strategy = self._factory.create_bucket_full_strategy()
+            should_full, bucket_level = strategy.should_create_full(
+                target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
             )
             if should_full:
                 logger.info(
@@ -2512,7 +2415,7 @@ class Core:
             # Filter out phantom FULLs — entries in state whose files
             # no longer exist (deleted externally, disk failure, etc.).
             # Phantom FULLs block bucket-driven FULL creation because
-            # _should_create_bucket_full sees an existing FULL for the
+            # the bucket strategy sees an existing FULL for the
             # period and skips creation.
             filtered_fulls: list[FullBackupInfo] = []
             for full in all_fulls:
@@ -2529,8 +2432,9 @@ class Core:
                     )
             all_fulls = filtered_fulls
             policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
-            should_full, bucket_level = self._should_create_bucket_full(
-                target, policy, all_fulls, snapshots[-1].timestamp
+            strategy = self._factory.create_bucket_full_strategy()
+            should_full, bucket_level = strategy.should_create_full(
+                target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
             )
             if should_full:
                 if self._dry_run:
@@ -2603,7 +2507,14 @@ class Core:
 
         # Transfer missing snapshots (with retry when configured)
         if not self._dry_run:
-            results = self._transfer_with_retry(provider, vm_config, target, snapshots)
+            full_verify_mode = self._config.get_global().full_verify_before_rebase
+            results = self._transfer_with_retry(
+                provider,
+                vm_config,
+                target,
+                snapshots,
+                full_verify_before_rebase=full_verify_mode,
+            )
             if any(not r.success for r in results):
                 backup_failed = True
 

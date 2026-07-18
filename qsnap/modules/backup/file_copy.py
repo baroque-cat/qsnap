@@ -25,13 +25,13 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
-from qsnap.modules.backup.nbd_helper import (
+from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
     nbd_full_export,
 )
-from qsnap.modules.backup.verification import verify_backup, verify_full_backup
 from qsnap.utils.parsing import parse_rate_limit, parse_timestamp, rate_limit_to_kib
+from qsnap.utils.verification import verify_backup, verify_full_backup
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,8 @@ class FileCopyBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         """Copy snapshots not yet present at *target* using ``rsync``.
 
@@ -214,7 +216,7 @@ class FileCopyBackupProvider(IBackupProvider):
                 sorted_anchors = self._get_sorted_full_anchors(target)
                 for candidate in sorted_anchors:
                     m1_error = verify_full_backup(
-                        self._shell, candidate, "metadata"
+                        self._shell, candidate, full_verify_before_rebase
                     )
                     if m1_error is None:
                         full_anchor = candidate

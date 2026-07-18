@@ -24,7 +24,6 @@ from qsnap.models.config import VMConfig
 from qsnap.models.results import RestoreResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
-
 SAMPLE_SOURCE_XML = """<domain type='kvm'>
   <name>sourcevm</name>
   <uuid>12345678-1234-1234-1234-123456789abc</uuid>

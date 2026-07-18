@@ -31,7 +31,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockConfigFacade
+from tests.mocks import MockBucketFullStrategy, MockConfigFacade
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
 
@@ -933,8 +933,11 @@ def test_size_estimation_logged_during_dry_run(
 
     caplog.set_level(logging.INFO)
 
-    with patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")):
-        core._log_size_estimate(vm, target)
+    # Configure MockBucketFullStrategy to return (True, "weekly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "weekly")
+    )
+    core._log_size_estimate(vm, target)
 
     assert "Size estimate" in caplog.text, "Size estimation should be logged during dry-run"
     # New assertion: dry-run FULL would-be-created indicator
@@ -1292,3 +1295,38 @@ def test_size_estimation_uses_force_share_on_base_image(
         assert "--force-share" in cmd_str, (
             f"qemu-img info on base image must include --force-share, got: {cmd_str}"
         )
+
+
+# ── test_core_imports_from_utils_not_backup_modules ──────────────────────
+
+
+def test_core_imports_from_utils_not_backup_modules():
+    """Core imports shared utilities from qsnap.utils.*, not qsnap.modules.backup.*.
+
+    Verifies that:
+    - ``is_vm_running`` is imported from ``qsnap.utils.nbd``
+    - ``verify_full_backup`` is imported from ``qsnap.utils.verification``
+    - No imports from ``qsnap.modules.backup.nbd_helper``
+    - No imports from ``qsnap.modules.backup.verification``
+    """
+    import inspect
+
+    import qsnap.core
+
+    source = inspect.getsource(qsnap.core)
+
+    # Core imports from qsnap.utils.*
+    assert "from qsnap.utils.nbd import" in source, (
+        "Core should import is_vm_running from qsnap.utils.nbd"
+    )
+    assert "from qsnap.utils.verification import" in source, (
+        "Core should import verify_full_backup from qsnap.utils.verification"
+    )
+
+    # Core must NOT import from qsnap.modules.backup.*
+    assert "qsnap.modules.backup.nbd_helper" not in source, (
+        "Core must NOT import from qsnap.modules.backup.nbd_helper"
+    )
+    assert "qsnap.modules.backup.verification" not in source, (
+        "Core must NOT import from qsnap.modules.backup.verification"
+    )

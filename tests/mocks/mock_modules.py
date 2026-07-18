@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
@@ -19,6 +20,7 @@ from qsnap.models.results import (
     BackupResult,
     ChangeResult,
     CommitResult,
+    FullBackupInfo,
     RetentionItem,
     RetentionResult,
     ShellResult,
@@ -69,6 +71,8 @@ class MockBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         return [
             BackupResult(
@@ -130,6 +134,8 @@ class MockBitmapBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         return [
             BackupResult(
@@ -215,3 +221,35 @@ class MockLifecycleManager(ILifecycleManager):
             committed_snapshot=snapshots_to_merge[0].name,
             error=None,
         )
+
+
+class MockBucketFullStrategy(IBucketFullStrategy):
+    """Mock bucket FULL backup strategy.
+
+    Returns a configurable ``tuple[bool, str]`` from ``should_create_full``
+    (default ``(False, "")``).  Stores call arguments for inspection by
+    tests.  No I/O — pure in-memory mock.
+    """
+
+    def __init__(self, return_value: tuple[bool, str] = (False, "")) -> None:
+        self._return_value = return_value
+        self.calls: list[dict[str, object]] = []
+
+    def should_create_full(
+        self,
+        target: TargetConfig,
+        policy: RetentionPolicy,
+        all_fulls: list[FullBackupInfo],
+        snapshot_ts: datetime,
+        now: datetime,
+    ) -> tuple[bool, str]:
+        self.calls.append(
+            {
+                "target": target,
+                "policy": policy,
+                "all_fulls": list(all_fulls),
+                "snapshot_ts": snapshot_ts,
+                "now": now,
+            }
+        )
+        return self._return_value

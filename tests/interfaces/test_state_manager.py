@@ -151,7 +151,6 @@ def test_json_state_manager_passes_isinstance_after_corruption_recovery(
     IStateManager)`` is True.  Then trigger corruption recovery (write
     a corrupt file, load), and verify ``isinstance`` is still True.
     """
-    import json as _json
 
     manager = JsonStateManager(state_dir=tmp_path)
 

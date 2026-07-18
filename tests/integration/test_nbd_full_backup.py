@@ -26,18 +26,16 @@ from qsnap.core import Core
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
-from qsnap.modules.backup.nbd_helper import (
+from qsnap.shell.subprocess_shell import SubprocessShell
+from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
-    nbd_full_export,
 )
-from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks import (
     InMemoryStateManager,
     MockConfigFacade,
     MockVMModuleFactory,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: NBD full backup of a running VM

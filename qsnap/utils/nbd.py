@@ -1,9 +1,13 @@
-"""Shared NBD full-export helper for FULL backups.
+"""Cross-cutting NBD (Network Block Device) utilities.
 
-Provides utilities used by both ``FileCopyBackupProvider`` and
-``BitmapBackupProvider`` for creating FULL backups via the libvirt
-pull-model NBD API (``virsh backup-begin`` + ``qemu-img convert -n
-nbd:unix:<socket>``).
+Provides stateless helper functions used by both
+``FileCopyBackupProvider`` and ``BitmapBackupProvider`` for creating
+FULL backups via the libvirt pull-model NBD API
+(``virsh backup-begin`` + ``qemu-img convert -n nbd:unix:<socket>``).
+
+These functions do not implement any ABC and are shared across module
+boundaries, so they live in ``qsnap.utils`` rather than under
+``qsnap.modules.backup``.
 
 The NBD pull-model exports a frozen point-in-time view of the disk
 through a Unix socket served by the QEMU process itself.  No external
@@ -15,6 +19,7 @@ Functions:
 - :func:`is_libvirt_new_enough` — verify libvirt >= 6.0 for ``backup-begin``.
 - :func:`nbd_full_export` — run the full NBD export + convert lifecycle.
 - :func:`write_backup_xml` — write the libvirt pull-model backup XML.
+- :func:`_get_first_disk_target` — get the first disk target device name.
 """
 
 from __future__ import annotations
@@ -64,8 +69,8 @@ def is_vm_running(shell: IShell, vm_name: str) -> bool:
     return False
 
 
-def is_libvirt_new_enough(shell: IShell) -> bool:
-    """Check whether libvirt >= 6.0 via ``virsh --version``.
+def is_libvirt_new_enough(shell: IShell, min_major: int = _MIN_LIBVIRT_MAJOR) -> bool:
+    """Check whether libvirt >= *min_major*.0 via ``virsh --version``.
 
     libvirt 6.0+ is required for the ``virsh backup-begin`` pull-model
     NBD API.  Returns ``True`` if the version is sufficient, ``False``
@@ -84,7 +89,7 @@ def is_libvirt_new_enough(shell: IShell) -> bool:
         return False
 
     major = int(match.group(1))
-    return major >= _MIN_LIBVIRT_MAJOR
+    return major >= min_major
 
 
 def _get_first_disk_target(shell: IShell, vm_name: str) -> str | None:

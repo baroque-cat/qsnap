@@ -24,13 +24,12 @@ from qsnap.models.config import VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
-    FullBackupInfo,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
     SnapshotResult,
 )
-from tests.mocks import MockConfigFacade
+from tests.mocks import MockBucketFullStrategy, MockConfigFacade
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
 
@@ -871,21 +870,20 @@ def test_pipeline_onchange_no_changes_validation_first(
     assert result.success is True
 
 
-# ── test_first_backup_creates_full_via_bucket ─────────────────────────────
+# ── test_first_backup_creates_full_via_strategy ─────────────────────────────
 
 
-def test_first_backup_creates_full_via_bucket(
+def test_first_backup_creates_full_via_strategy(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """First backup to target triggers FULL via bucket-driven logic.
+    """First backup to target triggers FULL via MockBucketFullStrategy.
 
-    When no previous FULL exists on a target with bucket retention policy,
-    ``_should_create_bucket_full`` returns (True, bucket_level) and
-    ``create_full_backup`` is called with that bucket_level.
+    Configuring MockBucketFullStrategy to return (True, "monthly") should
+    cause ``_backup_target`` to call ``create_full_backup`` with that bucket_level.
     """
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -905,60 +903,10 @@ def test_first_backup_creates_full_via_bucket(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    backup_provider = mock_factory._backup_provider
-
-    with patch.object(
-        backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
-    ) as full_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert full_spy.called, "create_full_backup should be called on first backup"
-    assert full_spy.call_args.kwargs.get("bucket_level") == "daily", (
-        "bucket_level should be 'daily' for daily=7 policy"
+    # Configure MockBucketFullStrategy to return (True, "monthly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "monthly")
     )
-
-
-# ── test_new_monthly_period_triggers_full ────────────────────────────────
-
-
-def test_new_monthly_period_triggers_full(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """New monthly period triggers FULL backup.
-
-    When the highest active bucket is 'monthly' and the last FULL was
-    in a different month, a new FULL is created.
-    """
-    target = make_target(target_preserve="3m 7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    # Last FULL was in June
-    last_full_ts = datetime(2025, 6, 15, 10, 0)
-    mock_state.record_full_backup(
-        str(target.path), "old.FULL.monthly.qcow2", last_full_ts, "monthly"
-    )
-
-    # Current snapshot is in July — new month
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
 
@@ -969,387 +917,26 @@ def test_new_monthly_period_triggers_full(
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called when entering new monthly period"
+    assert full_spy.called, "create_full_backup should be called when strategy returns True"
     assert full_spy.call_args.kwargs.get("bucket_level") == "monthly", (
-        "bucket_level should be 'monthly' when monthly is highest active bucket"
+        "bucket_level should be 'monthly' as configured in MockBucketFullStrategy"
     )
 
 
-# ── test_same_bucket_period_skips_full ───────────────────────────────────
+# ── test_backup_target_passes_full_list_to_strategy ───────────────────────
 
 
-def test_same_bucket_period_skips_full(
+def test_backup_target_passes_full_list_to_strategy(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Same bucket period skips FULL backup.
-
-    When the snapshot is in the same daily period as the last FULL,
-    no new FULL is created.
-    """
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    # Last FULL was earlier today
-    last_full_ts = datetime(2025, 7, 13, 2, 0)
-    mock_state.record_full_backup(str(target.path), "today.FULL.daily.qcow2", last_full_ts, "daily")
-
-    # Snapshot also today — same daily period
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    backup_provider = mock_factory._backup_provider
-
-    with patch(
-        "qsnap.core.os.path.exists", return_value=True
-    ), patch.object(
-        backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
-    ) as full_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert not full_spy.called, "create_full_backup should NOT be called when in same bucket period"
-
-
-# ── test_no_buckets_preserve_min_all_no_full_created ──────────────────────
-
-
-def test_no_buckets_preserve_min_all_no_full_created(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Policy with no buckets and preserve_min=all never triggers FULL."""
-    target = make_target(target_preserve_min="all")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    backup_provider = mock_factory._backup_provider
-
-    with patch.object(
-        backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
-    ) as full_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called when no buckets are configured"
-    )
-
-
-# ── test_should_create_bucket_full_highest_yearly ────────────────────────
-
-
-def test_should_create_bucket_full_highest_yearly(
-    make_target,
-):
-    """Highest active bucket is yearly when yearly > 0.
-
-    In multi-level mode, ALL active buckets are checked in descending order.
-    To assert no new FULL is needed, every active bucket must have
-    a matching FULL in the same period.
-    """
-    from qsnap.models.config import RetentionPolicy
-
-    policy = RetentionPolicy(yearly=3, monthly=6)
-    target = make_target()
-
-    # No prior FULL — should create full with yearly bucket
-    should, level = Core._should_create_bucket_full(
-        target, policy, [], datetime(2025, 7, 13, 10, 0)
-    )
-    assert should is True
-    assert level == "yearly"
-
-    # Same year + same month — should NOT create
-    # (with multi-level, we need FULLs for BOTH yearly and monthly)
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [
-            FullBackupInfo(
-                name="full1.FULL.yearly.qcow2",
-                path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
-                timestamp=datetime(2025, 2, 1, 0, 0),
-                bucket_level="yearly",
-            ),
-            FullBackupInfo(
-                name="full2.FULL.monthly.qcow2",
-                path=Path("/mnt/backup/full2.FULL.monthly.qcow2"),
-                timestamp=datetime(2025, 7, 1, 0, 0),
-                bucket_level="monthly",
-            ),
-        ],
-        datetime(2025, 7, 13, 10, 0),
-    )
-    assert should is False
-
-    # New year — should create (yearly is checked first)
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [
-            FullBackupInfo(
-                name="full1.FULL.yearly.qcow2",
-                path=Path("/mnt/backup/full1.FULL.yearly.qcow2"),
-                timestamp=datetime(2024, 12, 31, 23, 59),
-                bucket_level="yearly",
-            ),
-            FullBackupInfo(
-                name="full2.FULL.monthly.qcow2",
-                path=Path("/mnt/backup/full2.FULL.monthly.qcow2"),
-                timestamp=datetime(2025, 6, 1, 0, 0),
-                bucket_level="monthly",
-            ),
-        ],
-        datetime(2025, 7, 13, 10, 0),
-    )
-    assert should is True
-    assert level == "yearly"
-
-
-# ── test_should_create_bucket_full_highest_daily ─────────────────────────
-
-
-def test_should_create_bucket_full_highest_daily(
-    make_target,
-):
-    """Highest active bucket is daily when daily > 0 and no higher bucket active.
-
-    In multi-level mode, ALL active buckets are checked in descending order.
-    To assert no new FULL is needed, every active bucket must have
-    a matching FULL in the same period.
-    """
-    from qsnap.models.config import RetentionPolicy
-
-    policy = RetentionPolicy(daily=7, hourly=24)
-    target = make_target()
-
-    # No prior FULL
-    should, level = Core._should_create_bucket_full(
-        target, policy, [], datetime(2025, 7, 13, 10, 0)
-    )
-    assert should is True
-    assert level == "daily"
-
-    # Same day + same hour — should NOT create
-    # (with multi-level, we need FULLs for BOTH daily and hourly)
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [
-            FullBackupInfo(
-                name="full1.FULL.daily.qcow2",
-                path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
-                timestamp=datetime(2025, 7, 13, 2, 0),
-                bucket_level="daily",
-            ),
-            FullBackupInfo(
-                name="full2.FULL.hourly.qcow2",
-                path=Path("/mnt/backup/full2.FULL.hourly.qcow2"),
-                timestamp=datetime(2025, 7, 13, 10, 30),
-                bucket_level="hourly",
-            ),
-        ],
-        datetime(2025, 7, 13, 10, 0),
-    )
-    assert should is False
-
-    # Next day — should create (daily is checked before hourly)
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [
-            FullBackupInfo(
-                name="full1.FULL.daily.qcow2",
-                path=Path("/mnt/backup/full1.FULL.daily.qcow2"),
-                timestamp=datetime(2025, 7, 12, 8, 0),
-                bucket_level="daily",
-            ),
-            FullBackupInfo(
-                name="full2.FULL.hourly.qcow2",
-                path=Path("/mnt/backup/full2.FULL.hourly.qcow2"),
-                timestamp=datetime(2025, 7, 12, 10, 0),
-                bucket_level="hourly",
-            ),
-        ],
-        datetime(2025, 7, 13, 10, 0),
-    )
-    assert should is True
-    assert level == "daily"
-
-
-# ── test_should_create_bucket_full_no_active_buckets ─────────────────────
-
-
-def test_should_create_bucket_full_no_active_buckets(
-    make_target,
-):
-    """No active buckets returns (False, "")."""
-    from qsnap.models.config import RetentionPolicy
-
-    policy = RetentionPolicy()  # all zeros
-    target = make_target()
-
-    should, level = Core._should_create_bucket_full(
-        target, policy, [], datetime(2025, 7, 13, 10, 0)
-    )
-    assert should is False
-    assert level == ""
-
-
-# ── test_new_weekly_period_triggers_full_all_buckets ──────────────────────
-
-
-def test_new_weekly_period_triggers_full_all_buckets(
-    make_target,
-):
-    """New weekly period triggers FULL when higher buckets are in same period.
-
-    Policy has yearly=1, monthly=12, weekly=4.  FULLs exist for yearly
-    (same year) and monthly (same month), but no weekly FULL.  When the
-    snapshot lands in a new weekly period, _should_create_bucket_full
-    checks all active buckets and returns (True, "weekly").
-    """
-    from qsnap.models.config import RetentionPolicy
-
-    policy = RetentionPolicy(yearly=1, monthly=12, weekly=4)
-    target = make_target()
-
-    # FULLs for yearly (same year) and monthly (same month), no weekly FULL
-    all_fulls: list[FullBackupInfo] = [
-        FullBackupInfo(
-            name="full_yearly.qcow2",
-            path=Path("/mnt/backup/full_yearly.qcow2"),
-            timestamp=datetime(2025, 1, 15),
-            bucket_level="yearly",
-        ),
-        FullBackupInfo(
-            name="full_monthly.qcow2",
-            path=Path("/mnt/backup/full_monthly.qcow2"),
-            timestamp=datetime(2025, 6, 10),  # W24, same month as snapshot
-            bucket_level="monthly",
-        ),
-    ]
-    # Snapshot in June 2025, W25 (June 16 = W25 Monday)
-    snapshot_ts = datetime(2025, 6, 16)
-
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        all_fulls,
-        snapshot_ts,
-    )
-    assert should is True
-    assert level == "weekly", (
-        "Should trigger weekly FULL: yearly and monthly are same period, "
-        "but no weekly FULL exists for the new week"
-    )
-
-
-# ── test_f_anchor_weekly_only_full_on_week_boundary_not_day ───────────────
-
-
-def test_f_anchor_weekly_only_full_on_week_boundary_not_day(
-    make_target,
-):
-    """F-anchor mode only checks F-marked buckets, daily is ignored.
-
-    Policy: weekly=4, anchor_weekly=True, daily=7, anchor_daily=False.
-    F-anchor mode restricts full creation to only F-marked boundaries.
-    """
-    from qsnap.models.config import RetentionPolicy
-
-    policy = RetentionPolicy(
-        weekly=4,
-        anchor_weekly=True,
-        daily=7,
-        anchor_daily=False,
-    )
-    target = make_target()
-
-    # FULL exists for weekly in W24 (June 9, 2025 = Monday of W24)
-    weekly_full = FullBackupInfo(
-        name="full_weekly.qcow2",
-        path=Path("/mnt/backup/full_weekly.qcow2"),
-        timestamp=datetime(2025, 6, 9),  # W24 Monday
-        bucket_level="weekly",
-    )
-
-    # Case A: Snapshot on new day but same week (W24 Tuesday)
-    # Only weekly is checked (F-anchor), daily != 0 is ignored.
-    snapshot_a = datetime(2025, 6, 10)  # W24 Tuesday
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [weekly_full],
-        snapshot_a,
-    )
-    assert should is False
-    assert level == "", (
-        "F-anchor mode: same week (W24) should NOT trigger new FULL; "
-        "daily bucket is ignored even though day changed"
-    )
-
-    # Case B: Snapshot on new week (W25 Monday)
-    snapshot_b = datetime(2025, 6, 16)  # W25 Monday
-    should, level = Core._should_create_bucket_full(
-        target,
-        policy,
-        [weekly_full],
-        snapshot_b,
-    )
-    assert should is True
-    assert level == "weekly", "F-anchor mode: new week (W25) should trigger weekly FULL"
-
-
-# ── test_backup_target_passes_full_list_to_bucket_check ───────────────────
-
-
-def test_backup_target_passes_full_list_to_bucket_check(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """_backup_target passes the full list of FULLs to _should_create_bucket_full.
+    """_backup_target passes the full list of FULLs to the bucket strategy.
 
     Verifies that state.get_full_backups() (list, not single) is used,
-    and the list is passed through to _should_create_bucket_full.
+    and the list is passed through to the strategy via the factory mock.
     """
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -1361,7 +948,7 @@ def test_backup_target_passes_full_list_to_bucket_check(
         shell=mock_shell,
     )
 
-    # Record 2 FULL backups (same day as snapshot to avoid triggering a new one)
+    # Record 2 FULL backups (same day as snapshot to avoid triggering new FULL)
     mock_state.record_full_backup(
         str(target.path),
         "full1.FULL.daily.qcow2",
@@ -1375,7 +962,7 @@ def test_backup_target_passes_full_list_to_bucket_check(
         "daily",
     )
 
-    # Snapshot on the same day → no new FULL triggered
+    # Snapshot on the same day → no new FULL triggered by strategy default
     snap = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
@@ -1384,25 +971,80 @@ def test_backup_target_passes_full_list_to_bucket_check(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Spy on _should_create_bucket_full
+    strategy = mock_factory._bucket_full_strategy
+
     with patch(
         "qsnap.core.os.path.exists", return_value=True
-    ), patch.object(
-        Core,
-        "_should_create_bucket_full",
-        wraps=Core._should_create_bucket_full,
-    ) as bucket_spy:
+    ):
         core._backup_target(vm, target, [snap])
 
-    assert bucket_spy.called, "_should_create_bucket_full should be called during _backup_target"
-    # Third positional arg is all_fulls
-    all_fulls_arg = bucket_spy.call_args[0][2]
+    # Verify the strategy was called
+    assert len(strategy.calls) > 0, "Bucket full strategy should be called during _backup_target"
+    # Verify it received the correct full list
+    all_fulls_arg = strategy.calls[0]["all_fulls"]
     assert isinstance(all_fulls_arg, list), (
         "all_fulls should be a list, not a single FullBackupInfo or None"
     )
     assert len(all_fulls_arg) == 2, (
         "all_fulls should contain all 2 FULLs from state.get_full_backups()"
     )
+
+
+# ── test_core_delegates_bucket_decision_to_strategy ───────────────────────
+
+
+def test_core_delegates_bucket_decision_to_strategy(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core delegates bucket FULL decision to the strategy via factory.
+
+    Verifies that ``factory.create_bucket_full_strategy()`` is called and
+    the strategy's ``should_create_full()`` is invoked with correct arguments
+    when ``_backup_target`` runs.
+    """
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    with (
+        patch.object(
+            mock_factory,
+            "create_bucket_full_strategy",
+            wraps=mock_factory.create_bucket_full_strategy,
+        ) as create_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Factory was called to create the strategy
+    assert create_spy.called, "factory.create_bucket_full_strategy() should be called"
+
+    # Strategy's should_create_full was invoked
+    strategy = mock_factory._bucket_full_strategy
+    assert len(strategy.calls) > 0, "strategy.should_create_full() should be called"
+
+    # Verify the call includes expected arguments
+    call_args = strategy.calls[0]
+    assert isinstance(call_args["target"], type(target)), "target should be passed"
+    assert isinstance(call_args["snapshot_ts"], datetime), "snapshot_ts should be a datetime"
+    assert isinstance(call_args["all_fulls"], list), "all_fulls should be a list"
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────
@@ -2830,7 +2472,7 @@ def test_dry_run_logs_full_would_be_created(
     mock_shell,
     caplog,
 ):
-    """Dry-run mode: _should_create_bucket_full returns True → INFO log.
+    """Dry-run mode: MockBucketFullStrategy returns True → INFO log.
 
     Verifies the dry-run log includes bucket, method (NBD for running VM),
     and VM state.  Also verifies create_full_backup() is NOT called.
@@ -2855,19 +2497,20 @@ def test_dry_run_logs_full_would_be_created(
     )
     mock_state.record_snapshot("testvm", snap)
 
+    # Configure MockBucketFullStrategy to return (True, "weekly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "weekly")
+    )
+
     backup_provider = mock_factory._backup_provider
 
     caplog.set_level(logging.INFO)
 
-    # Patch _should_create_bucket_full to force a new FULL
-    with (
-        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
-        patch.object(
-            backup_provider,
-            "create_full_backup",
-            wraps=backup_provider.create_full_backup,
-        ) as full_spy,
-    ):
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
     # The dry-run log includes the creation spec.
@@ -2910,19 +2553,20 @@ def test_dry_run_detects_vm_running_state_for_method(
 
     caplog.set_level(logging.INFO)
 
+    # Configure MockBucketFullStrategy to return (True, "weekly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "weekly")
+    )
+
     # --- Case A: VM running (default fixture dominfo returns State: running) ---
-    with patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")):
-        core._backup_target(vm, target, [snap])
+    core._backup_target(vm, target, [snap])
 
     assert "method=NBD" in caplog.text, "Running VM should produce method=NBD in dry-run log"
     assert "VM=running" in caplog.text
 
     # --- Case B: VM stopped — patch is_vm_running to return False ---
     caplog.clear()
-    with (
-        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
-        patch("qsnap.core.is_vm_running", return_value=False),
-    ):
+    with patch("qsnap.core.is_vm_running", return_value=False):
         core._backup_target(vm, target, [snap])
 
     assert "method=direct convert" in caplog.text, (
@@ -2962,10 +2606,12 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 
     caplog.set_level(logging.INFO)
 
-    with (
-        patch.object(Core, "_should_create_bucket_full", return_value=(True, "weekly")),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-    ):
+    # Configure MockBucketFullStrategy to return (True, "weekly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "weekly")
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         core._backup_target(vm, target, [snap])
 
     # Log confirms FULL would be created.
@@ -3019,6 +2665,11 @@ def test_full_creation_works_for_file_copy_and_bitmap(
         allocation=1000,
     )
     mock_state.record_snapshot("testvm", snap)
+
+    # Configure MockBucketFullStrategy to return (True, "daily")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "daily")
+    )
 
     bitmap_provider = mock_factory._bitmap_backup_provider
 
@@ -3182,16 +2833,18 @@ def test_core_passes_vm_name_to_create_full_backup(
     )
     mock_state.record_snapshot("3.Projects_opencode", snap)
 
+    # Configure MockBucketFullStrategy to return (True, "monthly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(
+        return_value=(True, "monthly")
+    )
+
     backup_provider = mock_factory._backup_provider
 
-    with (
-        patch.object(Core, "_should_create_bucket_full", return_value=(True, "monthly")),
-        patch.object(
-            backup_provider,
-            "create_full_backup",
-            wraps=backup_provider.create_full_backup,
-        ) as full_spy,
-    ):
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
     assert full_spy.called, "create_full_backup should be called when FULL is triggered"

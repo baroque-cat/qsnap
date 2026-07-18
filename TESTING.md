@@ -20,42 +20,50 @@ tests/
 │   ├── test_change_detector.py
 │   ├── test_state_manager.py
 │   ├── test_lifecycle_manager.py
-│   └── test_factory.py
+│   ├── test_factory.py
+│   ├── test_config.py
+│   └── test_shell.py
 │
 ├── config/                         # Unit tests: parser, resolver, facade
-│   ├── test_parser.py              # Lexical + syntax of .conf files
-│   ├── test_resolver.py            # Option inheritance (volume → subvolume → target)
+│   ├── test_parser.py              # Lexical + syntax of .toml files
+│   ├── test_resolver.py            # Option inheritance (global → vm → target)
 │   ├── test_model.py               # Immutability of VMConfig, TargetConfig, etc.
-│   └── test_facade.py              # ConfigFacade integration (parser + resolver)
+│   ├── test_facade.py              # ConfigFacade integration (parser + resolver)
+│   └── test_fixtures.py            # Fixture .toml file validation
 │
 ├── core/                           # Unit tests: Core orchestration
 │   ├── test_engine.py              # Core.run(), Core._execute_pipeline()
 │   ├── test_pipeline.py            # Step ordering, error handling per step
-│   └── test_errors.py              # Error hierarchy, error formatting
+│   ├── test_full_anchor.py         # Bucket-driven FULL backup strategy (delegates to IBucketFullStrategy)
+│   ├── test_full_verification_pipeline.py  # FULL backup verification tiers (M1/M2/M3)
+│   ├── test_deferred.py            # Deferred snapshot threshold logic
+│   ├── test_fork.py                # Fork/snapshot-creation logic
+│   ├── test_preserve.py           # Preserve-string parsing
+│   ├── test_schedule_summary.py    # Schedule summary output
+│   ├── test_state_check.py        # State consistency checks
+│   ├── test_validation.py          # Config validation
+│   └── test_list_commands.py       # List/info CLI commands
 │
 ├── modules/                        # Unit tests: individual domain modules
 │   ├── snapshot/
-│   │   ├── test_base.py            # SnapshotModule(Core) base behavior
 │   │   └── test_external.py        # ExternalSnapshotProvider specifics
 │   │
 │   ├── backup/
-│   │   ├── test_base.py
-│   │   ├── test_copy.py            # CopyBackupProvider (XFS target)
-│   │   └── test_raw.py             # RawBackupProvider (future)
+│   │   ├── test_copy.py            # FileCopyBackupProvider (rsync + rebase)
+│   │   ├── test_bitmap.py          # BitmapBackupProvider (NBD pull-model)
+│   │   ├── test_verification.py    # verify_backup() utility
+│   │   └── test_full_verification.py  # verify_full_backup() utility
 │   │
 │   ├── retention/
-│   │   ├── test_base.py
 │   │   └── test_time_based.py      # Retention logic with fixed timestamps
 │   │
 │   ├── change/
-│   │   ├── test_base.py
 │   │   ├── test_allocation.py      # AllocationSizeDetector
-│   │   ├── test_always.py
-│   │   └── test_ondemand.py
+│   │   └── test_map_detector.py    # Map-based change detector
 │   │
 │   └── lifecycle/
-│       ├── test_base.py
-│       └── test_blockcommit.py
+│       ├── test_blockcommit.py     # BlockCommitManager
+│       └── test_qemu_img_commit.py # qemu-img commit wrapper
 │
 ├── factory/                        # Unit tests: DefaultVMModuleFactory
 │   └── test_default.py             # Returns correct types for each config variant
@@ -65,30 +73,53 @@ tests/
 │
 ├── cli/                            # Unit tests: CLI dispatch
 │   ├── test_commands.py            # Each command maps to correct Core method
-│   └── test_app.py                 # Argument parsing, exit codes
+│   ├── test_app.py                 # Argument parsing, exit codes
+│   ├── test_format.py              # Output formatting
+│   ├── test_thin_layer.py         # CLI is thin (no business logic)
+│   └── test_tree.py                # Tree view output
 │
 ├── utils/                          # Unit tests: pure-function utilities
 │   ├── test_locking.py             # Lockfile acquire/release
 │   ├── test_shell.py               # IShell wrappers, timeout handling
-│   └── test_time.py                # Timestamp formatting
+│   ├── test_time.py                # Timestamp formatting
+│   ├── test_parsing.py             # Rate-limit/timestamp parsing
+│   └── test_retry.py               # Retry backoff logic
 │
 ├── mocks/                          # Mock implementations of every ABC
 │   ├── __init__.py
 │   ├── mock_factory.py             # MockVMModuleFactory — returns all mocks
 │   ├── mock_shell.py               # MockShell — predefined command outputs
-│   ├── mock_snapshot.py
-│   ├── mock_backup.py
-│   ├── mock_retention.py
-│   ├── mock_change.py
-│   ├── mock_lifecycle.py
+│   ├── mock_modules.py             # Consolidated domain mocks: MockSnapshotProvider,
+│   │                                #   MockBackupProvider, MockBitmapBackupProvider,
+│   │                                #   MockRetentionEngine, MockChangeDetector,
+│   │                                #   MockLifecycleManager, MockBucketFullStrategy
+│   ├── mock_config.py              # MockConfigFacade — in-memory config
 │   └── mock_state.py               # InMemoryStateManager
 │
+├── models/                         # Unit tests: data models
+│   └── test_results.py             # Result dataclass immutability/fields
+│
+├── systemd/                        # Unit tests: systemd integration
+│   └── test_units.py               # .service/.timer unit generation
+│
 ├── fixtures/                       # Static test data
-│   ├── configs/                    # .conf files for parser tests
-│   │   ├── minimal.conf            # One VM, one target
-│   │   ├── multi_vm.conf           # Multiple VMs
-│   │   ├── inheritance.conf        # Option cascading
-│   │   └── invalid.conf            # Malformed config
+│   ├── configs/                    # .toml files for parser tests
+│   │   ├── minimal.toml            # One VM, one target
+│   │   ├── multi_vm.toml           # Multiple VMs
+│   │   ├── inheritance.toml        # Option cascading
+│   │   ├── invalid.toml            # Malformed config
+│   │   ├── bucket_driven.toml      # Bucket-driven FULL backup retention
+│   │   ├── full_backup.toml        # FULL backup anchor configuration
+│   │   ├── deferred_thresholds.toml  # Deferred snapshot thresholds
+│   │   ├── safety_fields.toml      # Fault-tolerance safety controls
+│   │   ├── global_fields.toml      # Global config defaults
+│   │   ├── preserve_min.toml       # Preserve-min floor logic
+│   │   ├── preserve_dow_valid.toml  # Preserve day-of-week (valid)
+│   │   ├── preserve_dow_invalid.toml  # Preserve day-of-week (invalid)
+│   │   ├── rate_limit_global.toml  # Global rate limit
+│   │   ├── rate_limit_target_override.toml  # Per-target rate limit override
+│   │   ├── rate_limit_invalid.toml  # Malformed rate limit
+│   │   └── deprecated_fields.toml  # Deprecated field handling
 │   ├── shell_outputs/              # Canned virsh/qemu-img output
 │   │   ├── domblklist.txt
 │   │   ├── snapshot_list.txt
@@ -100,17 +131,20 @@ tests/
 │       └── mixed_set.json
 │
 ├── integration/                    # Integration: real virsh/qemu-img on test VMs
+│   ├── __init__.py
 │   ├── conftest.py                 # Setup/teardown test VM, cleanup snapshots
-│   ├── test_snapshot_create.py     # Actually create and verify external snapshots
-│   ├── test_blockcommit.py         # Actually commit and verify chain reduction
-│   ├── test_backup_transfer.py     # Actually copy + rebase to another path
-│   └── test_full_pipeline.py       # Run → snapshot → backup → prune, end-to-end
+│   ├── test_nbd_full_backup.py     # NBD pull-model FULL backup
+│   └── test_stale_state_recovery.py  # Stale state self-healing
 │
 ├── stress/                         # Stress: large chains, concurrent access
+│   ├── __init__.py
+│   ├── conftest.py                 # stress_env fixture (disposable VM, 512M disk)
 │   ├── test_long_chain.py          # 50+ snapshots, blockcommit tail
 │   └── test_concurrent.py          # Lockfile prevents parallel runs
 │
 └── e2e/                            # End-to-end: from config to restored VM
+    ├── __init__.py
+    ├── conftest.py                 # e2e_vm fixture (disposable VM + TOML config)
     ├── test_from_config.py         # Parse config → run pipeline → verify results
     └── test_restore.py             # Take backup, restore to a new VM, boot it
 ```
@@ -159,12 +193,16 @@ def test_create_snapshot_returns_result_on_virsh_timeout(mock_shell):
 - Every mock MUST pass `isinstance(mock, ABC)`.
 - Every mock method must return a valid result type (never `None`).
 - `MockVMModuleFactory` must return the correct interface for every `create_*` call.
+- Domain mocks are consolidated in `mock_modules.py` (not split across
+  `mock_snapshot.py`, `mock_backup.py`, etc.).  `mock_config.py` provides
+  a `MockConfigFacade` for in-memory config in Core tests.
 
 ```python
 def test_mock_factory_returns_interface_types():
     factory = MockVMModuleFactory()
     assert isinstance(factory.create_snapshot_provider(make_vm_config()), ISnapshotProvider)
     assert isinstance(factory.create_backup_provider(make_vm_config(), make_target()), IBackupProvider)
+    assert isinstance(factory.create_bucket_full_strategy(), IBucketFullStrategy)
 ```
 
 ### 3. Contract Tests (`interfaces/`)
@@ -191,9 +229,12 @@ def test_snapshot_provider_contract_create_returns_result(provider_cls):
 
 **Rules:**
 - Require a running libvirt daemon. Marked with `@pytest.mark.integration`.
-- Fixture creates a tiny throwaway VM (e.g., Alpine Linux qcow2, 256MB RAM).
+- Fixture creates a tiny throwaway VM (256M qcow2 disk, 256MB RAM).
 - Fixture destroys the VM and removes all snapshot files after test.
 - Run only when explicitly requested (`-m integration`).
+- `conftest.py` provides a `test_vm` fixture; tests include
+  `test_nbd_full_backup.py` (NBD pull-model) and
+  `test_stale_state_recovery.py` (stale state self-healing).
 
 ```python
 @pytest.mark.integration
@@ -215,16 +256,22 @@ def test_create_external_snapshot(test_vm):
 - Long snapshot chains (50+), rapid creation/deletion cycles.
 - Concurrent access: two processes trying to acquire lockfile.
 - Disk-full scenarios (simulated via `qemu-img` allocation or `fallocate`).
+- Marked with `@pytest.mark.stress`; excluded from normal runs.
+- `conftest.py` provides a `stress_env` fixture (disposable VM with
+  a 512M disk — larger than integration's 256M for chain depth).
 
 ### 6. End-to-End Tests (`e2e/`)
 
 **Scope:** Complete user journey from config to restored VM.
 
 **Rules:**
-- Start with a `.conf` file and a running VM.
+- Start with a `.toml` config file and a running VM.
 - Run `qsnap run` (via Core).
 - Verify snapshots exist on source, backups exist on target.
 - Restore VM from backup, boot it, verify it works.
+- Marked with `@pytest.mark.e2e`; excluded from normal runs.
+- `conftest.py` provides an `e2e_vm` fixture (disposable VM + writes
+  a minimal TOML config file referencing it).
 
 ---
 
@@ -236,7 +283,8 @@ def test_create_external_snapshot(test_vm):
 | `IShell` wraps `subprocess` | `MockShell` returns fixture outputs |
 | `IStateManager` writes to JSON files | `InMemoryStateManager` stores in `dict` |
 | `Core` coordinates pipeline | `test_pipeline.py` verifies step order |
-| Module inherits from `Core` | Test class can inherit from a `ModuleTestCase(Core)` base |
+| `IBucketFullStrategy` decides FULL creation | `MockBucketFullStrategy` returns configurable `(bool, str)` |
+| Modules implement ABC directly (no Core inheritance) | Tests mock the ABC; no `ModuleTestCase(Core)` base needed |
 | Result objects carry success/error | Tests assert on `.success`, `.error`, `.path` |
 
 ---
@@ -255,12 +303,19 @@ poetry run pytest tests/integration/ -m integration
 # Stress (needs libvirt + patience):
 poetry run pytest tests/stress/ -m stress
 
+# End-to-end (needs libvirt + disposable VM):
+poetry run pytest tests/e2e/ -m e2e
+
 # Everything:
 poetry run pytest tests/ -m ""
 
 # Coverage:
 poetry run pytest tests/ --cov=qsnap --cov-report=html
 ```
+
+Markers are registered in `pyproject.toml` under `[tool.pytest.ini_options]`.
+`--strict-markers` is enabled — unregistered markers will cause a test
+collection error.
 
 ---
 
@@ -271,5 +326,5 @@ When implementing a new module (e.g. `modules/snapshot/internal.py`):
 1. ✅ Create `tests/modules/snapshot/test_internal.py`
 2. ✅ Update `MockVMModuleFactory` to optionally return `MockInternalSnapshotProvider`
 3. ✅ Add the new provider class to contract test parametrization in `tests/interfaces/test_snapshot_provider.py`
-4. ✅ Add a `.conf` fixture exercising the new snapshot type in `tests/fixtures/configs/`
+4. ✅ Add a `.toml` fixture exercising the new snapshot type in `tests/fixtures/configs/`
 5. ✅ Verify: `pytest tests/modules/snapshot/ tests/interfaces/ -v`

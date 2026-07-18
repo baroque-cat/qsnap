@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
@@ -14,6 +15,7 @@ from qsnap.interfaces.state import IStateManager
 
 __all__ = [
     "IBackupProvider",
+    "IBucketFullStrategy",
     "IChangeDetector",
     "IConfigFacade",
     "IRetentionEngine",

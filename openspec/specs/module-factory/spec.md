@@ -5,7 +5,7 @@ The system SHALL provide an `IVMModuleFactory` ABC with factory methods for crea
 
 #### Scenario: IVMModuleFactory defines all creation methods
 - **WHEN** IVMModuleFactory is inspected
-- **THEN** it has abstract methods: `create_snapshot_provider`, `create_backup_provider`, `create_retention_engine`, `create_change_detector`, `create_lifecycle_manager`
+- **THEN** it has abstract methods: `create_snapshot_provider`, `create_backup_provider`, `create_retention_engine`, `create_change_detector`, `create_lifecycle_manager`, `create_bucket_full_strategy`
 
 ### Requirement: Factory returns ABC interface types
 Each factory method SHALL return an instance implementing the corresponding ABC interface (e.g., `create_snapshot_provider` returns `ISnapshotProvider`).
@@ -21,9 +21,22 @@ Each factory method SHALL return an instance implementing the corresponding ABC 
 - **WHEN** DefaultFactory is created with a mock shell and mock state manager
 - **THEN** both are stored and available for module construction
 
-### Requirement: Unimplemented factory methods raise NotImplementedError
-When a module does not yet exist, the corresponding `create_*` method SHALL raise `NotImplementedError` with a clear message indicating which module is pending.
+### Requirement: DefaultFactory gates BitmapBackupProvider on libvirt version
 
-#### Scenario: Calling create_lifecycle_manager before it exists
-- **WHEN** `factory.create_lifecycle_manager()` is called but no LifecycleManager module exists yet
-- **THEN** NotImplementedError is raised with message "LifecycleManager not yet implemented"
+`DefaultFactory.create_backup_provider()` SHALL, when `target.incremental_mode == "bitmap"`, call `is_libvirt_new_enough(shell)` from `qsnap.utils.nbd` BEFORE constructing `BitmapBackupProvider`. If the version check returns `False`, the factory SHALL log a WARNING and return `FileCopyBackupProvider(shell, state)`. If `True`, the factory SHALL construct and return `BitmapBackupProvider(shell)`.
+
+#### Scenario: Bitmap mode with old libvirt falls back to FileCopy
+- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode == "bitmap"`
+- **AND** `is_libvirt_new_enough(shell)` returns `False`
+- **THEN** the factory returns `FileCopyBackupProvider(shell, state)`
+- **AND** a WARNING is logged
+
+#### Scenario: Bitmap mode with sufficient libvirt returns BitmapBackupProvider
+- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode == "bitmap"`
+- **AND** `is_libvirt_new_enough(shell)` returns `True`
+- **THEN** the factory returns `BitmapBackupProvider(shell)`
+
+#### Scenario: Non-bitmap mode bypasses version check
+- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode != "bitmap"`
+- **THEN** no call to `is_libvirt_new_enough(shell)` is made
+- **THEN** `FileCopyBackupProvider` is returned directly

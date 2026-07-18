@@ -7,6 +7,7 @@ Returns mock instances for all ``create_*`` methods that satisfy
 from __future__ import annotations
 
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.lifecycle import ILifecycleManager
@@ -16,6 +17,7 @@ from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from tests.mocks.mock_modules import (
     MockBackupProvider,
     MockBitmapBackupProvider,
+    MockBucketFullStrategy,
     MockChangeDetector,
     MockLifecycleManager,
     MockRetentionEngine,
@@ -33,6 +35,7 @@ class MockVMModuleFactory(IVMModuleFactory):
         self._retention_engine = MockRetentionEngine()
         self._change_detector = MockChangeDetector()
         self._lifecycle_manager = MockLifecycleManager()
+        self._bucket_full_strategy = MockBucketFullStrategy()
 
     def create_snapshot_provider(self, vm_config: VMConfig) -> ISnapshotProvider:
         return self._snapshot_provider
@@ -54,3 +57,6 @@ class MockVMModuleFactory(IVMModuleFactory):
 
     def create_lifecycle_manager(self, mode: str = "virsh") -> ILifecycleManager:
         return self._lifecycle_manager
+
+    def create_bucket_full_strategy(self) -> IBucketFullStrategy:
+        return self._bucket_full_strategy

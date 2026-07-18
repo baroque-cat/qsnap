@@ -51,7 +51,6 @@ from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_shell import MockShell
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # Autouse fixture: ensure fake snapshot paths pass os.path.exists check
 # ──────────────────────────────────────────────────────────────────────────
@@ -1239,7 +1238,7 @@ def test_create_full_backup_vm_state_detection_fails_falls_back(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.nbd_helper")
+    caplog.set_level(logging.WARNING, logger="qsnap.utils.nbd")
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -4004,7 +4003,7 @@ def test_risk_domjobabort_fails_gracefully(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.nbd_helper")
+    caplog.set_level(logging.WARNING, logger="qsnap.utils.nbd")
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -4041,3 +4040,69 @@ def test_risk_domjobabort_fails_gracefully(
     # block ran without crashing the operation.
     mv_cmds = [cmd for cmd in all_cmds if cmd.startswith("mv ")]
     assert len(mv_cmds) == 1, "mv should still complete after domjobabort warning"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Architecture — import-path verification
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_nbd_imports_from_utils():
+    """``qsnap.modules.backup.file_copy`` imports NBD functions from
+    ``qsnap.utils.nbd`` (shared utility, not a backup sub-module).
+
+    The module-level import ``from qsnap.utils.nbd import is_vm_running``
+    means ``qsnap.modules.backup.file_copy.is_vm_running`` is the same
+    function object as ``qsnap.utils.nbd.is_vm_running``.
+    """
+    from qsnap.modules.backup import file_copy
+    from qsnap.utils.nbd import (
+        is_libvirt_new_enough as nbd_libvirt_check,
+    )
+    from qsnap.utils.nbd import (
+        is_vm_running as nbd_vm_running,
+    )
+    from qsnap.utils.nbd import (
+        nbd_full_export as nbd_export,
+    )
+
+    assert hasattr(file_copy, "is_vm_running"), (
+        "file_copy must import is_vm_running"
+    )
+    assert file_copy.is_vm_running is nbd_vm_running, (
+        "file_copy.is_vm_running must be qsnap.utils.nbd.is_vm_running"
+    )
+    assert file_copy.is_libvirt_new_enough is nbd_libvirt_check, (
+        "file_copy.is_libvirt_new_enough must be qsnap.utils.nbd.is_libvirt_new_enough"
+    )
+    assert file_copy.nbd_full_export is nbd_export, (
+        "file_copy.nbd_full_export must be qsnap.utils.nbd.nbd_full_export"
+    )
+
+
+def test_verify_backup_imported_from_utils():
+    """``qsnap.modules.backup.file_copy`` imports verification functions
+    from ``qsnap.utils.verification`` (shared utility, not a backup
+    sub-module).
+
+    The module-level import ``from qsnap.utils.verification import
+    verify_backup`` means ``qsnap.modules.backup.file_copy.verify_backup``
+    is the same function object as ``qsnap.utils.verification.verify_backup``.
+    """
+    from qsnap.modules.backup import file_copy
+    from qsnap.utils.verification import (
+        verify_backup as vfy_backup,
+    )
+    from qsnap.utils.verification import (
+        verify_full_backup as vfy_full,
+    )
+
+    assert hasattr(file_copy, "verify_backup"), (
+        "file_copy must import verify_backup"
+    )
+    assert file_copy.verify_backup is vfy_backup, (
+        "file_copy.verify_backup must be qsnap.utils.verification.verify_backup"
+    )
+    assert file_copy.verify_full_backup is vfy_full, (
+        "file_copy.verify_full_backup must be qsnap.utils.verification.verify_full_backup"
+    )

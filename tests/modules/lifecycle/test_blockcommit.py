@@ -22,6 +22,7 @@ Test scenarios (per spec: lifecycle-manager/spec.md):
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime
 from pathlib import Path
 
@@ -819,3 +820,25 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
         assert "--force-share" not in cmd_str, (
             f"virsh blockcommit must NOT include --force-share, got: {cmd_str}"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 13. Architecture — no cross-domain imports
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_no_cross_domain_imports():
+    """``qsnap.modules.lifecycle.blockcommit_manager`` does NOT import
+    anything from ``qsnap.modules.backup`` (cross-domain import violation
+    per AGENTS.md).
+
+    The BlockCommitManager is a lifecycle module — it must not depend on
+    backup-domain code.  Shared utilities live in ``qsnap.utils.*``.
+    """
+    import qsnap.modules.lifecycle.blockcommit_manager as bc_mod
+
+    source = inspect.getsource(bc_mod)
+    assert "qsnap.modules.backup" not in source, (
+        "blockcommit_manager.py must not import from qsnap.modules.backup "
+        "(shared utilities live in qsnap.utils.*)"
+    )

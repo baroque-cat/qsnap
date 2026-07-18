@@ -28,7 +28,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import tempfile
 from pathlib import Path
 
@@ -36,13 +35,11 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
-from qsnap.modules.backup.nbd_helper import _get_first_disk_target, nbd_full_export
-from qsnap.modules.backup.verification import verify_backup
+from qsnap.utils.nbd import _get_first_disk_target, nbd_full_export
 from qsnap.utils.parsing import parse_timestamp
+from qsnap.utils.verification import verify_backup
 
 logger = logging.getLogger(__name__)
-
-_MIN_LIBVIRT_MAJOR = 6
 
 
 class BitmapBackupProvider(IBackupProvider):
@@ -50,29 +47,6 @@ class BitmapBackupProvider(IBackupProvider):
 
     def __init__(self, shell: IShell) -> None:
         self._shell = shell
-        self._check_libvirt_version()
-
-    # ── construction helpers ──────────────────────────────────────────
-
-    def _check_libvirt_version(self) -> None:
-        """Verify libvirt >= 6.0 via ``virsh --version``.
-
-        Raises:
-            RuntimeError: If libvirt version is < 6.0 or cannot be parsed.
-        """
-        result = self._shell.run(["virsh", "--version"], timeout=30)
-        if not result.success:
-            raise RuntimeError(f"Cannot determine virsh version: {result.error}")
-
-        # Output looks like: "virsh 8.2.0"
-        match = re.search(r"(\d+)\.(\d+)", result.stdout)
-        if not match:
-            raise RuntimeError(f"Cannot parse virsh version from: {result.stdout!r}")
-
-        major = int(match.group(1))
-
-        if major < _MIN_LIBVIRT_MAJOR:
-            raise RuntimeError("virsh backup-begin not available — libvirt 6.0+ required")
 
     # ── IBackupProvider implementation ────────────────────────────────
 
@@ -82,6 +56,8 @@ class BitmapBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         rate_limit: str = "no",
+        *,
+        full_verify_before_rebase: str = "metadata",
     ) -> list[BackupResult]:
         """Transfer missing snapshots via NBD pull-model.
 
@@ -89,6 +65,10 @@ class BitmapBackupProvider(IBackupProvider):
 
         ``rate_limit`` is accepted for interface compatibility but ignored
         — NBD-based transfers cannot be throttled via ``rsync --bwlimit``.
+
+        ``full_verify_before_rebase`` is accepted for interface
+        compatibility but ignored — the bitmap path does not use
+        ``qemu-img rebase``.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}

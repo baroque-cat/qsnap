@@ -1,8 +1,12 @@
-"""Shared backup verification logic.
+"""Cross-cutting backup verification logic.
 
-Used by both ``FileCopyBackupProvider`` and ``BitmapBackupProvider`` to
-verify that a transferred backup file is a valid qcow2 image matching
-the source.
+Provides stateless verification functions used by both
+``FileCopyBackupProvider`` and ``BitmapBackupProvider`` to verify that
+a transferred backup file is a valid qcow2 image matching the source.
+
+These functions do not implement any ABC and are shared across module
+boundaries, so they live in ``qsnap.utils`` rather than under
+``qsnap.modules.backup``.
 
 Verification levels (``TargetConfig.verify``):
 - ``"off"``: no verification.
@@ -15,33 +19,16 @@ Verification levels (``TargetConfig.verify``):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
+from qsnap.utils.hash import file_sha256
 
 logger = logging.getLogger(__name__)
 
 _VERIFY_COMPARE_TIMEOUT = 7200  # 2 hours
-
-_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
-
-
-def _file_sha256(path: Path) -> str:
-    """Compute the SHA-256 hash of a file, reading 8 MB chunks.
-
-    Returns the hex digest string.
-    """
-    sha = hashlib.sha256()
-    with open(path, "rb") as fh:
-        while True:
-            chunk = fh.read(_CHUNK_SIZE)
-            if not chunk:
-                break
-            sha.update(chunk)
-    return sha.hexdigest()
 
 
 def verify_full_backup(
@@ -278,7 +265,7 @@ def verify_backup(
 
     if verify_mode == "hash" and expected_hash is not None:
         try:
-            actual_hash = _file_sha256(Path(target_path))
+            actual_hash = file_sha256(Path(target_path))
         except OSError as exc:
             return f"verification failed: cannot read target file for hashing: {exc}"
         if actual_hash != expected_hash:

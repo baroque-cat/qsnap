@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from qsnap.config.facade import ConfigFacade
-from qsnap.models.config import TargetConfig, GlobalConfig
+from qsnap.models.config import GlobalConfig, TargetConfig
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "configs"
 

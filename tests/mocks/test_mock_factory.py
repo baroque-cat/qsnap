@@ -6,7 +6,9 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
+from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
@@ -22,6 +24,7 @@ from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBackupProvider,
     MockBitmapBackupProvider,
+    MockBucketFullStrategy,
     MockChangeDetector,
     MockLifecycleManager,
 )
@@ -157,3 +160,19 @@ def test_mock_snapshot_provider_returns_content_hash(make_vm_config):
     assert len(result.content_hash) == 64
     # Verify it is a valid hex string (0-9, a-f).
     int(result.content_hash, 16)
+
+
+def test_mock_factory_create_bucket_full_strategy_returns_mock():
+    """create_bucket_full_strategy() returns a MockBucketFullStrategy that
+    also satisfies ``isinstance(..., IBucketFullStrategy)``."""
+    factory = MockVMModuleFactory()
+    strategy = factory.create_bucket_full_strategy()
+    assert isinstance(strategy, IBucketFullStrategy)
+    assert isinstance(strategy, MockBucketFullStrategy)
+
+
+def test_mock_factory_satisfies_new_interface():
+    """MockVMModuleFactory passes ``isinstance(..., IVMModuleFactory)``
+    after the addition of ``create_bucket_full_strategy`` to the ABC."""
+    factory = MockVMModuleFactory()
+    assert isinstance(factory, IVMModuleFactory) is True

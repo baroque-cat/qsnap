@@ -426,7 +426,6 @@ def test_state_recovery_triggers_first_run_changed_true(tmp_path, make_vm_config
     last_allocation=0, current_allocation=0)`` without calling any shell
     commands — the same as a true first run.
     """
-    import json as _json
 
     # Write corrupt state that JsonStateManager will recover from.
     state_file = tmp_path / "testvm.json"
