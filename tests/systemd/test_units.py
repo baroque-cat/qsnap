@@ -136,3 +136,29 @@ def test_deep_check_timer_persistent_true():
     missed runs after system downtime."""
     content = CHECK_TIMER_FILE.read_text()
     assert "Persistent=true" in content
+
+
+# ── stall detection / oneshot service tests ─────────────────────────────
+
+
+def test_qsnap_service_has_timeout_start_sec_zero():
+    """The qsnap.service unit file contains TimeoutStartSec=0.
+
+    Systemd's default timeout is disabled because qsnap uses stall
+    detection (output-file-growth monitoring) for long-running data
+    transfers.  A backup that is progressing correctly should never be
+    killed by a fixed timeout.
+    """
+    content = SERVICE_FILE.read_text()
+    assert "TimeoutStartSec=0" in content
+
+
+def test_qsnap_service_is_oneshot():
+    """The qsnap.service unit file declares Type=oneshot.
+
+    qsnap runs as a one-shot pipeline: it takes snapshots, transfers
+    backups, applies retention, and exits.  There is no long-running
+    daemon to manage.
+    """
+    content = SERVICE_FILE.read_text()
+    assert "Type=oneshot" in content

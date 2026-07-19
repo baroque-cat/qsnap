@@ -73,6 +73,8 @@ class MockBackupProvider(IBackupProvider):
         rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         return [
             BackupResult(
@@ -105,6 +107,8 @@ class MockBackupProvider(IBackupProvider):
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> BackupResult:
         return BackupResult(
             success=True,
@@ -136,6 +140,8 @@ class MockBitmapBackupProvider(IBackupProvider):
         rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         return [
             BackupResult(
@@ -168,6 +174,8 @@ class MockBitmapBackupProvider(IBackupProvider):
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> BackupResult:
         return BackupResult(
             success=True,

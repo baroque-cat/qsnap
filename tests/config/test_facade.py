@@ -670,3 +670,223 @@ def test_preserve_min_all_allows_zero_buckets(tmp_path: Path) -> None:
     # Verify the target was also parsed correctly.
     assert len(vm.targets) == 1
     assert vm.targets[0].path == Path("/mnt/backup/testvm")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# compression_type parsing (global + target inheritance + validation)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_global_compression_type_parsed(tmp_path: Path) -> None:
+    """ConfigFacade parses compression_type='zlib' from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "zlib"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_target_compression_type_overrides_global(tmp_path: Path) -> None:
+    """Target-level compression_type='zlib' overrides global 'zstd'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "zstd"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  compression_type = "zlib"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().compression_type == "zstd"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_target_compression_type_inherits(tmp_path: Path) -> None:
+    """Target inherits global compression_type='zlib' when not set locally."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "zlib"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().compression_type == "zlib"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_invalid_compression_type_raises_config_error(tmp_path: Path) -> None:
+    """Invalid compression_type='lz4' raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "lz4"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid compression_type"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_compression_type_absent_defaults_to_zstd(tmp_path: Path) -> None:
+    """When compression_type is absent from TOML, global and target default to 'zstd'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().compression_type == "zstd"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].compression_type == "zstd"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# backup_stall_timeout parsing (global + target inheritance + validation)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_global_backup_stall_timeout_parsed(tmp_path: Path) -> None:
+    """ConfigFacade parses backup_stall_timeout='1h' from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'backup_stall_timeout = "1h"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_stall_timeout == "1h"
+
+
+@pytest.mark.unit
+def test_target_stall_timeout_overrides_global(tmp_path: Path) -> None:
+    """Target-level backup_stall_timeout='1h' overrides global '30m'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'backup_stall_timeout = "30m"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  backup_stall_timeout = "1h"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_stall_timeout == "30m"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].backup_stall_timeout == "1h"
+
+
+@pytest.mark.unit
+def test_target_stall_timeout_inherits(tmp_path: Path) -> None:
+    """Target inherits global backup_stall_timeout='1h' when not set locally."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'backup_stall_timeout = "1h"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_stall_timeout == "1h"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].backup_stall_timeout == "1h"
+
+
+@pytest.mark.unit
+def test_invalid_stall_timeout_raises_config_error(tmp_path: Path) -> None:
+    """Invalid backup_stall_timeout='abc' raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'backup_stall_timeout = "abc"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid backup_stall_timeout"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_stall_timeout_absent_defaults_to_30m(tmp_path: Path) -> None:
+    """When backup_stall_timeout is absent from TOML, global and target default to '30m'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_stall_timeout == "30m"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].backup_stall_timeout == "30m"
+
+
+@pytest.mark.unit
+def test_stall_timeout_zero_disables(tmp_path: Path) -> None:
+    """backup_stall_timeout='0s' is a valid value that disables stall detection at runtime."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'backup_stall_timeout = "0s"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_stall_timeout == "0s"

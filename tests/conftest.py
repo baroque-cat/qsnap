@@ -140,6 +140,8 @@ def make_target():
         rate_limit: str = "no",
         compress: bool = True,
         copy_base: bool = False,
+        compression_type: str = "zstd",
+        backup_stall_timeout: str = "30m",
         **kwargs: object,
     ) -> TargetConfig:
         defaults: dict[str, object] = {
@@ -149,6 +151,8 @@ def make_target():
             "rate_limit": rate_limit,
             "compress": compress,
             "copy_base": copy_base,
+            "compression_type": compression_type,
+            "backup_stall_timeout": backup_stall_timeout,
         }
         defaults.update(kwargs)
         return TargetConfig(**defaults)  # type: ignore[arg-type]
@@ -180,6 +184,8 @@ def make_global_config():
         chain_verify_after_commit: bool = True,
         deep_check_schedule: str = "off",
         compress: bool = True,
+        compression_type: str = "zstd",
+        backup_stall_timeout: str = "30m",
         full_verify_after_create: str = "check",
         full_verify_before_rebase: str = "metadata",
         full_verify_before_delete: str = "check",
@@ -206,6 +212,8 @@ def make_global_config():
             chain_verify_after_commit=chain_verify_after_commit,
             deep_check_schedule=deep_check_schedule,
             compress=compress,
+            compression_type=compression_type,
+            backup_stall_timeout=backup_stall_timeout,
             full_verify_after_create=full_verify_after_create,
             full_verify_before_rebase=full_verify_before_rebase,
             full_verify_before_delete=full_verify_before_delete,

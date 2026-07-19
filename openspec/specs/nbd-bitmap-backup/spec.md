@@ -66,19 +66,17 @@ NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bit
 
 ### Requirement: BitmapBackupProvider.create_full_backup via NBD full export
 
-`BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. No checkpoint SHALL be created or deleted for this FULL — the checkpoint lifecycle remains exclusively in `transfer_missing()` for incremental runs. When `compress=True`, the `-c` flag SHALL be passed to `qemu-img convert` in the NBD path.
+`BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. No checkpoint SHALL be created or deleted for this FULL — the checkpoint lifecycle remains exclusively in `transfer_missing()` for incremental runs. When `compress=True` and `compression_type="zstd"`, the `-c -o compression_type=zstd` flags SHALL be passed to `qemu-img convert` in the NBD path. When `compress=True` and `compression_type="zlib"`, only `-c` SHALL be added. The `compression_type` parameter SHALL be passed through to `nbd_full_export()`.
 
-#### Scenario: Bitmap FULL via NBD succeeds
-- **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=False, bucket_level="monthly")` is called
-- **THEN** `virsh backup-begin` is called without `--incremental`
-- **THEN** `qemu-img convert -n nbd:unix:<socket> <target>` creates a standalone qcow2
-- **AND** no `virsh checkpoint-create-as` is called
-- **AND** no `virsh checkpoint-delete` is called
+#### Scenario: Bitmap FULL with zstd compression
+- **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, compression_type="zstd", bucket_level="monthly")` is called
+- **THEN** `qemu-img convert -c -o compression_type=zstd nbd:unix:<socket> <target>` is called
+- **AND** the resulting FULL is compressed with zstd
 
-#### Scenario: Bitmap FULL with compression succeeds
-- **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, bucket_level="monthly")` is called
-- **THEN** `qemu-img convert -c nbd:unix:<socket> <target>` is called with the `-c` flag
-- **AND** the resulting FULL is compressed
+#### Scenario: Bitmap FULL with zlib compression
+- **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, compression_type="zlib", bucket_level="monthly")` is called
+- **THEN** `qemu-img convert -c nbd:unix:<socket> <target>` is called (default zlib)
+- **AND** the resulting FULL is compressed with zlib
 
 #### Scenario: Bitmap FULL socket cleanup
 - **WHEN** the NBD full export completes (success or failure)
@@ -127,24 +125,17 @@ If `self._state` is `None` or no FULLs exist in state, the existing behavior SHA
 
 ### Requirement: Compression for NBD incremental transfers
 
-`BitmapBackupProvider.transfer_missing()` SHALL pass the `-c` flag to `qemu-img convert` when `target.compress=True` (default). This compresses the output qcow2 file using zlib per-cluster compression, matching the existing FULL backup compression behavior. When `target.compress=False`, no `-c` flag SHALL be added.
+`BitmapBackupProvider.transfer_missing()` SHALL pass the `-c` flag to `qemu-img convert` when `target.compress=True` (default). When `compression_type="zstd"`, the `-o compression_type=zstd` flag SHALL also be added. When `compression_type="zlib"`, only `-c` SHALL be added (default zlib). When `target.compress=False`, no compression flags SHALL be added.
 
-#### Scenario: Incremental transfer with compression
-- **WHEN** `transfer_missing()` is called with `target.compress=True`
-- **THEN** the `qemu-img convert` command SHALL include the `-c` flag
-- **AND** the resulting qcow2 file SHALL have compressed data clusters
+#### Scenario: Incremental NBD transfer with zstd compression
+- **WHEN** `transfer_missing()` is called with `target.compress=True`, `compression_type="zstd"`
+- **THEN** `qemu-img convert -O qcow2 -c -o compression_type=zstd nbd:unix:<socket> <target>` is executed
 
-#### Scenario: Incremental transfer without compression
-- **WHEN** `transfer_missing()` is called with `target.compress=False`
-- **THEN** the `qemu-img convert` command SHALL NOT include the `-c` flag
-- **AND** the resulting qcow2 file SHALL have uncompressed data clusters
+#### Scenario: Incremental NBD transfer with zlib compression
+- **WHEN** `transfer_missing()` is called with `target.compress=True`, `compression_type="zlib"`
+- **THEN** `qemu-img convert -O qcow2 -c nbd:unix:<socket> <target>` is executed (default zlib)
 
-#### Scenario: Compression does not affect metadata verification
-- **WHEN** a compressed incremental backup is verified with `verify="metadata"`
-- **THEN** `qemu-img info` reports the same `format` and `virtual-size` as an uncompressed backup
-- **AND** verification passes (compression does not affect metadata fields)
-
-#### Scenario: Compression does not affect full verification
-- **WHEN** a compressed incremental backup is verified with `verify="full"`
-- **THEN** `qemu-img compare` decompresses clusters during comparison
-- **AND** verification compares virtual disk content correctly (compression is transparent)
+#### Scenario: Incremental NBD transfer uses stall detection
+- **WHEN** `transfer_missing()` is called with `target.backup_stall_timeout = "30m"`
+- **THEN** the `qemu-img convert` command is executed via `shell.run_with_stall_detection(cmd, output_file=target_file, stall_timeout=1800)`
+- **AND** if the output file stops growing for 30 minutes, the convert is killed

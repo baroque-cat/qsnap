@@ -142,24 +142,27 @@ def nbd_full_export(
     vm_name: str,
     target_file: str | Path,
     compress: bool = False,
+    compression_type: str = "zstd",
+    stall_timeout: int = 1800,
 ) -> ShellResult:
     """Export a full disk via NBD pull-model and convert to *target_file*.
 
     Lifecycle (design D2):
-    (a) Remove any stale socket at ``/tmp/qsnap-backup-{pid}.sock``.
-    (b) Write backup XML with pull-mode Unix socket.
-    (c) Run ``virsh backup-begin --domain <vm> <xml>`` WITHOUT
-        ``--incremental`` (full export, no checkpoint).
-    (d) Run ``qemu-img convert [-c] -O qcow2 nbd:unix:<socket>
-        <target_file>`` to pull the full disk.  When *compress* is
-        ``True``, the ``-c`` flag is passed to ``qemu-img convert``,
-        producing a compressed qcow2 (experimentally verified with
-        qemu-img 11.0.2).
-    (e) Call ``virsh domjobabort --domain <vm>`` to terminate the
-        backup job and release the state change lock, then clean up
-        the socket via ``rm -f``.  Steps (e) SHALL execute in a
-        ``finally`` block and SHALL run regardless of whether
-        ``qemu-img convert`` succeeded or failed.
+        (a) Remove any stale socket at ``/tmp/qsnap-backup-{pid}.sock``.
+        (b) Write backup XML with pull-mode Unix socket.
+        (c) Run ``virsh backup-begin --domain <vm> <xml>`` WITHOUT
+            ``--incremental`` (full export, no checkpoint).
+        (d) Run ``qemu-img convert [-c] [-o compression_type=<type>]
+            -O qcow2 nbd:unix:<socket> <target_file>`` to pull the full
+            disk.  When *compress* is ``True``, the ``-c`` flag is passed
+            to ``qemu-img convert``, producing a compressed qcow2.  When
+            *compression_type* is ``"zstd"``, ``-o compression_type=zstd``
+            is added for 11x faster compression than the default zlib.
+        (e) Call ``virsh domjobabort --domain <vm>`` to terminate the
+            backup job and release the state change lock, then clean up
+            the socket via ``rm -f``.  Steps (e) SHALL execute in a
+            ``finally`` block and SHALL run regardless of whether
+            ``qemu-img convert`` succeeded or failed.
 
     Args:
         shell: :class:`IShell` instance for running commands.
@@ -168,6 +171,12 @@ def nbd_full_export(
         compress: When ``True``, add ``-c`` to ``qemu-img convert`` to
             enable compression.  Defaults to ``False`` (backwards-
             compatible with existing callers).
+        compression_type: Compression algorithm (``"zstd"`` default,
+            ``"zlib"`` alternative).  Only effective when *compress* is
+            ``True``.  When ``"zstd"``, adds ``-o compression_type=zstd``.
+        stall_timeout: Stall-detection timeout in seconds for the
+            convert command.  When ``0``, falls back to
+            :meth:`IShell.run` with a fixed 3600s timeout.
 
     Returns the :class:`ShellResult` from the final step — the
     ``qemu-img convert`` result on success/failure of that step, or
@@ -207,9 +216,18 @@ def nbd_full_export(
         convert_cmd = ["qemu-img", "convert", "-O", "qcow2"]
         if compress:
             convert_cmd.append("-c")
+            if compression_type == "zstd":
+                convert_cmd.extend(["-o", "compression_type=zstd"])
         convert_cmd.append(nbd_uri)
         convert_cmd.append(str(target_file))
-        convert_result = shell.run(convert_cmd, timeout=3600)
+        if stall_timeout > 0:
+            convert_result = shell.run_with_stall_detection(
+                convert_cmd,
+                output_file=Path(target_file),
+                stall_timeout=stall_timeout,
+            )
+        else:
+            convert_result = shell.run(convert_cmd, timeout=3600)
         return convert_result
 
     finally:

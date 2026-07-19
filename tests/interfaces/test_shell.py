@@ -8,6 +8,7 @@ import typing
 import pytest
 
 from qsnap.interfaces.shell import IShell
+from qsnap.models.results import ShellResult
 from qsnap.shell.subprocess_shell import SubprocessShell
 
 
@@ -30,6 +31,41 @@ def test_ishell_is_abstract():
 
     # An instance of SubprocessShell is an IShell.
     assert isinstance(SubprocessShell(), IShell)
+
+
+def test_ishell_has_run_with_stall_detection():
+    """IShell declares ``run_with_stall_detection`` as an abstract method.
+
+    The method supports stall detection via output-file growth monitoring
+    for long-running data-transfer commands (``qemu-img convert``,
+    ``rsync``).  It must be present in ``IShell.__abstractmethods__`` so
+    that any concrete implementation is required to provide it.
+    """
+    assert hasattr(IShell, "run_with_stall_detection")
+    assert "run_with_stall_detection" in IShell.__abstractmethods__
+
+    # Verify signature and return type.
+    sig = inspect.signature(IShell.run_with_stall_detection)
+    assert "cmd" in sig.parameters
+    assert "output_file" in sig.parameters
+    assert "stall_timeout" in sig.parameters
+    assert "check" in sig.parameters
+
+    # ``output_file`` defaults to None.
+    output_file_param = sig.parameters["output_file"]
+    assert output_file_param.default is None
+
+    # ``stall_timeout`` defaults to 1800 (30 minutes).
+    stall_timeout_param = sig.parameters["stall_timeout"]
+    assert stall_timeout_param.default == 1800
+
+    # ``check`` defaults to False.
+    check_param = sig.parameters["check"]
+    assert check_param.default is False
+
+    # Return type must resolve to ShellResult.
+    hints = typing.get_type_hints(IShell.run_with_stall_detection)
+    assert hints.get("return") is ShellResult
 
 
 def test_ishell_run_accepts_check_parameter():

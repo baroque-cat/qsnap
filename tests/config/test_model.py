@@ -51,6 +51,14 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.deep_check_targets = True  # type: ignore[misc]
 
+    # Mutating compression_type also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.compression_type = "zlib"  # type: ignore[misc]
+
+    # Mutating backup_stall_timeout also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.backup_stall_timeout = "1h"  # type: ignore[misc]
+
 
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
@@ -74,6 +82,10 @@ def test_global_config_defaults():
     assert cfg.deep_check_schedule == "off"
     # Compress full backups defaults to True.
     assert cfg.compress is True
+    # Compression algorithm defaults to zstd (11x faster than zlib).
+    assert cfg.compression_type == "zstd"
+    # Stall detection timeout for data-transfer commands defaults to 30m.
+    assert cfg.backup_stall_timeout == "30m"
     # FULL backup integrity verification tiers (M1/M2/M3).
     assert cfg.full_verify_after_create == "check"
     assert cfg.full_verify_before_rebase == "metadata"
@@ -706,3 +718,86 @@ def test_transaction_log_validates_absolute_path():
     # Relative path — also stored as-is (no model-layer validation).
     cfg_rel = GlobalConfig(transaction_log="logs/transactions.log")
     assert cfg_rel.transaction_log == "logs/transactions.log"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.compression_type — FULL backup compression algorithm
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_compression_type_default():
+    """GlobalConfig().compression_type defaults to 'zstd' (11x faster than zlib)."""
+    assert GlobalConfig().compression_type == "zstd"
+
+
+def test_global_config_compression_type_immutable():
+    """GlobalConfig is frozen; mutating compression_type raises FrozenInstanceError."""
+    cfg = GlobalConfig(compression_type="zstd")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.compression_type = "zlib"  # type: ignore[misc]
+
+
+def test_global_config_compression_type_zlib():
+    """GlobalConfig(compression_type='zlib') stores 'zlib'."""
+    cfg = GlobalConfig(compression_type="zlib")
+    assert cfg.compression_type == "zlib"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.backup_stall_timeout — stall detection for data-transfer
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_backup_stall_timeout_default():
+    """GlobalConfig().backup_stall_timeout defaults to '30m'."""
+    assert GlobalConfig().backup_stall_timeout == "30m"
+
+
+def test_global_config_backup_stall_timeout_immutable():
+    """GlobalConfig is frozen; mutating backup_stall_timeout raises FrozenInstanceError."""
+    cfg = GlobalConfig(backup_stall_timeout="30m")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.backup_stall_timeout = "1h"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.compression_type — inherited from GlobalConfig via ConfigFacade
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_compression_type_inherits():
+    """TargetConfig().compression_type defaults to 'zstd' (dataclass-level default).
+
+    ConfigFacade resolves inheritance at a higher layer; this test verifies
+    the dataclass field default is correct.
+    """
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.compression_type == "zstd"
+
+
+def test_target_config_compression_type_overrides():
+    """TargetConfig(compression_type='zlib') overrides the default 'zstd'."""
+    target = TargetConfig(path=Path("/backup/testvm"), compression_type="zlib")
+    assert target.compression_type == "zlib"
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.backup_stall_timeout — inherited from GlobalConfig via
+# ConfigFacade
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_backup_stall_timeout_inherits():
+    """TargetConfig().backup_stall_timeout defaults to '30m' (dataclass-level default).
+
+    ConfigFacade resolves inheritance at a higher layer; this test verifies
+    the dataclass field default is correct.
+    """
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.backup_stall_timeout == "30m"
+
+
+def test_target_config_backup_stall_timeout_overrides():
+    """TargetConfig(backup_stall_timeout='1h') overrides the default '30m'."""
+    target = TargetConfig(path=Path("/backup/testvm"), backup_stall_timeout="1h")
+    assert target.backup_stall_timeout == "1h"

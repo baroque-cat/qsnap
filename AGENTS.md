@@ -91,12 +91,11 @@ Core._execute_pipeline(vm):
   2. if detector.has_changed(vm): snapshot.create(...)
   3. retention.evaluate(snapshots) → keep/remove → lifecycle.commit(...)
   4. for each target:
-       _log_size_estimate(vm, target)           # design D5
        backup = factory.create_backup_provider(...)
        _should_create_bucket_full(target, policy, last_full, snapshot_ts)
          → if new period of highest active bucket: create_full_backup(...)
        transfer missing snapshots (rsync only — design D3)
-       record_incremental_dependency(target, incremental, full)
+       recordincremental_dependency(target, incremental, full)
        retention.evaluate(backups) → keep/remove
        _cleanup_backups() → cascade deletion (design D2):
          FULL with dependents in keep-set → ghost retention (skip)
@@ -135,6 +134,10 @@ All `virsh`, `qemu-img`, and filesystem calls go through `IShell` (thin wrapper 
 - Timeout enforcement on every command
 - Structured logging of every external call
 - Full mockability in tests without touching the real system
+
+`IShell` provides two execution methods:
+- `run(cmd, timeout, check)` — fixed-timeout execution for short commands (`virsh`, `qemu-img info`). Kills the process after *timeout* seconds.
+- `run_with_stall_detection(cmd, output_file, stall_timeout, check)` — output-growth monitoring for long-running data-transfer commands (`qemu-img convert`, `rsync`). Polls the *output_file* size every 60 seconds; kills the process only when no growth is observed for *stall_timeout* seconds. No maximum timeout — if data flows, the process runs to completion.
 
 ---
 

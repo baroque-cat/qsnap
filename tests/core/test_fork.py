@@ -233,14 +233,15 @@ def test_fork_nbd_running_vm(
     storage_dir = tmp_path / "storage"
     (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
 
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as spy_run, \
+         patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as spy_sd:
         result = core.fork("snap1", "newvm", storage_dir)
 
     assert isinstance(result, RestoreResult)
     assert result.success is True
 
-    # Verify the correct commands were issued
-    call_cmds = [" ".join(c.args[0]) for c in spy.call_args_list]
+    # Verify the correct commands were issued (collect from both run and run_with_stall_detection)
+    call_cmds = [" ".join(c.args[0]) for c in spy_run.call_args_list + spy_sd.call_args_list]
 
     # virsh backup-begin should be called (NBD export)
     backup_begin_calls = [c for c in call_cmds if "virsh backup-begin" in c]

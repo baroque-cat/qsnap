@@ -41,7 +41,28 @@ Full backup creation for live (running) VMs via the NBD pull-model (`virsh backu
 
 ### Requirement: NBD full-export helper for FULL backups
 
-The system SHALL provide a shared NBD full-export mechanism used by both `FileCopyBackupProvider.create_full_backup()` and `BitmapBackupProvider.create_full_backup()`. The mechanism SHALL: (1) remove any stale socket at `/tmp/qsnap-backup-{pid}.sock`, (2) write a backup XML with `<domainbackup mode='pull'><server transport='unix' path='<socket>'/></domainbackup>`, (3) run `virsh backup-begin --domain <vm> <xml>` WITHOUT `--incremental` (full export, no checkpoint), (4) run `qemu-img convert -n nbd:unix:<socket> <target_file>` to pull the full disk, (5) clean up the socket via `rm -f` in a `finally` block.
+The system SHALL provide a shared NBD full-export mechanism used by both `FileCopyBackupProvider.create_full_backup()` and `BitmapBackupProvider.create_full_backup()`. The mechanism SHALL: (1) remove any stale socket at `/tmp/qsnap-backup-{pid}.sock`, (2) write a backup XML, (3) run `virsh backup-begin --domain <vm> <xml>` WITHOUT `--incremental` (full export, no checkpoint), (4) run `qemu-img convert -O qcow2 [-c -o compression_type=<type>] nbd:unix:<socket> <target_file>` to pull the full disk, (5) clean up the socket via `rm -f` in a `finally` block. The function signature SHALL be `nbd_full_export(shell: IShell, vm_name: str, target_file: str | Path, compress: bool = False, compression_type: str = "zstd") -> ShellResult`. When `compress=True` and `compression_type="zstd"`, the convert command SHALL include `-c -o compression_type=zstd`. When `compress=True` and `compression_type="zlib"`, the convert command SHALL include only `-c` (default zlib). The `qemu-img convert` command SHALL be executed via `IShell.run_with_stall_detection()` with `output_file` set to `target_file` and `stall_timeout` from the target config.
+
+#### Scenario: NBD full export with zstd compression
+- **WHEN** `nbd_full_export(shell, "myvm", "/target/full.qcow2", compress=True, compression_type="zstd")` is called
+- **THEN** `virsh backup-begin` is called without `--incremental`
+- **THEN** `qemu-img convert -O qcow2 -c -o compression_type=zstd nbd:unix:<socket> <target>` is executed
+- **THEN** the resulting file has no backing file
+
+#### Scenario: NBD full export with zlib compression
+- **WHEN** `nbd_full_export(shell, "myvm", "/target/full.qcow2", compress=True, compression_type="zlib")` is called
+- **THEN** `qemu-img convert -O qcow2 -c nbd:unix:<socket> <target>` is executed (default zlib)
+
+#### Scenario: NBD full export without compression
+- **WHEN** `nbd_full_export(shell, "myvm", "/target/full.qcow2", compress=False, compression_type="zstd")` is called
+- **THEN** `qemu-img convert -O qcow2 nbd:unix:<socket> <target>` is executed (no `-c` flag)
+- **AND** the `compression_type` parameter is ignored
+
+#### Scenario: NBD full export uses stall detection
+- **WHEN** `nbd_full_export(shell, "myvm", "/target/full.qcow2.tmp", compress=True, compression_type="zstd")` is called
+- **AND** the calling context provides `stall_timeout` from target config
+- **THEN** the `qemu-img convert` command is executed via `shell.run_with_stall_detection(cmd, output_file=Path(target_file), stall_timeout=...)`
+- **AND** if the output file stops growing, the convert is killed
 
 #### Scenario: NBD full export produces standalone qcow2
 - **WHEN** the NBD full-export helper is called for a running VM

@@ -1,11 +1,21 @@
 ## Requirements
 
 ### Requirement: Systemd service unit
-The system SHALL ship a `qsnap.service` systemd service unit that executes `qsnap run` with a configurable config file path. The service SHALL be of type `oneshot`.
+The system SHALL ship a `qsnap.service` systemd service unit that executes `qsnap run` with a configurable config file path. The service SHALL be of type `oneshot`. The unit file SHALL include `TimeoutStartSec=0` to disable systemd's default oneshot timeout (90 seconds by default). This allows qsnap's internal stall detection (`backup_stall_timeout`) to be the sole authority for transfer timeout enforcement. Without `TimeoutStartSec=0`, systemd would kill the service after 90 seconds, defeating stall detection for any backup that takes longer than 90 seconds.
 
 #### Scenario: Service runs qsnap
 - **WHEN** `systemctl start qsnap.service` is executed
 - **THEN** `qsnap -c /etc/qsnap/qsnap.toml run` is executed and the service reports success or failure based on exit code
+
+#### Scenario: qsnap.service has TimeoutStartSec=0
+- **WHEN** the qsnap.service unit file is generated
+- **THEN** it contains `TimeoutStartSec=0`
+- **AND** systemd does not kill the service based on elapsed time
+
+#### Scenario: qsnap.service is Type=oneshot
+- **WHEN** the qsnap.service unit file is generated
+- **THEN** it contains `Type=oneshot`
+- **AND** systemd waits for the process to complete before considering the service started
 
 ### Requirement: Systemd timer unit
 The system SHALL ship a `qsnap.timer` systemd timer unit that triggers `qsnap.service` on a schedule. Default schedule SHALL be hourly with `Persistent=True` and `RandomizedDelaySec=300`.

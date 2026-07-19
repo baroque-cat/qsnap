@@ -302,3 +302,149 @@ def test_safety_fields_toml_no_deprecated_fields() -> None:
             assert "full_compress" not in target, (
                 "safety_fields.toml should not contain deprecated full_compress"
             )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_global_config — compression_type / backup_stall_timeout
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_global_config_defaults_compression_type_zstd(
+    make_global_config,
+) -> None:
+    """make_global_config() defaults to compression_type='zstd'."""
+    cfg = make_global_config()
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.compression_type == "zstd"
+
+
+@pytest.mark.unit
+def test_make_global_config_defaults_backup_stall_timeout(
+    make_global_config,
+) -> None:
+    """make_global_config() defaults to backup_stall_timeout='30m'."""
+    cfg = make_global_config()
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.backup_stall_timeout == "30m"
+
+
+@pytest.mark.unit
+def test_make_global_config_overrides_compression_type(
+    make_global_config,
+) -> None:
+    """make_global_config(compression_type='zlib') overrides the default."""
+    cfg = make_global_config(compression_type="zlib")
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_make_global_config_overrides_backup_stall_timeout(
+    make_global_config,
+) -> None:
+    """make_global_config(backup_stall_timeout='1h') overrides the default."""
+    cfg = make_global_config(backup_stall_timeout="1h")
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.backup_stall_timeout == "1h"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_target — compression_type / backup_stall_timeout
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_target_defaults_compression_type_zstd(make_target) -> None:
+    """make_target() defaults to compression_type='zstd'."""
+    target = make_target()
+    assert isinstance(target, TargetConfig)
+    assert target.compression_type == "zstd"
+
+
+@pytest.mark.unit
+def test_make_target_defaults_backup_stall_timeout(make_target) -> None:
+    """make_target() defaults to backup_stall_timeout='30m'."""
+    target = make_target()
+    assert isinstance(target, TargetConfig)
+    assert target.backup_stall_timeout == "30m"
+
+
+@pytest.mark.unit
+def test_make_target_overrides_compression_type(make_target) -> None:
+    """make_target(compression_type='zlib') overrides the default."""
+    target = make_target(compression_type="zlib")
+    assert isinstance(target, TargetConfig)
+    assert target.compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_make_target_overrides_backup_stall_timeout(make_target) -> None:
+    """make_target(backup_stall_timeout='1h') overrides the default."""
+    target = make_target(backup_stall_timeout="1h")
+    assert isinstance(target, TargetConfig)
+    assert target.backup_stall_timeout == "1h"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TOML fixture: zstd_config.toml
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_zstd_config_toml_parses_without_error() -> None:
+    """zstd_config.toml parses without error — compression_type / stall fields."""
+    facade = ConfigFacade(FIXTURES / "zstd_config.toml")
+    vms = facade.get_vms()
+
+    assert len(vms) == 2
+
+    # Global: compression_type="zlib", backup_stall_timeout="1h".
+    global_cfg = facade.get_global()
+    assert global_cfg.compression_type == "zlib"
+    assert global_cfg.backup_stall_timeout == "1h"
+
+    # vm_inherit: inherits global defaults.
+    vm_inherit = facade.get_vm("vm_inherit")
+    assert vm_inherit.name == "vm_inherit"
+    target_inherit = next(
+        t for t in vm_inherit.targets if t.path == Path("/mnt/backup/vm_inherit")
+    )
+    assert target_inherit.compression_type == "zlib"
+    assert target_inherit.backup_stall_timeout == "1h"
+
+    # vm_override: one target overrides compression_type, another inherits.
+    vm_override = facade.get_vm("vm_override")
+    assert vm_override.name == "vm_override"
+
+    target_zstd = next(
+        t for t in vm_override.targets
+        if t.path == Path("/mnt/backup/vm_override_zstd")
+    )
+    assert target_zstd.compression_type == "zstd"   # target-level override
+    assert target_zstd.backup_stall_timeout == "30m"  # target-level override
+
+    target_inh = next(
+        t for t in vm_override.targets
+        if t.path == Path("/mnt/backup/vm_override_inherit")
+    )
+    assert target_inh.compression_type == "zlib"    # inherited from global
+    assert target_inh.backup_stall_timeout == "1h"   # inherited from global
+
+
+@pytest.mark.unit
+def test_zstd_config_toml_no_deprecated_fields() -> None:
+    """zstd_config.toml has no deprecated full_every or full_compress keys."""
+    import tomllib
+
+    with open(FIXTURES / "zstd_config.toml", "rb") as f:
+        raw = tomllib.load(f)
+
+    for vm in raw.get("vm", []):
+        for target in vm.get("target", []):
+            assert "full_every" not in target, (
+                "zstd_config.toml should not contain deprecated full_every"
+            )
+            assert "full_compress" not in target, (
+                "zstd_config.toml should not contain deprecated full_compress"
+            )

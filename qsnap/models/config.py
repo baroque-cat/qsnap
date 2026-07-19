@@ -68,6 +68,18 @@ class GlobalConfig:
     deep_check_schedule: str = "off"
     # Compress full backups (global default, overridden per-VM/target).
     compress: bool = True
+    # Compression algorithm for FULL backups (``qemu-img convert -c -o
+    # compression_type=<type>``) and rsync incrementals
+    # (``--compress --compress-choice=<type>``).  ``"zstd"`` (default) is
+    # 11x faster than ``"zlib"``.  Only effective when ``compress=True``;
+    # when ``compress=False``, no compression is applied regardless.
+    compression_type: str = "zstd"
+    # Stall detection timeout for data-transfer commands (``qemu-img
+    # convert``, ``rsync``).  Duration string (e.g. ``"30m"``, ``"1h"``)
+    # parsed to seconds via ``parse_duration()``.  When the output file
+    # shows no growth for this duration, the process is killed.  ``"0s"``
+    # disables stall detection (falls back to fixed-timeout ``run()``).
+    backup_stall_timeout: str = "30m"
     # FULL backup integrity verification tiers (M1/M2/M3).
     # ``full_verify_after_create``: verification after ``create_full_backup()``
     #   completes, before state recording.  ``"metadata"`` (M1 — qemu-img info
@@ -127,6 +139,15 @@ class TargetConfig:
     incrementals (``-c`` flag), and rsync incrementals (``--compress``
     transfer-level flag).  Inherited from global → VM → target.
 
+    ``compression_type`` selects the compression algorithm (default
+    ``"zstd"`` — 11x faster than ``"zlib"``).  Only effective when
+    ``compress=True``.  Inherited from global → VM → target.
+
+    ``backup_stall_timeout`` is a duration string (e.g. ``"30m"``)
+    controlling stall detection on data-transfer commands.  ``"0s"``
+    disables stall detection (falls back to fixed-timeout ``run()``).
+    Inherited from global → VM → target.
+
     ``copy_base`` controls whether the base image is copied to the
     target on first backup (default ``False`` — first backup is always
     a FULL via ``qemu-img convert``).
@@ -139,6 +160,8 @@ class TargetConfig:
     verify: str = "metadata"
     target_preserve_min: str | None = None
     compress: bool = True
+    compression_type: str = "zstd"
+    backup_stall_timeout: str = "30m"
     copy_base: bool = False
     rate_limit: str = "no"
     # Backup retry controls (target-level — network reliability varies

@@ -10,7 +10,6 @@ imports.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -46,7 +45,7 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.retention.time_based import parse_duration
+from qsnap.retention.time_based import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import is_vm_running, nbd_full_export
 from qsnap.utils.parsing import parse_domblklist_disks
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
@@ -278,8 +277,12 @@ class Core:
         Simulates the retention engine against a synthetic timestamp
         distribution (one per hour for the configured retention window
         + 50% margin) and returns a formatted string showing expected
-        chain length, bucket breakdown, and storage estimates for each
-        VM and each target.
+        chain length and bucket breakdown for each VM and each target.
+
+        Logs only factual data: base image actual-size (from
+        ``qemu-img info``) and compression_type (from config).  No
+        size projections — the ``base_size × 0.3`` formula was removed
+        because it cannot predict data compressibility.
         """
         vms = self._filter_vms(vm_filter)
         dow = self._config.get_global().preserve_day_of_week
@@ -290,7 +293,7 @@ class Core:
         for vm in vms:
             lines.append(f"=== {vm.name} ===")
 
-            # Get base image actual-size for size projections
+            # Get base image actual-size (factual — no projections).
             base_size = 0
             info_cmd = [
                 "qemu-img",
@@ -307,16 +310,7 @@ class Core:
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
-            # Get average incremental size from state history
-            snapshots = self._state.get_snapshots(vm.name)
-            avg_inc_size = 0
-            if snapshots:
-                sizes = [s.allocation for s in snapshots if s.allocation > 0]
-                if sizes:
-                    avg_inc_size = sum(sizes) // len(sizes)
-
             lines.append(f"  Base image actual-size: {base_size} B")
-            lines.append(f"  Avg incremental size:   {avg_inc_size} B")
 
             # Snapshot retention
             snap_policy = self._parse_preserve(vm.snapshot_preserve, vm.snapshot_preserve_min)
@@ -374,33 +368,9 @@ class Core:
                     count = info.get("count", 0)
                     if count > 0:
                         lines.append(f"    {bucket}: {count}")
-
-                # Size projections (design D5)
-                full_size = int(base_size * 0.3) if target.compress else base_size
-                active_buckets = sum(
-                    1
-                    for c in (
-                        tgt_policy.hourly,
-                        tgt_policy.daily,
-                        tgt_policy.weekly,
-                        tgt_policy.monthly,
-                        tgt_policy.yearly,
-                    )
-                    if c > 0
+                lines.append(
+                    f"    Compression: {target.compression_type} (compress={target.compress})"
                 )
-                total_kept = (
-                    tgt_policy.hourly
-                    + tgt_policy.daily
-                    + tgt_policy.weekly
-                    + tgt_policy.monthly
-                    + tgt_policy.yearly
-                )
-                projected_fulls = max(1, active_buckets)
-                projected_incs = max(0, total_kept - projected_fulls)
-                projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
-                lines.append(f"    Projected FULLs: {projected_fulls}")
-                lines.append(f"    Projected incrementals: {projected_incs}")
-                lines.append(f"    Projected total size: {projected_total} B")
 
             lines.append("")
 
@@ -409,12 +379,12 @@ class Core:
     def estimate(self, vm_filter: str | None = None) -> str:
         """Produce a human-readable size estimation report.
 
-        Same as ``schedule_summary()`` but includes real size projections:
-        base image actual-size, average incremental size, projected
-        FULL count, projected total size, and current target size.
+        Prints only factual data: base image actual-size (from
+        ``qemu-img info``), compression_type, and compress enabled/
+        disabled.  No projections — the ``base_size × 0.3`` formula
+        was removed because it cannot predict data compressibility.
         """
         vms = self._filter_vms(vm_filter)
-        dow = self._config.get_global().preserve_day_of_week
         now = datetime.now()
 
         lines: list[str] = []
@@ -422,7 +392,7 @@ class Core:
         for vm in vms:
             lines.append(f"=== {vm.name} ===")
 
-            # Get base image actual-size
+            # Get base image actual-size (factual — no projections).
             base_size = 0
             info_cmd = [
                 "qemu-img",
@@ -439,18 +409,9 @@ class Core:
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
-            # Get average incremental size from state history
-            snapshots = self._state.get_snapshots(vm.name)
-            avg_inc_size = 0
-            if snapshots:
-                sizes = [s.allocation for s in snapshots if s.allocation > 0]
-                if sizes:
-                    avg_inc_size = sum(sizes) // len(sizes)
-
             lines.append(f"  Base image actual-size: {base_size} B")
-            lines.append(f"  Avg incremental size:   {avg_inc_size} B")
 
-            # Per-target backup retention + size projections
+            # Per-target factual data.
             for target in vm.targets:
                 tgt_policy = self._parse_preserve(
                     target.target_preserve, target.target_preserve_min
@@ -459,44 +420,11 @@ class Core:
                 tgt_items = self._generate_synthetic_items(now, tgt_window, "backup")
                 tgt_engine = self._factory.create_retention_engine(tgt_policy)
                 tgt_result = tgt_engine.evaluate(
-                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
+                    tgt_items,
+                    tgt_policy,
+                    now,
+                    preserve_day_of_week=self._config.get_global().preserve_day_of_week,
                 )
-
-                # Size projections
-                full_size = int(base_size * 0.3) if target.compress else base_size
-                active_buckets = sum(
-                    1
-                    for c in (
-                        tgt_policy.hourly,
-                        tgt_policy.daily,
-                        tgt_policy.weekly,
-                        tgt_policy.monthly,
-                        tgt_policy.yearly,
-                    )
-                    if c > 0
-                )
-                total_kept = (
-                    tgt_policy.hourly
-                    + tgt_policy.daily
-                    + tgt_policy.weekly
-                    + tgt_policy.monthly
-                    + tgt_policy.yearly
-                )
-                projected_fulls = max(1, active_buckets)
-                projected_incs = max(0, total_kept - projected_fulls)
-                projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
-
-                # Current target size
-                current_target_size = 0
-                du_result = self._shell.run(
-                    ["du", "-sb", str(target.path)],
-                    timeout=60,
-                )
-                if du_result.success:
-                    parts = du_result.stdout.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            current_target_size = int(parts[0])
 
                 lines.append(f"  Backups [{target.path}]:")
                 lines.append(
@@ -506,10 +434,9 @@ class Core:
                 )
                 lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
                 lines.append(f"    Expected remove: {len(tgt_result.remove)}")
-                lines.append(f"    Projected FULLs: {projected_fulls}")
-                lines.append(f"    Projected incrementals: {projected_incs}")
-                lines.append(f"    Projected total size: {projected_total} B")
-                lines.append(f"    Current target size: {current_target_size} B")
+                lines.append(
+                    f"    Compression: {target.compression_type} (compress={target.compress})"
+                )
 
             lines.append("")
 
@@ -2273,6 +2200,8 @@ class Core:
         snapshots: list[SnapshotInfo],
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         """Transfer missing snapshots with exponential backoff retry.
 
@@ -2284,6 +2213,9 @@ class Core:
         ``full_verify_before_rebase`` is the M1 verification mode threaded
         from ``GlobalConfig.full_verify_before_rebase``; passed through to
         the provider's ``transfer_missing()``.
+
+        ``compression_type`` and ``stall_timeout`` are threaded from
+        ``TargetConfig`` to the provider's ``transfer_missing()``.
 
         Returns the list of ``BackupResult`` objects from the last
         attempt.
@@ -2298,6 +2230,8 @@ class Core:
                 snapshots,
                 rate_limit=target.rate_limit,
                 full_verify_before_rebase=full_verify_before_rebase,
+                compression_type=compression_type,
+                stall_timeout=stall_timeout,
             )
 
         results: list[BackupResult] = []
@@ -2308,6 +2242,8 @@ class Core:
                 snapshots,
                 rate_limit=target.rate_limit,
                 full_verify_before_rebase=full_verify_before_rebase,
+                compression_type=compression_type,
+                stall_timeout=stall_timeout,
             )
 
             # Check if all transfers succeeded
@@ -2354,120 +2290,6 @@ class Core:
 
         return results
 
-    def _log_size_estimate(
-        self,
-        vm_config: VMConfig,
-        target: TargetConfig,
-    ) -> None:
-        """Log projected backup size estimates (design D5).
-
-        Gathers:
-        - Base image actual-size via ``qemu-img info``
-        - Average incremental size from state history
-        - Projected FULL count from retention policy
-        - Current target size via ``du -sh``
-
-        Formula: ``num_fulls × full_size + num_incs × inc_size``.
-        Compressed FULL ≈ base_size × 0.3.
-        """
-        # Get base image actual-size
-        base_size = 0
-        info_cmd = [
-            "qemu-img",
-            "info",
-            "--force-share",
-            "--output=json",
-            str(vm_config.base_image),
-        ]
-        info_result = self._shell.run(info_cmd, timeout=60)
-        if info_result.success:
-            try:
-                info = json.loads(info_result.stdout)
-                base_size = int(info.get("actual-size", 0))
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
-
-        # Compute projected FULL size (compressed ≈ base × 0.3)
-        full_size = int(base_size * 0.3) if target.compress else base_size
-
-        # Get average incremental size from state history
-        snapshots = self._state.get_snapshots(vm_config.name)
-        avg_inc_size = 0
-        if snapshots:
-            sizes = [s.allocation for s in snapshots if s.allocation > 0]
-            if sizes:
-                avg_inc_size = sum(sizes) // len(sizes)
-
-        # Projected FULL count and incremental count from retention policy
-        policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
-        # Count active buckets for FULL projection
-        active_buckets = sum(
-            1
-            for c in (
-                policy.hourly,
-                policy.daily,
-                policy.weekly,
-                policy.monthly,
-                policy.yearly,
-            )
-            if c > 0
-        )
-        # Project: 1 FULL per highest bucket period, incrementals fill the rest
-        total_kept = policy.hourly + policy.daily + policy.weekly + policy.monthly + policy.yearly
-        projected_fulls = max(1, active_buckets)
-        projected_incs = max(0, total_kept - projected_fulls)
-        projected_total = projected_fulls * full_size + projected_incs * avg_inc_size
-
-        # Current target size
-        current_target_size = 0
-        du_result = self._shell.run(
-            ["du", "-sb", str(target.path)],
-            timeout=60,
-        )
-        if du_result.success:
-            parts = du_result.stdout.split()
-            if parts:
-                with contextlib.suppress(ValueError):
-                    current_target_size = int(parts[0])
-
-        logger.info(
-            "Size estimate for VM %s target %s: "
-            "base=%d B, full(compressed=%s)=%d B, avg_inc=%d B, "
-            "projected_fulls=%d, projected_incs=%d, "
-            "projected_total=%d B, current_target=%d B",
-            vm_config.name,
-            target.path,
-            base_size,
-            target.compress,
-            full_size,
-            avg_inc_size,
-            projected_fulls,
-            projected_incs,
-            projected_total,
-            current_target_size,
-        )
-
-        # Dry-run: indicate whether a FULL would be created this run
-        if self._dry_run and snapshots:
-            all_fulls = self._state.get_full_backups(str(target.path))
-            strategy = self._factory.create_bucket_full_strategy()
-            should_full, bucket_level = strategy.should_create_full(
-                target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
-            )
-            if should_full:
-                logger.info(
-                    "[dry-run] FULL backup would be created (bucket=%s) for VM %s target %s",
-                    bucket_level,
-                    vm_config.name,
-                    target.path,
-                )
-            else:
-                logger.info(
-                    "[dry-run] No FULL backup needed this run for VM %s target %s",
-                    vm_config.name,
-                    target.path,
-                )
-
     def _backup_target(
         self,
         vm_config: VMConfig,
@@ -2481,8 +2303,10 @@ class Core:
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
 
-        # Size estimation logging (design D5 — runs even in dry-run)
-        self._log_size_estimate(vm_config, target)
+        # Parse stall_timeout from target config (duration string → seconds).
+        # "0s" disables stall detection → stall_timeout=0 → providers fall
+        # back to fixed-timeout shell.run().
+        stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
         # Check for bucket-driven FULL backup necessity (design D1)
         if snapshots:
@@ -2528,6 +2352,8 @@ class Core:
                         target,
                         compress=target.compress,
                         bucket_level=bucket_level,
+                        compression_type=target.compression_type,
+                        stall_timeout=stall_timeout,
                     )
                     if full_result.success:
                         # ── Post-create FULL backup verification ────
@@ -2595,6 +2421,8 @@ class Core:
                 target,
                 snapshots,
                 full_verify_before_rebase=full_verify_mode,
+                compression_type=target.compression_type,
+                stall_timeout=stall_timeout,
             )
             failed = [r for r in results if not r.success]
             if failed:

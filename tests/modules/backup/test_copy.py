@@ -56,6 +56,51 @@ from tests.mocks.mock_shell import MockShell
 # ──────────────────────────────────────────────────────────────────────────
 
 
+# ── Module-level: track ALL MockShell calls ──
+# Both run() and run_with_stall_detection() calls are logged in mock_shell._calls
+_orig_mock_run = MockShell.run
+_orig_mock_sd = MockShell.run_with_stall_detection
+def _tracked_run(self, cmd, timeout, check=False):
+    self._calls = getattr(self, '_calls', [])
+    self._calls.append(cmd)
+    return _orig_mock_run(self, cmd, timeout, check=check)
+def _tracked_sd(self, cmd, output_file=None, stall_timeout=1800, check=False):
+    self._calls = getattr(self, '_calls', [])
+    self._calls.append(cmd)
+    return _orig_mock_sd(self, cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+MockShell.run = _tracked_run
+MockShell.run_with_stall_detection = _tracked_sd
+
+def _all_cmds(mock_shell):
+    """Get all tracked commands from a MockShell instance."""
+    return [" ".join(c) for c in getattr(mock_shell, '_calls', [])]
+
+def _clear_calls(mock_shell):
+    """Clear tracked calls (call before each test)."""
+    mock_shell._calls = []
+
+def _wrap_sd_with_side_effect(mock_shell, side_effect_fn):
+    """Wrap run_with_stall_detection with a side-effect callback.
+    
+    The side_effect_fn receives the command list and is called before
+    the original method.  Useful for creating target files so stat() works.
+    """
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _wrapped(cmd, output_file=None, stall_timeout=1800, check=False):
+        side_effect_fn(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = _wrapped
+
+def _rsync_side_effect(cmd):
+    """Create target file for rsync commands."""
+    cmd_str = " ".join(cmd)
+    if cmd_str.startswith("rsync "):
+        tgt = Path(cmd[-1])
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        tgt.write_bytes(b"\x00" * 65536)
+
 @pytest.fixture(autouse=True)
 def _ensure_snapshot_paths_exist(monkeypatch):
     """Make os.path.exists return True for fake snapshot paths in tests.
@@ -117,15 +162,26 @@ def test_transfer_missing_new_snapshot_rsync_empty_target(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -141,7 +197,7 @@ def test_transfer_missing_new_snapshot_rsync_empty_target(
     assert results[0].target_path == expected_target_file
 
     # Assert rsync command copies to target.path/<snapshot.name>.qcow2
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert str(snapshot.path) in rsync_cmds[0]
@@ -152,6 +208,9 @@ def test_transfer_missing_new_snapshot_rsync_empty_target(
     assert "--partial" in rsync_cmds[0]
     # --compress should appear because target.compress defaults to True
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -192,6 +251,7 @@ def test_transfer_missing_existing_snapshot_skipped(
         )
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -200,7 +260,7 @@ def test_transfer_missing_existing_snapshot_skipped(
     assert len(results) == 0
 
     # rsync is NOT called
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 0
 
@@ -261,6 +321,7 @@ def test_transfer_incremental_rebase_backing_path(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
@@ -270,7 +331,7 @@ def test_transfer_incremental_rebase_backing_path(
     assert results[0].success is True
 
     # Verify rebase command
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 1
     rebase_cmd = rebase_cmds[0]
@@ -289,6 +350,9 @@ def test_transfer_incremental_rebase_backing_path(
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -320,6 +384,7 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -329,7 +394,7 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
     assert results[0].success is True
 
     # Verify rebase is NOT called
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 0
 
@@ -337,6 +402,9 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -389,6 +457,7 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -409,7 +478,7 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
     )
 
     # Assert rm -f was called to clean up the partial target file (design D2)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     assert len(rm_cmds) >= 1, (
         f"Expected rm -f to clean up partial file after rsync failure, got: {all_cmds}"
@@ -468,6 +537,7 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
+    _clear_calls(shell)
     with patch.object(shell, "run", wraps=shell.run) as shell_spy:
         provider = FileCopyBackupProvider(shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
@@ -478,7 +548,7 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(
     assert "rsync" in results[0].error
 
     # No cp was called — no fallback
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(shell)
     cp_cmds = [cmd for cmd in all_cmds if cmd.startswith("cp ")]
     assert len(cp_cmds) == 0, "cp should NOT be used as fallback when rsync fails (design D3)"
 
@@ -545,6 +615,7 @@ def test_list_backups_target_not_exists(mock_shell, make_target, tmp_path):
     """
     target = make_target(path=str(tmp_path / "nonexistent"))
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         snapshots = provider.list(target)
@@ -559,6 +630,7 @@ def test_list_backups_target_empty(mock_shell, make_target, tmp_path):
     """
     target = make_target(path=str(tmp_path))
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         snapshots = provider.list(target)
@@ -772,7 +844,7 @@ def test_transfer_verify_failure_deletes_file_and_logs_warning(
     ), f"Expected 'backup verification failed' WARNING, got: {warnings}"
 
     # Assert rm -f was called to clean up the partial target file
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     assert len(rm_cmds) >= 1, (
         f"Expected rm -f to be called for partial file cleanup, got: {all_cmds}"
@@ -908,15 +980,26 @@ def test_transfer_missing_metadata_verification_default(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -928,7 +1011,7 @@ def test_transfer_missing_metadata_verification_default(
     assert results[0].error is None
 
     # Verify qemu-img info was called (for verification: source + target)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     info_cmds = [cmd for cmd in all_cmds if "qemu-img info" in cmd]
     assert len(info_cmds) >= 2
 
@@ -938,6 +1021,9 @@ def test_transfer_missing_metadata_verification_default(
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -995,15 +1081,26 @@ def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_tar
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -1015,7 +1112,7 @@ def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_tar
     assert results[0].error is None
 
     # Verify qemu-img compare was called
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
     assert len(compare_cmds) == 1
 
@@ -1023,6 +1120,9 @@ def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_tar
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -1059,15 +1159,26 @@ def test_transfer_missing_no_verification_when_off(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -1079,7 +1190,7 @@ def test_transfer_missing_no_verification_when_off(
     assert results[0].error is None
 
     # Verify NO qemu-img commands were called
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     qemu_cmds = [cmd for cmd in all_cmds if "qemu-img" in cmd]
     assert len(qemu_cmds) == 0
 
@@ -1087,6 +1198,9 @@ def test_transfer_missing_no_verification_when_off(
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
     assert "--compress" in rsync_cmds[0].split("--partial")[0], (
         f"--compress should appear before --partial in: {rsync_cmds[0]}"
     )
@@ -1163,14 +1277,10 @@ def test_create_full_backup_uncompressed_stopped_vm(mock_shell, make_target, tmp
     assert result.snapshot_name == snapshot.name
 
     # Verify qemu-img convert was called WITHOUT -c flag
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
-    convert_args_list = [
-        call_obj.args[0]
-        for call_obj in shell_spy.call_args_list
-        if "qemu-img convert" in " ".join(call_obj.args[0])
-    ]
+    convert_args_list = [c for c in mock_shell._calls if "qemu-img convert" in " ".join(c)]
     convert_args = convert_args_list[0]
     assert "-c" not in convert_args, "qemu-img convert should NOT contain -c when compress=False"
     # Verify required format flags are present
@@ -1250,16 +1360,16 @@ def test_create_full_backup_compressed_stopped_vm(mock_shell, make_target, tmp_p
     assert result.bytes_transferred == 65536
 
     # Verify qemu-img convert was called WITH -c flag
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
-    convert_args_list = [
-        call_obj.args[0]
-        for call_obj in shell_spy.call_args_list
-        if "qemu-img convert" in " ".join(call_obj.args[0])
-    ]
+    convert_args_list = [c for c in mock_shell._calls if "qemu-img convert" in " ".join(c)]
     convert_args = convert_args_list[0]
     assert "-c" in convert_args, "qemu-img convert should contain -c when compress=True"
+    assert "-o compression_type=zstd" in " ".join(convert_args), (
+        f"qemu-img convert should contain -o compression_type=zstd (default zstd), "
+        f"got: {' '.join(convert_args)}"
+    )
     # Verify -c appears before -f (flag ordering in source)
     assert convert_args.index("-c") < convert_args.index("-f")
 
@@ -1352,7 +1462,7 @@ def test_create_full_backup_nbd_running_vm_succeeds(mock_shell, make_target, tmp
     assert result.bytes_transferred == 65536
     assert result.snapshot_name == snapshot.name
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify backup-begin called WITHOUT --incremental
     backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
@@ -1433,7 +1543,7 @@ def test_create_full_backup_direct_stopped_vm_succeeds(mock_shell, make_target, 
     assert result.error is None
     assert result.bytes_transferred == 65536
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify direct convert with format flags
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -1515,7 +1625,7 @@ def test_create_full_backup_vm_state_detection_fails_falls_back(
         f"Expected VM state detection failure warning, got: {warnings}"
     )
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Direct convert used
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -1685,7 +1795,7 @@ def test_nbd_socket_cleanup_on_success(mock_shell, make_target, tmp_path):
     assert result.success is True
 
     # Count rm -f commands (socket cleanup before + after)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     # At least 2: stale socket removal + finally cleanup
     assert len(rm_cmds) >= 2, f"Expected >= 2 rm -f calls (stale socket + finally), got: {rm_cmds}"
@@ -1740,6 +1850,7 @@ def test_nbd_socket_cleanup_on_failure(mock_shell, make_target, tmp_path):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
@@ -1753,7 +1864,7 @@ def test_nbd_socket_cleanup_on_failure(mock_shell, make_target, tmp_path):
     assert result.success is False
 
     # Verify socket cleanup rm -f was called despite failure
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     socket_rm_cmds = [cmd for cmd in rm_cmds if "/tmp/qsnap-backup-" in cmd]
     assert len(socket_rm_cmds) >= 1, (
@@ -1821,7 +1932,7 @@ def test_nbd_full_file_copy_no_checkpoint_created(mock_shell, make_target, tmp_p
 
     assert result.success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # No checkpoints
     cp_create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
@@ -1972,7 +2083,7 @@ def test_nbd_full_old_libvirt_falls_back_direct_convert(mock_shell, make_target,
         f"Expected old-libvirt warning, got: {warnings}"
     )
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Direct convert used
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -2046,7 +2157,7 @@ def test_nbd_full_creates_tmp_then_renames(mock_shell, make_target, tmp_path):
 
     assert result.success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify qemu-img convert writes to .tmp
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -2111,6 +2222,7 @@ def test_nbd_full_failure_leaves_no_final_file(mock_shell, make_target, tmp_path
         )
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
@@ -2124,7 +2236,7 @@ def test_nbd_full_failure_leaves_no_final_file(mock_shell, make_target, tmp_path
     assert result.success is False
     assert result.error == convert_error
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify .tmp file is removed
     tmp_rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f") and ".tmp" in cmd]
@@ -2203,11 +2315,15 @@ def test_nbd_full_backup_with_compression_succeeds(mock_shell, make_target, tmp_
     assert result.snapshot_name == snapshot.name
 
     # NBD path used WITH -c (compression supported over NBD)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 1
     assert "nbd:unix:" in convert_cmds[0], "NBD path should be used for running VM"
     assert "-c" in convert_cmds[0], "NBD path should use -c when compress=True"
+    assert "-o compression_type=zstd" in convert_cmds[0], (
+        f"NBD convert should include -o compression_type=zstd (default zstd), "
+        f"got: {convert_cmds[0]}"
+    )
 
     # NO WARNING about compress=True ignored
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
@@ -2279,7 +2395,7 @@ def test_nbd_full_no_force_share_on_convert(mock_shell, make_target, tmp_path):
 
     assert result.success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # No --force-share anywhere
     force_share_cmds = [cmd for cmd in all_cmds if "--force-share" in cmd]
@@ -2377,7 +2493,7 @@ def test_transfer_missing_rebases_to_full_anchor(mock_shell, make_vm_config, mak
     assert results[0].error is None
     assert results[0].target_path == expected_target_file
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify rebase command rebases to the FULL anchor
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
@@ -2460,15 +2576,26 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -2479,7 +2606,7 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     assert results[0].success is True
     assert results[0].error is None
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify qemu-img info WAS called on the source (to get backing-filename)
     source_info_cmds = [
@@ -2541,15 +2668,26 @@ def test_transfer_with_rate_limit_uses_rsync(mock_shell, make_vm_config, make_ta
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -2559,7 +2697,7 @@ def test_transfer_with_rate_limit_uses_rsync(mock_shell, make_vm_config, make_ta
     assert results[0].success is True
     assert results[0].bytes_transferred == 65536
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--bwlimit=102400" in rsync_cmds[0]
@@ -2629,7 +2767,7 @@ def test_partial_file_resumes_with_rsync(mock_shell, make_vm_config, make_target
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--partial" in rsync_cmds[0]
@@ -2661,15 +2799,26 @@ def test_pre_transfer_info_log(mock_shell, make_vm_config, make_target, tmp_path
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     caplog.set_level(logging.INFO, logger="qsnap.modules.backup.file_copy")
 
@@ -2711,15 +2860,26 @@ def test_post_transfer_info_log_throughput(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     caplog.set_level(logging.INFO, logger="qsnap.modules.backup.file_copy")
 
@@ -2767,15 +2927,26 @@ def test_debug_log_contains_rsync_command(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     caplog.set_level(logging.DEBUG, logger="qsnap.modules.backup.file_copy")
 
@@ -2820,15 +2991,26 @@ def test_slow_transfer_triggers_warning(mock_shell, make_vm_config, make_target,
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
@@ -2896,7 +3078,7 @@ def test_full_backup_ignores_rate_limit(mock_shell, make_target, tmp_path):
 
     assert result.success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 0
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -2944,15 +3126,26 @@ def test_copy_base_false_prevents_base_copy(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
@@ -2964,7 +3157,7 @@ def test_copy_base_false_prevents_base_copy(
     assert results[0].target_path == expected_target_file
 
     # rsync was called (normal transfer behavior)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
 
@@ -3017,15 +3210,26 @@ def test_transfer_missing_does_not_create_full_when_empty_target(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
@@ -3051,7 +3255,7 @@ def test_transfer_missing_does_not_create_full_when_empty_target(
     )
 
     # rsync was called (normal transfer behavior)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
 
@@ -3104,15 +3308,26 @@ def test_copy_base_true_allows_base_copy(mock_shell, make_vm_config, make_target
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -3124,7 +3339,7 @@ def test_copy_base_true_allows_base_copy(mock_shell, make_vm_config, make_target
     assert results[0].target_path == expected_target_file
 
     # rsync was called (not qemu-img convert)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
@@ -3175,6 +3390,7 @@ def test_provider_remains_retry_unaware(mock_shell, make_vm_config, make_target,
         )
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
@@ -3189,7 +3405,7 @@ def test_provider_remains_retry_unaware(mock_shell, make_vm_config, make_target,
     assert results[0].target_path == expected_target_file
 
     # The transfer command (rsync) was attempted exactly ONCE — no retry loop
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1, (
         f"Expected exactly 1 rsync attempt (no retry), got {len(rsync_cmds)}"
@@ -3319,7 +3535,7 @@ def test_create_full_backup_dotted_vm_name(mock_shell, make_target, tmp_path):
     assert result.error is None
 
     # Assert dominfo called with full dotted name — NOT truncated to "3"
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     dominfo_cmds = [cmd for cmd in all_cmds if "virsh dominfo" in cmd]
     assert len(dominfo_cmds) >= 1
     assert "--domain 3.Projects_opencode" in dominfo_cmds[0], (
@@ -3375,15 +3591,26 @@ def test_transfer_missing_passes_vm_name_to_create_full(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
@@ -3488,7 +3715,7 @@ def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
     assert result.success is True
     assert result.error is None
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Assert dominfo called with the full dotted name, not truncated
     dominfo_cmds = [cmd for cmd in all_cmds if "virsh dominfo" in cmd]
@@ -3574,15 +3801,26 @@ def test_transfer_incremental_rebase_with_F_qcow2(
     )
 
     # Side effect: simulate rsync creating the target file so stat() works
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -3591,7 +3829,7 @@ def test_transfer_incremental_rebase_with_F_qcow2(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 1
     rebase_cmd = rebase_cmds[0]
@@ -3653,15 +3891,26 @@ def test_transfer_no_full_anchor_rebase_with_F_flag(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -3670,7 +3919,7 @@ def test_transfer_no_full_anchor_rebase_with_F_flag(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 1
     rebase_cmd = rebase_cmds[0]
@@ -3757,7 +4006,7 @@ def test_transfer_missing_rebases_to_full_anchor_m1_passes(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify rebase command uses the FULL anchor
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
@@ -3860,7 +4109,7 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify rebase uses the OLDER anchor (the one that passed M1)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
@@ -3949,7 +4198,7 @@ def test_transfer_missing_no_rebase_when_no_valid_full(
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 0, "No rebase should be performed when all FULL anchors fail M1"
 
@@ -3990,6 +4239,7 @@ def test_transfer_missing_stale_snapshot_skipped(
     assert len(mock_state.get_snapshots(vm_config.name)) == 1
 
     # The file does NOT exist on disk → stale guard fires.
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -3998,7 +4248,7 @@ def test_transfer_missing_stale_snapshot_skipped(
     assert len(results) == 0
 
     # No rsync or qemu-img commands were called
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 0, "No rsync should be called for stale snapshot"
     qemu_cmds = [cmd for cmd in all_cmds if "qemu-img" in cmd]
@@ -4074,7 +4324,7 @@ def test_nbd_socket_and_domjobabort_on_success(mock_shell, make_target, tmp_path
 
     assert result.success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # Verify domjobabort was called
     abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
@@ -4136,6 +4386,7 @@ def test_nbd_cleanup_on_failure_domjobabort(mock_shell, make_target, tmp_path):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
@@ -4148,7 +4399,7 @@ def test_nbd_cleanup_on_failure_domjobabort(mock_shell, make_target, tmp_path):
 
     assert result.success is False
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
 
     # domjobabort was called despite qemu-img convert failure
     abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
@@ -4239,7 +4490,7 @@ def test_risk_domjobabort_fails_gracefully(mock_shell, make_target, tmp_path, ca
     )
 
     # 2. Socket cleanup STILL ran after the WARNING (finally block completed)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     abort_cmds = [cmd for cmd in all_cmds if "virsh domjobabort" in cmd]
     assert len(abort_cmds) == 1, (
         f"domjobabort should be called (then WARNING on failure), got: {abort_cmds}"
@@ -4350,6 +4601,7 @@ def test_rsync_with_compress_flag(mock_shell, make_vm_config, make_target, tmp_p
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -4357,7 +4609,7 @@ def test_rsync_with_compress_flag(mock_shell, make_vm_config, make_target, tmp_p
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0], (
@@ -4397,6 +4649,7 @@ def test_rsync_compress_with_rate_limit(mock_shell, make_vm_config, make_target,
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
@@ -4404,7 +4657,7 @@ def test_rsync_compress_with_rate_limit(mock_shell, make_vm_config, make_target,
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     rsync_cmd = rsync_cmds[0]
@@ -4446,6 +4699,7 @@ def test_rsync_without_compress(mock_shell, make_vm_config, make_target, tmp_pat
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
+    _clear_calls(mock_shell)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -4453,7 +4707,7 @@ def test_rsync_without_compress(mock_shell, make_vm_config, make_target, tmp_pat
     assert len(results) == 1
     assert results[0].success is True
 
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" not in rsync_cmds[0], (
@@ -4515,15 +4769,26 @@ def test_rsync_compress_hash_verification_passes(mock_shell, make_vm_config, mak
     )
 
     # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
     original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
 
-    def spied_run(cmd, timeout):
+    def _side_effect(cmd, is_rsync=True):
         cmd_str = " ".join(cmd)
-        if cmd_str.startswith("rsync "):
+        if is_rsync and cmd_str.startswith("rsync "):
             target_file = Path(cmd[-1])
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
         return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
 
     with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
         provider = FileCopyBackupProvider(mock_shell)
@@ -4535,10 +4800,13 @@ def test_rsync_compress_hash_verification_passes(mock_shell, make_vm_config, mak
     assert results[0].error is None
 
     # Verify rsync command includes --compress
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
     assert len(rsync_cmds) == 1
     assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be in rsync command (default zstd), got: {rsync_cmds[0]}"
+    )
 
     # Verify qemu-img compare was called (full verification passed)
     compare_cmds = [cmd for cmd in all_cmds if "qemu-img compare" in cmd]
@@ -4603,7 +4871,7 @@ def test_failed_backup_deletion_before_retention_cleanup(
 
     # Verify rm -f was called: the deletion happens inside transfer_missing
     # (before the function returns), NOT in the caller's retention cleanup
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
+    all_cmds = _all_cmds(mock_shell)
     rm_cmds = [cmd for cmd in all_cmds if cmd.startswith("rm -f")]
     assert len(rm_cmds) >= 1, (
         f"Expected rm -f for failed backup cleanup before function returns, got: {all_cmds}"
@@ -4612,3 +4880,621 @@ def test_failed_backup_deletion_before_retention_cleanup(
         f"rm -f should target {expected_target_file}, ensuring retention "
         f"cleanup never sees the partial file. Got: {rm_cmds}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# New tests: zstd compression & stall detection (zstd-compression-and-stall-detection)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_full_backup_compressed_zstd_stopped_vm(mock_shell, make_target, tmp_path):
+    """``create_full_backup(compress=True)`` with stopped VM uses
+    ``-c -o compression_type=zstd`` (default zstd).
+
+    Verifies both ``-c`` flag and ``-o compression_type=zstd`` are present.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _sd_mv(cmd, output_file=None, stall_timeout=1800, check=False):
+        # qemu-img convert creates the temp file
+        cmd_str = " ".join(cmd)
+        if "qemu-img convert" in cmd_str:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    original_run = mock_shell.run
+
+    def _run_mv(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv), \
+         patch.object(mock_shell, "run", side_effect=_run_mv):
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target,
+            compress=True, bucket_level="monthly",
+        )
+
+    assert result.success is True
+    assert result.bytes_transferred == 65536
+
+    all_cmds = _all_cmds(mock_shell)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "-c" in convert_cmds[0], "Should contain -c for compression"
+    assert "-o compression_type=zstd" in convert_cmds[0], (
+        f"Should contain -o compression_type=zstd (default zstd), got: {convert_cmds[0]}"
+    )
+
+
+def test_create_full_backup_compressed_zlib_stopped_vm(mock_shell, make_target, tmp_path):
+    """``create_full_backup(compress=True, compression_type='zlib')`` uses
+    ``-c`` but NOT ``-o compression_type=`` (zlib is the default)."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _sd_mv(cmd, output_file=None, stall_timeout=1800, check=False):
+        cmd_str = " ".join(cmd)
+        if "qemu-img convert" in cmd_str:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    original_run = mock_shell.run
+
+    def _run_mv(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv), \
+         patch.object(mock_shell, "run", side_effect=_run_mv):
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target,
+            compress=True, bucket_level="monthly", compression_type="zlib",
+        )
+
+    assert result.success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "-c" in convert_cmds[0], "Should contain -c for compression"
+    assert "-o compression_type=zstd" not in convert_cmds[0], (
+        f"Should NOT contain -o compression_type=zstd for zlib, got: {convert_cmds[0]}"
+    )
+    assert "-o compression_type=" not in convert_cmds[0], (
+        f"Should NOT contain any -o compression_type= for zlib (default), got: {convert_cmds[0]}"
+    )
+
+
+def test_rsync_uses_stall_detection(mock_shell, make_vm_config, make_target, tmp_path):
+    """rsync transfers use ``run_with_stall_detection`` (not ``run``),
+    with output_file and stall_timeout parameters."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    # Verify run_with_stall_detection was called for rsync
+    assert sd_spy.call_count >= 1, "run_with_stall_detection should be called for rsync"
+    # Verify the call includes output_file and stall_timeout
+    rsync_calls = [c for c in sd_spy.call_args_list if "rsync" in " ".join(c.args[0])]
+    assert len(rsync_calls) >= 1, "rsync should be called via run_with_stall_detection"
+    # Check keyword arguments: output_file and stall_timeout
+    first_call = rsync_calls[0]
+    assert first_call.kwargs.get("output_file") is not None, "output_file should be set"
+    assert first_call.kwargs.get("stall_timeout") == 1800, "stall_timeout should be default 1800"
+
+
+def test_nbd_full_uses_stall_detection(mock_shell, make_target, tmp_path):
+    """NBD convert uses ``run_with_stall_detection`` (not ``run``)."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+    # NBD convert should go through run_with_stall_detection
+    convert_calls = [c for c in sd_spy.call_args_list if "qemu-img convert" in " ".join(c.args[0])]
+    assert len(convert_calls) >= 1, (
+        f"NBD convert should be called via run_with_stall_detection, got {len(convert_calls)} calls"
+    )
+
+
+def test_stall_timeout_zero_falls_back(mock_shell, make_vm_config, make_target, tmp_path):
+    """When stall_timeout=0, ``run()`` with timeout=3600 is used instead of
+    ``run_with_stall_detection``."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy, \
+         patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], stall_timeout=0,
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    # rsync should use run(), not run_with_stall_detection
+    rsync_run_calls = [c for c in run_spy.call_args_list if "rsync" in " ".join(c.args[0])]
+    assert len(rsync_run_calls) >= 1, (
+        f"rsync should use run() when stall_timeout=0, got {len(rsync_run_calls)} run calls"
+    )
+    # verify timeout=3600 was passed to run()
+    first_call = rsync_run_calls[0]
+    timeout_value = first_call.kwargs.get("timeout", first_call.args[1] if len(first_call.args) > 1 else None)
+    assert timeout_value == 3600, (
+        f"run() timeout should be 3600 when stall_timeout=0, got {timeout_value}"
+    )
+    # run_with_stall_detection should NOT be called for rsync
+    rsync_sd_calls = [c for c in sd_spy.call_args_list if "rsync" in " ".join(c.args[0])]
+    assert len(rsync_sd_calls) == 0, "run_with_stall_detection should NOT be called when stall_timeout=0"
+
+
+def test_rsync_with_zstd_compression(mock_shell, make_vm_config, make_target, tmp_path):
+    """rsync uses ``--compress-choice=zstd`` when compression_type='zstd' and compress=True."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    _wrap_sd_with_side_effect(mock_shell, _rsync_side_effect)
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(
+        vm_config, target, [snapshot], compression_type="zstd",
+    )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"--compress-choice=zstd should be present for zstd compression, got: {rsync_cmds[0]}"
+    )
+
+
+def test_rsync_with_zlib_compression(mock_shell, make_vm_config, make_target, tmp_path):
+    """rsync uses ``--compress`` only when compression_type='zlib'.
+
+    zlib is rsync's default compression algorithm, so the implementation
+    emits ``--compress`` without any ``--compress-choice=`` flag.  The
+    ``--compress-choice=`` flag is only added for non-zlib compression
+    types (e.g. zstd).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    _wrap_sd_with_side_effect(mock_shell, _rsync_side_effect)
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(
+        vm_config, target, [snapshot], compression_type="zlib",
+    )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" in rsync_cmds[0]
+    assert "--compress-choice=" not in rsync_cmds[0], (
+        f"--compress-choice= should NOT be present for zlib compression "
+        f"(zlib is rsync's default), got: {rsync_cmds[0]}"
+    )
+
+
+def test_rsync_zstd_with_rate_limit(mock_shell, make_vm_config, make_target, tmp_path):
+    """rsync with rate limit and zstd compression includes both
+    ``--bwlimit`` and ``--compress-choice=zstd``."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", rate_limit="100M", copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    _wrap_sd_with_side_effect(mock_shell, _rsync_side_effect)
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(
+        vm_config, target, [snapshot], rate_limit="100M", compression_type="zstd",
+    )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--bwlimit=102400" in rsync_cmds[0], "Should have --bwlimit"
+    assert "--compress-choice=zstd" in rsync_cmds[0], (
+        f"Should have --compress-choice=zstd with zstd compression, got: {rsync_cmds[0]}"
+    )
+
+
+def test_rsync_no_compression(mock_shell, make_vm_config, make_target, tmp_path):
+    """When compress=False, rsync has no ``--compress`` or ``--compress-choice=`` flags."""
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False, verify="off", compress=False, copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    _wrap_sd_with_side_effect(mock_shell, _rsync_side_effect)
+
+    provider = FileCopyBackupProvider(mock_shell)
+    results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--compress" not in rsync_cmds[0], (
+        f"--compress should NOT be present when compress=False, got: {rsync_cmds[0]}"
+    )
+    assert "--compress-choice=" not in rsync_cmds[0], (
+        f"--compress-choice= should NOT be present when compress=False, got: {rsync_cmds[0]}"
+    )
+
+
+def test_nbd_full_zstd_compression(mock_shell, make_target, tmp_path):
+    """NBD convert with ``compress=True`` and ``compression_type='zstd'``
+    includes ``-c -o compression_type=zstd``."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _sd_create(cmd, output_file=None, stall_timeout=1800, check=False):
+        cmd_str = " ".join(cmd)
+        if "qemu-img convert" in cmd_str:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    original_run = mock_shell.run
+
+    def _run_mv(cmd, timeout):
+        if " ".join(cmd).startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create), \
+         patch.object(mock_shell, "run", side_effect=_run_mv):
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target,
+            compress=True, bucket_level="daily", compression_type="zstd",
+        )
+
+    assert result.success is True
+    assert result.bytes_transferred == 65536
+
+    all_cmds = _all_cmds(mock_shell)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0], "NBD path should be used"
+    assert "-c" in convert_cmds[0], "Should contain -c"
+    assert "-o compression_type=zstd" in convert_cmds[0], (
+        f"Should contain -o compression_type=zstd, got: {convert_cmds[0]}"
+    )
+
+
+def test_nbd_full_zlib_compression(mock_shell, make_target, tmp_path):
+    """NBD convert with ``compress=True`` and ``compression_type='zlib'``
+    includes ``-c`` only (no ``-o compression_type=`` flag)."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    _clear_calls(mock_shell)
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _sd_create(cmd, output_file=None, stall_timeout=1800, check=False):
+        cmd_str = " ".join(cmd)
+        if "qemu-img convert" in cmd_str:
+            Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    original_run = mock_shell.run
+
+    def _run_mv(cmd, timeout):
+        if " ".join(cmd).startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create), \
+         patch.object(mock_shell, "run", side_effect=_run_mv):
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target,
+            compress=True, bucket_level="daily", compression_type="zlib",
+        )
+
+    assert result.success is True
+
+    all_cmds = _all_cmds(mock_shell)
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 1
+    assert "nbd:unix:" in convert_cmds[0], "NBD path should be used"
+    assert "-c" in convert_cmds[0], "Should contain -c"
+    assert "-o compression_type=" not in convert_cmds[0], (
+        f"Should NOT contain -o compression_type= for zlib (default), got: {convert_cmds[0]}"
+    )
+
+
+def test_full_backup_uses_stall_detection(mock_shell, make_target, tmp_path):
+    """``create_full_backup`` (direct convert) passes output_file and
+    stall_timeout to ``run_with_stall_detection``."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect(r"qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect(r"^mv ").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+        provider = FileCopyBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target,
+            compress=False, bucket_level="monthly",
+        )
+
+    assert result.success is True
+
+    # Verify run_with_stall_detection was called for the convert
+    convert_calls = [c for c in sd_spy.call_args_list if "qemu-img convert" in " ".join(c.args[0])]
+    assert len(convert_calls) >= 1, (
+        f"qemu-img convert should use run_with_stall_detection, got {len(convert_calls)} calls"
+    )
+    # Verify output_file is set (tmp file) and stall_timeout is 1800
+    first_call = convert_calls[0]
+    assert first_call.kwargs.get("output_file") is not None, "output_file should be set"
+    assert ".tmp" in str(first_call.kwargs["output_file"]), "output_file should be .tmp file"
+    assert first_call.kwargs.get("stall_timeout") == 1800, "stall_timeout should be default 1800"

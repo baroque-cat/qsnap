@@ -1,0 +1,31 @@
+# Config fixture testing compression_type and backup_stall_timeout fields.
+#
+# Global defaults:  compression_type = "zlib", backup_stall_timeout = "1h".
+# - vm_inherit:  inherits both from global — compression_type="zlib", backup_stall_timeout="1h".
+# - vm_override: target overrides compression_type to "zstd", both with explicit backup_stall_timeout.
+
+compression_type = "zlib"
+backup_stall_timeout = "1h"
+
+[[vm]]
+name = "vm_inherit"
+base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_inherit"
+  incremental = true
+
+[[vm]]
+name = "vm_override"
+base_image = "/var/lib/libvirt/images/vm_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_zstd"
+  compression_type = "zstd"
+  backup_stall_timeout = "30m"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_inherit"
+  # Inherits compression_type="zlib" and backup_stall_timeout="1h" from global.

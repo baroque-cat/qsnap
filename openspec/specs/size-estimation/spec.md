@@ -2,59 +2,21 @@
 
 ## Purpose
 
-Runtime size estimation and projection of target storage growth. On every pipeline run (including dry-run), Core logs a projected target size estimate. Also exposed via `qsnap estimate` CLI command for standalone projection.
+Runtime factual reporting of backup-related disk metrics. The previous size estimation formula (`base_size × 0.3`) was removed because it cannot predict data compressibility and always produced misleading projections. Now the system logs only factual data: base image size and compression type.
 
 ## Requirements
 
-### Requirement: Core logs size estimation on every pipeline run
-
-Core SHALL compute and log a projected target size estimate on every pipeline run (including dry-run mode). The estimate SHALL be based on: (a) `qemu-img info --force-share` actual-size of the VM's base image, (b) average incremental size from state history (last N snapshots), (c) retention policy bucket counts. The log SHALL be at INFO level and include: current allocated size, average incremental size, retention policy, projected number of FULLs and incrementals, projected total size, current target size, and estimated delta.
-
-In dry-run mode, the size estimation SHALL additionally log whether a FULL backup WOULD be created at this run (based on `_should_create_bucket_full()`) and which transfer method would be used (NBD for running VM, direct convert for stopped VM).
-
-#### Scenario: Size estimation logged during normal run
-- **WHEN** `qsnap run myvm` is executed
-- **THEN** an INFO log entry is produced containing projected target size for each VM+target combination
-
-#### Scenario: Size estimation logged during dry-run
-- **WHEN** `qsnap -n run myvm` is executed
-- **THEN** the same size estimation INFO log is produced, even though no pipeline actions are executed
-- **AND** if a FULL would be created, the log includes: "[dry-run] FULL would be created (bucket=weekly, method=NBD)"
-
-#### Scenario: Size estimation with no state history
-- **WHEN** a VM has no recorded snapshots in state (first run)
-- **THEN** the estimate SHALL use the base image actual-size for both FULL and incremental projections, and log "no churn history available"
-
-#### Scenario: Size estimation uses --force-share on base image
-- **WHEN** `qemu-img info` is called on the base image during size estimation
-- **AND** the base image is locked by QEMU as a backing file of a running VM
-- **THEN** `--force-share` is included in the command
-- **AND** the command succeeds despite the VM holding a lock on the backing chain
-
 ### Requirement: qsnap estimate CLI command
 
-The system SHALL provide a `qsnap estimate [vm]` CLI subcommand that computes and prints the size estimation without executing any pipeline actions. It SHALL accept an optional VM name filter positional argument.
+The system SHALL provide a `qsnap estimate [vm]` CLI subcommand that prints factual backup information without executing any pipeline actions. It SHALL accept an optional VM name filter positional argument. The output SHALL include: VM name, base image path, base image actual-size (from `qemu-img info`), compression type (from config), and compression enabled/disabled. The output SHALL NOT include projected FULL size, projected total size, estimated delta, or any computed projections.
 
 #### Scenario: Estimate for specific VM
 - **WHEN** `qsnap estimate myvm` is executed
-- **THEN** a formatted size projection is printed to stdout for that VM only
+- **THEN** a factual summary is printed to stdout for that VM only
+- **AND** the summary includes: base image path, base image actual-size, compression type, compression enabled
+- **AND** no projected sizes or deltas are printed
 
 #### Scenario: Estimate for all VMs
 - **WHEN** `qsnap estimate` is executed without a VM argument
-- **THEN** size projections for all configured VMs are printed
-
-### Requirement: Size estimation formula
-
-The projected target size SHALL be computed as: `num_fulls × full_size + num_incs × inc_size`, where `num_fulls` is the count of the highest active retention bucket, `full_size` is the base image actual-size (multiplied by 0.3 if compression is enabled), `num_incs` is the sum of all other bucket counts, and `inc_size` is the rolling average of the last N incremental snapshot sizes from state history.
-
-#### Scenario: Compressed FULL projection
-- **WHEN** `compress = true` and base image actual-size is 100 GB
-- **THEN** the projected FULL size SHALL be approximately 30 GB (100 × 0.3)
-
-#### Scenario: Uncompressed FULL projection
-- **WHEN** `compress = false` and base image actual-size is 100 GB
-- **THEN** the projected FULL size SHALL be approximately 100 GB
-
-#### Scenario: Incremental size from state history
-- **WHEN** the last 7 snapshots in state history have sizes [1.2, 1.5, 1.3, 1.6, 1.4, 1.5, 1.3] GB
-- **THEN** the projected incremental size SHALL be approximately 1.4 GB (rolling average)
+- **THEN** factual summaries for all configured VMs are printed
+- **AND** no projected sizes or deltas are printed

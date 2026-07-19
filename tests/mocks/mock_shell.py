@@ -8,6 +8,7 @@ responses.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
 from qsnap.models.results import ShellResult
@@ -66,6 +67,34 @@ class MockShell(IShell):
         return exp
 
     def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
+        cmd_str = " ".join(cmd)
+        for exp in self._expectations:
+            if re.search(exp.pattern, cmd_str):
+                return exp.execute()
+        return ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error=f"No mock configured for: {cmd_str}",
+        )
+
+    def run_with_stall_detection(
+        self,
+        cmd: list[str],
+        output_file: Path | None = None,
+        stall_timeout: int = 1800,
+        check: bool = False,
+    ) -> ShellResult:
+        """Mock stall-detection execution — matches expectations like ``run``.
+
+        The mock does not perform real polling or stall detection.  It
+        matches the command against registered expectations (same as
+        :meth:`run`) and returns the preconfigured :class:`ShellResult`.
+        Tests that need to assert stall-detection parameters (e.g.
+        ``output_file``, ``stall_timeout``) should inspect the command
+        string via the expectation pattern.
+        """
         cmd_str = " ".join(cmd)
         for exp in self._expectations:
             if re.search(exp.pattern, cmd_str):

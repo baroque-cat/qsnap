@@ -20,6 +20,8 @@ class IBackupProvider(ABC):
         rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         """Transfer snapshots not yet present at *target*.
 
@@ -32,6 +34,14 @@ class IBackupProvider(ABC):
         rebasing an incremental onto it.  Defaults to ``"metadata"``
         for backward compatibility.  Implementations that do not use
         rebase may ignore it.
+
+        ``compression_type`` selects the compression algorithm for
+        transfer (``"zstd"`` default, ``"zlib"`` alternative).  Only
+        effective when ``target.compress`` is ``True``.
+
+        ``stall_timeout`` is the stall-detection timeout in seconds for
+        data-transfer commands.  When ``0``, implementations fall back
+        to fixed-timeout :meth:`IShell.run`.
         """
         ...
 
@@ -52,6 +62,8 @@ class IBackupProvider(ABC):
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> BackupResult:
         """Create a standalone full (anchor) backup via ``qemu-img convert``.
 
@@ -64,6 +76,14 @@ class IBackupProvider(ABC):
 
         ``bucket_level`` records which retention bucket triggered the
         FULL (e.g. ``"yearly"``, ``"monthly"``).
+
+        ``compression_type`` selects the compression algorithm
+        (``"zstd"`` default, ``"zlib"`` alternative).  Only effective
+        when ``compress`` is ``True``.
+
+        ``stall_timeout`` is the stall-detection timeout in seconds
+        for the convert command.  When ``0``, falls back to
+        fixed-timeout :meth:`IShell.run`.
 
         Default implementation raises ``NotImplementedError``.  Concrete
         providers that support full backups should override this.

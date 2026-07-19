@@ -82,6 +82,20 @@ target_preserve = "48h 14d 8w 12m 1y"
 # Compress full backups (global default, overridden per-VM/target).
 # compress = true
 
+# Compression algorithm for FULL backups (qemu-img convert -c -o
+# compression_type=<type>) and rsync incrementals
+# (--compress --compress-choice=<type>).
+#   "zstd" (default) — 11x faster than zlib, slightly larger files
+#   "zlib"           — standard qcow2 compression (slower, smaller)
+# Only effective when compress = true.
+# compression_type = "zstd"
+
+# Stall detection timeout for data-transfer commands (qemu-img convert,
+# rsync).  Duration string (e.g. "30m", "1h", "0s").  When the output
+# file shows no growth for this duration, the process is killed.
+# "0s" disables stall detection (falls back to fixed-timeout run()).
+# backup_stall_timeout = "30m"
+
 
 # ── VM definitions ──────────────────────────────────────────────────────
 
@@ -152,6 +166,15 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # qemu-img convert with compression.  Default: true (inherited from
   # global → VM → target).
   # compress = true
+
+  # Compression algorithm (inherited from global → VM → target).
+  # "zstd" (default) — 11x faster than zlib.  "zlib" — standard qcow2.
+  # Only effective when compress = true.
+  # compression_type = "zstd"
+
+  # Stall detection timeout (inherited from global → VM → target).
+  # Duration string like "30m", "1h", "0s" (disables stall detection).
+  # backup_stall_timeout = "30m"
 
   # Copy the base image to the target on first backup.  When false
   # (default), the first backup is always a FULL via qemu-img convert.

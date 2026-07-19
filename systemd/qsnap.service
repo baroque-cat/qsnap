@@ -5,4 +5,9 @@ Requires=libvirtd.service
 
 [Service]
 Type=oneshot
+# Disable systemd's default timeout — qsnap uses stall detection
+# (output-file-growth monitoring) for long-running data transfers.
+# A backup that is progressing correctly should never be killed by
+# a fixed timeout.
+TimeoutStartSec=0
 ExecStart=/usr/bin/qsnap -c /etc/qsnap/qsnap.toml run

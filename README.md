@@ -147,7 +147,9 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_preserve_min` | string | `"all"` | Minimum retention floor for snapshots, e.g. `"2h"`. Keeps recent snapshots regardless of bucket counts |
 | `target_preserve` | string | none | Retention policy for backups on targets, e.g. `"48h 14d 8w 12m 1y"` |
 | `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
-| `compress` | bool | `true` | Compress full backups with zlib (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
+| `compress` | bool | `true` | Compress full backups (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
+| `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
+| `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
 | `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
 | `full_verify_before_delete` | string | `"check"` | FULL verification before cascade-deletion: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
@@ -180,7 +182,9 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
 | `verify` | string | mode-dependent | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Effective default is `"hash"` for file-copy mode, `"metadata"` for bitmap mode (resolved by ConfigFacade). Explicit value takes precedence |
-| `compress` | bool | `true` | Compress backups with zlib. Applies to FULL backups (`qemu-img convert -c`), NBD incrementals (`-c` flag), and rsync incrementals (`--compress` transfer-level flag). Inherits from global → VM → target |
+| `compress` | bool | `true` | Compress backups. Applies to FULL backups (`qemu-img convert -c`), NBD incrementals (`-c` flag), and rsync incrementals (`--compress` transfer-level flag). Inherits from global → VM → target |
+| `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
+| `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
 | `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is created as a FULL by the bucket-driven mechanism in `Core._backup_target()` (not via `transfer_missing()`) |
 
 ## Retention Policy Guide
@@ -340,7 +344,7 @@ This mechanism is used by **both** backup providers:
 
 | Provider | FULL Backup Method | Notes |
 |---|---|---|
-| `FileCopyBackupProvider` (`incremental_mode = "file-copy"`) | NBD for running VMs, direct `qemu-img convert` for stopped | Logs WARNING if `compress = true` and NBD is used (NBD path doesn't support `-c`) |
+| `FileCopyBackupProvider` (`incremental_mode = "file-copy"`) | NBD for running VMs, direct `qemu-img convert` for stopped | Both NBD and direct-convert paths support compression (`-c` flag). When `compression_type = "zstd"`, adds `-o compression_type=zstd` for 11x faster compression than zlib |
 | `BitmapBackupProvider` (`incremental_mode = "bitmap"`) | NBD full export (no checkpoint) | Previously raised `NotImplementedError` on bucket boundaries — now supported. No checkpoint is created or deleted during FULL creation; checkpoint lifecycle remains exclusively in `transfer_missing()`. |
 
 The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
@@ -353,14 +357,16 @@ When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model 
 
 This eliminates the previous double-FULL bug where the first run produced two full NBD exports (one from the bucket strategy, one from `transfer_missing()`).
 
-### `compress` Trade-off
+### `compress` and `compression_type`
 
-| | Uncompressed (`false`) | Compressed (`true`) |
-|---|---|---|
-| Speed | Faster conversion | Slower (zlib overhead) |
-| Size | Full size | ~30-50% smaller (data-dependent) |
-| Compatibility | Standard qcow2 | Standard qcow2 (zlib clusters) |
-| Restore | Direct | Direct (qemu-img handles transparently) |
+| | Uncompressed (`compress = false`) | zstd (`compress = true`, `compression_type = "zstd"`) | zlib (`compress = true`, `compression_type = "zlib"`) |
+|---|---|---|---|
+| Speed | Fastest conversion | Fast (850 MB/s) | Slow (77 MB/s) |
+| Size | Full size | ~5-10% larger than zlib | ~30-50% smaller than uncompressed |
+| Compatibility | Standard qcow2 | Standard qcow2 (requires qemu-img 5.2+) | Standard qcow2 (zlib clusters) |
+| Restore | Direct | Direct (qemu-img handles transparently) | Direct (qemu-img handles transparently) |
+
+zstd is the default because it is 11x faster than zlib, transitioning backups from CPU-bound to I/O-bound. Use `compression_type = "zlib"` if you need maximum compression or compatibility with older qemu-img versions (< 5.2).
 
 ### Cascade Deletion
 
@@ -690,18 +696,16 @@ snapshot_dir = "/var/lib/libvirt/snapshots/test-vm"
 
 ## Size Estimation
 
-qsnap logs projected backup size estimates on every run (including dry-run). The estimate includes:
+qsnap logs factual backup size data on every run (including dry-run). The estimate includes:
 
 - **Base image actual-size** — obtained via `qemu-img info`
-- **Average incremental size** — computed from state history (past snapshot allocations)
-- **Projected FULL count** — based on the number of active retention buckets
-- **Projected total size** — `num_fulls × full_size + num_incs × inc_size`
-- **Compressed FULL size** — when `compress = true` (default), estimated as `base_size × 0.3`
-- **Current target size** — obtained via `du -sb`
+- **Compression type** — from config (`zstd` or `zlib`)
+
+No size projections are made — the previous `base_size × 0.3` formula was removed because it cannot predict data compressibility (real data has wildly different ratios from 0.1 to 0.8).
 
 ### `qsnap estimate` Command
 
-Use the `estimate` subcommand to preview projected storage usage without running the pipeline:
+Use the `estimate` subcommand to preview factual storage data without running the pipeline:
 
 ```bash
 qsnap estimate [vm]
@@ -712,18 +716,12 @@ Example output:
 ```
 === prod-server ===
   Base image actual-size: 53687091200 B
-  Avg incremental size:   524288000 B
   Backups [/mnt/nas-backup/prod-server]:
     Policy: hourly=0 daily=7 weekly=4 monthly=12 yearly=2 preserve_min=4h
     Expected kept:   25
     Expected remove: 0
-    Projected FULLs: 1
-    Projected incrementals: 24
-    Projected total size: 22548578304 B
-    Current target size: 0 B
+    Compression: zstd (compress=True)
 ```
-
-The size estimate is also logged at INFO level during every pipeline run (including `--dry-run`), allowing monitoring systems to track projected storage growth.
 
 ## Dry-Run Mode
 
@@ -737,27 +735,18 @@ The `--dry-run` / `-n` flag prints planned actions without executing any mutatio
   [dry-run] Would create FULL backup (bucket=weekly, method=NBD, VM=running)
   ```
   The `method` field shows whether NBD or direct convert would be used, and `VM` shows the detected running state. No FULL backup is actually created.
-- **Logs size estimates with FULL indicator** — the size estimation step includes whether a FULL would be created this run:
-  ```
-  [dry-run] FULL backup would be created (bucket=weekly)
-  ```
-  or:
-  ```
-  [dry-run] No FULL backup needed this run
-  ```
 - **Does NOT create snapshots** — `snapshot_provider.create()` is never called.
 - **Does NOT transfer backups** — no `rsync` or `qemu-img convert` data-copying commands are executed.
 - **Does NOT delete anything** — retention is evaluated but no snapshots or backups are removed.
 
 ### What Dry-Run Allows
 
-Dry-run mode permits **read-only** shell commands for validation and estimation:
+Dry-run mode permits **read-only** shell commands for validation:
 
 - `test -d`, `test -w`, `test -f` — directory/file existence checks
 - `which virsh`, `which qemu-img`, `which rsync` — binary discovery
 - `virsh dominfo` — VM running-state detection
-- `qemu-img info` — metadata reads for size estimation
-- `du` — current target size measurement
+- `qemu-img info` — metadata reads for base-size reporting
 - `find` — stale file discovery
 
 ## Requirements

@@ -90,6 +90,8 @@ class BitmapBackupProvider(IBackupProvider):
         rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         """Transfer missing snapshots via NBD pull-model.
 
@@ -101,6 +103,14 @@ class BitmapBackupProvider(IBackupProvider):
         ``full_verify_before_rebase`` is accepted for interface
         compatibility but ignored — the bitmap path does not use
         ``qemu-img rebase``.
+
+        ``compression_type`` selects the compression algorithm for the
+        NBD convert command (``"zstd"`` default, ``"zlib"`` alternative).
+        Only effective when ``target.compress`` is ``True``.
+
+        ``stall_timeout`` is the stall-detection timeout in seconds for
+        the convert command.  When ``0``, falls back to fixed-timeout
+        :meth:`IShell.run`.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}
@@ -195,13 +205,23 @@ class BitmapBackupProvider(IBackupProvider):
                     "-O",
                     "qcow2",
                 ]
-                # Compression: -c compresses the output qcow2 (zlib
-                # per-cluster), matching FULL backup compression (D7).
+                # Compression: -c compresses the output qcow2.  When
+                # compression_type is "zstd", adds -o compression_type=zstd
+                # for 11x faster compression than the default zlib (D7).
                 if target.compress:
                     convert_cmd.append("-c")
+                    if compression_type == "zstd":
+                        convert_cmd.extend(["-o", "compression_type=zstd"])
                 convert_cmd.extend([nbd_uri, str(target_file)])
                 start_time = time.monotonic()
-                convert_result = self._shell.run(convert_cmd, timeout=600)
+                if stall_timeout > 0:
+                    convert_result = self._shell.run_with_stall_detection(
+                        convert_cmd,
+                        output_file=target_file,
+                        stall_timeout=stall_timeout,
+                    )
+                else:
+                    convert_result = self._shell.run(convert_cmd, timeout=600)
                 elapsed = time.monotonic() - start_time
                 if not convert_result.success:
                     # Preserve checkpoint for retry.  Delete the partial
@@ -318,6 +338,8 @@ class BitmapBackupProvider(IBackupProvider):
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> BackupResult:
         """Create a standalone FULL backup via NBD full export (design D4).
 
@@ -338,7 +360,9 @@ class BitmapBackupProvider(IBackupProvider):
 
         When ``compress=True``, the ``-c`` flag is passed through to
         :func:`nbd_full_export` and on to ``qemu-img convert``,
-        producing a compressed qcow2.
+        producing a compressed qcow2.  When ``compression_type`` is
+        ``"zstd"``, ``-o compression_type=zstd`` is added for faster
+        compression.
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -349,7 +373,14 @@ class BitmapBackupProvider(IBackupProvider):
         # Run NBD full-export to .tmp file (no --incremental, no
         # checkpoint — design D3, D4).  Compression is passed through
         # via the -c flag.
-        nbd_result = nbd_full_export(self._shell, vm_name, str(tmp_file), compress=compress)
+        nbd_result = nbd_full_export(
+            self._shell,
+            vm_name,
+            str(tmp_file),
+            compress=compress,
+            compression_type=compression_type,
+            stall_timeout=stall_timeout,
+        )
         if not nbd_result.success:
             # Remove .tmp on failure — no final file created.
             self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)

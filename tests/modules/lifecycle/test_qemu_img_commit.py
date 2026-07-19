@@ -51,6 +51,18 @@ class CountingShell(IShell):
         self.calls.append(list(cmd))
         return self._inner.run(cmd, timeout, check)
 
+    def run_with_stall_detection(
+        self,
+        cmd: list[str],
+        output_file: Path | None = None,
+        stall_timeout: int = 1800,
+        check: bool = False,
+    ) -> ShellResult:
+        self.calls.append(list(cmd))
+        return self._inner.run_with_stall_detection(
+            cmd, output_file=output_file, stall_timeout=stall_timeout, check=check
+        )
+
 
 def _make_snapshot(
     name: str = "testvm.20250101T000000",

@@ -15,6 +15,7 @@ from typing import cast
 
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.retention.time_based import parse_stall_timeout
 from qsnap.utils.parsing import parse_rate_limit
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,14 @@ class ConfigFacade(IConfigFacade):
         if "compress" in raw:
             global_kwargs["compress"] = bool(raw["compress"])
 
+        # Compression algorithm (zstd default, zlib alternative).
+        if "compression_type" in raw:
+            global_kwargs["compression_type"] = str(raw["compression_type"])
+
+        # Stall detection timeout for data-transfer commands.
+        if "backup_stall_timeout" in raw:
+            global_kwargs["backup_stall_timeout"] = str(raw["backup_stall_timeout"])
+
         # FULL backup integrity verification tiers (M1/M2/M3).
         if "full_verify_after_create" in raw:
             global_kwargs["full_verify_after_create"] = str(raw["full_verify_after_create"])
@@ -133,6 +142,23 @@ class ConfigFacade(IConfigFacade):
                 f"Invalid deep_check_schedule: {self._global.deep_check_schedule!r}. "
                 f"Must be one of: {', '.join(sorted(valid_schedules))}"
             )
+
+        # Validate compression_type (zstd default, zlib alternative).
+        valid_compression = {"zstd", "zlib"}
+        if self._global.compression_type.lower() not in valid_compression:
+            raise ConfigError(
+                f"Invalid compression_type: {self._global.compression_type!r}. "
+                f"Must be one of: {', '.join(sorted(valid_compression))}"
+            )
+
+        # Validate backup_stall_timeout via parse_stall_timeout().
+        try:
+            parse_stall_timeout(self._global.backup_stall_timeout)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Invalid backup_stall_timeout: {self._global.backup_stall_timeout!r}. "
+                f"Must be a duration string like '30m', '1h', '0s'."
+            ) from exc
 
         # Validate FULL verification tiers.
         valid_after_create = {"metadata", "check", "hash", "off"}
@@ -250,6 +276,8 @@ class ConfigFacade(IConfigFacade):
                     target_preserve_min,
                     global_cfg.rate_limit,
                     global_cfg.compress,
+                    global_cfg.compression_type,
+                    global_cfg.backup_stall_timeout,
                 )
             )
 
@@ -278,6 +306,8 @@ class ConfigFacade(IConfigFacade):
         vm_target_preserve_min: str | None = None,
         global_rate_limit: str = "no",
         global_compress: bool = True,
+        global_compression_type: str = "zstd",
+        global_backup_stall_timeout: str = "30m",
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -360,6 +390,25 @@ class ConfigFacade(IConfigFacade):
         # copy_base: target-level, default False.
         copy_base = bool(tgt_raw.get("copy_base", False))
 
+        # compression_type: target overrides global default.
+        compression_type = str(tgt_raw.get("compression_type", global_compression_type))
+        valid_compression = {"zstd", "zlib"}
+        if compression_type.lower() not in valid_compression:
+            raise ConfigError(
+                f"Invalid compression_type: {compression_type!r}. "
+                f"Must be one of: {', '.join(sorted(valid_compression))}"
+            )
+
+        # backup_stall_timeout: target overrides global default.
+        backup_stall_timeout = str(tgt_raw.get("backup_stall_timeout", global_backup_stall_timeout))
+        try:
+            parse_stall_timeout(backup_stall_timeout)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Invalid backup_stall_timeout: {backup_stall_timeout!r}. "
+                f"Must be a duration string like '30m', '1h', '0s'."
+            ) from exc
+
         # verify: mode-dependent default ("hash" for file-copy,
         # "metadata" for bitmap), or explicit user value (design D3).
         # The dataclass field default is "metadata", but the *effective*
@@ -429,6 +478,8 @@ class ConfigFacade(IConfigFacade):
             verify=verify,
             target_preserve_min=target_preserve_min,
             compress=compress,
+            compression_type=compression_type,
+            backup_stall_timeout=backup_stall_timeout,
             copy_base=copy_base,
             rate_limit=rate_limit,
             backup_retry_max=backup_retry_max,

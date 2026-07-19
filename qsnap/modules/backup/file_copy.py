@@ -113,12 +113,16 @@ class FileCopyBackupProvider(IBackupProvider):
         rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         """Copy snapshots not yet present at *target* using ``rsync``.
 
         1. Determine existing backups via ``list()``.
         2. For each missing snapshot: ``rsync --partial`` (or
            ``rsync --bwlimit=<kib> --partial`` when rate limiting).
+           When ``target.compress`` is ``True``, adds ``--compress``
+           plus ``--compress-choice=<compression_type>`` (zstd or zlib).
         3. If incremental: ``qemu-img rebase -u -b <bare_backing> <target>``.
         4. After rebase, record incremental→FULL dependency in state.
         """
@@ -155,6 +159,8 @@ class FileCopyBackupProvider(IBackupProvider):
                 ]
                 if target.compress:
                     transfer_cmd.append("--compress")
+                    if compression_type != "zlib":
+                        transfer_cmd.append(f"--compress-choice={compression_type}")
                 transfer_cmd.extend(
                     [
                         "--partial",
@@ -173,6 +179,8 @@ class FileCopyBackupProvider(IBackupProvider):
                 transfer_cmd = ["rsync"]
                 if target.compress:
                     transfer_cmd.append("--compress")
+                    if compression_type != "zlib":
+                        transfer_cmd.append(f"--compress-choice={compression_type}")
                 transfer_cmd.extend(
                     [
                         "--partial",
@@ -190,7 +198,14 @@ class FileCopyBackupProvider(IBackupProvider):
             logger.debug("Transfer command: %s", " ".join(transfer_cmd))
 
             start_time = time.monotonic()
-            transfer_result = self._shell.run(transfer_cmd, timeout=3600)
+            if stall_timeout > 0:
+                transfer_result = self._shell.run_with_stall_detection(
+                    transfer_cmd,
+                    output_file=target_file,
+                    stall_timeout=stall_timeout,
+                )
+            else:
+                transfer_result = self._shell.run(transfer_cmd, timeout=3600)
             elapsed = time.monotonic() - start_time
 
             if not transfer_result.success:
@@ -422,6 +437,8 @@ class FileCopyBackupProvider(IBackupProvider):
         target: TargetConfig,
         compress: bool = False,
         bucket_level: str = "monthly",
+        compression_type: str = "zstd",
+        stall_timeout: int = 1800,
     ) -> BackupResult:
         """Create a standalone full (anchor) backup.
 
@@ -439,7 +456,9 @@ class FileCopyBackupProvider(IBackupProvider):
         file (existing behavior, no lock conflict).
 
         Both NBD and direct-convert paths support compression via
-        ``-c`` flag on ``qemu-img convert``.
+        ``-c`` flag on ``qemu-img convert``.  When ``compression_type``
+        is ``"zstd"``, adds ``-o compression_type=zstd`` for faster
+        compression (11x faster than zlib).
 
         Uses an atomic pattern: convert to a ``.tmp`` file, then rename
         on success.  On failure, the ``.tmp`` file is removed and no
@@ -470,7 +489,14 @@ class FileCopyBackupProvider(IBackupProvider):
             # Run NBD full-export to .tmp file (no --force-share, no
             # checkpoint — design D3, D5).  Compression is passed
             # through to nbd_full_export() via the -c flag.
-            nbd_result = nbd_full_export(self._shell, vm_name, str(tmp_file), compress=compress)
+            nbd_result = nbd_full_export(
+                self._shell,
+                vm_name,
+                str(tmp_file),
+                compress=compress,
+                compression_type=compression_type,
+                stall_timeout=stall_timeout,
+            )
             if not nbd_result.success:
                 # Remove .tmp on failure — no final file created.
                 self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
@@ -490,6 +516,8 @@ class FileCopyBackupProvider(IBackupProvider):
             ]
             if compress:
                 convert_cmd.append("-c")
+                if compression_type == "zstd":
+                    convert_cmd.extend(["-o", "compression_type=zstd"])
             convert_cmd.extend(
                 [
                     "-f",
@@ -501,7 +529,14 @@ class FileCopyBackupProvider(IBackupProvider):
                 ]
             )
 
-            convert_result = self._shell.run(convert_cmd, timeout=3600)
+            if stall_timeout > 0:
+                convert_result = self._shell.run_with_stall_detection(
+                    convert_cmd,
+                    output_file=tmp_file,
+                    stall_timeout=stall_timeout,
+                )
+            else:
+                convert_result = self._shell.run(convert_cmd, timeout=3600)
             if not convert_result.success:
                 # Remove .tmp on failure — no final file created.
                 self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)

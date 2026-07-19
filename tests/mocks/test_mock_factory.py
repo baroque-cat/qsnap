@@ -176,3 +176,147 @@ def test_mock_factory_satisfies_new_interface():
     after the addition of ``create_bucket_full_strategy`` to the ABC."""
     factory = MockVMModuleFactory()
     assert isinstance(factory, IVMModuleFactory) is True
+
+
+# ---------------------------------------------------------------------------
+# New parameter acceptance tests (compression_type + stall_timeout)
+# ---------------------------------------------------------------------------
+
+
+def test_mock_backup_provider_create_full_backup_accepts_new_params(
+    make_vm_config, make_target
+):
+    """MockBackupProvider.create_full_backup() accepts the new
+    ``compression_type`` and ``stall_timeout`` keyword arguments
+    without error and still passes isinstance(..., IBackupProvider)."""
+    provider = MockBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/test-snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    result = provider.create_full_backup(
+        "testvm",
+        source_snapshot,
+        make_target(),
+        compression_type="zstd",
+        stall_timeout=1800,
+    )
+    assert isinstance(result, BackupResult)
+    assert result.success is True
+
+
+def test_mock_backup_provider_transfer_missing_accepts_new_params(
+    make_vm_config, make_target
+):
+    """MockBackupProvider.transfer_missing() accepts the new
+    ``compression_type`` and ``stall_timeout`` keyword arguments
+    without error."""
+    provider = MockBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    snapshots = [
+        SnapshotInfo(
+            name="inc-1",
+            path=Path("/tmp/inc-1.qcow2"),
+            timestamp=datetime.now(),
+            allocation=65536,
+        )
+    ]
+    results = provider.transfer_missing(
+        make_vm_config(),
+        make_target(),
+        snapshots,
+        compression_type="zstd",
+        stall_timeout=600,
+    )
+    assert isinstance(results, list)
+    assert len(results) == 1
+    assert isinstance(results[0], BackupResult)
+    assert results[0].success is True
+
+
+def test_mock_bitmap_backup_provider_create_full_backup_accepts_new_params(
+    make_vm_config, make_target
+):
+    """MockBitmapBackupProvider.create_full_backup() accepts the new
+    ``compression_type`` and ``stall_timeout`` keyword arguments
+    without error and still passes isinstance(..., IBackupProvider)."""
+    provider = MockBitmapBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/test-snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    result = provider.create_full_backup(
+        "testvm",
+        source_snapshot,
+        make_target(),
+        compression_type="zlib",
+        stall_timeout=0,
+    )
+    assert isinstance(result, BackupResult)
+    assert result.success is True
+
+
+def test_mock_bitmap_backup_provider_transfer_missing_accepts_new_params(
+    make_vm_config, make_target
+):
+    """MockBitmapBackupProvider.transfer_missing() accepts the new
+    ``compression_type`` and ``stall_timeout`` keyword arguments
+    without error."""
+    provider = MockBitmapBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    snapshots = [
+        SnapshotInfo(
+            name="inc-1",
+            path=Path("/tmp/inc-1.qcow2"),
+            timestamp=datetime.now(),
+            allocation=65536,
+        )
+    ]
+    results = provider.transfer_missing(
+        make_vm_config(),
+        make_target(),
+        snapshots,
+        compression_type="zlib",
+        stall_timeout=0,
+    )
+    assert isinstance(results, list)
+    assert len(results) == 1
+    assert isinstance(results[0], BackupResult)
+    assert results[0].success is True
+
+
+def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_target):
+    """Both MockBackupProvider and MockBitmapBackupProvider default
+    ``compression_type`` to ``"zstd"`` on both create_full_backup() and
+    transfer_missing(), matching IBackupProvider defaults."""
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/test-snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+    )
+    snapshots = [source_snapshot]
+
+    for provider in [MockBackupProvider(), MockBitmapBackupProvider()]:
+        assert isinstance(provider, IBackupProvider)
+
+        # create_full_backup with default compression_type
+        r1 = provider.create_full_backup("vm", source_snapshot, make_target())
+        assert isinstance(r1, BackupResult)
+
+        # transfer_missing with default compression_type
+        r2 = provider.transfer_missing(
+            make_vm_config(), make_target(), snapshots
+        )
+        assert isinstance(r2, list)
+        assert all(isinstance(r, BackupResult) for r in r2)
