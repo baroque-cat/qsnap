@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import getpass
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -17,6 +20,31 @@ from tests.mocks import (
     MockShell,
     MockVMModuleFactory,
 )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Remove stale pytest temp dirs left by previous runs.
+
+    Integration tests write qcow2 artifacts into ``tmp_path`` (~1.4 GB per
+    full run).  The default basetemp root lives on the small ``/tmp`` tmpfs,
+    so a few stale runs fill it up and the whole suite fails with
+    ``OSError: [Errno 122] Disk quota exceeded``.  Purge every ``pytest-*``
+    dir except the current session's at session start.  Best-effort: cleanup
+    failures must never break the run.
+    """
+    try:
+        root = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
+        if not root.is_dir():
+            return
+        current_link = root / "pytest-current"
+        current = current_link.resolve() if current_link.is_symlink() else None
+        for child in root.iterdir():
+            if child.name == "pytest-current" or child == current:
+                continue
+            if child.name.startswith("pytest-") and child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+    except Exception:  # noqa: BLE001 — cleanup must never break the suite
+        pass
 
 
 def _setup_validation_expectations(shell: MockShell) -> None:
@@ -71,6 +99,31 @@ def _setup_validation_expectations(shell: MockShell) -> None:
         ShellResult(
             success=True,
             stdout="Id: 1\nName: testvm\nState: running\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Default VM-state for the blockcommit VM-state check in _blockcommit_snapshots().
+    # Tests needing a different state must use mock_shell.expect_first("domstate").
+    shell.expect("virsh domstate").returns(
+        ShellResult(success=True, stdout="shut off\n", stderr="", returncode=0, error=None)
+    )
+    # Default domblklist output for the active-layer detection in _plan_blockcommit().
+    # Returns the latest snapshot from the common test fixture chain (snap4 in
+    # _add_snapshots_for_chain, timestamp 14:00).  This path is never in the
+    # remove set of stale_guard / post_commit tests, so the full remove set is
+    # committable under the "shut off" default.  Tests needing a different
+    # active layer (e.g. one that IS in their remove set) must use
+    # ``mock_shell.expect_first("virsh domblklist")`` to override.
+    shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                "vda   /var/lib/libvirt/snapshots/testvm/snap4.qcow2\n"
+            ),
             stderr="",
             returncode=0,
             error=None,

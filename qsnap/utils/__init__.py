@@ -2,6 +2,7 @@
 
 Cross-cutting stateless helpers shared across module boundaries:
 - :mod:`qsnap.utils.hash` — file SHA-256 hashing.
+- :mod:`qsnap.utils.mac` — AppArmor/SELinux denial detection.
 - :mod:`qsnap.utils.nbd` — NBD/libvirt helper functions.
 - :mod:`qsnap.utils.verification` — backup verification functions.
 - :mod:`qsnap.utils.parsing` — config value parsing.

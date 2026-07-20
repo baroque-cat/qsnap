@@ -155,6 +155,42 @@ def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
     assert op.last_warned_at is None
 
 
+def test_add_deferred_blockcommit_vm_running_reason(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry with "vm_running" reason."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2", "snap2.qcow2"], "vm_running")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2", "snap2.qcow2"]
+    assert op.reason == "vm_running"
+    assert isinstance(op.since, datetime)
+    # New entries have no warning timestamp yet.
+    assert op.last_warned_at is None
+
+
+def test_add_deferred_blockcommit_active_layer_reason(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry with "active_layer" reason."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", ["snap3.qcow2"], "active_layer")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap3.qcow2"]
+    assert op.reason == "active_layer"
+    assert isinstance(op.since, datetime)
+    # New entries have no warning timestamp yet.
+    assert op.last_warned_at is None
+
+
 def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
     """Alternate: add_deferred_blockcommit round-trips through get_deferred_operations."""
     manager = JsonStateManager(state_dir=tmp_path)

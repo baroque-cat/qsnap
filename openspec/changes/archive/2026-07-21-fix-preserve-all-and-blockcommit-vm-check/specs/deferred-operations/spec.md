@@ -1,10 +1,4 @@
-# Deferred Operations
-
-## Purpose
-
-Deferred blockcommit operations — when AppArmor/SELinux block virsh blockcommit, snapshots are queued in IStateManager and retried on VM shutdown.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Deferred blockcommit queue in IStateManager
 
@@ -13,63 +7,32 @@ Deferred blockcommit operations — when AppArmor/SELinux block virsh blockcommi
 The `reason` field SHALL accept any string value. Known values include `"apparmor"`, `"selinux"`, `"vm_running"`, and `"active_layer"`. The `"vm_running"` reason is used when Core defers blockcommit because the VM is not in "shut off" state (or is paused). The `"active_layer"` reason is used when Core defers the XML-referenced tip overlay of an inactive domain, which must never be committed or deleted offline (the domain would become unbootable); such entries become drainable once the snapshot is no longer the tip (a newer snapshot exists and the VM runs).
 
 #### Scenario: Add and retrieve deferred blockcommit
-
 - **WHEN** `add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")` is called
 - **THEN** `get_deferred_operations("vm1")` returns a list containing one `DeferredBlockcommit` with snapshots=["snap1.qcow2"], reason="apparmor", last_warned_at=None
 
 #### Scenario: Add deferred blockcommit with vm_running reason
-
 - **WHEN** `add_deferred_blockcommit("vm1", ["snap1.qcow2", "snap2.qcow2"], "vm_running")` is called
 - **THEN** `get_deferred_operations("vm1")` returns a list containing one `DeferredBlockcommit` with reason="vm_running"
 
 #### Scenario: Add deferred blockcommit with active_layer reason
-
 - **WHEN** `add_deferred_blockcommit("vm1", ["snap3.qcow2"], "active_layer")` is called
 - **THEN** `get_deferred_operations("vm1")` returns a list containing one `DeferredBlockcommit` with reason="active_layer"
 
 #### Scenario: Clear deferred operations
-
 - **WHEN** `clear_deferred_operations("vm1")` is called after adding two deferred items
 - **THEN** `get_deferred_operations("vm1")` returns an empty list
 
 #### Scenario: No deferred operations for VM
-
 - **WHEN** `get_deferred_operations("vm_new")` is called for a VM with no deferred state
 - **THEN** the method returns an empty list
 
 #### Scenario: last_warned_at persists across state round-trip
-
 - **WHEN** a deferred blockcommit with `last_warned_at=datetime(2025, 7, 13)` is written to state and read back
-- **THEN** `last_warned_at` has the same value
-
-#### Scenario: Old state file without last_warned_at is backward-compatible
-
-- **WHEN** a state JSON file lacks `last_warned_at` in a deferred entry
-- **THEN** `_dict_to_deferred()` constructs a `DeferredBlockcommit` with `last_warned_at=None`
-
-### Requirement: AppArmor/SELinux error detection in BlockCommitManager
-
-`BlockCommitManager.blockcommit()` SHALL detect MAC denials from virsh stderr: `"Permission denied"` or `"apparmor"` (AppArmor), `"Operation not permitted"` or `"AVC"` (SELinux). On detection, the method SHALL return `CommitResult(success=False, committed_snapshot="", error="blocked by apparmor|selinux")` without crashing. Core SHALL record the failed snapshots as deferred operations.
-
-#### Scenario: AppArmor blocks blockcommit
-
-- **WHEN** `virsh blockcommit` stderr contains "Permission denied" and "apparmor"
-- **THEN** `CommitResult` is returned with error containing "apparmor"
-- **THEN** the snapshots are added to the deferred operations queue
-
-#### Scenario: SELinux blocks blockcommit
-
-- **WHEN** `virsh blockcommit` stderr contains "Operation not permitted" and "AVC"
-- **THEN** `CommitResult` is returned with error containing "selinux"
-
-#### Scenario: Normal virsh failure (not MAC-related)
-
-- **WHEN** `virsh blockcommit` stderr contains "No such file or directory"
-- **THEN** `CommitResult(success=False)` is returned with the original error — no deferral
+- **THEN** `last_warned_at` equals `datetime(2025, 7, 13)`
 
 ### Requirement: State-adaptive drain of the deferred queue
 
-`Core._check_deferred_operations()` SHALL select the execution strategy from the *current* VM state rather than from `vm_config.lifecycle_mode` alone, using the same fork decision as the main blockcommit path (see `specs/core-orchestrator/spec.md`):
+`Core._check_deferred_operations()` SHALL select the execution strategy from the *current* VM state rather than from `vm_config.lifecycle_mode` alone, using the same fork decision as the main blockcommit path:
 
 | VM state | `lifecycle_mode` | Drain behavior |
 |---|---|---|
@@ -93,9 +56,3 @@ An entry SHALL be removed from the queue only when all of its snapshots have bee
 #### Scenario: No drain on running VM in qemu-img mode
 - **WHEN** the VM is running and `lifecycle_mode = "qemu-img"`
 - **THEN** no queued entry is executed and the queue is unchanged
-
-#### Scenario: Deferred blockcommit still fails on retry
-
-- **WHEN** a deferred blockcommit fails again on a shut-off VM (e.g. disk error)
-- **THEN** the error is logged and the deferred entry remains for the next run
-- **THEN** pipeline continues (does not abort)

@@ -10,10 +10,12 @@ imports.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -47,7 +49,7 @@ from qsnap.models.results import (
 )
 from qsnap.retention.time_based import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import is_vm_running, nbd_full_export
-from qsnap.utils.parsing import parse_domblklist_disks
+from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
@@ -86,6 +88,29 @@ class PipelineResult:
     def success(self) -> bool:
         """True iff every VM succeeded."""
         return all(r.success for r in self.results)
+
+
+@dataclass(frozen=True)
+class _CommitPlan:
+    """Adaptive blockcommit plan (design D2) — module-private.
+
+    Produced by :meth:`Core._plan_blockcommit`.  ``committable`` holds
+    snapshots (oldest first) that are safe to commit NOW with
+    ``effective_mode``; ``deferrable`` holds snapshots that must wait
+    (active layer / XML-referenced tip / whole set when unsafe).
+    """
+
+    committable: list[SnapshotInfo]
+    deferrable: list[SnapshotInfo]
+    effective_mode: str | None  # "virsh" | "qemu-img" | None (nothing committable)
+    defer_reason: str | None  # "vm_running" | "active_layer" | None
+
+
+def _same_file(path: Path, other: str | None) -> bool:
+    """True when *other* refers to the same file as *path* (symlink-safe)."""
+    if other is None:
+        return False
+    return os.path.realpath(str(path)) == os.path.realpath(other)
 
 
 # ── Core ─────────────────────────────────────────────────────────────────
@@ -1708,78 +1733,127 @@ class Core:
     def _check_deferred_operations(self, vm_config: VMConfig) -> None:
         """Check and execute deferred blockcommit operations.
 
-        Before creating new snapshots, check if there are pending deferred
-        blockcommits. If the VM is shut off, execute them and clear the
-        queue on success. If the VM is running, skip with an INFO log.
+        State-adaptive drain (design D6): the executor is chosen from the
+        CURRENT VM power state via the same fork as the main blockcommit
+        path (``_plan_blockcommit``), not from ``vm_config.lifecycle_mode``
+        alone:
+
+        - shut off (any mode): commit via qemu-img, excluding the
+          XML-referenced tip; a tip-only remainder is re-queued with the
+          entry's ORIGINAL reason.
+        - running + virsh mode: commit non-active snapshots live via
+          ``virsh blockcommit``.
+        - running + qemu-img mode, paused, or domstate failed: skip.
+
+        Committed snapshots are removed from state unconditionally
+        (design D5).  An entry leaves the queue only when ALL of its
+        snapshots are committed; stale entries whose snapshots are gone
+        from state are dropped.
         """
         deferred = self._state.get_deferred_operations(vm_config.name)
         if not deferred:
             return
 
-        # Check VM state
-        domstate_cmd = [
-            "virsh",
-            "domstate",
-            "--domain",
-            vm_config.name,
-        ]
-        state_result = self._shell.run(domstate_cmd, timeout=30)
-        vm_state = state_result.stdout.strip().lower() if state_result.success else ""
+        remaining: list[DeferredBlockcommit] = []
+        queue_changed = False
+        offline_drained = False
 
-        if "shut off" in vm_state:
-            # Execute deferred blockcommits
-            manager = self._factory.create_lifecycle_manager(
-                mode=vm_config.lifecycle_mode,
-            )
-            failed_entries: list[DeferredBlockcommit] = []
-            for entry in deferred:
-                snapshots = [
-                    s
-                    for s in self._state.get_snapshots(vm_config.name)
-                    if s.name in entry.snapshots
-                ]
-                if not snapshots:
-                    logger.warning(
-                        "Deferred snapshots not found for VM %s: %s",
-                        vm_config.name,
-                        entry.snapshots,
-                    )
-                    failed_entries.append(entry)
-                    continue
-                result = manager.blockcommit(
-                    vm_config,
-                    snapshots,
-                    deep_verify=vm_config.blockcommit_deep_verify,
+        for entry in deferred:
+            snapshots = [
+                s for s in self._state.get_snapshots(vm_config.name) if s.name in entry.snapshots
+            ]
+            if not snapshots:
+                # Stale entry — snapshots gone from state; drop it.
+                logger.warning(
+                    "Deferred snapshots not found for VM %s: %s — dropping stale entry",
+                    vm_config.name,
+                    entry.snapshots,
                 )
-                if result.success:
-                    logger.info(
-                        "Deferred blockcommit succeeded for VM %s (was blocked by %s)",
-                        vm_config.name,
-                        entry.reason,
-                    )
-                else:
-                    # Still failing — keep for next run
-                    logger.warning(
-                        "Deferred blockcommit still failing for VM %s: %s",
-                        vm_config.name,
-                        result.error,
-                    )
-                    failed_entries.append(entry)
+                queue_changed = True
+                continue
 
-            # Update deferred queue: clear all, then re-add only failures
-            if len(failed_entries) < len(deferred):
-                self._state.clear_deferred_operations(vm_config.name)
-                for entry in failed_entries:
-                    self._state.add_deferred_blockcommit(
-                        vm_config.name,
-                        entry.snapshots,
-                        entry.reason,
-                    )
-        else:
-            logger.info(
-                "Skipping %d deferred blockcommits — VM is running",
-                len(deferred),
+            plan = self._plan_blockcommit(vm_config, snapshots)
+            if plan is None:
+                # domstate failed — conservative: keep everything queued.
+                logger.info(
+                    "Skipping %d deferred blockcommit(s) for VM %s — "
+                    "VM state unknown (domstate failed)",
+                    len(entry.snapshots),
+                    vm_config.name,
+                )
+                remaining.append(entry)
+                continue
+            if not plan.committable or plan.effective_mode is None:
+                # VM is running (qemu-img mode), paused, or only the
+                # tip/active layer remains — keep for a later run.
+                logger.info(
+                    "Skipping deferred blockcommit of %d snapshot(s) for "
+                    "VM %s — not committable in current VM state "
+                    "(reason: %s)",
+                    len(entry.snapshots),
+                    vm_config.name,
+                    plan.defer_reason,
+                )
+                remaining.append(entry)
+                continue
+
+            manager = self._factory.create_lifecycle_manager(
+                mode=plan.effective_mode,
             )
+            result = manager.blockcommit(
+                vm_config,
+                plan.committable,
+                deep_verify=vm_config.blockcommit_deep_verify,
+            )
+            if not result.success:
+                # Still failing — keep for next run
+                logger.warning(
+                    "Deferred blockcommit still failing for VM %s: %s",
+                    vm_config.name,
+                    result.error,
+                )
+                remaining.append(entry)
+                continue
+
+            logger.info(
+                "Deferred blockcommit succeeded for VM %s (was blocked by %s)",
+                vm_config.name,
+                entry.reason,
+            )
+            queue_changed = True
+            if plan.effective_mode == "qemu-img":
+                offline_drained = True
+            for sn in plan.committable:
+                self._state.remove_snapshot(vm_config.name, sn.name)
+            if plan.deferrable:
+                # Partial drain — re-queue the remainder (XML tip / active
+                # layer) with the entry's ORIGINAL reason.
+                remaining.append(
+                    DeferredBlockcommit(
+                        snapshots=[s.name for s in plan.deferrable],
+                        reason=entry.reason,
+                        since=entry.since,
+                        last_warned_at=entry.last_warned_at,
+                    )
+                )
+
+        # Rewrite the queue only when something changed (dropped stale
+        # entries, full or partial drains) — re-adding unchanged entries
+        # would reset their `since` timestamps.
+        if queue_changed:
+            self._state.clear_deferred_operations(vm_config.name)
+            for entry in remaining:
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    entry.snapshots,
+                    entry.reason,
+                )
+
+        # Offline drains deleted overlay files that the (inactive) domain
+        # XML may still reference in <backingStore> chains — refresh the
+        # XML so the domain stays bootable (design D8).
+        if offline_drained:
+            self._refresh_domain_backing_store(vm_config)
 
     def _create_snapshot(self, vm_config: VMConfig) -> list[SnapshotResult]:
         """Step 2: Create a snapshot for each disk of *vm_config*.
@@ -2064,6 +2138,188 @@ class Core:
             pass
         return None
 
+    def _detect_active_layer_path(self, vm_config: VMConfig) -> str | None:
+        """Return the current top overlay path for *vm_config*.
+
+        Uses ``virsh domblklist`` — the source of the first disk is the
+        active overlay on a running VM and the XML-referenced tip on an
+        inactive one.  On failure, falls back to the newest snapshot
+        recorded in state (by timestamp) with a WARNING — correct in the
+        normal case because qsnap-created snapshots are appended in order.
+        Returns ``None`` when the layer cannot be determined at all.
+        """
+        domblklist_result = self._shell.run(
+            ["virsh", "domblklist", "--domain", vm_config.name],
+            timeout=30,
+        )
+        if domblklist_result.success:
+            try:
+                return parse_domblklist_path(domblklist_result.stdout)
+            except ValueError:
+                pass  # fall through to the state heuristic
+        snapshots = self._state.get_snapshots(vm_config.name)
+        if snapshots:
+            newest = max(snapshots, key=lambda s: s.timestamp)
+            logger.warning(
+                "virsh domblklist failed for VM %s — assuming newest state "
+                "snapshot %s is the active layer",
+                vm_config.name,
+                newest.name,
+            )
+            return str(newest.path)
+        logger.warning(
+            "virsh domblklist failed for VM %s and no snapshots in state — active layer unknown",
+            vm_config.name,
+        )
+        return None
+
+    def _plan_blockcommit(
+        self,
+        vm_config: VMConfig,
+        candidates: list[SnapshotInfo],
+    ) -> _CommitPlan | None:
+        """Decide which snapshots are safe to commit now, and with which
+        executor (adaptive lifecycle fork, design D2).
+
+        Fork matrix:
+
+        - VM running + ``lifecycle_mode="virsh"``: commit the non-active
+          prefix live via ``virsh blockcommit``; defer the active layer
+          with reason ``"vm_running"``.
+        - VM running + ``lifecycle_mode="qemu-img"``: defer everything
+          (offline-only mode) with reason ``"vm_running"``.
+        - VM shut off (either mode): commit offline via ``qemu-img``,
+          excluding the XML-referenced tip overlay; defer the tip with
+          reason ``"active_layer"``.
+        - VM paused / any other state: defer everything ``"vm_running"``.
+        - ``virsh domstate`` failure: return ``None`` — legacy fallback
+          (configured mode, full candidate set, no deferral).
+        """
+        domstate_result = self._shell.run(
+            ["virsh", "domstate", "--domain", vm_config.name],
+            timeout=30,
+        )
+        if not domstate_result.success:
+            return None  # legacy fallback — non-fatal by design
+
+        vm_state = domstate_result.stdout.strip().lower()
+
+        if "shut off" in vm_state:
+            # Offline path — qemu-img; never commit/delete the
+            # XML-referenced tip (the domain would become unbootable).
+            tip = self._detect_active_layer_path(vm_config)
+            committable = [s for s in candidates if not _same_file(s.path, tip)]
+            deferrable = [s for s in candidates if _same_file(s.path, tip)]
+            return _CommitPlan(
+                committable=committable,
+                deferrable=deferrable,
+                effective_mode="qemu-img",
+                defer_reason="active_layer" if deferrable else None,
+            )
+
+        if "running" in vm_state and vm_config.lifecycle_mode == "virsh":
+            # Live path — virsh; the active layer cannot be committed.
+            active = self._detect_active_layer_path(vm_config)
+            committable = [s for s in candidates if not _same_file(s.path, active)]
+            deferrable = [s for s in candidates if _same_file(s.path, active)]
+            return _CommitPlan(
+                committable=committable,
+                deferrable=deferrable,
+                effective_mode="virsh",
+                defer_reason="vm_running" if deferrable else None,
+            )
+
+        # running + qemu-img mode, paused, or any other state → defer all
+        return _CommitPlan(
+            committable=[],
+            deferrable=list(candidates),
+            effective_mode=None,
+            defer_reason="vm_running",
+        )
+
+    def _refresh_domain_backing_store(self, vm_config: VMConfig) -> None:
+        """Strip stale ``<backingStore>`` elements from the domain XML.
+
+        Offline commits (:class:`QemuImgCommitManager`) delete committed
+        overlay files, but the inactive domain's persistent XML still
+        references them in its ``<backingStore>`` chains — the domain
+        would fail to start ("Cannot access backing file ... No such
+        file or directory").  Removing all ``<backingStore>`` elements
+        makes libvirt re-probe the (now shortened) chain from the qcow2
+        headers on next start (design D8).
+
+        Best-effort: any failure is logged as a WARNING and is non-fatal.
+        """
+        dumpxml = self._shell.run(
+            ["virsh", "dumpxml", "--domain", vm_config.name],
+            timeout=30,
+        )
+        if not dumpxml.success:
+            logger.warning(
+                "Could not refresh domain XML for VM %s after offline commit "
+                "(dumpxml failed: %s) — if the domain fails to start, strip "
+                "stale <backingStore> elements manually",
+                vm_config.name,
+                dumpxml.error,
+            )
+            return
+        try:
+            root = ET.fromstring(dumpxml.stdout)
+        except ET.ParseError as exc:
+            logger.warning(
+                "Could not refresh domain XML for VM %s after offline commit "
+                "(XML parse failed: %s) — manual <backingStore> cleanup may "
+                "be needed",
+                vm_config.name,
+                exc,
+            )
+            return
+        stripped = 0
+        for disk in root.iter("disk"):
+            for backing_store in disk.findall("backingStore"):
+                disk.remove(backing_store)
+                stripped += 1
+        if stripped == 0:
+            return
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".xml",
+                prefix=f"qsnap-{vm_config.name}-",
+                delete=False,
+                encoding="utf-8",
+            ) as tmp:
+                tmp.write(ET.tostring(root, encoding="unicode"))
+                tmp_path = tmp.name
+        except OSError as exc:
+            logger.warning(
+                "Could not refresh domain XML for VM %s after offline commit "
+                "(temp file failed: %s) — manual <backingStore> cleanup may "
+                "be needed",
+                vm_config.name,
+                exc,
+            )
+            return
+        try:
+            define = self._shell.run(["virsh", "define", tmp_path], timeout=30)
+            if define.success:
+                logger.info(
+                    "Refreshed domain XML for VM %s after offline commit "
+                    "(stripped %d stale <backingStore> element(s))",
+                    vm_config.name,
+                    stripped,
+                )
+            else:
+                logger.warning(
+                    "virsh define failed for VM %s after offline commit: %s — "
+                    "manual <backingStore> cleanup may be needed",
+                    vm_config.name,
+                    define.error,
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+
     def _blockcommit_snapshots(
         self,
         vm_config: VMConfig,
@@ -2116,6 +2372,33 @@ class Core:
             )
             return
 
+        # Adaptive lifecycle fork (design D2): decide from the current VM
+        # power state which snapshots are safe to commit and with which
+        # executor.  None → legacy fallback (configured mode, full remove
+        # set, no deferral) — a failed domstate call is non-fatal.
+        plan = self._plan_blockcommit(vm_config, to_merge)
+        if plan is None:
+            committable = to_merge
+            effective_mode = vm_config.lifecycle_mode
+        else:
+            committable = plan.committable
+            effective_mode = plan.effective_mode
+            if plan.deferrable:
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    [s.name for s in plan.deferrable],
+                    plan.defer_reason or "vm_running",
+                )
+                logger.info(
+                    "Deferring blockcommit of %d snapshot(s) for VM %s (reason: %s): %s",
+                    len(plan.deferrable),
+                    vm_config.name,
+                    plan.defer_reason,
+                    ", ".join(s.name for s in plan.deferrable),
+                )
+            if not committable:
+                return
+
         global_cfg = self._config.get_global()
 
         # Pre-commit chain verification
@@ -2141,10 +2424,34 @@ class Core:
         # Get chain length before commit for post-commit comparison
         chain_length_before = self._get_chain_length(vm_config)
 
+        # Race guard (design D2): qemu-img writes into the base image —
+        # only safe while the VM stays shut off.  Re-check immediately
+        # before invoking the manager; a failed re-check is non-fatal.
+        if effective_mode == "qemu-img":
+            recheck = self._shell.run(
+                ["virsh", "domstate", "--domain", vm_config.name],
+                timeout=30,
+            )
+            if recheck.success and "shut off" not in recheck.stdout.strip().lower():
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    [s.name for s in committable],
+                    "vm_running",
+                )
+                logger.info(
+                    "VM %s no longer shut off — deferring offline blockcommit of %d snapshot(s)",
+                    vm_config.name,
+                    len(committable),
+                )
+                return
+
+        # effective_mode is None only when committable is empty — and that
+        # case returned above.
+        assert effective_mode is not None
         manager = self._factory.create_lifecycle_manager(
-            mode=vm_config.lifecycle_mode,
+            mode=effective_mode,
         )
-        result = manager.blockcommit(vm_config, to_merge)
+        result = manager.blockcommit(vm_config, committable)
 
         # Check for MAC denial — defer if blocked by AppArmor/SELinux
         if (
@@ -2155,7 +2462,7 @@ class Core:
             reason = "apparmor" if "apparmor" in result.error else "selinux"
             self._state.add_deferred_blockcommit(
                 vm_config.name,
-                [s.name for s in to_merge],
+                [s.name for s in committable],
                 reason,
             )
             logger.info(
@@ -2177,14 +2484,14 @@ class Core:
         # (design D4, D5).  Emitted before post-commit verification; if
         # verification later detects a problem, a separate CRITICAL log
         # is emitted.
-        merged_names = ", ".join(s.name for s in to_merge)
+        merged_names = ", ".join(s.name for s in committable)
         logger.info(
             "[blockcommit] %s: merged %d snapshot(s) — %s",
             vm_config.name,
-            len(to_merge),
+            len(committable),
             merged_names,
         )
-        for sn in to_merge:
+        for sn in committable:
             self._actions.append(
                 ActionRecord(
                     action="snapshot_delete",
@@ -2193,6 +2500,17 @@ class Core:
                     path=sn.path,
                 )
             )
+            # Unconditional state cleanup (design D5): state must reflect
+            # disk reality before backup steps run — independent of
+            # chain_verify_after_commit.  Removal also happens before the
+            # post-commit measurement so it finds the current active layer.
+            self._state.remove_snapshot(vm_config.name, sn.name)
+
+        # Offline commits deleted overlay files that the (inactive) domain
+        # XML may still reference in <backingStore> chains — refresh the
+        # XML so the domain stays bootable (design D8).
+        if effective_mode == "qemu-img":
+            self._refresh_domain_backing_store(vm_config)
 
         # Post-commit chain verification
         if global_cfg.chain_verify_after_commit:
@@ -2203,12 +2521,6 @@ class Core:
                     vm_config.name,
                 )
             else:
-                # Remove merged snapshots from state so that
-                # post-commit measurement finds the current active
-                # layer (the most recent surviving snapshot).
-                for sn in to_merge:
-                    self._state.remove_snapshot(vm_config.name, sn.name)
-
                 chain_length_after = self._get_chain_length(vm_config)
                 if chain_length_after is not None:
                     if chain_length_after >= chain_length_before:
@@ -2220,7 +2532,7 @@ class Core:
                             vm_config.name,
                             chain_length_before,
                             chain_length_after,
-                            ", ".join(str(s.path) for s in to_merge),
+                            ", ".join(str(s.path) for s in committable),
                         )
                         return
                     else:
@@ -2772,10 +3084,12 @@ class Core:
             effective_min = "all"
         elif preserve_str == "latest":
             effective_min = "latest"
+        elif preserve_str == "all":
+            effective_min = "all"
         else:
             effective_min = "0h"
 
-        if preserve_str is None or preserve_str == "latest":
+        if preserve_str is None or preserve_str in ("latest", "all"):
             return RetentionPolicy(preserve_min=effective_min)
 
         counts: dict[str, int] = {

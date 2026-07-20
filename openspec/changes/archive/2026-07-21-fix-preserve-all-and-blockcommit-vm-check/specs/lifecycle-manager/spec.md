@@ -1,12 +1,7 @@
-# Lifecycle Manager
-
-## Purpose
-
-Backing chain lifecycle management via `virsh blockcommit` — merges old qcow2 snapshots back into the base image to shorten the backing chain and release disk space.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Blockcommit snapshots into base image
+
 The system SHALL provide two lifecycle managers implementing `ILifecycleManager`, selected by Core through the factory. Managers are stateless workers: they MUST NOT inspect VM power state, MUST NOT decide deferral, and MUST NOT access the deferred-operations queue — Core performs all state detection, splitting, and deferral (adaptive fork, see `core-orchestrator`).
 
 `BlockCommitManager` is the **live executor**: Core invokes it only when the VM is running and only with snapshots that exclude the active layer. It SHALL merge each snapshot (oldest first) via `virsh blockcommit --domain <vm> --path <disk> --base <base> --top <snap> --delete --verbose --wait`, resolving the disk target via `virsh domblklist`. libvirt internally pivots child overlays and deletes committed files. It SHALL NOT be invoked on a shut-off domain (libvirt cannot run blockcommit offline — empirically `error: domain is not running`). When blockcommit is blocked by AppArmor (stderr contains "Permission denied" or "apparmor") or SELinux (stderr contains "Operation not permitted" or "AVC"), the module SHALL return `CommitResult(success=False, committed_snapshot="", error="blocked by apparmor|selinux")`.
@@ -17,9 +12,7 @@ The system SHALL provide two lifecycle managers implementing `ILifecycleManager`
 3. If a child exists, pivot it via `qemu-img rebase -u -F qcow2 -b <base_image> <child>` (metadata-only; safe because `si`'s data is now contained in the base image).
 4. Delete the committed file (`rm -f <si.path>`) — only after the pivot succeeded, or when no child exists.
 
-The manager SHALL NOT rely on `qemu-img commit -d` for deletion (a no-op on QEMU 11.0.2 — the file survives and the chain never shortens). On any step failure it SHALL short-circuit: no deletion, no further iterations, returning `CommitResult(success=False, committed_snapshot=<failing snapshot>, error=...)` with the chain left consistent for safe retry. MAC denial detection (AppArmor/SELinux) SHALL apply as for `BlockCommitManager`, via a shared helper in `qsnap/utils/`.
-
-The `blockcommit()` method SHALL accept an optional keyword argument `deep_verify: bool = False`. When `True` and the commit succeeds, the manager SHALL additionally run `qemu-img check --output=json` on the base image. If corruptions are detected, `CommitResult` SHALL be `success=False` with the corruption count.
+The manager SHALL NOT rely on `qemu-img commit -d` for deletion (a no-op on QEMU 11.0.2 — the file survives and the chain never shortens). On any step failure it SHALL short-circuit: no deletion, no further iterations, returning `CommitResult(success=False, committed_snapshot=<failing snapshot>, error=...)` with the chain left consistent for safe retry. MAC denial detection (AppArmor/SELinux) SHALL apply as for `BlockCommitManager`, via a shared helper in `qsnap/utils/`. The `deep_verify` flag SHALL run `qemu-img check --output=json <base_image>` after success, as before.
 
 #### Scenario: Successful live blockcommit of a single snapshot
 - **WHEN** `virsh blockcommit --domain <vm> --path <disk> --base <base> --top <snap> --delete --verbose --wait` returns exit code 0
@@ -50,45 +43,3 @@ The `blockcommit()` method SHALL accept an optional keyword argument `deep_verif
 #### Scenario: Empty snapshot list — nothing to merge
 - **WHEN** `blockcommit()` is called with an empty list on either manager
 - **THEN** `CommitResult(success=True, committed_snapshot="")` is returned immediately
-
-#### Scenario: Blockcommit times out
-- **WHEN** `virsh blockcommit` exceeds the timeout (3600 seconds for large disks)
-- **THEN** the module returns `CommitResult(success=False)` with error containing "timed out"
-
-#### Scenario: Successful blockcommit with deep verify passing
-- **WHEN** `blockcommit(deep_verify=True)` succeeds and `qemu-img check` reports 0 corruptions
-- **THEN** `CommitResult(success=True)` is returned
-
-#### Scenario: Successful blockcommit but deep verify fails
-- **WHEN** `blockcommit(deep_verify=True)` succeeds but `qemu-img check` reports `corruptions: 5`
-- **THEN** `CommitResult(success=False, committed_snapshot="", error="deep verify: 5 corruptions in base image")` is returned
-
-#### Scenario: deep_verify=False — no check performed
-- **WHEN** `blockcommit(deep_verify=False)` or `deep_verify` is omitted
-- **THEN** no `qemu-img check` is executed after commit
-
-### Requirement: Blockcommit of multiple snapshots
-
-The system SHALL handle multiple snapshots for merging, executing blockcommit for each in order (nearest-to-base first). Each invocation SHALL use `--base <vm_config.base_image>` and `--top <snapshot.path>`.
-
-#### Scenario: Two snapshots merged sequentially
-
-- **WHEN** `snapshots_to_merge` contains [snap1, snap2]
-- **THEN** blockcommit is executed for snap1 first (closest to base)
-- **AND** then blockcommit for snap2
-- **AND** if the first blockcommit fails, the second is NOT executed
-- **AND** the result contains information about committed snapshots
-
-### Requirement: QemuImgCommitManager implements ILifecycleManager
-The system SHALL provide a `QemuImgCommitManager` class implementing `ILifecycleManager` in `qsnap/modules/lifecycle/qemu_img_commit.py`. It SHALL merge snapshots offline via the commit → child-pivot → delete sequence described in the blockcommit requirement (instead of `virsh blockcommit`). It SHALL be selectable via `factory.create_lifecycle_manager(mode="qemu-img")`.
-
-#### Scenario: Successful qemu-img commit
-- **WHEN** `qemu-img commit -b base.qcow2 snap1.qcow2` returns exit code 0 and no child overlay references snap1
-- **THEN** snap1 is deleted and `CommitResult(success=True, committed_snapshot="snap1.qcow2")` is returned
-
-### Requirement: Factory selectable lifecycle manager
-`DefaultFactory.create_lifecycle_manager()` SHALL accept an optional `mode: str = "virsh"` parameter. When `mode == "qemu-img"`, it SHALL return `QemuImgCommitManager`. When `mode == "virsh"` (default), it SHALL return `BlockCommitManager`.
-
-#### Scenario: Default mode returns BlockCommitManager
-- **WHEN** `factory.create_lifecycle_manager()` is called without mode
-- **THEN** a `BlockCommitManager` instance is returned

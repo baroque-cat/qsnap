@@ -523,7 +523,7 @@ def test_create_snapshot_single_disk_sda_not_vda(
         "--------------------------------------\n"
         " sda      /var/lib/libvirt/images/testvm.qcow2\n"
     )
-    mock_shell.expect("domblklist").returns(
+    mock_shell.expect_first("domblklist").returns(
         ShellResult(
             success=True,
             stdout=domblklist_output,
@@ -574,7 +574,7 @@ def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
         " vda      /var/lib/libvirt/images/testvm.qcow2\n"
         " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
     )
-    mock_shell.expect("domblklist").returns(
+    mock_shell.expect_first("domblklist").returns(
         ShellResult(
             success=True,
             stdout=domblklist_output,
@@ -3027,12 +3027,12 @@ def test_blockcommit_stale_guard_all_exist_proceeds(
     mock_state,
     mock_shell,
 ):
-    """All snapshot files exist → stale guard passes → blockcommit called.
+    """All snapshot files exist → stale guard passes → blockcommit called, D5 cleanup.
 
     When every snapshot in ``to_merge`` has its file present on disk,
-    ``os.path.exists()`` returns True for all, no entries are removed
-    from state, and the lifecycle manager's ``blockcommit()`` is called
-    with the complete to_merge list.
+    ``os.path.exists()`` returns True for all.  The stale guard does not
+    remove any entries, but after successful blockcommit, design D5
+    unconditionally removes committed snapshots from state.
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=False,
@@ -3081,8 +3081,14 @@ def test_blockcommit_stale_guard_all_exist_proceeds(
     # All files exist — no staleness detected
     assert exists_mock.called, "os.path.exists should be called to verify files"
 
-    # No entries removed from state (all files exist)
-    remove_spy.assert_not_called()
+    # Design D5 unconditionally removes COMMITTED snapshots from state on
+    # success — both snap1 and snap2 are committable (conftest domblklist
+    # default returns snap4, not in the remove set).
+    assert remove_spy.call_count == 2, (
+        f"D5 should remove both committed snapshots, got {remove_spy.call_count}"
+    )
+    remove_spy_names = [c.args[1] for c in remove_spy.call_args_list]
+    assert set(remove_spy_names) == {"snap1", "snap2"}
 
     # Blockcommit called with both snapshots
     assert bc_spy.called, "blockcommit should proceed when all files exist"
@@ -3257,6 +3263,10 @@ def test_blockcommit_stale_guard_no_short_circuit(
     stale, the stale entry is removed from state and skipped, but the
     remaining valid snapshots still proceed to blockcommit.  This verifies
     that a single stale entry does NOT short-circuit the entire operation.
+
+    Design D5 unconditionally removes COMMITTED snapshots from state on
+    success, so ``remove_snapshot`` is called for snap_stale (stale guard),
+    snap_a (D5), and snap_b (D5).
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=False,
@@ -3314,10 +3324,11 @@ def test_blockcommit_stale_guard_no_short_circuit(
     ):
         core._blockcommit_snapshots(vm, retention)
 
-    # Only snap_stale removed from state
+    # Stale guard removes snap_stale; D5 removes snap_a and snap_b after
+    # successful commit (conftest domblklist default = snap4, not in remove set).
     remove_spy_calls = [c.args[1] for c in remove_spy.call_args_list]
-    assert remove_spy_calls == ["snap_stale"], (
-        f"Only snap_stale should be removed from state, got: {remove_spy_calls}"
+    assert set(remove_spy_calls) == {"snap_stale", "snap_a", "snap_b"}, (
+        f"Expected snap_stale (stale guard) + snap_a + snap_b (D5), got: {remove_spy_calls}"
     )
 
     # WARNING logged for the single stale entry
@@ -3331,6 +3342,673 @@ def test_blockcommit_stale_guard_no_short_circuit(
         f"snap_a and snap_b should be blockcommitted, snap_stale skipped; got: {merge_names}"
     )
     assert "snap_stale" not in merge_names, "stale snapshot must be excluded from blockcommit"
+
+
+# ── Blockcommit VM State Check ───────────────────────────────────────────────
+
+
+def test_blockcommit_live_commit_when_vm_running(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM running + lifecycle_mode="virsh" → non-active snapshots committed live.
+
+    The adaptive lifecycle fork (design D2) commits the non-active prefix
+    via ``virsh blockcommit`` when the VM is running in virsh mode.
+    Only the active layer (reported by domblklist) is deferred.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        lifecycle_mode="virsh",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Two snapshots: snap1 (older, to be committed) and snap2 (newer,
+    # will be the active layer reported by domblklist).
+    snap1 = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap2 = SnapshotInfo(
+        name="snap2",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+
+    # VM is running.
+    mock_shell.expect_first("domstate").returns(
+        ShellResult(success=True, stdout="running\n", stderr="", returncode=0, error=None)
+    )
+    # domblklist returns snap2 as the active layer — snap1 is NOT active.
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/snapshots/testvm/snap2.qcow2\n"
+    )
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(success=True, stdout=domblklist_output, stderr="", returncode=0, error=None)
+    )
+
+    # Remove only snap1 (non-active snapshot).
+    retention = RetentionResult(keep=["snap2"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_factory,
+            "create_lifecycle_manager",
+            wraps=mock_factory.create_lifecycle_manager,
+        ) as lifecycle_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was called for the non-active snapshot.
+    assert bc_spy.called, "blockcommit should proceed for non-active snapshots"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert set(merge_names) == {"snap1"}, "snap1 (non-active) should be committed"
+
+    # Factory was called with mode="virsh" (live commit path).
+    lifecycle_spy.assert_called_once_with(mode="virsh")
+
+    # No deferred entry — snap1 is not the active layer.
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert deferred == [], "No deferred entries expected for non-active snapshot"
+
+    # snap1 removed from state after successful commit (design D5).
+    snapshots_after = mock_state.get_snapshots("testvm")
+    assert not any(s.name == "snap1" for s in snapshots_after), (
+        "snap1 should be removed from state after successful blockcommit"
+    )
+
+
+def test_blockcommit_executes_when_vm_shut_off(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM shut off → blockcommit proceeds via qemu-img executor.
+
+    The adaptive lifecycle fork (design D2) uses ``qemu-img commit`` on
+    shut off even when ``lifecycle_mode="virsh"``.  ``remove_snapshot``
+    is called unconditionally on success (design D5).
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        lifecycle_mode="virsh",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # domblklist returns base image (NOT snap1) — snap1 is not the tip.
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(success=True, stdout=domblklist_output, stderr="", returncode=0, error=None)
+    )
+
+    # VM is shut off (conftest default).  The race guard in the qemu-img
+    # path also calls domstate — the conftest default matches both.
+
+    retention = RetentionResult(keep=[], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(
+            mock_factory,
+            "create_lifecycle_manager",
+            wraps=mock_factory.create_lifecycle_manager,
+        ) as lifecycle_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was called (VM is shut off).
+    assert bc_spy.called, "blockcommit should proceed when VM is shut off"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert "snap1" in merge_names, "snap1 should be blockcommitted"
+
+    # Factory was called with mode="qemu-img" (offline executor even with
+    # lifecycle_mode="virsh" — the fork overrides it).
+    lifecycle_spy.assert_called_once_with(mode="qemu-img")
+
+    # snap1 removed from state after successful commit (design D5).
+    snapshots_after = mock_state.get_snapshots("testvm")
+    assert not any(s.name == "snap1" for s in snapshots_after), (
+        "snap1 should be removed from state after successful blockcommit"
+    )
+
+    # No deferred entries.
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert deferred == [], "No deferred entries expected when VM is shut off"
+
+
+def test_blockcommit_deferred_when_vm_paused(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """VM paused → blockcommit deferred (paused is NOT "shut off").
+
+    Only ``"shut off"`` allows blockcommit to proceed; any other state
+    (including paused) triggers deferral.
+    """
+    global_cfg = make_global_config()
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Override conftest default — VM is paused.
+    mock_shell.expect_first("domstate").returns(
+        ShellResult(success=True, stdout="paused\n", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=[], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.INFO)
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was NOT called — paused VM → deferred.
+    bc_spy.assert_not_called()
+
+    # Deferred entry added with reason "vm_running".
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "vm_running"
+    assert deferred[0].snapshots == ["snap1"]
+
+    # INFO log about deferring.
+    assert "Deferring blockcommit" in caplog.text
+
+
+def test_blockcommit_vm_state_check_failure_non_fatal(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """domstate call fails → blockcommit proceeds (non-fatal fallback).
+
+    When the ``virsh domstate`` command itself fails (e.g. domain not
+    found), the code falls through and allows blockcommit to proceed
+    rather than blocking it.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Override conftest default — domstate fails entirely.
+    mock_shell.expect_first("domstate").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: domain not found",
+            returncode=1,
+            error="domain not found",
+        )
+    )
+
+    retention = RetentionResult(keep=[], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit proceeds despite failed domstate check.
+    assert bc_spy.called, "blockcommit should proceed when domstate check fails (non-fatal)"
+
+    # No deferral occurs (domstate failure is non-fatal, not a defer trigger).
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 0, "No deferred entries expected when domstate fails"
+
+
+def test_deferred_blockcommit_executed_after_vm_shutdown(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Deferred blockcommit executes after VM shutdown via qemu-img executor.
+
+    Per D6: drain uses the qemu-img executor on shut-off regardless of
+    configured lifecycle_mode.  Committed snapshots are removed from
+    state (design D5) and the deferred queue is empty afterwards.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with a deferred blockcommit and matching snapshot.
+    mock_state.record_snapshot(
+        "testvm",
+        SnapshotInfo(
+            name="snap1",
+            path=Path("/tmp/snap1.qcow2"),
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+        ),
+    )
+    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "vm_running")
+
+    # VM is shut off (conftest default for domstate).
+    # domblklist returns base image — NOT snap1's path — so snap1 is
+    # committable (not the XML-referenced tip).
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(success=True, stdout=domblklist_output, stderr="", returncode=0, error=None)
+    )
+
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch.object(
+            mock_factory,
+            "create_lifecycle_manager",
+            wraps=mock_factory.create_lifecycle_manager,
+        ) as lifecycle_spy,
+        patch.object(
+            manager,
+            "blockcommit",
+            wraps=manager.blockcommit,
+        ) as bc_spy,
+    ):
+        core._check_deferred_operations(vm)
+
+    # Blockcommit was called for the deferred snapshot.
+    assert bc_spy.called, "blockcommit should be called for deferred operation"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert "snap1" in merge_names, "snap1 should be blockcommitted"
+
+    # Factory was called with mode="qemu-img" (offline drain executor per D6).
+    lifecycle_spy.assert_called_once_with(mode="qemu-img")
+
+    # snap1 removed from state after successful commit (design D5).
+    snapshots_after = mock_state.get_snapshots("testvm")
+    assert not any(s.name == "snap1" for s in snapshots_after), (
+        "snap1 should be removed from state after successful deferred commit"
+    )
+
+    # Deferred queue is empty afterwards.
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_preserve_all_vm_running_no_blockcommit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """preserve="all" + VM running → blockcommit never reached.
+
+    When ``snapshot_preserve="all"``, retention keeps all snapshots
+    (remove set empty).  ``_blockcommit_snapshots`` returns early at the
+    empty to_merge guard, never reaching the VM state check.  This proves
+    preserve="all" + running VM does not trigger a spurious deferral.
+    """
+    global_cfg = make_global_config()
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+        snapshot_preserve="all",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1 = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    snap2 = SnapshotInfo(
+        name="snap2",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+    )
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+
+    # Override conftest default — VM is running (but it shouldn't matter).
+    mock_shell.expect_first("domstate").returns(
+        ShellResult(success=True, stdout="running\n", stderr="", returncode=0, error=None)
+    )
+
+    # Retention keeps ALL snapshots — remove set is empty.
+    retention = RetentionResult(keep=["snap1", "snap2"], remove=[])
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was NOT called (nothing to remove).
+    bc_spy.assert_not_called()
+
+    # No deferred entries added — the empty to_merge guard returned before
+    # reaching the VM state check.
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 0, "preserve=all should not add deferred entries"
+
+
+# ── XML Refresh After Offline Commit (Design D8) ────────────────────────────
+
+
+def test_offline_commit_refreshes_domain_xml(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Offline (qemu-img) commit triggers _refresh_domain_backing_store.
+
+    Design D8: after a successful offline commit, ``_refresh_domain_backing_store``
+    strips stale ``<backingStore>`` elements from the domain XML so the VM
+    remains bootable.  This test verifies that ``virsh dumpxml`` and
+    ``virsh define`` are called, and the INFO "Refreshed domain XML" log
+    is emitted.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # domblklist returns the base image (NOT snap1) — snap1 is committable.
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(success=True, stdout=domblklist_output, stderr="", returncode=0, error=None)
+    )
+
+    # Provide domain XML with <backingStore> elements — the refresh strips them.
+    domain_xml = """<domain type="kvm">
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="/var/lib/libvirt/snapshots/testvm/snap1.qcow2"/>
+      <backingStore type="file">
+        <format type="qcow2"/>
+        <source file="/var/lib/libvirt/images/testvm.qcow2"/>
+        <backingStore/>
+      </backingStore>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+  </devices>
+</domain>"""
+    mock_shell.expect("virsh dumpxml").returns(
+        ShellResult(success=True, stdout=domain_xml, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("virsh define").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=[], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.INFO)
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was called and succeeded
+    assert bc_spy.called, "blockcommit should proceed when all files exist"
+
+    # virsh define was called after dumpxml (XML refresh)
+    define_calls = [
+        " ".join(c.args[0])
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "virsh" in c.args[0][0]
+        and "define" in " ".join(c.args[0])
+    ]
+    assert len(define_calls) >= 1, "virsh define should be called to refresh domain XML"
+
+    # "Refreshed domain XML" INFO log was emitted
+    assert "Refreshed domain XML" in caplog.text, (
+        "Should log INFO about refreshed domain XML after offline commit"
+    )
+
+    # Committed snapshots removed from state (D5)
+    snapshots_after = mock_state.get_snapshots("testvm")
+    assert not any(s.name == "snap1" for s in snapshots_after), (
+        "snap1 should be removed from state after successful commit (D5)"
+    )
+
+
+def test_offline_commit_xml_refresh_failure_non_fatal(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """XML refresh failure after offline commit is non-fatal — commit still counted.
+
+    Design D8: ``_refresh_domain_backing_store`` is best-effort.  If
+    ``virsh dumpxml`` fails, a WARNING is logged but the blockcommit
+    still succeeds and state cleanup still proceeds (D5).
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # domblklist returns base image — snap1 is committable
+    domblklist_output = (
+        " Target   Source\n"
+        "--------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+    )
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(success=True, stdout=domblklist_output, stderr="", returncode=0, error=None)
+    )
+
+    # virsh dumpxml fails — XML refresh will be skipped with a WARNING
+    mock_shell.expect("virsh dumpxml").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: domain not found",
+            returncode=1,
+            error="domain not found",
+        )
+    )
+
+    retention = RetentionResult(keep=[], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.WARNING)
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        # Must not raise — XML refresh failure is non-fatal
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit was called and succeeded despite XML refresh failure
+    assert bc_spy.called, "blockcommit should proceed even when dumpxml fails"
+
+    # WARNING logged about XML refresh failure
+    warning_logs = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("Could not refresh domain XML" in r.message for r in warning_logs), (
+        f"Expected WARNING about XML refresh failure, got: {[r.message for r in warning_logs]}"
+    )
+
+    # Committed snapshot still removed from state (D5 — state cleanup is
+    # independent of XML refresh).
+    snapshots_after = mock_state.get_snapshots("testvm")
+    assert not any(s.name == "snap1" for s in snapshots_after), (
+        "snap1 should be removed from state despite XML refresh failure (D5)"
+    )
 
 
 # ── Dry-Run Pipeline Result Tests ───────────────────────────────────────────

@@ -7,6 +7,7 @@ Covers:
 - Risk: deferred accumulation logs a warning.
 - Risk: deferred count visible in list.
 - Risk: deferred queue grows across multiple runs (MAC denials).
+- Adaptive drain (design D6): per-entry executor, tip-preserving, partial drain.
 """
 
 from __future__ import annotations
@@ -29,13 +30,13 @@ from tests.mocks import MockConfigFacade
 _OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
-def _add_snapshot(state, vm_name: str, name: str) -> None:
+def _add_snapshot(state, vm_name: str, name: str, path: str | None = None) -> None:
     """Pre-populate state with a snapshot record."""
     state.record_snapshot(
         vm_name,
         SnapshotInfo(
             name=name,
-            path=Path(f"/tmp/{name}.qcow2"),
+            path=Path(path or f"/tmp/{name}.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
         ),
@@ -44,7 +45,7 @@ def _add_snapshot(state, vm_name: str, name: str) -> None:
 
 def _set_vm_state(shell, state: str) -> None:
     """Configure MockShell to return *state* for ``virsh domstate``."""
-    shell.expect("domstate").returns(
+    shell.expect_first("domstate").returns(
         ShellResult(
             success=True,
             stdout=state,
@@ -80,6 +81,19 @@ def _add_deferred_with_since(
     )
 
 
+def _set_domblklist(shell, source_path: str) -> None:
+    """Configure MockShell to return *source_path* for ``virsh domblklist``."""
+    shell.expect_first("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"vda {source_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
 # ── test_deferred_blockcommits_executed_on_shutoff_vm ─────────────────────
 
 
@@ -103,6 +117,8 @@ def test_deferred_blockcommits_executed_on_shutoff_vm(
     _add_snapshot(mock_state, "testvm", "snap1")
     mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
+    # domblklist returns a DIFFERENT source — snap1 is NOT the tip → committable
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
 
@@ -130,7 +146,12 @@ def test_deferred_blockcommits_skipped_on_running_vm(
     mock_shell,
     caplog,
 ):
-    """Deferred ops exist + VM running → skipped with INFO log."""
+    """Deferred ops exist + VM running → skipped with INFO log.
+
+    Uses default lifecycle_mode="virsh".  The deferred snapshot IS the
+    current active layer (domblklist source == snapshot path), so it is
+    not committable while running — the entry stays in the queue.
+    """
     vm = make_vm_config(name="testvm", disks=["vda"])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -140,9 +161,12 @@ def test_deferred_blockcommits_skipped_on_running_vm(
         shell=mock_shell,
     )
 
-    # Pre-populate state with a deferred blockcommit.
+    # Pre-populate state with a deferred blockcommit AND matching snapshot.
+    _add_snapshot(mock_state, "testvm", "snap1")
     mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "running")
+    # domblklist returns the same path → snap1 IS the active layer
+    _set_domblklist(mock_shell, "/tmp/snap1.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
     caplog.set_level(logging.INFO)
@@ -154,14 +178,14 @@ def test_deferred_blockcommits_skipped_on_running_vm(
     ) as bc_spy:
         core.snapshot()
 
-    # Blockcommit was NOT called (VM is running).
+    # Blockcommit was NOT called (active layer, not committable while running).
     assert not bc_spy.called
 
     # Deferred operations remain in the queue.
     assert len(mock_state.get_deferred_operations("testvm")) == 1
 
-    # INFO log about skipping.
-    assert "VM is running" in caplog.text
+    # INFO log about skipping (D6: "not committable in current VM state").
+    assert "not committable" in caplog.text
 
 
 # ── test_deferred_blockcommit_fails_on_retry_remains_queued ───────────────
@@ -188,6 +212,8 @@ def test_deferred_blockcommit_fails_on_retry_remains_queued(
     _add_snapshot(mock_state, "testvm", "snap1")
     mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
+    # domblklist returns a DIFFERENT source — snap1 is NOT the tip → committable
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
     caplog.set_level(logging.WARNING)
@@ -250,6 +276,8 @@ def test_risk_deferred_accumulation_logs_warning(
     mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
     mock_state.add_deferred_blockcommit("testvm", ["snap2"], "selinux")
     _set_vm_state(mock_shell, "shut off")
+    # domblklist returns a DIFFERENT source — both snap1 and snap2 are committable
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
     caplog.set_level(logging.WARNING)
@@ -328,12 +356,13 @@ def test_risk_deferred_queue_grows_across_runs(
     mock_state,
     mock_shell,
 ):
-    """Multiple MAC denials accumulate deferred entries across runs.
+    """Deferred entries accumulate across runs when VM is running.
 
-    Run 1: no deferred ops. Retention removes "snap1". Blockcommit fails
-    with apparmor → deferred entry 1 added.
-    Run 2: 1 deferred op (VM running → skipped). Retention removes "snap1"
-    again. Blockcommit fails with apparmor → deferred entry 2 added.
+    Run 1: no deferred ops. Retention removes "snap1". VM is running →
+    blockcommit deferred with reason "vm_running" (entry 1).
+    Run 2: 1 deferred op exists, VM still running → skipped during
+    _check_deferred_operations.  Retention removes "snap1" again →
+    blockcommit deferred again (entry 2).
     Verify queue grew from 0 → 1 → 2.
     """
     vm = make_vm_config(
@@ -354,27 +383,11 @@ def test_risk_deferred_queue_grows_across_runs(
 
     # Set VM state to "running" so deferred ops are skipped, not retried.
     _set_vm_state(mock_shell, "running")
-
-    # Chain verification: return a valid single-element chain so that
-    # pre-commit verification passes and blockcommit is attempted.
-    mock_shell.expect("qemu-img info.*--backing-chain").returns(
-        ShellResult(
-            success=True,
-            stdout='[{"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"}]',
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    # domblklist returns snap1's path → snap1 IS the active layer →
+    # not committable in virsh mode → deferred (preserves original intent)
+    _set_domblklist(mock_shell, "/tmp/snap1.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
-
-    # Patch retention to remove "snap1" and blockcommit to fail with apparmor.
-    mac_fail = CommitResult(
-        success=False,
-        committed_snapshot="",
-        error="apparmor denies blockcommit",
-    )
 
     with (
         patch("os.path.exists", return_value=True),
@@ -386,17 +399,17 @@ def test_risk_deferred_queue_grows_across_runs(
         patch.object(
             lifecycle_manager,
             "blockcommit",
-            return_value=mac_fail,
+            wraps=lifecycle_manager.blockcommit,
         ) as bc_spy,
     ):
         # Run 1: no deferred ops yet.
         assert len(mock_state.get_deferred_operations("testvm")) == 0
         core.snapshot()
 
-        # After run 1: 1 deferred entry.
+        # After run 1: 1 deferred entry (VM running → blockcommit deferred).
         after_run1 = mock_state.get_deferred_operations("testvm")
         assert len(after_run1) == 1
-        assert after_run1[0].reason == "apparmor"
+        assert after_run1[0].reason == "vm_running"
 
         # Run 2: deferred op exists, VM running → skipped.
         core.snapshot()
@@ -405,8 +418,8 @@ def test_risk_deferred_queue_grows_across_runs(
         after_run2 = mock_state.get_deferred_operations("testvm")
         assert len(after_run2) == 2
 
-    # Blockcommit was called at least twice (once per run).
-    assert bc_spy.call_count >= 2
+    # Blockcommit was never called — VM running → deferred before blockcommit.
+    assert bc_spy.call_count == 0
 
 
 # ── test_deferred_count_below_warn_silent ─────────────────────────────────
@@ -609,14 +622,19 @@ def test_threshold_check_exit_code_unchanged(
     caplog,
 ):
     """CRITICAL threshold breached during core.run() → PipelineResult.success
-    is still True (monitoring is non-fatal)."""
+    is still True (monitoring is non-fatal).
+
+    Uses lifecycle_mode="qemu-img" so that on a running VM ALL deferred
+    entries are skipped (nothing committable).  Each entry must have a
+    matching state snapshot so they are not dropped as stale.
+    """
     global_config = make_global_config(
         deferred_warn_count="5",
         deferred_crit_count="10",
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="qemu-img")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -626,9 +644,11 @@ def test_threshold_check_exit_code_unchanged(
     )
 
     for i in range(10):
+        # Add a matching snapshot so the deferred entry is not stale.
+        _add_snapshot(mock_state, "testvm", f"snap{i}")
         mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
 
-    # VM is running → deferred ops skipped (remain in queue for threshold check).
+    # VM is running → in qemu-img mode everything is skipped.
     _set_vm_state(mock_shell, "running")
 
     caplog.set_level(logging.CRITICAL)
@@ -829,3 +849,277 @@ def test_deferred_threshold_critical_logged(
     assert "testvm" in msg
     assert "10 deferred blockcommit" in msg
     assert "selinux" in msg
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# NEW TESTS — adaptive drain (design D6)
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── A1: test_drain_shutoff_uses_qemu_img_executor ────────────────────────
+
+
+def test_drain_shutoff_uses_qemu_img_executor(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM shut off, snapshots all non-tip → factory receives mode="qemu-img".
+
+    After a successful drain the queue is empty.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "s1")
+    mock_state.add_deferred_blockcommit("testvm", ["s1"], "apparmor")
+    _set_vm_state(mock_shell, "shut off")
+    # domblklist points to a DIFFERENT path → s1 is NOT the tip
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    with patch.object(
+        mock_factory,
+        "create_lifecycle_manager",
+        wraps=mock_factory.create_lifecycle_manager,
+    ) as factory_spy:
+        core.snapshot()
+
+    # Factory was called at least once with mode="qemu-img" (shut-off path).
+    calls_with_qemu_img = [
+        c for c in factory_spy.call_args_list if c.kwargs.get("mode") == "qemu-img"
+    ]
+    assert len(calls_with_qemu_img) >= 1
+
+    # Queue is empty after successful drain.
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ── A2: test_drain_shutoff_tip_remainder_requeued ────────────────────────
+
+
+def test_drain_shutoff_tip_remainder_requeued(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM shut off, entry ["s1","s2"] where s2 is the tip → partial drain.
+
+    s1 committed (mode qemu-img) and removed from state.  Queue has ONE
+    entry with snapshots==["s2"] and the ORIGINAL reason ("apparmor").
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "s1")
+    _add_snapshot(mock_state, "testvm", "s2")
+    mock_state.add_deferred_blockcommit("testvm", ["s1", "s2"], "apparmor")
+    _set_vm_state(mock_shell, "shut off")
+    # domblklist returns s2's path → s2 IS the tip, s1 is below it
+    _set_domblklist(mock_shell, "/tmp/s2.qcow2")
+
+    core.snapshot()
+
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].snapshots == ["s2"]
+    assert remaining[0].reason == "apparmor"
+
+    # s1 has been removed from state (committed).
+    snap_names = {s.name for s in mock_state.get_snapshots("testvm")}
+    assert "s1" not in snap_names
+
+
+# ── A3: test_drain_running_virsh_mode_commits_non_active ─────────────────
+
+
+def test_drain_running_virsh_mode_commits_non_active(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM running, lifecycle_mode="virsh", snapshots all below active layer.
+
+    Formerly-active snapshots become committable; entry removed from queue.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="virsh")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "running")
+    # domblklist returns a DIFFERENT (newer) file → snap1 is below active layer
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with (
+        patch.object(
+            lifecycle_manager,
+            "blockcommit",
+            wraps=lifecycle_manager.blockcommit,
+        ) as bc_spy,
+        patch.object(
+            mock_factory,
+            "create_lifecycle_manager",
+            wraps=mock_factory.create_lifecycle_manager,
+        ) as factory_spy,
+    ):
+        core.snapshot()
+
+    # Blockcommit was called (snap1 was committable below the active layer).
+    assert bc_spy.called
+
+    # Factory received mode="virsh" for the live blockcommit.
+    calls_with_virsh = [c for c in factory_spy.call_args_list if c.kwargs.get("mode") == "virsh"]
+    assert len(calls_with_virsh) >= 1
+
+    # Entry was removed from the queue.
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ── A4: test_drain_running_qemu_img_mode_skips ───────────────────────────
+
+
+def test_drain_running_qemu_img_mode_skips(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM running + lifecycle_mode="qemu-img" → blockcommit NOT called.
+
+    Queue is unchanged (entry kept).
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="qemu-img")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "running")
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with patch.object(
+        lifecycle_manager,
+        "blockcommit",
+        wraps=lifecycle_manager.blockcommit,
+    ) as bc_spy:
+        core.snapshot()
+
+    # Blockcommit was NOT called (qemu-img mode → nothing committable on running VM).
+    assert not bc_spy.called
+
+    # Deferred operations remain unchanged.
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].snapshots == ["snap1"]
+
+
+# ── A5: test_drain_paused_skips ──────────────────────────────────────────
+
+
+def test_drain_paused_skips(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """VM paused → blockcommit NOT called, queue unchanged.
+
+    Tested with both lifecycle_mode="virsh" (default); paused skips in all modes.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "paused")
+
+    caplog.set_level(logging.INFO)
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with patch.object(
+        lifecycle_manager,
+        "blockcommit",
+        wraps=lifecycle_manager.blockcommit,
+    ) as bc_spy:
+        core.snapshot()
+
+    # Blockcommit was NOT called (paused → nothing committable).
+    assert not bc_spy.called
+
+    # Deferred operations remain unchanged.
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+
+    # INFO log about skipping (D6: "not committable in current VM state").
+    assert "not committable" in caplog.text
+
+
+# ── A6: test_drain_removes_committed_from_state ──────────────────────────
+
+
+def test_drain_removes_committed_from_state(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """After a successful drain (shut off), committed names gone from state."""
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap_a")
+    _add_snapshot(mock_state, "testvm", "snap_b")
+    mock_state.add_deferred_blockcommit("testvm", ["snap_a"], "apparmor")
+    _set_vm_state(mock_shell, "shut off")
+    # domblklist points elsewhere → both are committable (only snap_a is in the entry)
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    core.snapshot()
+
+    # snap_a committed → gone from state.
+    remaining_snaps = mock_state.get_snapshots("testvm")
+    remaining_names = {s.name for s in remaining_snaps}
+    assert "snap_a" not in remaining_names
+    # snap_b was not in the deferred entry → still in state.
+    assert "snap_b" in remaining_names
+
+    # Queue is empty.
+    assert mock_state.get_deferred_operations("testvm") == []

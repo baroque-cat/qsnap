@@ -111,9 +111,18 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # installed in the VM).  Useful for filesystem-consistent snapshots.
 # snapshot_quiesce = false
 
-# Lifecycle mode for merging snapshots back into the base image:
-#   "virsh"    — use virsh blockcommit (default)
-#   "qemu-img" — use qemu-img commit (works without libvirt)
+# Lifecycle mode for merging snapshots back into the base image (adaptive):
+#   "virsh"    — default.  While the VM runs: live commits of non-active
+#                layers via virsh blockcommit; only the active layer is
+#                deferred (reason "vm_running").  When the VM is shut off:
+#                offline commits via qemu-img; the XML-referenced tip
+#                overlay is excluded (reason "active_layer") so the domain
+#                stays bootable.  Deferred entries drain automatically on
+#                later runs.
+#   "qemu-img" — offline-only.  Never commits while the VM runs (qemu-img
+#                writing into the base image of a live chain is unsafe);
+#                defers everything until the VM is shut off, then commits
+#                via qemu-img (same tip-exclusion rule).
 # lifecycle_mode = "virsh"
 
 # Change detection mode for "onchange" snapshot_create:

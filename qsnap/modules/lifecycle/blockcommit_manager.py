@@ -12,23 +12,10 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
+from qsnap.utils.mac import detect_mac_denial
 from qsnap.utils.parsing import parse_domblklist_target
 
 logger = logging.getLogger(__name__)
-
-
-def _detect_mac_denial(stderr: str) -> str | None:
-    """Detect AppArmor/SELinux denial from virsh stderr.
-
-    Returns ``"apparmor"``, ``"selinux"``, or ``None`` if the error is
-    not MAC-related.
-    """
-    lower = stderr.lower()
-    if "permission denied" in lower or "apparmor" in lower:
-        return "apparmor"
-    if "operation not permitted" in lower or "avc" in lower:
-        return "selinux"
-    return None
 
 
 class BlockCommitManager(ILifecycleManager):
@@ -105,7 +92,7 @@ class BlockCommitManager(ILifecycleManager):
             result = self._shell.run(cmd, timeout=3600)
             if not result.success:
                 # Check for MAC denial (AppArmor/SELinux)
-                mac_reason = _detect_mac_denial(result.stderr)
+                mac_reason = detect_mac_denial(result.stderr)
                 if mac_reason is not None:
                     return CommitResult(
                         success=False,

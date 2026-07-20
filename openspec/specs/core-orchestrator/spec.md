@@ -1,3 +1,9 @@
+# Core Orchestrator
+
+## Purpose
+
+Core is the pipeline runner and dependency-injection host: it coordinates environment validation, deferred-operation draining, change detection, snapshot creation, retention evaluation, adaptive blockcommit lifecycle, and per-target backup steps. Modules are stateless workers invoked through ABC interfaces; Core owns the execution order and all VM-state-aware decisions.
+
 ## Requirements
 
 ### Requirement: Core initialization with dependency injection
@@ -21,14 +27,32 @@ Core SHALL accept `IConfigFacade`, `IVMModuleFactory`, `IStateManager`, and `ISh
 ### Requirement: Pipeline step order
 `Core._execute_pipeline(vm_config)` SHALL execute steps in this order:
 1. Pre-flight environment validation (including stale file cleanup per `auto_cleanup`)
-2. Deferred blockcommit check (if VM is shut off)
+2. Deferred blockcommit check — state-adaptive drain per the `deferred-operations` capability
 3. Change detection — if `snapshot_create` mode requires it
 4. Snapshot creation — if detector says we should, or if mode is "always"
 5. Snapshot retention evaluation — which snapshots to keep/remove
 6. Snapshots to merge: pre-commit backing chain integrity verification (per `chain_verify_before_commit`)
-7. Snapshot lifecycle — blockcommit removed snapshots with MAC denial deferral
+7. Snapshot lifecycle — **adaptive blockcommit**: Core SHALL determine the VM power state via `virsh domstate` and the active overlay path via `virsh domblklist`, split the remove set into committable and deferrable subsets, execute the committable subset with the mechanism valid for the current state, and defer the rest. MAC denial deferral applies as before.
 8. Post-commit chain length verification (per `chain_verify_after_commit`)
 9. For each target: backup transfer (with retry per `backup_retry_max`) → backup verification → backup retention → cleanup
+
+The `--preserve-snapshots` and `--dry-run` guards SHALL run before any `virsh` state-detection calls.
+
+The adaptive fork in step 7 SHALL behave as follows:
+
+| VM state (`domstate`) | `lifecycle_mode` | Committable subset | Executor | Deferred subset and reason |
+|---|---|---|---|---|
+| running | `virsh` | remove set minus the active layer | `BlockCommitManager` | active layer, reason `"vm_running"` |
+| running | `qemu-img` | (none) | — | entire remove set, reason `"vm_running"` |
+| shut off | any | remove set minus the XML-referenced tip overlay | `QemuImgCommitManager` | tip overlay, reason `"active_layer"` |
+| paused / other | any | (none) | — | entire remove set, reason `"vm_running"` |
+| domstate call failed | any | entire remove set (legacy fallback) | manager for configured mode | (none) |
+
+The active-layer path SHALL be obtained from `virsh domblklist` (via `parse_domblklist_path()`); on failure Core SHALL fall back to the newest snapshot recorded in `IStateManager` and log a WARNING. When the executor is `QemuImgCommitManager`, Core SHALL re-check `virsh domstate` immediately before invoking the manager; if the VM is no longer shut off, Core SHALL defer the committable subset with reason `"vm_running"` instead.
+
+After any successful commit (any branch), Core SHALL remove the committed snapshots from `IStateManager` unconditionally — independent of `chain_verify_after_commit` — and append one `ActionRecord("snapshot_delete")` per committed snapshot.
+
+After any successful OFFLINE commit (executor `QemuImgCommitManager`, main path or deferred drain), Core SHALL refresh the domain's persistent XML so it no longer references deleted overlay files: dump the XML via `virsh dumpxml`, remove every `<backingStore>` element from every `<disk>` element, and redefine the domain via `virsh define`. With no `<backingStore>` recorded, libvirt re-probes the shortened chain from qcow2 headers on next start. Refresh failures SHALL be non-fatal WARNINGs (the commit itself already succeeded).
 
 After all VMs are processed, `_check_deferred_thresholds()` SHALL be called.
 
@@ -39,6 +63,67 @@ After all VMs are processed, `_check_deferred_thresholds()` SHALL be called.
 #### Scenario: Pipeline with onchange mode, no changes
 - **WHEN** a VM has `snapshot_create = "onchange"` and the change detector reports `has_changed = False`
 - **THEN** no snapshot is created, but retention is still evaluated
+
+#### Scenario: Non-active snapshots committed live when VM is running (virsh mode)
+- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains only non-active snapshots
+- **THEN** `factory.create_lifecycle_manager(mode="virsh")` is used
+- **AND** `manager.blockcommit()` is called with the full remove set
+- **AND** no deferred entry is created
+
+#### Scenario: Active layer deferred when VM is running (virsh mode)
+- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains the active overlay (per `domblklist`)
+- **THEN** the non-active prefix is committed live via `BlockCommitManager`
+- **AND** the active snapshot is deferred via `add_deferred_blockcommit()` with reason `"vm_running"`
+- **AND** an INFO log records the split decision
+
+#### Scenario: qemu-img mode defers everything when VM is running
+- **WHEN** `lifecycle_mode = "qemu-img"` and `virsh domstate` returns "running"
+- **THEN** no manager is invoked
+- **AND** the entire remove set is deferred with reason `"vm_running"`
+- **AND** the pipeline continues to backup steps
+
+#### Scenario: Blockcommit deferred when VM is paused
+- **WHEN** `virsh domstate` returns "paused"
+- **THEN** no manager is invoked regardless of `lifecycle_mode`
+- **AND** the entire remove set is deferred with reason `"vm_running"`
+
+#### Scenario: Offline commit via qemu-img when VM is shut off
+- **WHEN** `virsh domstate` returns "shut off" (either lifecycle mode) and the remove set does not contain the XML-referenced tip overlay
+- **THEN** `factory.create_lifecycle_manager(mode="qemu-img")` is used
+- **AND** `manager.blockcommit()` is called with the full remove set
+- **AND** no deferred entry is created
+
+#### Scenario: XML-referenced tip excluded from offline commit
+- **WHEN** `virsh domstate` returns "shut off" and the remove set contains the overlay referenced by the inactive domain XML (per `domblklist`)
+- **THEN** the remaining snapshots are committed via `QemuImgCommitManager`
+- **AND** the tip overlay is deferred with reason `"active_layer"`
+- **AND** the tip file is never passed to the manager, so the domain remains bootable
+
+#### Scenario: VM state check failure is non-fatal
+- **WHEN** `virsh domstate` fails (e.g., VM not defined, libvirt not running)
+- **THEN** blockcommit proceeds with the manager for the configured `lifecycle_mode` and the full remove set (legacy behavior)
+- **AND** no deferral occurs
+
+#### Scenario: Race guard before offline commit
+- **WHEN** the plan selected the `QemuImgCommitManager` executor but the immediate `virsh domstate` re-check no longer returns "shut off"
+- **THEN** the manager is not invoked
+- **AND** the committable subset is deferred with reason `"vm_running"`
+
+#### Scenario: State entries removed unconditionally after commit
+- **WHEN** a blockcommit succeeds and `chain_verify_after_commit` is disabled
+- **THEN** the committed snapshots are still removed from `IStateManager`
+- **AND** subsequent backup steps operate on the survivor list only
+
+#### Scenario: Domain XML refreshed after offline commit
+- **WHEN** an offline commit via `QemuImgCommitManager` succeeds and committed overlay files are deleted
+- **THEN** the domain's persistent XML no longer contains `<backingStore>` elements referencing the deleted files
+- **AND** `virsh start` on the domain succeeds (libvirt re-probes the shortened chain)
+
+#### Scenario: preserve="all" with VM running — no blockcommit attempted
+- **WHEN** `snapshot_preserve = "all"` and the VM is running
+- **THEN** the retention engine keeps all snapshots (after D1 fix)
+- **AND** `_blockcommit_snapshots()` is not called (empty remove list)
+- **AND** no blockcommit error occurs
 
 ### Requirement: Error isolation between VMs
 An error processing one VM SHALL NOT prevent other VMs from being processed.
@@ -57,8 +142,16 @@ An error processing one VM SHALL NOT prevent other VMs from being processed.
 ### Requirement: Core.backup() runs only backup steps
 `Core.backup(vm_filter=None)` SHALL execute only step 5 (backup transfer, backup retention, cleanup). No snapshot steps.
 
+#### Scenario: backup command skips snapshot creation
+- **WHEN** `core.backup()` is called
+- **THEN** snapshot providers are never invoked, only backup steps run
+
 ### Requirement: Core.prune() runs only retention steps
 `Core.prune(vm_filter=None)` SHALL execute only retention and lifecycle cleanup for both snapshots and backups.
+
+#### Scenario: prune command skips creation steps
+- **WHEN** `core.prune()` is called
+- **THEN** no snapshots or backups are created, only retention evaluation and cleanup run
 
 ### Requirement: Dry-run mode
 Core SHALL support dry-run mode where all pipeline steps are evaluated but no mutation occurs (no snapshot creation, no blockcommit, no file deletion). Dry-run mode SHALL be activated via the `dry_run` boolean property on the Core instance, settable by the CLI `--dry-run` / `-n` flag. In dry-run mode, `_backup_target()` SHALL pass `full_verify_before_rebase` to the backup provider (retention evaluation and bucket strategy still execute as pure logic). The dry-run SHALL NOT accumulate `ActionRecord` entries — since no mutations occur, no actions are recorded. The `PipelineResult.dry_run` flag SHALL be set to `True` to indicate the run was a dry-run.
@@ -178,14 +271,14 @@ Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(
 - **THEN** pipeline returns `VMRunResult(success=False, error="snapshot_dir not found: ...")` without executing any steps
 
 ### Requirement: Deferred operations integrated into snapshot steps
-`Core._execute_snapshot_steps()` SHALL check `IStateManager` for deferred blockcommit operations before step 2 (snapshot creation). If VM is shut off, deferred blockcommits SHALL be executed. If VM is running, deferred operations SHALL be skipped. After blockcommit steps (step 4), if any snapshot's blockcommit failed due to MAC denial, those snapshots SHALL be recorded as deferred operations.
+`Core._execute_snapshot_steps()` SHALL check `IStateManager` for deferred blockcommit operations before step 2 (snapshot creation). The drain is state-adaptive (see `specs/deferred-operations/spec.md`): on a shut-off VM deferred blockcommits SHALL be executed via the qemu-img executor (excluding the XML-referenced tip); on a running VM in `virsh` mode, entries whose snapshots are all non-active SHALL be executed live; otherwise they SHALL be skipped. After blockcommit steps (step 4), snapshots whose blockcommit was deferred or failed due to MAC denial SHALL be recorded as deferred operations.
 
 #### Scenario: Deferred blockcommits executed on shut-off VM
 - **WHEN** `virsh domstate` returns "shut off" and deferred queue has 2 snapshots
-- **THEN** `BlockCommitManager.blockcommit()` is called with those snapshots before any new snapshot creation
+- **THEN** the lifecycle manager's `blockcommit()` is called with the committable snapshots before any new snapshot creation
 
-#### Scenario: Deferred blockcommits skipped on running VM
-- **WHEN** VM is running and deferred queue has entries
+#### Scenario: Deferred blockcommits skipped on running VM in qemu-img mode
+- **WHEN** VM is running, `lifecycle_mode = "qemu-img"`, and deferred queue has entries
 - **THEN** pipeline logs INFO and proceeds to change detection
 
 ### Requirement: Post-transfer verification in backup steps
@@ -326,7 +419,7 @@ When `chain_verify_after_commit = true` and blockcommit succeeded, Core SHALL ve
 - **WHEN** `chain_length_before` is `None` and `chain_verify_after_commit` is `True`
 - **THEN** "Post-commit chain verification skipped" is logged (existing message)
 - **AND** "Post-commit chain verification passed" is NOT logged
-- **AND** merged snapshots remain in state (no `remove_snapshot()` call)
+- **AND** merged snapshots are still removed from state (state cleanup is unconditional per the pipeline step order requirement)
 
 ### Requirement: Retry wrapper for backup transfers
 Core's `_backup_target()` method SHALL wrap provider transfer calls in a retry loop when `target.backup_retry_max > 0`. See `specs/backup-retry/spec.md`.
@@ -336,7 +429,7 @@ Core's `_backup_target()` method SHALL wrap provider transfer calls in a retry l
 - **THEN** the transfer is retried with exponential backoff
 
 ### Requirement: Deferred blockcommit with deep verify
-When executing deferred blockcommit operations on a shut-off VM and `vm_config.blockcommit_deep_verify = true`, Core SHALL pass `deep_verify=True` to `BlockCommitManager.blockcommit()`. See `specs/deep-verification-circuit/spec.md`.
+When executing deferred blockcommit operations and `vm_config.blockcommit_deep_verify = true`, Core SHALL pass `deep_verify=True` to the lifecycle manager selected by the state-adaptive drain (see `specs/deferred-operations/spec.md`). See `specs/deep-verification-circuit/spec.md`.
 
 #### Scenario: Deep verify passed to deferred blockcommit
 - **WHEN** VM is shut off, `blockcommit_deep_verify = true`, and deferred commits execute
@@ -369,9 +462,17 @@ When executing deferred blockcommit operations on a shut-off VM and `vm_config.b
 
 Before using `get_full_backups()` for bucket-driven FULL creation decisions, Core SHALL verify each FULL file exists on disk via `os.path.exists()`. Entries whose files do not exist SHALL be removed from state via `remove_full_backup()` with a WARNING log. This prevents phantom FULLs (deleted externally but still in state) from blocking new FULL creation.
 
+#### Scenario: Phantom FULL removed before bucket decision
+- **WHEN** state contains a FULL record whose file no longer exists on disk
+- **THEN** the record is removed via `remove_full_backup()` with a WARNING before `should_create_full()` is evaluated
+
 ### Requirement: Post-create FULL backup verification with source_path
 
 When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_full_backup()` after `create_full_backup()` completes. When the mode is `"hash"`, Core SHALL pass `source_path=most_recent.path` for `qemu-img compare` content verification. On success, `record_full_backup()` is called; on failure, the FULL file is deleted and NOT recorded.
+
+#### Scenario: Failed post-create verification deletes the FULL
+- **WHEN** `full_verify_after_create = "hash"` and `verify_full_backup()` reports a mismatch
+- **THEN** the new FULL file is deleted and no `record_full_backup()` call occurs
 
 ### Requirement: backup_failed WARNING in Core._backup_target
 

@@ -537,3 +537,118 @@ def test_parse_preserve_f_prefix_invalid_bucket_ignored():
     assert policy.anchor_weekly is False
     assert policy.anchor_monthly is False
     assert policy.anchor_yearly is False
+
+
+# ── test_parse_preserve_all_maps_to_preserve_min_all ──────────────────────
+
+
+def test_parse_preserve_all_maps_to_preserve_min_all():
+    """``_parse_preserve("all", None)`` maps to ``preserve_min="all"`` and zero buckets."""
+    policy = Core._parse_preserve("all", None)
+    assert policy.preserve_min == "all"
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0
+
+
+# ── test_parse_preserve_all_with_explicit_min_overrides ───────────────────
+
+
+def test_parse_preserve_all_with_explicit_min_overrides():
+    """``_parse_preserve("all", "6h")`` — explicit min overrides to ``"6h"``, buckets zero."""
+    policy = Core._parse_preserve("all", "6h")
+    assert policy.preserve_min == "6h"
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+
+
+# ── test_parse_preserve_all_with_explicit_min_all ─────────────────────────
+
+
+def test_parse_preserve_all_with_explicit_min_all():
+    """``_parse_preserve("all", "all")`` — explicit min preserves ``"all"``."""
+    policy = Core._parse_preserve("all", "all")
+    assert policy.preserve_min == "all"
+
+
+# ── test_parse_preserve_all_with_explicit_min_zero_h ──────────────────────
+
+
+def test_parse_preserve_all_with_explicit_min_zero_h():
+    """``_parse_preserve("all", "0h")`` — explicit ``"0h"`` override wins (contradictory but allowed)."""
+    policy = Core._parse_preserve("all", "0h")
+    assert policy.preserve_min == "0h"
+
+
+# ── test_parse_preserve_none_defaults_to_all ──────────────────────────────
+
+
+def test_parse_preserve_none_defaults_to_all():
+    """``_parse_preserve(None, None)`` defaults to ``preserve_min="all"``."""
+    policy = Core._parse_preserve(None, None)
+    assert policy.preserve_min == "all"
+
+
+# ── test_parse_preserve_bucket_string_unaffected ──────────────────────────
+
+
+def test_parse_preserve_bucket_string_unaffected():
+    """``_parse_preserve("24h 7d", None)`` — bucket parsing unchanged (regression guard)."""
+    policy = Core._parse_preserve("24h 7d", None)
+    assert policy.preserve_min == "0h"
+    assert policy.hourly == 24
+    assert policy.daily == 7
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0
+
+
+# ── test_parse_preserve_all_defaults_to_all ───────────────────────────────
+
+
+def test_parse_preserve_all_defaults_to_all():
+    """``_parse_preserve("all")`` with default second arg — preserve_min is ``"all"``, no regex parsing."""
+    policy = Core._parse_preserve("all")
+    assert policy.preserve_min == "all"
+    # Verify no regex parsing was attempted: all bucket counts must be zero.
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0
+
+
+# ── test_parse_preserve_all_with_explicit_all ─────────────────────────────
+
+
+def test_parse_preserve_all_with_explicit_all():
+    """``_parse_preserve("all", "all")`` — full RetentionPolicy field set, anchors all False."""
+    policy = Core._parse_preserve("all", "all")
+    assert policy.preserve_min == "all"
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0
+    assert policy.anchor_hourly is False
+    assert policy.anchor_daily is False
+    assert policy.anchor_weekly is False
+    assert policy.anchor_monthly is False
+    assert policy.anchor_yearly is False
+
+
+# ── test_parse_preserve_all_with_explicit_6h ──────────────────────────────
+
+
+def test_parse_preserve_all_with_explicit_6h():
+    """``_parse_preserve("all", "6h")`` — preserve_min is ``"6h"`` AND all buckets == 0."""
+    policy = Core._parse_preserve("all", "6h")
+    assert policy.preserve_min == "6h"
+    assert policy.hourly == 0
+    assert policy.daily == 0
+    assert policy.weekly == 0
+    assert policy.monthly == 0
+    assert policy.yearly == 0

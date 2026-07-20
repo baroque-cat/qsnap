@@ -168,7 +168,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | inherits global | VM-specific backup retention (overrides global) |
 | `target_preserve_min` | string | inherits global | VM-specific minimum backup retention floor (overrides global) |
 | `snapshot_quiesce` | bool | `false` | Use `--quiesce` for filesystem-consistent snapshots |
-| `lifecycle_mode` | string | `"virsh"` | How to merge snapshots: `"virsh"` (blockcommit) or `"qemu-img"` (commit) |
+| `lifecycle_mode` | string | `"virsh"` | How to merge snapshots (adaptive): `"virsh"` — live `virsh blockcommit` of non-active layers while running, offline `qemu-img commit` when shut off; `"qemu-img"` — offline-only, defers while the VM runs |
 | `change_detection_mode` | string | `"allocation-size"` | How to detect disk changes: `"allocation-size"` or `"none"` |
 | `disks` | list | `null` | Explicit list of disk paths to snapshot (default: all VM disks) |
 
@@ -265,6 +265,28 @@ For cron/systemd timer use, the `--timer` flag logs the schedule summary at INFO
 ```bash
 qsnap run --timer
 ```
+
+## Snapshot Lifecycle (Blockcommit)
+
+Snapshots that retention removes are merged back into the base image to keep the backing chain short. qsnap picks the safe mechanism for the VM's **current power state** on every run — this is fully automatic:
+
+| VM state | `lifecycle_mode = "virsh"` (default) | `lifecycle_mode = "qemu-img"` |
+|---|---|---|
+| **running** | Non-active snapshots committed **live** via `virsh blockcommit`; only the **active layer** is deferred (reason `"vm_running"`) | Everything deferred (reason `"vm_running"`) — `qemu-img` writing into the base image of a live chain is unsafe |
+| **shut off** | Offline commit via `qemu-img commit` + child pivot + file deletion | Same as `"virsh"` |
+| **paused / other** | Everything deferred (reason `"vm_running"`) | Everything deferred |
+
+### Deferred blockcommits
+
+A deferred entry waits in the state file and drains automatically on a later run when the VM is in a compatible state (a formerly-active layer becomes committable once a newer snapshot exists above it while the VM runs; everything except the tip drains when the VM is shut off). Known deferral reasons:
+
+- `"vm_running"` — the snapshot was the active layer of a running VM, or the VM was paused / in qemu-img mode while running.
+- `"active_layer"` — the snapshot is the **XML-referenced tip** of a shut-off domain. It is never committed or deleted offline (deleting it would make the domain unbootable); it drains once it is no longer the tip.
+- `"apparmor"` / `"selinux"` — the commit was blocked by MAC policy.
+
+After offline commits, qsnap also refreshes the domain's persistent XML (strips stale `<backingStore>` elements) so `virsh start` re-probes the shortened chain and the VM stays bootable.
+
+> **Historical note:** before this behavior was introduced, setting `preserve = "all"` was broken — it produced a "keep nothing" policy and deleted all backups/snapshots instead of keeping everything. The bug is fixed, but backups already lost to it are not recoverable. If you ran an older version with `preserve = "all"`, verify your backup targets.
 
 ## Full Backups
 
