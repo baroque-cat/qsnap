@@ -22,7 +22,7 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 - **NBD job cleanup** — `virsh domjobabort` ensures NBD backup jobs are terminated even on failure
 - **Deferred operations** — AppArmor/SELinux-blocked blockcommits queued and retried on VM shutdown
 - **Pre-flight validation** — environment checks including truncated rsync artifact detection
-- **State consistency audit** — `qsnap check --state` detects phantom entries and corrupt state files
+- **State consistency audit** — `qsnap check --state` detects phantom entries, corrupt state files, and orphaned libvirt checkpoints
 - **Quiesce support** — optional `--quiesce` flag for filesystem-consistent snapshots
 
 ## Installation
@@ -353,9 +353,17 @@ The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD expo
 
 When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model for incremental transfers via `virsh backup-begin` with checkpoint-based dirty-block tracking. This produces standalone qcow2 files (no backing chain) that are easier to restore.
 
-**Fixed first-run behavior:** On the first bitmap run, the bucket strategy creates a FULL via `create_full_backup()` (which does not create a checkpoint). Then `transfer_missing()` detects that no prior checkpoint exists. Instead of performing a redundant full NBD export, it checks the state manager for existing FULLs. If a FULL exists, it creates a checkpoint via `virsh checkpoint-create-as` **without a data transfer** — the FULL already contains all data at this point in time, and the checkpoint serves only as the baseline for the next incremental run. Subsequent runs use `virsh backup-begin --incremental <checkpoint>` to export only dirty blocks.
+**Fixed first-run behavior:** On the first bitmap run, the bucket strategy creates a FULL via `create_full_backup()` (which does not create a checkpoint). Then `transfer_missing()` detects that no prior checkpoint exists. Instead of performing a redundant full NBD export, it checks the state manager for existing FULLs. If a FULL exists, it creates a checkpoint via `virsh checkpoint-create-as` **without a data transfer** — the FULL already contains all data at this point in time, and the checkpoint serves only as the baseline for the next incremental run. Subsequent runs embed `<incremental><checkpoint></incremental>` in the backup XML to export only dirty blocks (see [libvirt Incremental Backup API](#libvirt-incremental-backup-api) below).
 
 This eliminates the previous double-FULL bug where the first run produced two full NBD exports (one from the bucket strategy, one from `transfer_missing()`).
+
+### Bitmap Mode Limitations
+
+Bitmap mode has several inherent constraints due to its NBD/checkpoint architecture:
+
+- **Single-disk only** — only the first disk target (via `get_first_disk_target`) is pulled through the NBD export. Multi-disk VMs are not fully covered by bitmap backups; use `file-copy` mode for multi-disk coverage.
+- **`verify="metadata"` recommended** — `verify="hash"` is unsupported (NBD-converted qcow2 has a different internal structure than the source, so SHA-256 digests never match) and `verify="full"` will mismatch for incrementals (the target contains only dirty blocks while the source resolves to full data via the backing chain). ConfigFacade auto-downgrades both to `"metadata"` with a WARNING. `verify="metadata"` is the effective default for bitmap mode.
+- **Checkpoints live in libvirt, not in state files** — bitmap mode creates libvirt checkpoints (`virsh checkpoint-create-as`) that track dirty-bitmap boundaries. These are stored by libvirt, not in qsnap's JSON state. Use `qsnap check --state` to detect orphaned checkpoints (checkpoints whose target no longer matches any configured target path), and `virsh checkpoint-delete --metadata` to clean them up.
 
 ### `compress` and `compression_type`
 
@@ -749,6 +757,42 @@ Dry-run mode permits **read-only** shell commands for validation:
 - `qemu-img info` — metadata reads for base-size reporting
 - `find` — stale file discovery
 
+## Troubleshooting
+
+### Orphaned Checkpoints (Bitmap Mode)
+
+Bitmap mode creates libvirt checkpoints to track dirty-block boundaries. A checkpoint becomes **orphaned** when its target no longer matches any configured target path — for example, after a VM is removed from config, a target is removed, or a target path changes. Orphaned checkpoints accumulate in libvirt with no automatic cleanup.
+
+**Detection:**
+
+```bash
+qsnap check --state
+```
+
+The state consistency audit now includes an "Orphaned Checkpoints" section listing any checkpoints whose `qsnap-{hash}-{snapshot}` naming prefix does not match a configured target's hash. The `orphan_ckpts` column in the summary table shows the count per VM.
+
+**Cleanup:**
+
+Orphaned checkpoints are not deleted automatically (detection only, to prevent accidental data loss). Remove them manually:
+
+```bash
+# List all checkpoints for a VM
+virsh checkpoint-list --domain <vm> --name
+
+# Delete a specific orphaned checkpoint (metadata-only — no data merge)
+virsh checkpoint-delete --domain <vm> <checkpoint-name> --metadata
+```
+
+The `--metadata` flag removes the checkpoint definition without merging its dirty-bitmap data back into the active disk. This is safe for orphaned checkpoints because their data is no longer referenced by any qsnap-managed backup.
+
+### Broken Incremental Backups (Pre-Fix Runs)
+
+Before the `<incremental>` XML fix, bitmap mode incremental backups failed with `error: command 'backup-begin' doesn't support option --incremental`. If you have orphaned checkpoints or failed state entries from these runs:
+
+1. Run `qsnap check --state` to identify orphaned checkpoints.
+2. Delete orphaned checkpoints via `virsh checkpoint-delete --metadata` (see above).
+3. The next `qsnap run` will create a fresh checkpoint and resume normal incremental flow.
+
 ## Requirements
 
 - Python 3.11+
@@ -756,6 +800,29 @@ Dry-run mode permits **read-only** shell commands for validation:
 - qemu-img
 - rsync (hard requirement for all backup transfers)
 - QEMU/KVM hypervisor
+
+### libvirt Incremental Backup API
+
+Bitmap mode incremental backups use the **`<incremental>` XML element** inside the `<domainbackup>` document passed to `virsh backup-begin`, **not** a CLI flag. The `--incremental` flag does not exist in any version of virsh. The correct invocation is:
+
+```bash
+virsh backup-begin --domain <vm> --backupxml <backup.xml>
+```
+
+where `backup.xml` contains:
+
+```xml
+<domainbackup mode='pull'>
+  <incremental>qsnap-<hash>-<snapshot></incremental>
+  <server>
+    <transport unix>
+      <socket>/tmp/qsnap-backup-<pid>.sock</socket>
+    </transport>
+  </server>
+</domainbackup>
+```
+
+The `<incremental>` element references a prior checkpoint name. libvirt uses it to export only the dirty blocks (regions modified since that checkpoint) via the NBD server. FULL exports omit the `<incremental>` element entirely, producing a complete disk export.
 
 ### Libvirt Permissions
 

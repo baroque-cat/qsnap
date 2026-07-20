@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 from argparse import Namespace
-from pathlib import Path
 
 from qsnap.core import Core
 from qsnap.models.results import ShellResult
@@ -325,11 +324,13 @@ def test_schedule_summary_compression_type_zlib(
     and compress is disabled."""
     vm = make_vm_config(
         name="testvm",
-        targets=[make_target(
-            target_preserve="48h",
-            compression_type="zlib",
-            compress=False,
-        )],
+        targets=[
+            make_target(
+                target_preserve="48h",
+                compression_type="zlib",
+                compress=False,
+            )
+        ],
         snapshot_preserve="24h",
     )
     config = MockConfigFacade(vms=[vm])

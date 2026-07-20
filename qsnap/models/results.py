@@ -277,7 +277,12 @@ class StateCheckResult:
 
     ``status`` is ``"ok"`` when no issues found, or a combination of
     flags: ``"stale_snapshots"``, ``"stale_fulls"``, ``"stale_deps"``,
-    ``"corrupt_state"``.
+    ``"corrupt_state"``, ``"orphan_checkpoints"``.
+
+    ``orphan_checkpoints`` lists libvirt checkpoints (named
+    ``qsnap-{target_hash}-{snapshot}``) whose ``target_hash`` does not
+    match any configured target for this VM.  Detection is read-only —
+    no checkpoints are deleted automatically.
     """
 
     vm_name: str
@@ -286,6 +291,7 @@ class StateCheckResult:
     phantom_fulls: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     stale_deps: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     corrupt_files: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    orphan_checkpoints: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
 
 # ── Action audit trail ───────────────────────────────────────────────────

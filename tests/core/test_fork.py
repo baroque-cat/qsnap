@@ -233,8 +233,12 @@ def test_fork_nbd_running_vm(
     storage_dir = tmp_path / "storage"
     (storage_dir / "newvm").mkdir(parents=True, exist_ok=True)
 
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as spy_run, \
-         patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as spy_sd:
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as spy_run,
+        patch.object(
+            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+        ) as spy_sd,
+    ):
         result = core.fork("snap1", "newvm", storage_dir)
 
     assert isinstance(result, RestoreResult)

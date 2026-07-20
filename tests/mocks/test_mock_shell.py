@@ -51,8 +51,7 @@ def test_run_with_stall_detection_returns_expected_result():
     mock_shell.expect("qemu-img convert").returns(expected)
 
     result = mock_shell.run_with_stall_detection(
-        ["qemu-img", "convert", "-c", "-o", "compression_type=zstd",
-         "source.qcow2", "dest.qcow2"],
+        ["qemu-img", "convert", "-c", "-o", "compression_type=zstd", "source.qcow2", "dest.qcow2"],
         output_file=Path("/tmp/dest.qcow2"),
         stall_timeout=60,
     )
@@ -83,9 +82,7 @@ def test_run_with_stall_detection_raises_on_expectation_raises():
     import subprocess
 
     mock_shell = MockShell()
-    mock_shell.expect("rsync").raises(
-        subprocess.TimeoutExpired(cmd="rsync", timeout=30)
-    )
+    mock_shell.expect("rsync").raises(subprocess.TimeoutExpired(cmd="rsync", timeout=30))
 
     try:
         mock_shell.run_with_stall_detection(
@@ -93,7 +90,7 @@ def test_run_with_stall_detection_raises_on_expectation_raises():
             output_file=Path("/tmp/backup.qcow2"),
             stall_timeout=300,
         )
-        assert False, "Expected TimeoutExpired was not raised"
+        raise AssertionError("Expected TimeoutExpired was not raised")
     except subprocess.TimeoutExpired:
         pass
 
@@ -104,20 +101,25 @@ def test_run_with_stall_detection_expect_first_priority():
     mock_shell = MockShell()
 
     general = ShellResult(
-        success=False, stdout="", stderr="general match",
-        returncode=1, error="general",
+        success=False,
+        stdout="",
+        stderr="general match",
+        returncode=1,
+        error="general",
     )
     specific = ShellResult(
-        success=True, stdout="specific match", stderr="",
-        returncode=0, error=None,
+        success=True,
+        stdout="specific match",
+        stderr="",
+        returncode=0,
+        error=None,
     )
 
     mock_shell.expect("qemu-img convert").returns(general)
     mock_shell.expect_first("qemu-img convert.*zstd").returns(specific)
 
     result = mock_shell.run_with_stall_detection(
-        ["qemu-img", "convert", "-c", "-o", "compression_type=zstd",
-         "source.qcow2", "dest.qcow2"],
+        ["qemu-img", "convert", "-c", "-o", "compression_type=zstd", "source.qcow2", "dest.qcow2"],
         output_file=Path("/tmp/dest.qcow2"),
         stall_timeout=60,
     )

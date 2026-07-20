@@ -117,17 +117,30 @@ def get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
     return None
 
 
-def write_backup_xml(socket_path: str) -> Path:
+def write_backup_xml(socket_path: str, incremental: str | None = None) -> Path:
     """Write a libvirt pull-model backup XML to a temp file.
 
-    The XML uses ``mode='pull'`` with a Unix socket transport.  No
-    checkpoint is created (no ``--incremental`` flag is passed to
-    ``virsh backup-begin`` by the caller).
+    The XML uses ``mode='pull'`` with a Unix socket transport.
+
+    When *incremental* is non-``None``, an ``<incremental>`` element
+    naming an existing checkpoint is included as a child of
+    ``<domainbackup>``, before the ``<server>`` element.  This is the
+    correct libvirt mechanism for incremental NBD exports — the
+    ``--incremental`` CLI flag does not exist in any version of virsh
+    ``backup-begin`` (design D1).  When *incremental* is ``None``, the
+    XML describes a full NBD export (no ``<incremental>`` element).
+
+    Args:
+        socket_path: Path to the Unix socket the NBD server listens on.
+        incremental: Optional checkpoint name for incremental export.
+            When ``None`` (default), a full export XML is produced.
 
     Returns the path to the temp file containing the XML.
     """
+    incremental_element = f"  <incremental>{incremental}</incremental>\n" if incremental else ""
     xml_content = (
         f"<domainbackup mode='pull'>\n"
+        f"{incremental_element}"
         f"  <server transport='unix' socket='{socket_path}'/>\n"
         f"</domainbackup>\n"
     )

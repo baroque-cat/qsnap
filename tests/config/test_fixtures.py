@@ -407,9 +407,7 @@ def test_zstd_config_toml_parses_without_error() -> None:
     # vm_inherit: inherits global defaults.
     vm_inherit = facade.get_vm("vm_inherit")
     assert vm_inherit.name == "vm_inherit"
-    target_inherit = next(
-        t for t in vm_inherit.targets if t.path == Path("/mnt/backup/vm_inherit")
-    )
+    target_inherit = next(t for t in vm_inherit.targets if t.path == Path("/mnt/backup/vm_inherit"))
     assert target_inherit.compression_type == "zlib"
     assert target_inherit.backup_stall_timeout == "1h"
 
@@ -418,18 +416,16 @@ def test_zstd_config_toml_parses_without_error() -> None:
     assert vm_override.name == "vm_override"
 
     target_zstd = next(
-        t for t in vm_override.targets
-        if t.path == Path("/mnt/backup/vm_override_zstd")
+        t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_zstd")
     )
-    assert target_zstd.compression_type == "zstd"   # target-level override
+    assert target_zstd.compression_type == "zstd"  # target-level override
     assert target_zstd.backup_stall_timeout == "30m"  # target-level override
 
     target_inh = next(
-        t for t in vm_override.targets
-        if t.path == Path("/mnt/backup/vm_override_inherit")
+        t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_inherit")
     )
-    assert target_inh.compression_type == "zlib"    # inherited from global
-    assert target_inh.backup_stall_timeout == "1h"   # inherited from global
+    assert target_inh.compression_type == "zlib"  # inherited from global
+    assert target_inh.backup_stall_timeout == "1h"  # inherited from global
 
 
 @pytest.mark.unit

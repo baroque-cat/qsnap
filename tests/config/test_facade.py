@@ -10,6 +10,7 @@ Covers the ``config-parsing`` spec requirements:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -890,3 +891,150 @@ def test_stall_timeout_zero_disables(tmp_path: Path) -> None:
     )
     facade = ConfigFacade(config_file)
     assert facade.get_global().backup_stall_timeout == "0s"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# D5: bitmap + verify="full" guard — auto-downgrade with WARNING
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_bitmap_verify_hash_auto_downgrades(tmp_path: Path, caplog) -> None:
+    """Bitmap mode + verify='hash' emits WARNING and downgrades to 'metadata'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  incremental_mode = "bitmap"\n'
+        '  verify = "hash"\n'
+    )
+
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.incremental_mode == "bitmap"
+    # verify="hash" is downgraded to "metadata" in bitmap mode.
+    assert target.verify == "metadata"
+
+    warnings_text = " ".join(caplog.messages)
+    assert "not supported in bitmap mode" in warnings_text
+    assert "Downgrading" in warnings_text
+
+
+@pytest.mark.unit
+def test_bitmap_verify_full_auto_downgrades(tmp_path: Path, caplog) -> None:
+    """Bitmap mode + verify='full' emits WARNING and downgrades to 'metadata' (design D5)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  incremental_mode = "bitmap"\n'
+        '  verify = "full"\n'
+    )
+
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.incremental_mode == "bitmap"
+    # verify="full" is downgraded to "metadata" in bitmap mode (NBD mismatch).
+    assert target.verify == "metadata"
+
+    warnings_text = " ".join(caplog.messages)
+    assert "verify='full' is not supported in bitmap mode" in warnings_text
+    assert "qemu-img compare will always mismatch" in warnings_text
+    assert "Downgrading to verify='metadata'" in warnings_text
+
+
+@pytest.mark.unit
+def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
+    """Bitmap mode + verify='metadata' is the recommended mode — NO warning emitted."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  incremental_mode = "bitmap"\n'
+        '  verify = "metadata"\n'
+    )
+
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.incremental_mode == "bitmap"
+    # metadata is the correct/recommended mode — no downgrade.
+    assert target.verify == "metadata"
+
+    # No warning about verify downgrade should have been emitted.
+    for msg in caplog.messages:
+        assert "not supported in bitmap mode" not in msg
+        assert "Downgrading" not in msg
+
+
+@pytest.mark.unit
+def test_filecopy_verify_full_no_downgrade(tmp_path: Path) -> None:
+    """File-copy mode + verify='full' is supported — NOT downgraded."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  incremental_mode = "file-copy"\n'
+        '  verify = "full"\n'
+    )
+
+    facade = ConfigFacade(config_file)
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.incremental_mode == "file-copy"
+    # file-copy mode supports full verification — NOT downgraded.
+    assert target.verify == "full"
+
+
+@pytest.mark.unit
+def test_filecopy_verify_hash_no_downgrade(tmp_path: Path) -> None:
+    """File-copy mode + verify='hash' is supported — NOT downgraded."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  incremental_mode = "file-copy"\n'
+        '  verify = "hash"\n'
+    )
+
+    facade = ConfigFacade(config_file)
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.incremental_mode == "file-copy"
+    # file-copy mode supports hash verification — NOT downgraded.
+    assert target.verify == "hash"

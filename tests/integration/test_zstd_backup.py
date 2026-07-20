@@ -23,7 +23,6 @@ import pytest
 
 from qsnap.shell.subprocess_shell import SubprocessShell
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -104,9 +103,14 @@ def test_qemu_img_convert_zstd_produces_valid_qcow2(tmp_path: Path) -> None:
     # Convert raw → intermediate qcow2 (uncompressed).
     conv1 = shell.run(
         [
-            "qemu-img", "convert",
-            "-f", "raw", "-O", "qcow2",
-            str(raw_source), str(intermediate),
+            "qemu-img",
+            "convert",
+            "-f",
+            "raw",
+            "-O",
+            "qcow2",
+            str(raw_source),
+            str(intermediate),
         ],
         timeout=120,
     )
@@ -118,16 +122,19 @@ def test_qemu_img_convert_zstd_produces_valid_qcow2(tmp_path: Path) -> None:
     # Convert intermediate qcow2 → zstd-compressed qcow2.
     conv2 = shell.run(
         [
-            "qemu-img", "convert",
-            "-c", "-o", "compression_type=zstd",
-            "-O", "qcow2",
-            str(intermediate), str(compressed),
+            "qemu-img",
+            "convert",
+            "-c",
+            "-o",
+            "compression_type=zstd",
+            "-O",
+            "qcow2",
+            str(intermediate),
+            str(compressed),
         ],
         timeout=180,
     )
-    assert conv2.success, (
-        f"qemu-img convert with -o compression_type=zstd failed: {conv2.error}"
-    )
+    assert conv2.success, f"qemu-img convert with -o compression_type=zstd failed: {conv2.error}"
 
     # Free disk space: intermediate is no longer needed.
     intermediate.unlink(missing_ok=True)
@@ -195,9 +202,14 @@ def test_zstd_faster_than_zlib(tmp_path: Path) -> None:
     # Convert raw → intermediate qcow2 (uncompressed).
     conv = shell.run(
         [
-            "qemu-img", "convert",
-            "-f", "raw", "-O", "qcow2",
-            str(raw_source), str(intermediate),
+            "qemu-img",
+            "convert",
+            "-f",
+            "raw",
+            "-O",
+            "qcow2",
+            str(raw_source),
+            str(intermediate),
         ],
         timeout=180,
     )
@@ -210,10 +222,15 @@ def test_zstd_faster_than_zlib(tmp_path: Path) -> None:
     zstd_start = time.perf_counter()
     zstd_result = shell.run(
         [
-            "qemu-img", "convert",
-            "-c", "-o", "compression_type=zstd",
-            "-O", "qcow2",
-            str(intermediate), str(zstd_output),
+            "qemu-img",
+            "convert",
+            "-c",
+            "-o",
+            "compression_type=zstd",
+            "-O",
+            "qcow2",
+            str(intermediate),
+            str(zstd_output),
         ],
         timeout=600,
     )
@@ -224,10 +241,15 @@ def test_zstd_faster_than_zlib(tmp_path: Path) -> None:
     zlib_start = time.perf_counter()
     zlib_result = shell.run(
         [
-            "qemu-img", "convert",
-            "-c", "-o", "compression_type=zlib",
-            "-O", "qcow2",
-            str(intermediate), str(zlib_output),
+            "qemu-img",
+            "convert",
+            "-c",
+            "-o",
+            "compression_type=zlib",
+            "-O",
+            "qcow2",
+            str(intermediate),
+            str(zlib_output),
         ],
         timeout=1800,
     )
@@ -299,8 +321,7 @@ def test_rsync_zstd_transfer(tmp_path: Path) -> None:
     assert dest_file.exists(), "Destination file was not created"
     dest_checksum = _file_sha256(dest_file)
     assert src_checksum == dest_checksum, (
-        f"Checksum mismatch: source={src_checksum[:16]}... "
-        f"dest={dest_checksum[:16]}..."
+        f"Checksum mismatch: source={src_checksum[:16]}... dest={dest_checksum[:16]}..."
     )
 
 
@@ -348,9 +369,14 @@ def test_large_disk_zstd_no_stall(tmp_path: Path) -> None:
     # Convert raw → intermediate qcow2 (uncompressed).
     conv = shell.run(
         [
-            "qemu-img", "convert",
-            "-f", "raw", "-O", "qcow2",
-            str(raw_source), str(intermediate),
+            "qemu-img",
+            "convert",
+            "-f",
+            "raw",
+            "-O",
+            "qcow2",
+            str(raw_source),
+            str(intermediate),
         ],
         timeout=300,
     )
@@ -364,19 +390,22 @@ def test_large_disk_zstd_no_stall(tmp_path: Path) -> None:
     # process will be killed.  For a normally-progressing conversion
     # this should never happen.
     convert_cmd = [
-        "qemu-img", "convert",
-        "-c", "-o", "compression_type=zstd",
-        "-O", "qcow2",
-        str(intermediate), str(output),
+        "qemu-img",
+        "convert",
+        "-c",
+        "-o",
+        "compression_type=zstd",
+        "-O",
+        "qcow2",
+        str(intermediate),
+        str(output),
     ]
     result = shell.run_with_stall_detection(
         convert_cmd,
         output_file=output,
         stall_timeout=60,
     )
-    assert result.success, (
-        f"qemu-img convert with stall detection failed: {result.error}"
-    )
+    assert result.success, f"qemu-img convert with stall detection failed: {result.error}"
     # Explicitly assert there was no stall error (belt-and-suspenders).
     assert "no progress" not in (result.error or ""), (
         f"False-positive stall detected: {result.error}"

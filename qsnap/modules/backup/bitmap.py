@@ -10,16 +10,19 @@ them into a standalone qcow2 file on the target — no backing chain.
 **NBD backup lifecycle:**
 
 1. Remove any stale socket at ``/tmp/qsnap-backup-{pid}.sock``.
-2. Create backup XML with NBD Unix socket and write to temp file.
-3. If a prior qsnap checkpoint exists, pass ``--incremental <checkpoint>``
-   to ``virsh backup-begin`` for dirty-block-only export.
-4. ``virsh backup-begin --domain VM <backupxml> [--incremental <cp>]``
-5. ``qemu-img convert -n nbd:unix:<socket> <target_file>``
-6. Verify the target file (if ``target.verify != "off"``).
-7. Delete prior checkpoint (if any) and create a new one for the next
+2. Create backup XML with NBD Unix socket and write to temp file.  When
+   a prior qsnap checkpoint exists, an ``<incremental>`` element naming
+   that checkpoint is embedded in the XML (design D1 — the
+   ``--incremental`` CLI flag does not exist in any version of virsh
+   ``backup-begin``).
+3. ``virsh backup-begin --domain VM <backupxml>`` starts the NBD export
+   (full when no ``<incremental>`` element, incremental otherwise).
+4. ``qemu-img convert -n nbd:unix:<socket> <target_file>``
+5. Verify the target file (if ``target.verify != "off"``).
+6. Delete prior checkpoint (if any) and create a new one for the next
    incremental run.
-8. On failure, preserve all checkpoints for retry.
-9. Socket is always cleaned up in a ``finally`` block.
+7. On failure, preserve all checkpoints for retry.
+8. Socket is always cleaned up in a ``finally`` block.
 """
 
 from __future__ import annotations
@@ -29,7 +32,6 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -38,7 +40,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
-from qsnap.utils.nbd import get_first_disk_target, nbd_full_export
+from qsnap.utils.nbd import get_first_disk_target, nbd_full_export, write_backup_xml
 from qsnap.utils.parsing import parse_timestamp
 from qsnap.utils.verification import verify_backup
 
@@ -115,7 +117,7 @@ class BitmapBackupProvider(IBackupProvider):
         existing = self.list(target)
         existing_names = {s.name for s in existing}
 
-        target_hash = self._target_hash(str(target.path))
+        target_hash = self.target_hash(str(target.path))
         prior_checkpoints = self._list_checkpoints_for_target(vm_config.name, target_hash)
 
         results: list[BackupResult] = []
@@ -157,11 +159,18 @@ class BitmapBackupProvider(IBackupProvider):
             # Step 1: Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
 
-            # Step 2: Build and write backup XML.
-            backup_xml_path = self._write_backup_xml(socket_path)
+            # Step 2: Build and write backup XML.  The incremental
+            # checkpoint is passed via the <incremental> XML element,
+            # NOT via a --incremental CLI flag (design D1 — the flag
+            # does not exist in any version of virsh backup-begin).
+            backup_xml_path = write_backup_xml(socket_path, incremental=prior)
 
             try:
-                # Step 3: Start NBD export via virsh backup-begin.
+                # Step 3: Start NBD export via virsh backup-begin.  The
+                # incremental checkpoint is already embedded in the
+                # backup XML via the <incremental> element (design D1).
+                # No --incremental CLI flag is passed — it does not
+                # exist in any version of virsh backup-begin.
                 backup_cmd = [
                     "virsh",
                     "backup-begin",
@@ -169,8 +178,6 @@ class BitmapBackupProvider(IBackupProvider):
                     vm_config.name,
                     str(backup_xml_path),
                 ]
-                if prior:
-                    backup_cmd.extend(["--incremental", prior])
 
                 backup_result = self._shell.run(backup_cmd, timeout=120)
                 if not backup_result.success:
@@ -363,6 +370,11 @@ class BitmapBackupProvider(IBackupProvider):
         producing a compressed qcow2.  When ``compression_type`` is
         ``"zstd"``, ``-o compression_type=zstd`` is added for faster
         compression.
+
+        This method SHALL NOT call ``self._state.record_full_backup()``
+        — state recording is Core's responsibility after post-create
+        verification passes (design D4 — matches
+        ``FileCopyBackupProvider`` behavior).
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -412,16 +424,10 @@ class BitmapBackupProvider(IBackupProvider):
         except OSError:
             bytes_transferred = 0
 
-        # Record FULL in state (mirrors FileCopyBackupProvider parity —
-        # design D4).  Called after successful FULL creation and atomic
-        # rename, before returning success.
-        if self._state is not None:
-            self._state.record_full_backup(
-                str(target.path),
-                f"{full_name}.qcow2",
-                source_snapshot.timestamp,
-                bucket_level,
-            )
+        # State recording is Core's responsibility after post-create
+        # verification passes (design D4 — matches FileCopyBackupProvider
+        # behavior, which also does not self-record).  The provider SHALL
+        # NOT call self._state.record_full_backup() here.
 
         return BackupResult(
             success=True,
@@ -486,7 +492,9 @@ class BitmapBackupProvider(IBackupProvider):
         """Return qsnap-owned checkpoint names for *vm_name*.
 
         Calls ``virsh checkpoint-list --name <vm>`` and filters by the
-        ``qsnap-`` prefix.
+        ``qsnap-`` prefix.  On command failure (e.g., VM not defined,
+        libvirt not running), logs a WARNING and returns an empty list —
+        callers treat this as "no checkpoints" (non-fatal).
         """
         cmd = [
             "virsh",
@@ -497,6 +505,11 @@ class BitmapBackupProvider(IBackupProvider):
         ]
         result = self._shell.run(cmd, timeout=30)
         if not result.success:
+            logger.warning(
+                "Failed to list checkpoints for VM %s: %s",
+                vm_name,
+                result.error,
+            )
             return []
 
         checkpoints: list[str] = []
@@ -544,22 +557,6 @@ class BitmapBackupProvider(IBackupProvider):
         return True
 
     @staticmethod
-    def _target_hash(target_path: str) -> str:
+    def target_hash(target_path: str) -> str:
         """Short hash of *target_path* for checkpoint naming."""
         return hashlib.md5(target_path.encode()).hexdigest()[:8]  # noqa: S324
-
-    @staticmethod
-    def _write_backup_xml(socket_path: str) -> Path:
-        """Write a libvirt pull-model backup XML to a temp file.
-
-        Returns the path to the temp file.
-        """
-        xml_content = (
-            f"<domainbackup mode='pull'>\n"
-            f"  <server transport='unix' socket='{socket_path}'/>\n"
-            f"</domainbackup>\n"
-        )
-        fd, tmp_path = tempfile.mkstemp(prefix="qsnap-backup-", suffix=".xml")
-        with os.fdopen(fd, "w") as f:
-            f.write(xml_content)
-        return Path(tmp_path)

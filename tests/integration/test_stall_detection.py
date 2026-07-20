@@ -24,7 +24,6 @@ import pytest
 
 from qsnap.shell.subprocess_shell import SubprocessShell
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -49,7 +48,9 @@ def _assert_no_orphan(marker: str, *, wait: float = 0.5) -> None:
 
 
 @pytest.mark.integration
-def test_stall_detection_kills_hung_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stall_detection_kills_hung_convert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Start a hung process and verify stall detection kills it.
 
     Uses ``sleep`` (simulating a hung data-transfer command) with an

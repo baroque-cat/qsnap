@@ -290,3 +290,297 @@ def test_check_state_corrupted_json_detected(
     assert result["testvm"].phantom_snapshots == []
     assert result["testvm"].phantom_fulls == []
     assert result["testvm"].stale_deps == []
+
+
+# ── test_check_state_orphaned_checkpoint_removed_target ─────────────────
+
+
+def test_check_state_orphaned_checkpoint_removed_target(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A checkpoint exists whose hash does not match any configured target.
+
+    Simulates a target that was removed from config — its checkpoint
+    remains in libvirt but the hash no longer matches any target path.
+    """
+    import hashlib
+
+    from qsnap.models.results import ShellResult
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    # Configure one target at a "current" path
+    target_path = tmp_path / "backup" / "existing"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Compute hash of a "deleted" target path (not in vm.targets)
+    deleted_hash = hashlib.md5(b"/nonexistent/deleted/target").hexdigest()[:8]
+    orphan_cp = f"qsnap-{deleted_hash}-snap1"
+
+    # Mock virsh checkpoint-list to return the orphaned checkpoint
+    mock_shell.expect("virsh checkpoint-list").returns(
+        ShellResult(success=True, stdout=f"{orphan_cp}\n", stderr="", returncode=0, error=None)
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    assert orphan_cp in result["testvm"].orphan_checkpoints
+    assert "orphan_checkpoints" in result["testvm"].status
+    # Other fields should be clean
+    assert result["testvm"].phantom_snapshots == []
+    assert result["testvm"].phantom_fulls == []
+    assert result["testvm"].stale_deps == []
+    assert result["testvm"].corrupt_files == []
+
+
+# ── test_check_state_orphaned_checkpoint_changed_path ───────────────────
+
+
+def test_check_state_orphaned_checkpoint_changed_path(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A target path was changed so an existing checkpoint's hash no longer matches.
+
+    The checkpoint was created when the target was at an old path; now
+    the target is at a new path with a different hash.
+    """
+    import hashlib
+
+    from qsnap.models.results import ShellResult
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    # Target at new (current) path
+    target_path = tmp_path / "backup" / "new-path"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Checkpoint with hash of old path
+    old_hash = hashlib.md5(b"/old/backup/path").hexdigest()[:8]
+    orphan_cp = f"qsnap-{old_hash}-snap1"
+
+    mock_shell.expect("virsh checkpoint-list").returns(
+        ShellResult(success=True, stdout=f"{orphan_cp}\n", stderr="", returncode=0, error=None)
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    assert orphan_cp in result["testvm"].orphan_checkpoints
+    assert "orphan_checkpoints" in result["testvm"].status
+    assert result["testvm"].phantom_snapshots == []
+    assert result["testvm"].phantom_fulls == []
+    assert result["testvm"].stale_deps == []
+    assert result["testvm"].corrupt_files == []
+
+
+# ── test_check_state_no_orphans_all_match ───────────────────────────────
+
+
+def test_check_state_no_orphans_all_match(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All checkpoints match configured targets — orphan_checkpoints is empty."""
+    import hashlib
+
+    from qsnap.models.results import ShellResult
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup" / "main"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Checkpoint hash matches the configured target
+    target_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+    matching_cp = f"qsnap-{target_hash}-snap1"
+
+    mock_shell.expect("virsh checkpoint-list").returns(
+        ShellResult(success=True, stdout=f"{matching_cp}\n", stderr="", returncode=0, error=None)
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    assert result["testvm"].orphan_checkpoints == []
+    assert "orphan_checkpoints" not in result["testvm"].status
+    assert result["testvm"].status == "ok"
+    assert result["testvm"].phantom_snapshots == []
+    assert result["testvm"].phantom_fulls == []
+    assert result["testvm"].stale_deps == []
+    assert result["testvm"].corrupt_files == []
+
+
+# ── test_check_state_checkpoint_list_failure_non_fatal ──────────────────
+
+
+def test_check_state_checkpoint_list_failure_non_fatal(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """virsh checkpoint-list fails — check_state() does NOT raise, orphans empty."""
+    from qsnap.models.results import ShellResult
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Mock virsh checkpoint-list to return failure
+    mock_shell.expect("virsh checkpoint-list").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: Domain not found",
+            returncode=1,
+            error="Domain not found",
+        )
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    # Must NOT raise
+    result = core.check_state()
+
+    assert result["testvm"].orphan_checkpoints == []
+    assert "orphan_checkpoints" not in result["testvm"].status
+    assert result["testvm"].status == "ok"
+
+
+# ── test_check_state_non_qsnap_checkpoints_ignored ──────────────────────
+
+
+def test_check_state_non_qsnap_checkpoints_ignored(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Checkpoints not matching qsnap-{hash}-{snapshot} naming are silently ignored.
+
+    Non-qsnap checkpoints are filtered by list_checkpoints (startswith("qsnap-")).
+    qsnap- checkpoints with only 2 parts (malformed) are skipped by
+    _detect_orphan_checkpoints (len(parts) < 3).
+    """
+    import hashlib
+
+    from qsnap.models.results import ShellResult
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup" / "main"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Hash for target — this one should match
+    target_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+    # Hash for a different target — this one is truly orphaned
+    other_hash = hashlib.md5(b"/other/target").hexdigest()[:8]
+
+    # Mix of: non-qsnap, malformed qsnap, orphaned qsnap, matching qsnap
+    checkpoints = [
+        "not-ours-checkpoint",  # non-qsnap — filtered by list_checkpoints
+        "qsnap-nohash",  # malformed (2 parts after split) → skipped
+        f"qsnap-{other_hash}-orphan1",  # valid format, orphaned
+        f"qsnap-{target_hash}-valid1",  # valid format, matching
+    ]
+    mock_shell.expect("virsh checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout="\n".join(checkpoints) + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    # Only the truly orphaned valid-format qsnap checkpoint should appear
+    assert f"qsnap-{other_hash}-orphan1" in result["testvm"].orphan_checkpoints
+    assert f"qsnap-{target_hash}-valid1" not in result["testvm"].orphan_checkpoints
+    assert "qsnap-nohash" not in result["testvm"].orphan_checkpoints
+    assert "not-ours-checkpoint" not in result["testvm"].orphan_checkpoints
+    assert len(result["testvm"].orphan_checkpoints) == 1
+    assert "orphan_checkpoints" in result["testvm"].status
+
+
+# ── test_check_state_result_includes_orphans ────────────────────────────
+
+
+def test_check_state_result_includes_orphans():
+    """StateCheckResult with orphaned checkpoints preserves them in the field."""
+    from qsnap.models.results import StateCheckResult
+
+    orphans = ["qsnap-abc12345-snap1", "qsnap-def67890-snap2"]
+    result = StateCheckResult(
+        vm_name="testvm",
+        status="orphan_checkpoints",
+        orphan_checkpoints=orphans,
+    )
+
+    assert result.orphan_checkpoints == orphans
+    assert result.orphan_checkpoints[0] == "qsnap-abc12345-snap1"
+    assert result.orphan_checkpoints[1] == "qsnap-def67890-snap2"
+    assert "orphan_checkpoints" in result.status
+
+
+# ── test_check_state_result_empty_orphans ───────────────────────────────
+
+
+def test_check_state_result_empty_orphans():
+    """StateCheckResult with no orphans defaults to an empty list."""
+    from qsnap.models.results import StateCheckResult
+
+    result = StateCheckResult(vm_name="testvm", status="ok")
+
+    assert result.orphan_checkpoints == []
+    # Verify defaults for other lists too
+    assert result.phantom_snapshots == []
+    assert result.phantom_fulls == []
+    assert result.stale_deps == []
+    assert result.corrupt_files == []

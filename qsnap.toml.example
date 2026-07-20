@@ -152,9 +152,10 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   incremental = true
 
   # Incremental backup mode:
-  #   "file-copy" — whole-file copy (default)
-  #   "bitmap"    — dirty-block extraction via checkpoint
-  # incremental_mode = "file-copy"
+  #   "bitmap"    — dirty-block extraction via checkpoint (default since 2026-07-19)
+  #   "file-copy" — whole-file copy (rsync)
+  # The factory automatically falls back to "file-copy" when libvirt < 6.0.
+  # incremental_mode = "bitmap"
 
   # Override backup retention for this target only
   # target_preserve = "72h 21d 12w 18m 3y"
@@ -181,9 +182,13 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # copy_base = false
 
   # Backup verification level:
-  #   "metadata" — verify qcow2 format + virtual-size match (default)
-  #   "full"     — metadata check + qemu-img compare
+  #   "metadata" — verify qcow2 format + virtual-size match
+  #   "hash"     — metadata + SHA-256 content hash (default for file-copy)
+  #   "full"     — metadata + qemu-img compare
   #   "off"      — no verification
+  # Mode-dependent default: "hash" for file-copy, "metadata" for bitmap.
+  # In bitmap mode, "hash" and "full" are auto-downgraded to "metadata"
+  # (NBD-converted qcow2 has different internal structure than source).
   # verify = "metadata"
 
   # Rate limit for this target only (overrides global rate_limit).
@@ -214,7 +219,7 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   path = "/mnt/backup/critical-db"
 #   incremental = true
 #   incremental_mode = "bitmap"
-#   verify = "full"
+#   verify = "metadata"          # max effective for bitmap (full/hash auto-downgraded)
 #   compress = true
 #   backup_retry_max = 5
 #   backup_retry_base = "10s"

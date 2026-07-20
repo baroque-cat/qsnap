@@ -183,9 +183,7 @@ def test_mock_factory_satisfies_new_interface():
 # ---------------------------------------------------------------------------
 
 
-def test_mock_backup_provider_create_full_backup_accepts_new_params(
-    make_vm_config, make_target
-):
+def test_mock_backup_provider_create_full_backup_accepts_new_params(make_vm_config, make_target):
     """MockBackupProvider.create_full_backup() accepts the new
     ``compression_type`` and ``stall_timeout`` keyword arguments
     without error and still passes isinstance(..., IBackupProvider)."""
@@ -209,9 +207,7 @@ def test_mock_backup_provider_create_full_backup_accepts_new_params(
     assert result.success is True
 
 
-def test_mock_backup_provider_transfer_missing_accepts_new_params(
-    make_vm_config, make_target
-):
+def test_mock_backup_provider_transfer_missing_accepts_new_params(make_vm_config, make_target):
     """MockBackupProvider.transfer_missing() accepts the new
     ``compression_type`` and ``stall_timeout`` keyword arguments
     without error."""
@@ -315,8 +311,6 @@ def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_tar
         assert isinstance(r1, BackupResult)
 
         # transfer_missing with default compression_type
-        r2 = provider.transfer_missing(
-            make_vm_config(), make_target(), snapshots
-        )
+        r2 = provider.transfer_missing(make_vm_config(), make_target(), snapshots)
         assert isinstance(r2, list)
         assert all(isinstance(r, BackupResult) for r in r2)

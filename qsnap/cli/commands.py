@@ -138,6 +138,7 @@ def _state_check_to_rows(
         )
         stale = ", ".join(result.stale_deps) if result.stale_deps else "-"
         corrupt = ", ".join(result.corrupt_files) if result.corrupt_files else "-"
+        orphans = ", ".join(result.orphan_checkpoints) if result.orphan_checkpoints else "-"
         rows.append(
             {
                 "vm": vm_name,
@@ -145,6 +146,7 @@ def _state_check_to_rows(
                 "phantom": phantom,
                 "stale_deps": stale,
                 "corrupt": corrupt,
+                "orphan_ckpts": orphans,
             }
         )
     return rows
@@ -329,10 +331,21 @@ def handle_check(core: Core, args: Namespace) -> int:
     if state:
         data = core.check_state(vm_filter)
         rows = _state_check_to_rows(data)
-        columns = ["vm", "status", "phantom", "stale_deps", "corrupt"]
+        columns = ["vm", "status", "phantom", "stale_deps", "corrupt", "orphan_ckpts"]
         has_issues = any(r.status != "ok" for r in data.values())
         output = format_output(rows, columns, fmt)
         print(output or "State is consistent — no issues found.")
+
+        # Detailed "Orphaned Checkpoints" section (design D6).
+        all_orphans = [
+            (vm_name, cp) for vm_name, result in data.items() for cp in result.orphan_checkpoints
+        ]
+        if all_orphans:
+            print("\nOrphaned Checkpoints:")
+            for vm_name, cp in all_orphans:
+                print(f"  {vm_name}: {cp}")
+            print("  Cleanup: virsh checkpoint-delete --domain <vm> <checkpoint> --metadata")
+
         return 1 if has_issues else 0
 
     data = core.check(vm_filter, deep=deep)

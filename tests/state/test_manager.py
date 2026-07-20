@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -762,3 +763,184 @@ def test_state_backup_count_zero_disables_rotation(tmp_path: Path) -> None:
         assert not backup.exists(), (
             f"Backup file {backup.name} should NOT exist when state_backup_count=0"
         )
+
+
+# ── FULL backup deduplication tests (design D4) ───────────────────────────
+
+
+def test_deduplicate_duplicate_full_entries(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Duplicate (name, target_path) tuples are removed on load, keeping the first.
+
+    Create a _full_backups.json with duplicate entries (same name
+    appearing twice for the same target).  Load via JsonStateManager.
+    Assert: only ONE entry remains; an INFO log was emitted for each
+    removed duplicate.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a state file with duplicate entries.
+    full_backups_data = {
+        "/mnt/backup/testvm": [
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            {
+                "name": "full-2024-02-01",
+                "path": "/mnt/backup/testvm/full-2024-02-01",
+                "timestamp": "2024-02-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            # DUPLICATE of the first entry (same name + same target_path).
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(full_backups_data), encoding="utf-8")
+
+    caplog.set_level(logging.INFO)
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+
+    # Only the first occurrence should remain (the duplicate removed).
+    assert len(backups) == 2
+    assert backups[0].name == "full-2024-01-01"
+    assert backups[1].name == "full-2024-02-01"
+
+    # Deduplication log should have been emitted.
+    assert (
+        "Deduplicated FULL backup entry: full-2024-01-01 for target /mnt/backup/testvm"
+        in caplog.text
+    )
+
+
+def test_deduplicate_no_duplicates_noop(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """No duplicate entries → all preserved, no deduplication log.
+
+    Create a _full_backups.json where all (name, target_path) tuples are
+    unique.  Load via JsonStateManager.  Assert all entries are preserved
+    and no deduplication INFO log was emitted.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a state file with only unique entries.
+    full_backups_data = {
+        "/mnt/backup/testvm": [
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            {
+                "name": "full-2024-02-01",
+                "path": "/mnt/backup/testvm/full-2024-02-01",
+                "timestamp": "2024-02-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            {
+                "name": "full-2024-03-01",
+                "path": "/mnt/backup/testvm/full-2024-03-01",
+                "timestamp": "2024-03-01T12:00:00",
+                "bucket_level": "weekly",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(full_backups_data), encoding="utf-8")
+
+    caplog.set_level(logging.INFO)
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+
+    # All entries should be preserved.
+    assert len(backups) == 3
+    names = [b.name for b in backups]
+    assert names == ["full-2024-01-01", "full-2024-02-01", "full-2024-03-01"]
+
+    # No deduplication log should have been emitted.
+    assert "Deduplicated FULL backup entry:" not in caplog.text
+
+
+def test_deduplicate_is_idempotent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Second load after deduplication is a no-op (idempotent).
+
+    Create a _full_backups.json with duplicates.  Load it once
+    (deduplication occurs and state is rewritten).  Then load it again.
+    Assert: the second load does NOT emit a deduplication log and the
+    state file has been rewritten with the deduplicated list.
+    """
+
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a state file with duplicate entries.
+    full_backups_data = {
+        "/mnt/backup/testvm": [
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            {
+                "name": "full-2024-02-01",
+                "path": "/mnt/backup/testvm/full-2024-02-01",
+                "timestamp": "2024-02-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+            # DUPLICATE of the first entry.
+            {
+                "name": "full-2024-01-01",
+                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "bucket_level": "monthly",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(full_backups_data), encoding="utf-8")
+
+    caplog.set_level(logging.INFO)
+
+    # First load — deduplication should occur.
+    manager1 = JsonStateManager(state_dir=state_dir)
+    backups1 = manager1.get_full_backups("/mnt/backup/testvm")
+    assert len(backups1) == 2
+    assert (
+        "Deduplicated FULL backup entry: full-2024-01-01 for target /mnt/backup/testvm"
+        in caplog.text
+    )
+
+    # The state file should have been rewritten with the deduplicated list.
+    with open(full_backups_file, encoding="utf-8") as fh:
+        rewritten_data = json.load(fh)
+    assert len(rewritten_data["/mnt/backup/testvm"]) == 2
+    names_on_disk = [e["name"] for e in rewritten_data["/mnt/backup/testvm"]]
+    assert names_on_disk == ["full-2024-01-01", "full-2024-02-01"]
+
+    # Clear caplog before second load.
+    caplog.clear()
+
+    # Second load — should be a no-op (already deduplicated).
+    manager2 = JsonStateManager(state_dir=state_dir)
+    backups2 = manager2.get_full_backups("/mnt/backup/testvm")
+    assert len(backups2) == 2
+    assert backups2[0].name == "full-2024-01-01"
+    assert backups2[1].name == "full-2024-02-01"
+
+    # No deduplication log on the second load.
+    assert "Deduplicated FULL backup entry:" not in caplog.text

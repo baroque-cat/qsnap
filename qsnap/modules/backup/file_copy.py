@@ -289,14 +289,16 @@ class FileCopyBackupProvider(IBackupProvider):
                     )
 
                 if full_anchor is not None:
-                    # Rebase to FULL anchor
+                    # Rebase to FULL anchor.  -B specifies the backing
+                    # format (qcow2); the -F flag was renamed to -B in
+                    # QEMU 11.0 for the rebase subcommand (design D3).
                     rebase_cmd = [
                         "qemu-img",
                         "rebase",
                         "-u",
                         "-b",
                         f"./{full_anchor.name}",
-                        "-F",
+                        "-B",
                         "qcow2",
                         str(target_file),
                     ]
@@ -340,13 +342,15 @@ class FileCopyBackupProvider(IBackupProvider):
                             backing_filename = info.get("backing-filename")
                             if backing_filename:
                                 backing_basename = Path(backing_filename).name
+                                # -B specifies the backing format (qcow2);
+                                # renamed from -F in QEMU 11.0 (design D3).
                                 rebase_cmd = [
                                     "qemu-img",
                                     "rebase",
                                     "-u",
                                     "-b",
                                     backing_basename,
-                                    "-F",
+                                    "-B",
                                     "qcow2",
                                     str(target_file),
                                 ]

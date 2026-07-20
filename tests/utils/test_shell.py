@@ -209,9 +209,7 @@ def test_run_with_stall_detection_kills_stalled_process(
     assert "no progress" in result.error  # type: ignore[operator]
 
 
-def test_run_with_stall_detection_slow_but_progressing(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_run_with_stall_detection_slow_but_progressing(tmp_path: Path, monkeypatch: object) -> None:
     """Output file grows slowly (1KB per cycle) — stall not triggered."""
     monkeypatch.setattr(subprocess_shell, "_POLL_INTERVAL", 0.5)  # type: ignore[arg-type]
 
@@ -250,9 +248,7 @@ def test_run_with_stall_detection_no_output_file() -> None:
     """output_file=None behaves like run() with infinite timeout."""
     shell = SubprocessShell()
 
-    result = shell.run_with_stall_detection(
-        ["sleep", "1"], output_file=None
-    )
+    result = shell.run_with_stall_detection(["sleep", "1"], output_file=None)
 
     assert isinstance(result, ShellResult)
     assert result.success is True
@@ -291,9 +287,7 @@ def test_run_with_stall_detection_check_mode_suppresses_error(
     assert len(debug_records) >= 1
 
 
-def test_subprocess_shell_stall_kills(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_subprocess_shell_stall_kills(tmp_path: Path, monkeypatch: object) -> None:
     """SubprocessShell kills ``sleep 3600`` after stall_timeout with no growth."""
     monkeypatch.setattr(subprocess_shell, "_POLL_INTERVAL", 0.5)  # type: ignore[arg-type]
 
@@ -316,9 +310,7 @@ def test_subprocess_shell_stall_kills(
     assert elapsed < 15
 
 
-def test_subprocess_shell_stall_allows_growth(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_subprocess_shell_stall_allows_growth(tmp_path: Path, monkeypatch: object) -> None:
     """SubprocessShell allows a slowly-growing file to complete without stall."""
     monkeypatch.setattr(subprocess_shell, "_POLL_INTERVAL", 0.5)  # type: ignore[arg-type]
 
@@ -356,9 +348,7 @@ def test_subprocess_shell_stall_allows_growth(
     assert elapsed < 12
 
 
-def test_stall_detection_logs_no_speed(
-    caplog: object, tmp_path: Path, monkeypatch: object
-) -> None:
+def test_stall_detection_logs_no_speed(caplog: object, tmp_path: Path, monkeypatch: object) -> None:
     """No speed/progress/rate/MB-s logged during stall detection polling."""
     monkeypatch.setattr(subprocess_shell, "_POLL_INTERVAL", 0.5)  # type: ignore[arg-type]
 

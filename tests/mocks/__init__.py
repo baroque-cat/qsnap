@@ -47,6 +47,4 @@ def test_mock_shell_implements_full_interface():
 
     # run_with_stall_detection must be callable and accept the full
     # IShell ABC signature.
-    assert callable(mock.run_with_stall_detection), (
-        "run_with_stall_detection must be callable"
-    )
+    assert callable(mock.run_with_stall_detection), "run_with_stall_detection must be callable"

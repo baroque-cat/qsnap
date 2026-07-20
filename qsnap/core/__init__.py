@@ -53,6 +53,10 @@ from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import verify_full_backup
 
+# Lazy import — BitmapBackupProvider is only needed for orphan checkpoint
+# detection in check_state().  Imported at call time to avoid a hard
+# dependency from Core to the bitmap module for all other code paths
+# (design D6: the provider's list_checkpoints only needs IShell).
 logger = logging.getLogger(__name__)
 
 
@@ -1164,6 +1168,18 @@ class Core:
                     corrupt_files.append(f"{vm_state_path}: {exc}")
                     status_parts.append("corrupt_state")
 
+            # ── Orphaned checkpoints (design D6) ─────────────────────
+            # Detect libvirt checkpoints (qsnap-{hash}-{snapshot}) whose
+            # target_hash does not match any configured target for this VM.
+            # Checkpoints live only in libvirt (not in state files), so
+            # when a target is removed or its path changes, checkpoints
+            # become permanently orphaned.  Detection is read-only and
+            # non-fatal — a failed checkpoint-list logs a WARNING and
+            # continues to the next VM.
+            orphan_checkpoints = self._detect_orphan_checkpoints(vm)
+            if orphan_checkpoints:
+                status_parts.append("orphan_checkpoints")
+
             status = ":".join(status_parts) if status_parts else "ok"
             results[vm.name] = StateCheckResult(
                 vm_name=vm.name,
@@ -1172,8 +1188,55 @@ class Core:
                 phantom_fulls=phantom_fulls,
                 stale_deps=stale_deps,
                 corrupt_files=corrupt_files,
+                orphan_checkpoints=orphan_checkpoints,
             )
         return results
+
+    def _detect_orphan_checkpoints(self, vm: VMConfig) -> list[str]:
+        """Detect libvirt checkpoints that no longer match any target.
+
+        Checkpoints are named ``qsnap-{target_hash}-{snapshot}`` where
+        ``target_hash`` is an 8-char MD5 hash of the target path.  A
+        checkpoint is orphaned when its hash does not match
+        ``target_hash(str(target.path))`` for any target configured for
+        this VM.
+
+        Uses :class:`BitmapBackupProvider.list_checkpoints` (which only
+        needs ``IShell``, not ``IStateManager``) — imported lazily to
+        avoid a hard Core→bitmap-module dependency for all other code
+        paths.  Detection is non-fatal: if ``virsh checkpoint-list``
+        fails, a WARNING is logged (inside ``list_checkpoints``) and an
+        empty list is returned.
+        """
+        # Lazy import — only needed for checkpoint listing (design D6).
+        from qsnap.modules.backup.bitmap import BitmapBackupProvider
+
+        provider = BitmapBackupProvider(self._shell)
+        checkpoints = provider.list_checkpoints(vm.name)
+        if not checkpoints:
+            return []
+
+        # Compute the set of configured target hashes for this VM.
+        configured_hashes = {BitmapBackupProvider.target_hash(str(t.path)) for t in vm.targets}
+
+        orphans: list[str] = []
+        for cp in checkpoints:
+            # Parse target_hash from checkpoint name:
+            # qsnap-{8-char-hash}-{snapshot_name}
+            parts = cp.split("-", 2)
+            if len(parts) < 3:
+                continue  # malformed — skip
+            cp_hash = parts[1]
+            if cp_hash not in configured_hashes:
+                logger.warning(
+                    "Orphaned checkpoint %s for VM %s — target hash %s "
+                    "matches no configured target",
+                    cp,
+                    vm.name,
+                    cp_hash,
+                )
+                orphans.append(cp)
+        return orphans
 
     # ── pipeline runner ────────────────────────────────────────────────
 

@@ -60,28 +60,39 @@ from tests.mocks.mock_shell import MockShell
 # Both run() and run_with_stall_detection() calls are logged in mock_shell._calls
 _orig_mock_run = MockShell.run
 _orig_mock_sd = MockShell.run_with_stall_detection
+
+
 def _tracked_run(self, cmd, timeout, check=False):
-    self._calls = getattr(self, '_calls', [])
+    self._calls = getattr(self, "_calls", [])
     self._calls.append(cmd)
     return _orig_mock_run(self, cmd, timeout, check=check)
+
+
 def _tracked_sd(self, cmd, output_file=None, stall_timeout=1800, check=False):
-    self._calls = getattr(self, '_calls', [])
+    self._calls = getattr(self, "_calls", [])
     self._calls.append(cmd)
-    return _orig_mock_sd(self, cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+    return _orig_mock_sd(
+        self, cmd, output_file=output_file, stall_timeout=stall_timeout, check=check
+    )
+
+
 MockShell.run = _tracked_run
 MockShell.run_with_stall_detection = _tracked_sd
 
+
 def _all_cmds(mock_shell):
     """Get all tracked commands from a MockShell instance."""
-    return [" ".join(c) for c in getattr(mock_shell, '_calls', [])]
+    return [" ".join(c) for c in getattr(mock_shell, "_calls", [])]
+
 
 def _clear_calls(mock_shell):
     """Clear tracked calls (call before each test)."""
     mock_shell._calls = []
 
+
 def _wrap_sd_with_side_effect(mock_shell, side_effect_fn):
     """Wrap run_with_stall_detection with a side-effect callback.
-    
+
     The side_effect_fn receives the command list and is called before
     the original method.  Useful for creating target files so stat() works.
     """
@@ -93,6 +104,7 @@ def _wrap_sd_with_side_effect(mock_shell, side_effect_fn):
 
     mock_shell.run_with_stall_detection = _wrapped
 
+
 def _rsync_side_effect(cmd):
     """Create target file for rsync commands."""
     cmd_str = " ".join(cmd)
@@ -100,6 +112,7 @@ def _rsync_side_effect(cmd):
         tgt = Path(cmd[-1])
         tgt.parent.mkdir(parents=True, exist_ok=True)
         tgt.write_bytes(b"\x00" * 65536)
+
 
 @pytest.fixture(autouse=True)
 def _ensure_snapshot_paths_exist(monkeypatch):
@@ -183,7 +196,7 @@ def test_transfer_missing_new_snapshot_rsync_empty_target(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -252,7 +265,7 @@ def test_transfer_missing_existing_snapshot_skipped(
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -322,7 +335,7 @@ def test_transfer_incremental_rebase_backing_path(
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -341,8 +354,8 @@ def test_transfer_incremental_rebase_backing_path(
     # CRITICAL: backing path is the bare filename, not the full source path
     assert "-b backing.qcow2" in rebase_cmd
     assert "/source/path/backing.qcow2" not in rebase_cmd
-    # CRITICAL: -F qcow2 flag is present (design D5 extension)
-    assert "-F qcow2" in rebase_cmd
+    # CRITICAL: -B qcow2 flag is present (design D3: renamed from -F in QEMU 11.0)
+    assert "-B qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -385,7 +398,7 @@ def test_transfer_non_incremental_no_rebase(mock_shell, make_vm_config, make_tar
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -458,7 +471,7 @@ def test_transfer_rsync_fails_disk_full(mock_shell, make_vm_config, make_target,
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -538,7 +551,7 @@ def test_rsync_unavailable_transfer_fails_no_cp_fallback(
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
     _clear_calls(shell)
-    with patch.object(shell, "run", wraps=shell.run) as shell_spy:
+    with patch.object(shell, "run", wraps=shell.run):
         provider = FileCopyBackupProvider(shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -827,7 +840,7 @@ def test_transfer_verify_failure_deletes_file_and_logs_warning(
             "qsnap.modules.backup.file_copy.verify_backup",
             return_value=verify_error,
         ),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run),
     ):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -1001,7 +1014,7 @@ def test_transfer_missing_metadata_verification_default(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -1102,7 +1115,7 @@ def test_transfer_missing_full_verification(mock_shell, make_vm_config, make_tar
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -1180,7 +1193,7 @@ def test_transfer_missing_no_verification_when_off(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -1260,7 +1273,7 @@ def test_create_full_backup_uncompressed_stopped_vm(mock_shell, make_target, tmp
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1344,7 +1357,7 @@ def test_create_full_backup_compressed_stopped_vm(mock_shell, make_target, tmp_p
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1446,7 +1459,7 @@ def test_create_full_backup_nbd_running_vm_succeeds(mock_shell, make_target, tmp
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1529,7 +1542,7 @@ def test_create_full_backup_direct_stopped_vm_succeeds(mock_shell, make_target, 
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1606,7 +1619,7 @@ def test_create_full_backup_vm_state_detection_fails_falls_back(
 
     caplog.set_level(logging.WARNING, logger="qsnap.utils.nbd")
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1782,7 +1795,7 @@ def test_nbd_socket_cleanup_on_success(mock_shell, make_target, tmp_path):
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1851,7 +1864,7 @@ def test_nbd_socket_cleanup_on_failure(mock_shell, make_target, tmp_path):
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -1920,7 +1933,7 @@ def test_nbd_full_file_copy_no_checkpoint_created(mock_shell, make_target, tmp_p
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -2065,7 +2078,7 @@ def test_nbd_full_old_libvirt_falls_back_direct_convert(mock_shell, make_target,
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -2145,7 +2158,7 @@ def test_nbd_full_creates_tmp_then_renames(mock_shell, make_target, tmp_path):
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -2223,7 +2236,7 @@ def test_nbd_full_failure_leaves_no_final_file(mock_shell, make_target, tmp_path
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -2299,7 +2312,7 @@ def test_nbd_full_backup_with_compression_succeeds(mock_shell, make_target, tmp_
 
     caplog.set_level(logging.WARNING, logger="qsnap.modules.backup.file_copy")
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "myvm",
@@ -2383,7 +2396,7 @@ def test_nbd_full_no_force_share_on_convert(mock_shell, make_target, tmp_path):
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -2483,7 +2496,7 @@ def test_transfer_missing_rebases_to_full_anchor(mock_shell, make_vm_config, mak
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -2504,8 +2517,8 @@ def test_transfer_missing_rebases_to_full_anchor(mock_shell, make_vm_config, mak
     assert " -u " in rebase_cmd
     # CRITICAL: backing path is the bare anchor filename prefixed with ./
     assert f"./{anchor_name}" in rebase_cmd
-    # CRITICAL: -F qcow2 flag is present
-    assert "-F qcow2" in rebase_cmd
+    # CRITICAL: -B qcow2 flag is present (design D3: renamed from -F in QEMU 11.0)
+    assert "-B qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -2597,7 +2610,7 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -2627,8 +2640,8 @@ def test_transfer_missing_no_full_anchor_uses_source_backing(
     # CRITICAL: backing path is the bare filename from source, not full path
     assert "-b backing.qcow2" in rebase_cmd
     assert "/source/path/backing.qcow2" not in rebase_cmd
-    # CRITICAL: -F qcow2 flag is present (design D5 extension)
-    assert "-F qcow2" in rebase_cmd
+    # CRITICAL: -B qcow2 flag is present (design D3: renamed from -F in QEMU 11.0)
+    assert "-B qcow2" in rebase_cmd
     # Verify target file is in the rebase command
     assert str(expected_target_file) in rebase_cmd
 
@@ -2689,7 +2702,7 @@ def test_transfer_with_rate_limit_uses_rsync(mock_shell, make_vm_config, make_ta
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
 
@@ -2760,7 +2773,7 @@ def test_partial_file_resumes_with_rsync(mock_shell, make_vm_config, make_target
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
 
@@ -3066,7 +3079,7 @@ def test_full_backup_ignores_rate_limit(mock_shell, make_target, tmp_path):
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -3147,7 +3160,7 @@ def test_copy_base_false_prevents_base_copy(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -3231,7 +3244,7 @@ def test_transfer_missing_does_not_create_full_when_empty_target(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
 
         # Spy on create_full_backup to verify it is never called
@@ -3329,7 +3342,7 @@ def test_copy_base_true_allows_base_copy(mock_shell, make_vm_config, make_target
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -3391,7 +3404,7 @@ def test_provider_remains_retry_unaware(mock_shell, make_vm_config, make_target,
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -3521,7 +3534,7 @@ def test_create_full_backup_dotted_vm_name(mock_shell, make_target, tmp_path):
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "3.Projects_opencode",
@@ -3702,7 +3715,7 @@ def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "3.Projects_opencode",
@@ -3746,20 +3759,20 @@ def test_create_full_backup_dotted_vm_name_passed_to_is_vm_running(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# -F qcow2 flag (design D5 extension)
+# -B qcow2 flag (design D3: renamed from -F in QEMU 11.0)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_transfer_incremental_rebase_with_F_qcow2(
+def test_transfer_incremental_rebase_with_B_qcow2(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
-    """The rebase command includes ``-F qcow2`` (backing file format)
+    """The rebase command includes ``-B qcow2`` (backing file format)
     when rebasing an incremental snapshot to a FULL anchor or source
     backing file.
 
-    Design D5 extension: ``-F qcow2`` ensures ``qemu-img rebase -u``
-    can resolve the backing file regardless of security context or
-    metadata format ambiguity.
+    Design D3: ``-B qcow2`` (renamed from ``-F`` in QEMU 11.0) ensures
+    ``qemu-img rebase -u`` can resolve the backing file regardless of
+    security context or metadata format ambiguity.
     """
     vm_config = make_vm_config()
     target = make_target(
@@ -3822,7 +3835,7 @@ def test_transfer_incremental_rebase_with_F_qcow2(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -3834,23 +3847,23 @@ def test_transfer_incremental_rebase_with_F_qcow2(
     assert len(rebase_cmds) == 1
     rebase_cmd = rebase_cmds[0]
 
-    # CRITICAL: -F qcow2 flag MUST be present
-    assert "-F" in rebase_cmd
+    # CRITICAL: -B qcow2 flag MUST be present
+    assert "-B" in rebase_cmd
     assert "qcow2" in rebase_cmd
-    # Verify -F qcow2 appears as a contiguous pair
-    assert "-F qcow2" in rebase_cmd
+    # Verify -B qcow2 appears as a contiguous pair
+    assert "-B qcow2" in rebase_cmd
     assert "-u" in rebase_cmd
     assert "-b" in rebase_cmd
 
 
-def test_transfer_no_full_anchor_rebase_with_F_flag(
+def test_transfer_no_full_anchor_rebase_with_B_flag(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
     """When no FULL anchor exists and the rebase uses the source backing
-    filename, the ``-F qcow2`` flag is STILL included.
+    filename, the ``-B qcow2`` flag is STILL included.
 
     Both rebase code paths (FULL-anchor and source-backing fallback) use
-    the ``-F qcow2`` flag consistently.
+    the ``-B qcow2`` flag consistently.
     """
     vm_config = make_vm_config()
     target = make_target(
@@ -3912,7 +3925,7 @@ def test_transfer_no_full_anchor_rebase_with_F_flag(
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -3924,8 +3937,8 @@ def test_transfer_no_full_anchor_rebase_with_F_flag(
     assert len(rebase_cmds) == 1
     rebase_cmd = rebase_cmds[0]
 
-    # Both -u and -F qcow2 are present (no-FULL-anchor fallback path)
-    assert "-F qcow2" in rebase_cmd
+    # Both -u and -B qcow2 are present (no-FULL-anchor fallback path)
+    assert "-B qcow2" in rebase_cmd
     assert "-u" in rebase_cmd
     assert "-b base.qcow2" in rebase_cmd
 
@@ -3999,7 +4012,7 @@ def test_transfer_missing_rebases_to_full_anchor_m1_passes(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -4012,7 +4025,7 @@ def test_transfer_missing_rebases_to_full_anchor_m1_passes(
     rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
     assert len(rebase_cmds) == 1
     assert f"./{anchor_name}" in rebase_cmds[0]
-    assert "-F qcow2" in rebase_cmds[0]
+    assert "-B qcow2" in rebase_cmds[0]
 
     # qemu-img info was NOT called on the source (anchor path skips source query)
     source_info_cmds = [
@@ -4102,7 +4115,7 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -4121,7 +4134,7 @@ def test_transfer_missing_rebase_uses_alternative_full_on_m1_fail(
     assert f"./{newer_anchor_name}" not in rebase_cmds[0], (
         f"Rebase should NOT use newer anchor '{newer_anchor_name}' (it failed M1)"
     )
-    assert "-F qcow2" in rebase_cmds[0]
+    assert "-B qcow2" in rebase_cmds[0]
 
 
 def test_transfer_missing_no_rebase_when_no_valid_full(
@@ -4190,7 +4203,7 @@ def test_transfer_missing_no_rebase_when_no_valid_full(
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
 
@@ -4240,7 +4253,7 @@ def test_transfer_missing_stale_snapshot_skipped(
 
     # The file does NOT exist on disk → stale guard fires.
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell, state=mock_state)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -4312,7 +4325,7 @@ def test_nbd_socket_and_domjobabort_on_success(mock_shell, make_target, tmp_path
             target_file.write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -4387,7 +4400,7 @@ def test_nbd_cleanup_on_failure_domjobabort(mock_shell, make_target, tmp_path):
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
             "testvm",
@@ -4472,7 +4485,7 @@ def test_risk_domjobabort_fails_gracefully(mock_shell, make_target, tmp_path, ca
 
     caplog.set_level(logging.WARNING, logger="qsnap.utils.nbd")
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         provider.create_full_backup(
             "testvm",
@@ -4602,7 +4615,7 @@ def test_rsync_with_compress_flag(mock_shell, make_vm_config, make_target, tmp_p
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -4650,7 +4663,7 @@ def test_rsync_compress_with_rate_limit(mock_shell, make_vm_config, make_target,
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
 
@@ -4700,7 +4713,7 @@ def test_rsync_without_compress(mock_shell, make_vm_config, make_target, tmp_pat
     )
 
     _clear_calls(mock_shell)
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+    with patch.object(mock_shell, "run", wraps=mock_shell.run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -4790,7 +4803,7 @@ def test_rsync_compress_hash_verification_passes(mock_shell, make_vm_config, mak
 
     mock_shell.run_with_stall_detection = spied_sd
 
-    with patch.object(mock_shell, "run", side_effect=spied_run) as shell_spy:
+    with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -4859,7 +4872,7 @@ def test_failed_backup_deletion_before_retention_cleanup(
             "qsnap.modules.backup.file_copy.verify_backup",
             return_value=verify_error,
         ),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run),
     ):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
@@ -4938,12 +4951,17 @@ def test_create_full_backup_compressed_zstd_stopped_vm(mock_shell, make_target, 
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv), \
-         patch.object(mock_shell, "run", side_effect=_run_mv):
+    with (
+        patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv),
+        patch.object(mock_shell, "run", side_effect=_run_mv),
+    ):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target,
-            compress=True, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=True,
+            bucket_level="monthly",
         )
 
     assert result.success is True
@@ -5005,12 +5023,18 @@ def test_create_full_backup_compressed_zlib_stopped_vm(mock_shell, make_target, 
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv), \
-         patch.object(mock_shell, "run", side_effect=_run_mv):
+    with (
+        patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_mv),
+        patch.object(mock_shell, "run", side_effect=_run_mv),
+    ):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target,
-            compress=True, bucket_level="monthly", compression_type="zlib",
+            "testvm",
+            snapshot,
+            target,
+            compress=True,
+            bucket_level="monthly",
+            compression_type="zlib",
         )
 
     assert result.success is True
@@ -5033,7 +5057,9 @@ def test_rsync_uses_stall_detection(mock_shell, make_vm_config, make_target, tmp
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", copy_base=True,
+        incremental=False,
+        verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5047,7 +5073,9 @@ def test_rsync_uses_stall_detection(mock_shell, make_vm_config, make_target, tmp
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+    with patch.object(
+        mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+    ) as sd_spy:
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
@@ -5093,10 +5121,16 @@ def test_nbd_full_uses_stall_detection(mock_shell, make_target, tmp_path):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+    with patch.object(
+        mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+    ) as sd_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result.success is True
@@ -5113,7 +5147,9 @@ def test_stall_timeout_zero_falls_back(mock_shell, make_vm_config, make_target, 
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", copy_base=True,
+        incremental=False,
+        verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5127,11 +5163,18 @@ def test_stall_timeout_zero_falls_back(mock_shell, make_vm_config, make_target, 
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy, \
-         patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch.object(
+            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+        ) as sd_spy,
+    ):
         provider = FileCopyBackupProvider(mock_shell)
         results = provider.transfer_missing(
-            vm_config, target, [snapshot], stall_timeout=0,
+            vm_config,
+            target,
+            [snapshot],
+            stall_timeout=0,
         )
 
     assert len(results) == 1
@@ -5144,13 +5187,17 @@ def test_stall_timeout_zero_falls_back(mock_shell, make_vm_config, make_target, 
     )
     # verify timeout=3600 was passed to run()
     first_call = rsync_run_calls[0]
-    timeout_value = first_call.kwargs.get("timeout", first_call.args[1] if len(first_call.args) > 1 else None)
+    timeout_value = first_call.kwargs.get(
+        "timeout", first_call.args[1] if len(first_call.args) > 1 else None
+    )
     assert timeout_value == 3600, (
         f"run() timeout should be 3600 when stall_timeout=0, got {timeout_value}"
     )
     # run_with_stall_detection should NOT be called for rsync
     rsync_sd_calls = [c for c in sd_spy.call_args_list if "rsync" in " ".join(c.args[0])]
-    assert len(rsync_sd_calls) == 0, "run_with_stall_detection should NOT be called when stall_timeout=0"
+    assert len(rsync_sd_calls) == 0, (
+        "run_with_stall_detection should NOT be called when stall_timeout=0"
+    )
 
 
 def test_rsync_with_zstd_compression(mock_shell, make_vm_config, make_target, tmp_path):
@@ -5158,7 +5205,9 @@ def test_rsync_with_zstd_compression(mock_shell, make_vm_config, make_target, tm
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", copy_base=True,
+        incremental=False,
+        verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5177,7 +5226,10 @@ def test_rsync_with_zstd_compression(mock_shell, make_vm_config, make_target, tm
 
     provider = FileCopyBackupProvider(mock_shell)
     results = provider.transfer_missing(
-        vm_config, target, [snapshot], compression_type="zstd",
+        vm_config,
+        target,
+        [snapshot],
+        compression_type="zstd",
     )
 
     assert len(results) == 1
@@ -5203,7 +5255,9 @@ def test_rsync_with_zlib_compression(mock_shell, make_vm_config, make_target, tm
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", copy_base=True,
+        incremental=False,
+        verify="off",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5222,7 +5276,10 @@ def test_rsync_with_zlib_compression(mock_shell, make_vm_config, make_target, tm
 
     provider = FileCopyBackupProvider(mock_shell)
     results = provider.transfer_missing(
-        vm_config, target, [snapshot], compression_type="zlib",
+        vm_config,
+        target,
+        [snapshot],
+        compression_type="zlib",
     )
 
     assert len(results) == 1
@@ -5244,7 +5301,10 @@ def test_rsync_zstd_with_rate_limit(mock_shell, make_vm_config, make_target, tmp
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", rate_limit="100M", copy_base=True,
+        incremental=False,
+        verify="off",
+        rate_limit="100M",
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5263,7 +5323,11 @@ def test_rsync_zstd_with_rate_limit(mock_shell, make_vm_config, make_target, tmp
 
     provider = FileCopyBackupProvider(mock_shell)
     results = provider.transfer_missing(
-        vm_config, target, [snapshot], rate_limit="100M", compression_type="zstd",
+        vm_config,
+        target,
+        [snapshot],
+        rate_limit="100M",
+        compression_type="zstd",
     )
 
     assert len(results) == 1
@@ -5283,7 +5347,10 @@ def test_rsync_no_compression(mock_shell, make_vm_config, make_target, tmp_path)
     vm_config = make_vm_config()
     target = make_target(
         path=str(tmp_path / "nonexistent_target"),
-        incremental=False, verify="off", compress=False, copy_base=True,
+        incremental=False,
+        verify="off",
+        compress=False,
+        copy_base=True,
     )
 
     snapshot = SnapshotInfo(
@@ -5363,12 +5430,18 @@ def test_nbd_full_zstd_compression(mock_shell, make_target, tmp_path):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create), \
-         patch.object(mock_shell, "run", side_effect=_run_mv):
+    with (
+        patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create),
+        patch.object(mock_shell, "run", side_effect=_run_mv),
+    ):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target,
-            compress=True, bucket_level="daily", compression_type="zstd",
+            "testvm",
+            snapshot,
+            target,
+            compress=True,
+            bucket_level="daily",
+            compression_type="zstd",
         )
 
     assert result.success is True
@@ -5430,12 +5503,18 @@ def test_nbd_full_zlib_compression(mock_shell, make_target, tmp_path):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
         return original_run(cmd, timeout)
 
-    with patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create), \
-         patch.object(mock_shell, "run", side_effect=_run_mv):
+    with (
+        patch.object(mock_shell, "run_with_stall_detection", side_effect=_sd_create),
+        patch.object(mock_shell, "run", side_effect=_run_mv),
+    ):
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target,
-            compress=True, bucket_level="daily", compression_type="zlib",
+            "testvm",
+            snapshot,
+            target,
+            compress=True,
+            bucket_level="daily",
+            compression_type="zlib",
         )
 
     assert result.success is True
@@ -5479,11 +5558,16 @@ def test_full_backup_uses_stall_detection(mock_shell, make_target, tmp_path):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as sd_spy:
+    with patch.object(
+        mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+    ) as sd_spy:
         provider = FileCopyBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target,
-            compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
     assert result.success is True
@@ -5498,3 +5582,202 @@ def test_full_backup_uses_stall_detection(mock_shell, make_target, tmp_path):
     assert first_call.kwargs.get("output_file") is not None, "output_file should be set"
     assert ".tmp" in str(first_call.kwargs["output_file"]), "output_file should be .tmp file"
     assert first_call.kwargs.get("stall_timeout") == 1800, "stall_timeout should be default 1800"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# New tests: fix-bitmap-incremental-via-xml — file-copy-unit delegation group
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_transfer_with_rate_limit(mock_shell, make_vm_config, make_target, tmp_path):
+    """When ``rate_limit`` is set on the target config, the provider uses
+    ``rsync --bwlimit=<kib> --partial`` for the transfer.
+
+    This verifies that the rate limit passed through ``transfer_missing()``
+    is correctly translated to the ``--bwlimit`` rsync flag.  The
+    ``rate_limit_to_kib()`` utility converts human-readable values
+    (e.g. ``"50M"`` → ``51200``) for the rsync argument.
+
+    Uses ``copy_base=True`` to skip the empty-target FULL creation path.
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "nonexistent_target"),
+        incremental=False,
+        verify="off",
+        copy_base=True,
+    )
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250101T000000",
+        path=Path("/snapshots/testvm.20250101T000000.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # Mock rsync returns success
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # Side effect: simulate rsync creating the target file so stat() works.
+    _clear_calls(mock_shell)
+    original_run = mock_shell.run
+    original_sd = mock_shell.run_with_stall_detection
+
+    def _side_effect(cmd, is_rsync=True):
+        cmd_str = " ".join(cmd)
+        if is_rsync and cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(b"\x00" * 65536)
+
+    def spied_run(cmd, timeout):
+        _side_effect(cmd)
+        return original_run(cmd, timeout)
+
+    def spied_sd(cmd, output_file=None, stall_timeout=1800, check=False):
+        _side_effect(cmd)
+        return original_sd(cmd, output_file=output_file, stall_timeout=stall_timeout, check=check)
+
+    mock_shell.run_with_stall_detection = spied_sd
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="50M")
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].bytes_transferred == 65536
+    assert results[0].error is None
+    assert results[0].snapshot_name == snapshot.name
+    assert results[0].source_path == snapshot.path
+    assert results[0].target_path == expected_target_file
+
+    # Verify rsync uses --bwlimit=51200 (50M → rate_limit_to_kib)
+    all_cmds = _all_cmds(mock_shell)
+    rsync_cmds = [cmd for cmd in all_cmds if cmd.startswith("rsync ")]
+    assert len(rsync_cmds) == 1
+    assert "--bwlimit=51200" in rsync_cmds[0], (
+        f"Expected --bwlimit=51200 for rate_limit='50M', got: {rsync_cmds[0]}"
+    )
+    assert "--partial" in rsync_cmds[0]
+    assert str(snapshot.path) in rsync_cmds[0]
+    assert str(expected_target_file) in rsync_cmds[0]
+
+
+def test_transfer_rebase_to_full_anchor(mock_shell, make_vm_config, make_target, tmp_path):
+    """When a FULL anchor file (``*.FULL.*.qcow2``) exists in the target
+    directory and ``target.incremental=True``, the rebase command MUST
+    target the FULL anchor's bare filename WITH the ``-B qcow2`` flag
+    (NOT ``-F qcow2``).
+
+    QEMU 11.0 renamed the ``rebase`` subcommand's ``--backing-format``
+    flag from ``-F`` to ``-B`` (design D3).  This test explicitly
+    verifies:
+    - The rebase ``-b`` argument points to ``./<anchor_name>``.
+    - The format flag is ``-B qcow2``, not ``-F qcow2``.
+    - ``qemu-img info`` is NOT called on the source (bypassed when a
+      valid anchor exists).
+    """
+    vm_config = make_vm_config()
+    target = make_target(
+        path=str(tmp_path / "backups"),
+        incremental=True,
+        verify="off",
+    )
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create a FULL anchor file in the target directory
+    anchor_name = "testvm.FULL.20250101.qcow2"
+    anchor_file = target.path / anchor_name
+    anchor_file.write_bytes(b"\x00" * 1024)
+
+    snapshot = SnapshotInfo(
+        name="testvm.20250102T000000",
+        path=Path("/snapshots/testvm.20250102T000000.qcow2"),
+        timestamp=datetime(2025, 1, 2, 0, 0, 0),
+        allocation=65536,
+    )
+
+    expected_target_file = target.path / f"{snapshot.name}.qcow2"
+
+    # qemu-img info for list() on the anchor AND M1 verification
+    mock_shell.expect(r"qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1073741824,
+                    "actual-size": 1024,
+                }
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # rsync succeeds
+    mock_shell.expect(r"^rsync").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img rebase succeeds
+    mock_shell.expect(r"qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # Side effect: simulate rsync creating the target file so stat() works
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("rsync "):
+            target_file = Path(cmd[-1])
+            target_file.write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = FileCopyBackupProvider(mock_shell)
+        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="no")
+
+    # Assert successful result
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+    assert results[0].target_path == expected_target_file
+
+    all_cmds = _all_cmds(mock_shell)
+
+    # Verify rebase command uses -B qcow2 (NOT -F) for backing format
+    rebase_cmds = [cmd for cmd in all_cmds if "qemu-img rebase" in cmd]
+    assert len(rebase_cmds) == 1
+    rebase_cmd = rebase_cmds[0]
+
+    # CRITICAL (design D3): -B qcow2 is present (QEMU 11.0 renamed from -F)
+    assert "-B qcow2" in rebase_cmd, (
+        f"Expected -B qcow2 (QEMU 11.0 rebase format flag), got: {rebase_cmd}"
+    )
+    # CRITICAL: -F qcow2 must NOT appear (old flag, removed in QEMU 11.0 for rebase)
+    assert "-F qcow2" not in rebase_cmd, (
+        f"-F qcow2 should NOT appear in rebase command (renamed to -B in QEMU 11.0), "
+        f"got: {rebase_cmd}"
+    )
+    # CRITICAL: -u flag (unsafe, metadata-only)
+    assert " -u " in rebase_cmd
+    # CRITICAL: backing path is the bare anchor filename prefixed with ./
+    assert f"./{anchor_name}" in rebase_cmd
+    # Verify target file is in the rebase command
+    assert str(expected_target_file) in rebase_cmd
+
+    # qemu-img info was NOT called on the source (anchor path skips source query)
+    source_info_cmds = [
+        cmd for cmd in all_cmds if "qemu-img info" in cmd and str(snapshot.path) in cmd
+    ]
+    assert len(source_info_cmds) == 0, (
+        "qemu-img info should NOT be called on the source when a FULL "
+        "anchor exists — the rebase should go directly to the anchor"
+    )

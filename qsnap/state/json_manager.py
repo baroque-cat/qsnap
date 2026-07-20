@@ -283,6 +283,15 @@ class JsonStateManager(IStateManager):
 
         If a value is a dict (not a list), it is wrapped in a single-element
         list for backward compatibility.
+
+        Deduplication migration (design D4): entries with duplicate
+        ``(name, target_path)`` tuples are removed on load, keeping the
+        first occurrence.  This fixes the double-recording bug where
+        ``BitmapBackupProvider.create_full_backup()`` and
+        ``Core._backup_target()`` both called ``record_full_backup()``.
+        When duplicates are removed, the deduplicated state is persisted
+        back to disk so the migration is one-time and idempotent.  An
+        INFO log is emitted for each removed duplicate.
         """
         path = self._full_backups_path()
         if not path.exists():
@@ -298,7 +307,35 @@ class JsonStateManager(IStateManager):
                 data[key] = [val]  # type: ignore[list-item]
             else:
                 logger.warning("Unexpected entry in _full_backups.json for %s", key)
-        return data
+
+        # Deduplication migration: remove entries with duplicate
+        # (name, target_path) tuples, keeping the first.  The target_path
+        # is the dict key; the name is the "name" field in each entry.
+        deduplicated_data: dict[str, list[dict[str, str]]] = {}
+        had_duplicates = False
+        for target_path, entries in data.items():
+            seen_names: set[str] = set()
+            unique_entries: list[dict[str, str]] = []
+            for entry in entries:
+                name = str(entry.get("name", ""))
+                if name in seen_names:
+                    had_duplicates = True
+                    logger.info(
+                        "Deduplicated FULL backup entry: %s for target %s",
+                        name,
+                        target_path,
+                    )
+                    continue
+                seen_names.add(name)
+                unique_entries.append(entry)
+            deduplicated_data[target_path] = unique_entries
+
+        # Persist deduplicated state so the migration is one-time and
+        # idempotent (subsequent loads find no duplicates, no logging).
+        if had_duplicates:
+            self._save_full_backups(deduplicated_data)
+
+        return deduplicated_data
 
     def _save_full_backups(self, data: dict[str, list[dict[str, str]]]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)

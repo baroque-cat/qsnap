@@ -1,5 +1,6 @@
-# verify="full" works for both file-copy and bitmap modes
-# Test: test_facade_verify_full_works_for_both_modes
+# verify="full" preserved for file-copy, downgraded to "metadata" for bitmap
+# (design D5: bitmap incremental NBD exports contain only dirty blocks)
+# Test: test_facade_verify_full_preserved_for_filecopy_downgraded_for_bitmap
 
 [[vm]]
 name = "vm_fc_full"

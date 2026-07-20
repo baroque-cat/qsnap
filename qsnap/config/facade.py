@@ -442,6 +442,21 @@ class ConfigFacade(IConfigFacade):
             )
             verify = "metadata"
 
+        # Bitmap + full is not supported for incremental transfers
+        # (design D5).  An incremental NBD export produces a standalone
+        # qcow2 containing only dirty blocks (non-dirty blocks read as
+        # zeros), while the source snapshot (with backing chain) resolves
+        # to full data.  qemu-img compare between these will always
+        # mismatch.  Warn and auto-downgrade to metadata.
+        if incremental_mode == "bitmap" and verify == "full":
+            logger.warning(
+                "verify='full' is not supported in bitmap mode "
+                "(incremental NBD exports contain only dirty blocks; "
+                "qemu-img compare will always mismatch against source "
+                "with backing chain). Downgrading to verify='metadata'."
+            )
+            verify = "metadata"
+
         # Deprecation warning: verify='metadata' for file-copy mode is
         # weaker than verify='hash' (race-condition-immune SHA-256).
         # Informational only — the explicit value is still honored.

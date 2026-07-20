@@ -10,7 +10,7 @@ Supports optional bandwidth control via `rate_limit` config field using `rsync -
 
 ### Requirement: Transfer missing snapshots to backup target
 
-The system SHALL copy snapshots missing from the target storage into the `target.path` directory using `rsync` exclusively. Before copying, the system SHALL determine which snapshots already exist on the target (via `list()`). For incremental backups (`target.incremental == True`) the system SHALL execute `qemu-img rebase -u -b <new_backing_path>` to rebuild the backing file path on the target.
+The system SHALL copy snapshots missing from the target storage into the `target.path` directory using `rsync` exclusively. Before copying, the system SHALL determine which snapshots already exist on the target (via `list()`). For incremental backups (`target.incremental == True`) the system SHALL execute `qemu-img rebase -u -b <new_backing_path> -B qcow2 <target_file>` to rebuild the backing file path on the target. The `-B` flag (backing-format) SHALL be used instead of the deprecated `-F` flag (renamed in QEMU 11.0).
 
 When `rate_limit` is set to a value other than `"no"`, the system SHALL use `rsync --bwlimit=<limit_kib> --partial <source> <target>`. When `rate_limit` is `"no"`, the system SHALL use `rsync --partial <source> <target>`. The system SHALL NOT use `cp` under any circumstances. If `rsync` is not available in PATH, the transfer SHALL fail with a `BackupResult(success=False, error="rsync not found")`.
 
@@ -33,11 +33,12 @@ When `target.copy_base` is `False` (default), the system SHALL NOT copy `base.qc
 - **THEN** that snapshot is NOT copied again
 - **AND** it does not appear in the returned `BackupResult` list
 
-#### Scenario: Incremental backup — rebase backing path
+#### Scenario: Incremental backup — rebase backing path with -B flag
 - **WHEN** `target.incremental == True`
 - **AND** the copied snapshot has a backing file
-- **THEN** after copying, `qemu-img rebase -u -b <new_relative_path> <target_file>` is executed
+- **THEN** after copying, `qemu-img rebase -u -b <new_relative_path> -B qcow2 <target_file>` is executed
 - **AND** `<new_relative_path>` is the backing file name (without path) in the same target directory
+- **AND** the `-B` flag is used for backing-format (NOT the deprecated `-F`)
 
 #### Scenario: Rebase to FULL anchor when present
 - **WHEN** target directory contains a FULL anchor file `vm.FULL.*.qcow2`
@@ -277,6 +278,8 @@ Backup providers (`FileCopyBackupProvider`, `BitmapBackupProvider`) SHALL NOT im
 
 `BitmapBackupProvider` SHALL override `create_full_backup(vm_name: str, source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False, compression_type: str = "zstd", bucket_level: str = "monthly") -> BackupResult` to create a standalone FULL backup via the NBD full-export path. The `compression_type` parameter SHALL be passed through to `nbd_full_export()`. The method SHALL NOT raise `NotImplementedError`. The result SHALL be a standalone qcow2 file on the target. No checkpoint SHALL be created for this FULL — the checkpoint lifecycle remains in `transfer_missing()` for incremental runs.
 
+The method SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after post-create verification passes. This matches `FileCopyBackupProvider.create_full_backup()` behavior, which also does not self-record.
+
 #### Scenario: Bitmap FULL with zstd compression
 - **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", bucket_level="monthly")` is called
 - **THEN** `nbd_full_export(shell, "myvm", target_file, compress=True, compression_type="zstd")` is called
@@ -290,21 +293,25 @@ Backup providers (`FileCopyBackupProvider`, `BitmapBackupProvider`) SHALL NOT im
 #### Scenario: Bitmap FULL no longer raises NotImplementedError
 - **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=False, bucket_level="monthly")` is called
 - **THEN** the method does NOT raise `NotImplementedError`
-- **AND** `virsh backup-begin` is called without `--incremental`
+- **AND** `virsh backup-begin` is called without any `--incremental` CLI flag
 - **AND** `qemu-img convert -n nbd:unix:<socket> <target>` creates a standalone qcow2
 
 #### Scenario: Bitmap FULL does not create checkpoint
 - **WHEN** `BitmapBackupProvider.create_full_backup()` completes successfully
 - **THEN** no `virsh checkpoint-create-as` is called
 - **AND** no `virsh checkpoint-delete` is called
-- **AND** the FULL is recorded in state via `IStateManager.record_full_backup()`
+
+#### Scenario: Bitmap FULL does not self-record in state
+- **WHEN** `BitmapBackupProvider.create_full_backup()` completes successfully
+- **THEN** `self._state.record_full_backup()` is NOT called by the provider
+- **AND** state recording is deferred to Core's `_backup_target()` after post-create verification
 
 #### Scenario: Bucket-driven FULL works for bitmap targets
 - **WHEN** `Core._backup_target()` calls `_should_create_bucket_full()` for a bitmap-mode target
 - **AND** it returns `(True, "weekly")`
 - **THEN** `BitmapBackupProvider.create_full_backup(vm_config.name, ...)` is called with the full VM name
 - **AND** it succeeds (no crash)
-- **AND** the FULL is recorded in state with `bucket_level="weekly"`
+- **AND** the FULL is recorded in state by Core (not by the provider) with `bucket_level="weekly"`
 
 #### Scenario: Bitmap FULL with dotted VM name
 - **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False, bucket_level="monthly")` is called
@@ -340,7 +347,7 @@ Before calling `rsync`, `transfer_missing()` SHALL verify the source snapshot fi
 
 ### Requirement: BitmapBackupProvider accepts IStateManager
 
-`BitmapBackupProvider.__init__()` SHALL accept an optional `state: IStateManager | None = None` parameter, mirroring `FileCopyBackupProvider.__init__()`. When `state` is not `None`, `create_full_backup()` SHALL call `self._state.record_full_backup(target_path, full_name, timestamp, bucket_level)` after successful FULL creation and atomic rename.
+`BitmapBackupProvider.__init__()` SHALL accept an optional `state: IStateManager | None = None` parameter, mirroring `FileCopyBackupProvider.__init__()`. The `state` parameter is used by `transfer_missing()` for checkpoint-only creation logic (checking existing FULLs). The `create_full_backup()` method SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after post-create verification passes, matching `FileCopyBackupProvider.create_full_backup()` behavior.
 
 #### Scenario: Constructor accepts IStateManager
 - **WHEN** `BitmapBackupProvider(shell=mock_shell, state=mock_state)` is instantiated
@@ -352,10 +359,10 @@ Before calling `rsync`, `transfer_missing()` SHALL verify the source snapshot fi
 - **THEN** `isinstance(provider, IBackupProvider)` is True
 - **AND** `self._state` is `None`
 
-#### Scenario: create_full_backup records FULL in state
+#### Scenario: create_full_backup does not self-record in state
 - **WHEN** `BitmapBackupProvider.create_full_backup(...)` succeeds and `self._state` is not `None`
-- **THEN** `self._state.record_full_backup(target_path, full_name, timestamp, bucket_level)` is called
-- **AND** the FULL is recorded before the method returns `BackupResult(success=True)`
+- **THEN** `self._state.record_full_backup()` is NOT called by the provider
+- **AND** state recording is deferred to Core's `_backup_target()` after post-create verification
 
 #### Scenario: create_full_backup skips state recording when state is None
 - **WHEN** `BitmapBackupProvider.create_full_backup(...)` succeeds and `self._state` is `None`

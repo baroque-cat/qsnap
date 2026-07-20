@@ -112,9 +112,13 @@ def test_facade_explicit_verify_overrides_mode_default() -> None:
 
 
 @pytest.mark.unit
-def test_facade_verify_full_works_for_both_modes() -> None:
-    """verify='full' is accepted and preserved for both file-copy and bitmap."""
-    facade = ConfigFacade(FIXTURES / "verify_full_both.toml")
+def test_facade_verify_full_preserved_for_filecopy_downgraded_for_bitmap(caplog) -> None:
+    """verify='full' is preserved for file-copy but downgraded to 'metadata'
+    for bitmap mode (design D5: incremental NBD exports contain only dirty
+    blocks; qemu-img compare will always mismatch against source with backing
+    chain)."""
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(FIXTURES / "verify_full_both.toml")
 
     vm_fc = facade.get_vm("vm_fc_full")
     assert vm_fc.targets[0].incremental_mode == "file-copy"
@@ -122,7 +126,11 @@ def test_facade_verify_full_works_for_both_modes() -> None:
 
     vm_bitmap = facade.get_vm("vm_bitmap_full")
     assert vm_bitmap.targets[0].incremental_mode == "bitmap"
-    assert vm_bitmap.targets[0].verify == "full"
+    assert vm_bitmap.targets[0].verify == "metadata"
+
+    warnings_text = " ".join(caplog.messages)
+    assert "verify='full' is not supported in bitmap mode" in warnings_text
+    assert "Downgrading to verify='metadata'" in warnings_text
 
 
 @pytest.mark.unit

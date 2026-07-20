@@ -107,10 +107,28 @@ def test_vm():
         }
     finally:
         # Teardown: destroy, undefine, and clean up all files.
+        # First, clean up any leftover checkpoints to allow undefine.
         shell.run(["virsh", "destroy", vm_name], timeout=30)
+        _cleanup_checkpoints(shell, vm_name)
         shell.run(["virsh", "undefine", vm_name], timeout=30)
         shell.run(
             ["rm", "-f", f"/tmp/qsnap-backup-{os.getpid()}.sock"],
             timeout=10,
         )
         shutil.rmtree(str(tmpdir), ignore_errors=True)
+
+
+def _cleanup_checkpoints(shell, vm_name: str) -> None:
+    """Delete all checkpoints for *vm_name* so virsh undefine can succeed."""
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if result.success:
+        for line in result.stdout.strip().splitlines():
+            cp = line.strip()
+            if cp:
+                shell.run(
+                    ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
+                    timeout=30,
+                )
