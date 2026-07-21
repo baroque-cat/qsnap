@@ -481,7 +481,12 @@ class FileCopyBackupProvider(IBackupProvider):
         # ── Method selection: NBD (running VM) vs direct convert (stopped) ──
         use_nbd = False
         if is_vm_running(self._shell, vm_name):
-            if is_libvirt_new_enough(self._shell):
+            # File-copy mode uses only the plain pull-model
+            # ``virsh backup-begin`` API (available since libvirt 6.0) —
+            # no <incremental> element, no checkpoint XML — so it keeps
+            # the 6.0 gate explicitly.  The 7.2 default applies to the
+            # bitmap incremental path selected by DefaultFactory.
+            if is_libvirt_new_enough(self._shell, min_major=6, min_minor=0):
                 use_nbd = True
             else:
                 logger.warning(

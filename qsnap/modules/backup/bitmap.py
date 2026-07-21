@@ -7,22 +7,38 @@ Uses ``virsh backup-begin`` with a pull-model NBD Unix socket to export
 dirty blocks, then ``qemu-img convert -n nbd:unix:<socket>`` to pull
 them into a standalone qcow2 file on the target — no backing chain.
 
+Every ``virsh backup-begin`` receives a checkpoint XML as its third
+positional argument, so the successor checkpoint (the dirty-bitmap
+baseline for the next incremental) is created **atomically at the
+export's freeze point** — never post-hoc via a standalone
+``virsh checkpoint-create-as`` call.  The bitmap baseline therefore
+always coincides with the exported point-in-time view, and the backup
+chain (FULL + incrementals) is gap-free by construction.
+
 **NBD backup lifecycle:**
 
 1. Remove any stale socket at ``/tmp/qsnap-backup-{pid}.sock``.
-2. Create backup XML with NBD Unix socket and write to temp file.  When
-   a prior qsnap checkpoint exists, an ``<incremental>`` element naming
-   that checkpoint is embedded in the XML (design D1 — the
-   ``--incremental`` CLI flag does not exist in any version of virsh
-   ``backup-begin``).
-3. ``virsh backup-begin --domain VM <backupxml>`` starts the NBD export
-   (full when no ``<incremental>`` element, incremental otherwise).
+2. Write backup XML with NBD Unix socket to a temp file.  When a prior
+   qsnap checkpoint exists, an ``<incremental>`` element naming that
+   checkpoint is embedded in the XML (the ``--incremental`` CLI flag
+   does not exist in any version of virsh ``backup-begin``).  Also
+   write a checkpoint XML naming the successor checkpoint
+   (``qsnap-{target_hash}-{yyyymmddTHHMMSS}``).
+3. ``virsh backup-begin --domain VM <backupxml> <checkpointxml>``
+   starts the NBD export (full when no ``<incremental>`` element,
+   incremental otherwise) and atomically creates the successor
+   checkpoint at the export's freeze point.
 4. ``qemu-img convert -n nbd:unix:<socket> <target_file>``
 5. Verify the target file (if ``target.verify != "off"``).
-6. Delete prior checkpoint (if any) and create a new one for the next
-   incremental run.
-7. On failure, preserve all checkpoints for retry.
-8. Socket is always cleaned up in a ``finally`` block.
+6. After a successful AND verified export, delete all superseded
+   (older) qsnap checkpoints for this VM+target via
+   ``virsh checkpoint-delete --metadata`` — the successor already
+   exists, so rotation never opens a zero-checkpoint window.
+7. On export/verify failure, preserve the prior checkpoint for retry,
+   delete the just-created successor checkpoint best-effort, and
+   delete the partial target file.
+8. Socket and XML temp files are always cleaned up in a ``finally``
+   block.
 """
 
 from __future__ import annotations
@@ -31,8 +47,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -40,7 +58,12 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
-from qsnap.utils.nbd import get_first_disk_target, nbd_full_export, write_backup_xml
+from qsnap.utils.nbd import (
+    get_first_disk_target,
+    nbd_full_export,
+    write_backup_xml,
+    write_checkpoint_xml,
+)
 from qsnap.utils.parsing import parse_timestamp
 from qsnap.utils.verification import verify_backup
 
@@ -118,7 +141,6 @@ class BitmapBackupProvider(IBackupProvider):
         existing_names = {s.name for s in existing}
 
         target_hash = self.target_hash(str(target.path))
-        prior_checkpoints = self._list_checkpoints_for_target(vm_config.name, target_hash)
 
         results: list[BackupResult] = []
 
@@ -129,58 +151,54 @@ class BitmapBackupProvider(IBackupProvider):
             target_file = target.path / f"{snapshot.name}.qcow2"
             socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
 
-            # Determine prior checkpoint for incremental export.
-            prior = prior_checkpoints[-1] if prior_checkpoints else None
+            # Determine the prior checkpoint for an incremental export
+            # (design D3: newest-wins discovery via ``virsh
+            # checkpoint-list``, re-evaluated per snapshot so the
+            # successor created earlier in this loop becomes the
+            # baseline for the next export).  When no prior checkpoint
+            # exists, a full NBD export is performed — with an atomic
+            # successor checkpoint, so the FULL run leaves a valid
+            # baseline by construction.  The same listing also feeds
+            # successor-name uniqueness (design D2).
+            candidates = self._list_checkpoints_for_target(vm_config.name, target_hash)
+            prior = self._select_newest(candidates, target_hash, vm_config.name)
 
-            # Checkpoint-only creation when a FULL already exists in state
-            # but no prior checkpoint is recorded (design D4).  The bucket
-            # strategy's ``create_full_backup()`` already produced a FULL
-            # with all data at this point in time; the checkpoint serves
-            # only as the baseline for the next incremental run.  Creating
-            # it without a data transfer avoids a redundant full NBD export.
-            #
-            # Guards:
-            # - ``prior is None``: only when no prior checkpoint exists.
-            # - ``self._state is not None``: fall through to full NBD
-            #   export when state is unavailable (design D4.3).
-            # - Snapshots already on target are skipped by the
-            #   ``existing_names`` check above (design D4.4).
-            if prior is None and self._state is not None:
-                fulls = self._state.get_full_backups(str(target.path))
-                if fulls:
-                    self._create_checkpoint_only(vm_config.name, target_hash, snapshot.name)
-                    logger.info(
-                        "Created checkpoint qsnap-%s-%s without transfer (FULL exists in state)",
-                        target_hash,
-                        snapshot.name,
-                    )
-                    continue
+            # The successor checkpoint is created atomically with this
+            # export's backup-begin (design D1/D2): its dirty-bitmap
+            # baseline coincides with the export's freeze point.
+            successor = self._new_checkpoint_name(target_hash, taken=set(candidates))
 
             # Step 1: Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
 
-            # Step 2: Build and write backup XML.  The incremental
-            # checkpoint is passed via the <incremental> XML element,
-            # NOT via a --incremental CLI flag (design D1 — the flag
-            # does not exist in any version of virsh backup-begin).
+            # Step 2: Build and write backup XML + checkpoint XML.  The
+            # incremental checkpoint is passed via the <incremental> XML
+            # element, NOT via a --incremental CLI flag (the flag does
+            # not exist in any version of virsh backup-begin).
             backup_xml_path = write_backup_xml(socket_path, incremental=prior)
+            checkpoint_xml_path = write_checkpoint_xml(successor)
 
             try:
                 # Step 3: Start NBD export via virsh backup-begin.  The
-                # incremental checkpoint is already embedded in the
-                # backup XML via the <incremental> element (design D1).
-                # No --incremental CLI flag is passed — it does not
-                # exist in any version of virsh backup-begin.
+                # checkpoint XML is the third positional argument —
+                # libvirt creates the successor checkpoint atomically at
+                # the export's freeze point (design D1).  No --incremental
+                # CLI flag is passed — it does not exist in any version
+                # of virsh backup-begin.
                 backup_cmd = [
                     "virsh",
                     "backup-begin",
                     "--domain",
                     vm_config.name,
                     str(backup_xml_path),
+                    str(checkpoint_xml_path),
                 ]
 
                 backup_result = self._shell.run(backup_cmd, timeout=120)
                 if not backup_result.success:
+                    # backup-begin is atomic: the successor checkpoint
+                    # was NOT created — the prior checkpoint remains the
+                    # newest valid baseline.  No rollback needed.
                     results.append(
                         BackupResult(
                             success=False,
@@ -231,11 +249,15 @@ class BitmapBackupProvider(IBackupProvider):
                     convert_result = self._shell.run(convert_cmd, timeout=600)
                 elapsed = time.monotonic() - start_time
                 if not convert_result.success:
-                    # Preserve checkpoint for retry.  Delete the partial
-                    # target file so retention cleanup does not find it
-                    # and log a misleading ``[delete] removed backup``
-                    # message (design D2).
+                    # Export failed: preserve the prior checkpoint for
+                    # retry, delete the just-created successor checkpoint
+                    # best-effort (it must not become the newest baseline
+                    # of a failed export), and delete the partial target
+                    # file so retention cleanup does not find it and log
+                    # a misleading ``[delete] removed backup`` message
+                    # (design D3).
                     self._cleanup_partial_file(target_file)
+                    self._delete_checkpoint_best_effort(vm_config.name, successor)
                     results.append(
                         BackupResult(
                             success=False,
@@ -256,10 +278,11 @@ class BitmapBackupProvider(IBackupProvider):
                     target.verify,
                 )
                 if verify_error is not None:
-                    # Delete the partially-transferred file so retention
-                    # cleanup does not find it and log a misleading
-                    # ``[delete] removed backup`` message (design D2).
+                    # Same failure handling as the convert-failure path:
+                    # preserve prior, delete successor best-effort,
+                    # delete the partially-transferred file (design D3).
                     self._cleanup_partial_file(target_file)
+                    self._delete_checkpoint_best_effort(vm_config.name, successor)
                     results.append(
                         BackupResult(
                             success=False,
@@ -272,27 +295,13 @@ class BitmapBackupProvider(IBackupProvider):
                     )
                     continue
 
-                # Step 6: Delete prior checkpoint (if any).
-                if prior:
-                    del_cmd = [
-                        "virsh",
-                        "checkpoint-delete",
-                        "--domain",
-                        vm_config.name,
-                        prior,
-                        "--metadata",
-                    ]
-                    del_result = self._shell.run(del_cmd, timeout=30)
-                    if not del_result.success:
-                        logger.warning(
-                            "Failed to delete prior checkpoint %s for VM %s: %s",
-                            prior,
-                            vm_config.name,
-                            del_result.error,
-                        )
-
-                # Step 7: Create new checkpoint for next incremental run.
-                self._create_checkpoint_only(vm_config.name, target_hash, snapshot.name)
+                # Step 6: Checkpoint rotation (design D3): only after a
+                # successful AND verified export, delete all superseded
+                # (older) qsnap checkpoints for this VM+target.  The
+                # successor checkpoint already exists (created atomically
+                # in step 3), so deletion never opens a zero-checkpoint
+                # window.  Delete failures are WARNING, never fatal.
+                self._delete_superseded_checkpoints(vm_config.name, target_hash, successor)
 
                 # Get file size for bytes_transferred.
                 try:
@@ -313,13 +322,14 @@ class BitmapBackupProvider(IBackupProvider):
                 )
 
             finally:
-                # Step 8: NBD job abort + socket cleanup (always, even on
-                # failure).  Abort the virsh backup-begin job to release
-                # the VM state change lock (mirrors nbd_full_export in
-                # qsnap/utils/nbd.py).  domjobabort is idempotent — safe
-                # to call when no job is running.  On failure, log a
-                # WARNING but do NOT propagate the error — the socket
-                # cleanup is the critical path and must still proceed.
+                # Step 8: NBD job abort + socket + XML temp file cleanup
+                # (always, even on failure).  Abort the virsh
+                # backup-begin job to release the VM state change lock
+                # (mirrors nbd_full_export in qsnap/utils/nbd.py).
+                # domjobabort is idempotent — safe to call when no job
+                # is running.  On failure, log a WARNING but do NOT
+                # propagate the error — the socket cleanup is the
+                # critical path and must still proceed.
                 abort_cmd = [
                     "virsh",
                     "domjobabort",
@@ -335,6 +345,17 @@ class BitmapBackupProvider(IBackupProvider):
                     )
                 # Socket cleanup.
                 self._shell.run(["rm", "-f", socket_path], timeout=10)
+                # Temp XML cleanup (local filesystem, not shell — keeps
+                # the files out of the IShell command stream).
+                for xml_path in (backup_xml_path, checkpoint_xml_path):
+                    try:
+                        xml_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to remove temp XML file %s: %s",
+                            xml_path,
+                            exc,
+                        )
 
         return results
 
@@ -348,7 +369,7 @@ class BitmapBackupProvider(IBackupProvider):
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> BackupResult:
-        """Create a standalone FULL backup via NBD full export (design D4).
+        """Create a standalone FULL backup via NBD full export.
 
         ``vm_name`` is the full, untruncated VM name (e.g.
         ``"3.Projects_opencode"``), passed from Core's
@@ -358,9 +379,14 @@ class BitmapBackupProvider(IBackupProvider):
 
         Uses the shared :func:`nbd_full_export` helper (no
         ``--incremental`` flag) to produce a standalone qcow2 on the
-        target.  No checkpoint is created or deleted — the checkpoint
-        lifecycle remains exclusively in :meth:`transfer_missing` for
-        incremental runs (design D3).
+        target.  A checkpoint named
+        ``qsnap-{target_hash}-{yyyymmddTHHMMSS}`` is created
+        **atomically** with the FULL's ``backup-begin`` (design D1/D2):
+        the baseline bitmap coincides with the FULL's freeze point, so
+        the first incremental after a FULL exports every block dirtied
+        since the FULL started — a faithful, gap-free chain.  On export
+        failure the just-created checkpoint is deleted best-effort by
+        :func:`nbd_full_export`, preserving any prior baseline.
 
         Uses an atomic pattern: convert to a ``.tmp`` file, then rename
         on success.  On failure, the ``.tmp`` file is removed.
@@ -373,8 +399,8 @@ class BitmapBackupProvider(IBackupProvider):
 
         This method SHALL NOT call ``self._state.record_full_backup()``
         — state recording is Core's responsibility after post-create
-        verification passes (design D4 — matches
-        ``FileCopyBackupProvider`` behavior).
+        verification passes (matches ``FileCopyBackupProvider``
+        behavior).
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -382,9 +408,13 @@ class BitmapBackupProvider(IBackupProvider):
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"
 
-        # Run NBD full-export to .tmp file (no --incremental, no
-        # checkpoint — design D3, D4).  Compression is passed through
-        # via the -c flag.
+        # The baseline checkpoint is created atomically with the FULL's
+        # backup-begin (design D1/D2).
+        checkpoint_name = self._new_checkpoint_name(self.target_hash(str(target.path)))
+
+        # Run NBD full-export to .tmp file (no --incremental flag;
+        # checkpoint XML passed for atomic baseline creation).
+        # Compression is passed through via the -c flag.
         nbd_result = nbd_full_export(
             self._shell,
             vm_name,
@@ -392,6 +422,7 @@ class BitmapBackupProvider(IBackupProvider):
             compress=compress,
             compression_type=compression_type,
             stall_timeout=stall_timeout,
+            checkpoint_name=checkpoint_name,
         )
         if not nbd_result.success:
             # Remove .tmp on failure — no final file created.
@@ -524,37 +555,180 @@ class BitmapBackupProvider(IBackupProvider):
         prefix = f"qsnap-{target_hash}-"
         return [cp for cp in self.list_checkpoints(vm_name) if cp.startswith(prefix)]
 
-    def _create_checkpoint_only(self, vm_name: str, target_hash: str, snapshot_name: str) -> bool:
-        """Create a libvirt checkpoint without a data transfer.
+    @staticmethod
+    def _new_checkpoint_name(target_hash: str, taken: set[str] | None = None) -> str:
+        """Generate a unique successor checkpoint name (design D2).
 
-        Used in two places (DRY): (1) the checkpoint-only path when a
-        FULL already exists in state (design D4), and (2) Step 7 after a
-        successful incremental transfer.  The checkpoint serves as the
-        baseline for the next incremental run.
+        Format: ``qsnap-{target_hash}-{yyyymmddTHHMMSS}`` — local time
+        with seconds resolution, the same clock used for snapshot
+        naming.  Only this format is ever generated for new checkpoints;
+        legacy names (``qsnap-{target_hash}-{snapshot_name}``) remain
+        parseable by discovery (design D3).
 
-        Returns ``True`` on success, ``False`` on failure (logged as
-        WARNING; callers continue regardless — checkpoint creation is
-        not fatal to the current transfer).
+        Seconds resolution collides when two checkpoints are created
+        within the same second (e.g. a fast FULL followed immediately
+        by the first incremental of the same pipeline run — libvirt
+        rejects the duplicate name).  Design D2 requires uniqueness
+        per creation, so when *taken* (the existing qsnap checkpoint
+        names for this VM+target) contains the candidate, the timestamp
+        is bumped forward one second at a time until unique.  The bump
+        only affects the name, never the checkpoint's actual creation
+        time, and ordering semantics are preserved (the bumped name is
+        still the newest).
         """
-        checkpoint_name = f"qsnap-{target_hash}-{snapshot_name}"
-        create_cmd = [
+        now = datetime.now()
+        existing: set[str] = taken if taken is not None else set()
+        for offset in range(60):
+            candidate = (
+                f"qsnap-{target_hash}-{(now + timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%S')}"
+            )
+            if candidate not in existing:
+                return candidate
+        # Practically unreachable (60 same-name collisions in a row);
+        # fall back to microsecond resolution to guarantee uniqueness.
+        return f"qsnap-{target_hash}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+
+    @staticmethod
+    def _parse_checkpoint_timestamp(name: str, target_hash: str) -> datetime | None:
+        """Parse the creation timestamp embedded in a checkpoint name.
+
+        New-format names (``qsnap-{target_hash}-{yyyymmddTHHMMSS}``)
+        carry the timestamp as the entire trailing segment.  Legacy
+        names (``qsnap-{target_hash}-{snapshot_name}``) carry it inside
+        the snapshot-name segment (same patterns as
+        :func:`qsnap.utils.parsing.parse_timestamp`, most specific
+        first).  Timezone-aware matches are normalized to naive local
+        time so they compare coherently with new-format timestamps.
+
+        Returns ``None`` when no timestamp can be parsed — callers sort
+        such names oldest (conservative, design D3).
+        """
+        prefix = f"qsnap-{target_hash}-"
+        remainder = name[len(prefix) :] if name.startswith(prefix) else name
+        if re.fullmatch(r"\d{8}T\d{6}", remainder):
+            try:
+                return datetime.strptime(remainder, "%Y%m%dT%H%M%S")
+            except ValueError:
+                return None
+        # Legacy fallback: timestamp embedded in the snapshot-name
+        # segment (e.g. ``3.Projects_opencode.20260721T0018_vda``).
+        patterns: list[tuple[str, str]] = [
+            (r"(\d{8}T\d{6}[+-]\d{4})", "%Y%m%dT%H%M%S%z"),
+            (r"(\d{8}T\d{6})", "%Y%m%dT%H%M%S"),
+            (r"(\d{8}T\d{4})", "%Y%m%dT%H%M"),
+            (r"(\d{8})", "%Y%m%d"),
+        ]
+        for regex, fmt in patterns:
+            match = re.search(regex, remainder)
+            if not match:
+                continue
+            try:
+                parsed = datetime.strptime(match.group(1), fmt)
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                # Normalize to naive local time for comparison with
+                # new-format (naive, local-clock) timestamps.
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        return None
+
+    def _newest_checkpoint(self, vm_name: str, target_hash: str) -> str | None:
+        """Return the newest qsnap checkpoint for this VM+target (design D3).
+
+        Thin wrapper over :meth:`_select_newest` that fetches the
+        candidate list via ``virsh checkpoint-list --name`` —
+        ``IStateManager`` is never consulted for checkpoint selection.
+        """
+        return self._select_newest(
+            self._list_checkpoints_for_target(vm_name, target_hash),
+            target_hash,
+            vm_name,
+        )
+
+    def _select_newest(
+        self,
+        candidates: list[str],
+        target_hash: str,
+        vm_name: str,
+    ) -> str | None:
+        """Select the newest checkpoint from *candidates* (design D3).
+
+        Orders the given ``qsnap-{target_hash}-*`` checkpoint names by
+        the creation timestamp embedded in the name (new format first,
+        legacy format as fallback).  Names whose timestamp cannot be
+        parsed sort oldest (conservative) and are logged at WARNING.
+        Returns ``None`` when *candidates* is empty.
+        """
+        if not candidates:
+            return None
+        newest: str | None = None
+        newest_ts: datetime | None = None
+        for name in candidates:
+            ts = self._parse_checkpoint_timestamp(name, target_hash)
+            if ts is None:
+                logger.warning(
+                    "Cannot parse timestamp from checkpoint name %s for VM %s; "
+                    "treating it as oldest",
+                    name,
+                    vm_name,
+                )
+                ts = datetime.min
+            if newest_ts is None or ts > newest_ts:
+                newest = name
+                newest_ts = ts
+        return newest
+
+    def _delete_checkpoint_best_effort(self, vm_name: str, checkpoint_name: str) -> None:
+        """Delete a checkpoint via ``virsh checkpoint-delete --metadata``.
+
+        Best-effort: failures are logged at WARNING and never
+        propagated (design D3 — checkpoint cleanup is never fatal to a
+        transfer).
+        """
+        del_cmd = [
             "virsh",
-            "checkpoint-create-as",
+            "checkpoint-delete",
             "--domain",
             vm_name,
-            "--name",
             checkpoint_name,
+            "--metadata",
         ]
-        create_result = self._shell.run(create_cmd, timeout=120)
-        if not create_result.success:
+        del_result = self._shell.run(del_cmd, timeout=30)
+        if not del_result.success:
             logger.warning(
-                "Failed to create checkpoint %s for VM %s: %s",
+                "Failed to delete checkpoint %s for VM %s: %s",
                 checkpoint_name,
                 vm_name,
-                create_result.error,
+                del_result.error,
             )
-            return False
-        return True
+
+    def _delete_superseded_checkpoints(
+        self,
+        vm_name: str,
+        target_hash: str,
+        successor: str,
+    ) -> None:
+        """Delete all qsnap checkpoints for this VM+target older than *successor*.
+
+        Called only after a successful AND verified export (design D3):
+        the successor checkpoint already exists (created atomically with
+        the export's ``backup-begin``), so deleting superseded
+        checkpoints never opens a zero-checkpoint window.  Unparseable
+        names sort oldest and are therefore always superseded.  A crash
+        before this cleanup leaves a stale older checkpoint — harmless,
+        because newest-wins discovery still picks the correct baseline
+        and cleanup is retried here on the next successful run.
+        """
+        successor_ts = self._parse_checkpoint_timestamp(successor, target_hash)
+        for name in self._list_checkpoints_for_target(vm_name, target_hash):
+            if name == successor:
+                continue
+            ts = self._parse_checkpoint_timestamp(name, target_hash)
+            if ts is not None and successor_ts is not None and ts >= successor_ts:
+                # Not older than the successor — keep.
+                continue
+            self._delete_checkpoint_best_effort(vm_name, name)
 
     @staticmethod
     def target_hash(target_path: str) -> str:

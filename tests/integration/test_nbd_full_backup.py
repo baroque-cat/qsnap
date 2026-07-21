@@ -72,7 +72,7 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
 
     # Step 3: Check that libvirt is new enough for NBD
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — NBD backup-begin not available")
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
 
     # Step 4: Create the backup provider and SnapshotInfo for the
     # active disk layer.
@@ -337,7 +337,7 @@ def test_fork_running_vm_nbd_integration(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — NBD fork not available")
+        pytest.skip("libvirt < 7.2 — NBD fork not available")
 
     # Step 2: Register the VM's active layer as a "snapshot" in state,
     # so that Core._resolve_snapshot() can find it.
@@ -456,7 +456,7 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — NBD backup-begin not available")
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
 
     # Step 2: Run NBD full backup.
     provider = FileCopyBackupProvider(shell)

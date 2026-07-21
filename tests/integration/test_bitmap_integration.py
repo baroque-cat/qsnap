@@ -1,4 +1,4 @@
-"""Integration tests for BitmapBackupProvider checkpoint-only creation
+"""Integration tests for BitmapBackupProvider atomic checkpoint creation
 and NBD incremental backup with compression.
 
 All tests in this module require a running libvirt daemon and are
@@ -12,6 +12,7 @@ Run only when explicitly requested::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -29,123 +30,45 @@ from qsnap.models.results import (
 )
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
-from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running, write_backup_xml
+from qsnap.utils.nbd import (
+    is_libvirt_new_enough,
+    is_vm_running,
+    write_backup_xml,
+    write_checkpoint_xml,
+)
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_state import InMemoryStateManager
 
-# ──────────────────────────────────────────────────────────────────────
-# Test 1: Checkpoint-only creation when FULL exists in state
-# ──────────────────────────────────────────────────────────────────────
+# ── helpers ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.integration
-def test_int_checkpoint_only_creation(test_vm):
-    """Verify that ``BitmapBackupProvider.transfer_missing()`` creates
-    a checkpoint WITHOUT data transfer when a FULL backup already
-    exists in state.
-
-    1. Start the test VM.
-    2. Record a FULL backup in ``InMemoryStateManager``.
-    3. Call ``transfer_missing()`` with a snapshot.
-    4. Assert that a checkpoint was created via ``virsh checkpoint-list``.
-    5. Assert no .qcow2 backup file was created for the snapshot (no NBD
-       transfer occurred).
-    """
-    shell: SubprocessShell = test_vm["shell"]
-    vm_name: str = test_vm["vm_name"]
-    base_image: Path = test_vm["base_image"]
-    snapshot_dir: Path = test_vm["snapshot_dir"]
-    target_dir: Path = test_vm["target_dir"]
-
-    # Step 1: Start the VM.
-    start_result = shell.run(["virsh", "start", vm_name], timeout=30)
-    if not start_result.success:
-        pytest.skip(f"virsh start failed: {start_result.error}")
-    time.sleep(1)
-
-    if not is_vm_running(shell, vm_name):
-        pytest.skip("VM did not reach running state")
-
-    if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — bitmap backup-begin not available")
-
-    # Step 2: Record a FULL backup in state so the checkpoint-only
-    # path is triggered (BitmapBackupProvider checks for FULLs in state
-    # before deciding whether to transfer data).
-    state = InMemoryStateManager()
-    state.record_full_backup(
-        str(target_dir),
-        f"{vm_name}.FULL.{datetime.now():%Y%m%d}.qcow2",
-        datetime.now(),
-        "monthly",
+def _get_checkpoint_names(shell: SubprocessShell, vm_name: str) -> list[str]:
+    """Return qsnap-prefixed checkpoint names for *vm_name*."""
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
     )
+    if not result.success:
+        return []
+    return [
+        line.strip()
+        for line in result.stdout.strip().splitlines()
+        if line.strip().startswith("qsnap-")
+    ]
 
-    # Step 3: Create the provider with state.
-    provider = BitmapBackupProvider(shell, state=state)
 
-    # Create a snapshot info for the active disk.
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.active",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-    )
-    target = TargetConfig(
-        path=target_dir,
-        incremental=True,
-        compress=False,
-        verify="off",
-    )
-    vm_config = VMConfig(
-        name=vm_name,
-        base_image=base_image,
-        snapshot_dir=snapshot_dir,
-    )
-
-    # Step 4: Call transfer_missing.  Since a FULL exists in state and
-    # no prior checkpoint exists, the checkpoint-only path should
-    # execute (no NBD transfer).
-    results = provider.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snapshot],
-    )
-
-    # Step 5: Verify a checkpoint was created by listing checkpoints.
-    checkpoints = provider.list_checkpoints(vm_name)
-    assert len(checkpoints) > 0, (
-        f"Expected at least one checkpoint after transfer_missing, got {len(checkpoints)}"
-    )
-    assert any("qsnap-" in cp for cp in checkpoints), (
-        f"Expected a qsnap-prefixed checkpoint, got: {checkpoints}"
-    )
-
-    # Step 6: Verify no NBD transfer occurred — the snapshot file
-    # should NOT exist in the target directory.
-    expected_backup = target_dir / f"{snapshot.name}.qcow2"
-    assert not expected_backup.exists(), (
-        f"No backup file should be created for checkpoint-only path, found {expected_backup}"
-    )
-
-    # Step 7: Verify no backup results with success=True were produced
-    # (checkpoint-only path returns empty/continue, no BackupResult).
-    success_results = [r for r in results if r.success]
-    assert len(success_results) == 0, (
-        f"Checkpoint-only path should not produce BackupResult, got {len(success_results)} results"
-    )
-
-    # Clean up: delete the checkpoint we created.
-    for cp in checkpoints:
-        if cp.startswith("qsnap-"):
-            shell.run(
-                ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
-                timeout=30,
-            )
+def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
+    """Delete all qsnap-prefixed checkpoints for *vm_name*."""
+    for cp in _get_checkpoint_names(shell, vm_name):
+        shell.run(
+            ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
+            timeout=30,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 2: NBD incremental backup with compression
+# Test 1: NBD incremental backup with compression
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -175,7 +98,7 @@ def test_int_nbd_incremental_with_compression(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — bitmap backup-begin not available")
+        pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
     # Step 2: Create the provider without state (no FULL in state,
     # so the first transfer_missing call should perform a real NBD
@@ -260,18 +183,7 @@ def test_int_nbd_incremental_with_compression(test_vm):
                 )
 
     # Clean up: delete any checkpoints created during the test.
-    checkpoints_result = shell.run(
-        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
-        timeout=30,
-    )
-    if checkpoints_result.success:
-        for line in checkpoints_result.stdout.strip().splitlines():
-            cp = line.strip()
-            if cp.startswith("qsnap-"):
-                shell.run(
-                    ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
-                    timeout=30,
-                )
+    _cleanup_checkpoints(shell, vm_name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -282,15 +194,17 @@ def test_int_nbd_incremental_with_compression(test_vm):
 @pytest.mark.integration
 def test_int_backup_begin_accepts_incremental_xml(test_vm):
     """Verify ``virsh backup-begin`` accepts a backup XML with
-    ``<incremental>`` element — no ``--incremental`` CLI flag.
+    ``<incremental>`` element AND a checkpoint XML as third positional
+    argument — no ``--incremental`` CLI flag.
 
     1. Start the test VM.
     2. Create a checkpoint via ``virsh checkpoint-create-as``.
-    3. Generate backup XML with ``write_backup_xml(socket, incremental=<cp>)``.
-    4. Call ``virsh backup-begin --domain <vm> --backupxml <xml>``
-       (no ``--incremental`` flag).
-    5. Assert exit code 0.
-    6. Clean up: abort backup job, delete checkpoint and socket.
+    3. Generate backup XML with ``write_backup_xml(socket, incremental=<cp>)``
+       and checkpoint XML via ``write_checkpoint_xml()``.
+    4. Call ``virsh backup-begin --domain <vm> <backup.xml> <checkpoint.xml>``
+       (three positional args, no ``--incremental`` flag).
+    5. Assert exit code 0 and the new checkpoint is visible.
+    6. Clean up: abort backup job, delete both checkpoints and socket.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -305,10 +219,10 @@ def test_int_backup_begin_accepts_incremental_xml(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — bitmap backup-begin not available")
+        pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
-    # Step 2: Create a checkpoint for the incremental export.
-    cp_name = "qsnap-test-cp"
+    # Step 2: Create a baseline checkpoint for the incremental export.
+    cp_name = "qsnap-test-baseline"
     cp_result = shell.run(
         [
             "virsh",
@@ -320,44 +234,68 @@ def test_int_backup_begin_accepts_incremental_xml(test_vm):
         ],
         timeout=30,
     )
-    assert cp_result.success, f"Failed to create checkpoint: {cp_result.error}"
+    if not cp_result.success:
+        pytest.skip(f"checkpoint-create-as not supported: {cp_result.error}")
 
-    # Step 3: Generate XML with <incremental> element.
+    # Step 3: Generate backup XML with <incremental> element AND
+    # checkpoint XML for atomic successor creation (design D1).
     socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
     shell.run(["rm", "-f", socket_path], timeout=10)
-    xml_path = write_backup_xml(socket_path, incremental=cp_name)
+    backup_xml_path = write_backup_xml(socket_path, incremental=cp_name)
+    successor_name = "qsnap-atomic-successor"
+    checkpoint_xml_path = write_checkpoint_xml(successor_name)
 
     try:
-        # Step 4: Call backup-begin WITHOUT --incremental flag.
-        # The <incremental> element is embedded in the XML (design D1).
+        # Step 4: Call backup-begin with THREE positional args:
+        # domain, backup XML, checkpoint XML.  No --incremental flag.
         backup_result = shell.run(
             [
                 "virsh",
                 "backup-begin",
                 "--domain",
                 vm_name,
-                str(xml_path),
+                str(backup_xml_path),
+                str(checkpoint_xml_path),
             ],
             timeout=120,
         )
         assert backup_result.success, (
-            f"virsh backup-begin with <incremental> XML element failed: {backup_result.error}"
+            f"virsh backup-begin with <incremental> XML + checkpoint XML failed: "
+            f"{backup_result.error}"
         )
-    finally:
-        # Step 6: Clean up — abort backup job, delete socket and checkpoint.
-        shell.run(["virsh", "domjobabort", "--domain", vm_name], timeout=30)
-        shell.run(["rm", "-f", socket_path], timeout=10)
-        shell.run(
-            [
-                "virsh",
-                "checkpoint-delete",
-                "--domain",
-                vm_name,
-                cp_name,
-                "--metadata",
-            ],
+
+        # Step 5: Verify the atomic successor checkpoint was created.
+        cp_list = shell.run(
+            ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
             timeout=30,
         )
+        assert cp_list.success, f"checkpoint-list failed: {cp_list.error}"
+        checkpoint_names = [line.strip() for line in cp_list.stdout.strip().splitlines()]
+        assert successor_name in checkpoint_names, (
+            f"Atomic successor checkpoint {successor_name!r} not found. "
+            f"Checkpoints: {checkpoint_names}"
+        )
+
+    finally:
+        # Step 6: Clean up — abort backup job, delete both checkpoints
+        # and socket + temp XML files.
+        shell.run(["virsh", "domjobabort", "--domain", vm_name], timeout=30)
+        shell.run(["rm", "-f", socket_path], timeout=10)
+        for cp in (cp_name, successor_name):
+            shell.run(
+                [
+                    "virsh",
+                    "checkpoint-delete",
+                    "--domain",
+                    vm_name,
+                    cp,
+                    "--metadata",
+                ],
+                timeout=30,
+            )
+        for xml_path in (backup_xml_path, checkpoint_xml_path):
+            with contextlib.suppress(OSError):
+                xml_path.unlink(missing_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -367,17 +305,20 @@ def test_int_backup_begin_accepts_incremental_xml(test_vm):
 
 @pytest.mark.integration
 def test_int_full_to_incremental_flow(test_vm):
-    """Execute a FULL→incremental NBD backup flow end-to-end.
+    """Execute a FULL→incremental NBD backup flow end-to-end with atomic
+    checkpoint assertions.
 
     1. Start the test VM.
     2. First run: ``transfer_missing()`` with no prior checkpoint
-       → FULL NBD export, creates a checkpoint.
-    3. Write data to dirty blocks via QEMU monitor.
-    4. Second run: ``transfer_missing()`` with new snapshot name,
+       → FULL NBD export, creates atomic checkpoint.
+    3. Assert exactly one qsnap checkpoint exists after first run.
+    4. Write data to dirty blocks via QEMU monitor.
+    5. Second run: ``transfer_missing()`` with new snapshot name,
        prior checkpoint exists → incremental NBD export via
-       ``<incremental>`` in XML.
-    5. Assert both runs succeeded.
-    6. Assert second backup is a valid qcow2.
+       ``<incremental>`` in XML.  Successor checkpoint created
+       atomically, prior deleted in rotation.
+    6. Assert exactly one qsnap checkpoint exists after second run.
+    7. Assert both backups are valid qcow2.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -395,7 +336,7 @@ def test_int_full_to_incremental_flow(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — bitmap backup-begin not available")
+        pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
     vm_config = VMConfig(
         name=vm_name,
@@ -409,7 +350,6 @@ def test_int_full_to_incremental_flow(test_vm):
         verify="off",
     )
 
-    # No state → no FULL anchor, so checkpoint-only path won't trigger.
     provider = BitmapBackupProvider(shell, state=None)
 
     # Step 2: First run — FULL NBD export (no prior checkpoint).
@@ -440,7 +380,15 @@ def test_int_full_to_incremental_flow(test_vm):
     info_full_data = json.loads(info_full.stdout)
     assert info_full_data.get("format") == "qcow2", "FULL backup should be qcow2"
 
-    # Step 3: Write data to create dirty blocks tracked by the bitmap.
+    # Step 3: Assert exactly one qsnap checkpoint exists after first run
+    # (atomic checkpoint created with the FULL export).
+    checkpoints_after_full = _get_checkpoint_names(shell, vm_name)
+    assert len(checkpoints_after_full) == 1, (
+        f"Expected 1 qsnap checkpoint after first (FULL) run, "
+        f"got {len(checkpoints_after_full)}: {checkpoints_after_full}"
+    )
+
+    # Step 4: Write data to create dirty blocks tracked by the bitmap.
     # Use QEMU Human Monitor Protocol to write directly to the virtual
     # disk — no guest OS required.
     write_result = shell.run(
@@ -476,7 +424,7 @@ def test_int_full_to_incremental_flow(test_vm):
             pass
     time.sleep(1)
 
-    # Step 4: Second run — incremental NBD export (prior checkpoint exists).
+    # Step 5: Second run — incremental NBD export (prior checkpoint exists).
     snap_incr = SnapshotInfo(
         name=f"{vm_name}.incr-run",
         path=base_image,
@@ -497,7 +445,7 @@ def test_int_full_to_incremental_flow(test_vm):
     incr_backup = results_incr[0].target_path
     assert incr_backup.exists(), f"Incremental backup file not found at {incr_backup}"
 
-    # Step 5: Verify incremental backup is valid qcow2.
+    # Verify incremental backup is valid qcow2.
     info_incr = shell.run(
         ["qemu-img", "info", "--output=json", str(incr_backup)],
         timeout=30,
@@ -506,26 +454,16 @@ def test_int_full_to_incremental_flow(test_vm):
     info_incr_data = json.loads(info_incr.stdout)
     assert info_incr_data.get("format") == "qcow2", "Incremental backup should be valid qcow2"
 
-    # Clean up: delete all qsnap-prefixed checkpoints.
-    checkpoints_result = shell.run(
-        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
-        timeout=30,
+    # Step 6: Assert exactly one qsnap checkpoint exists after second run
+    # (prior deleted in rotation, successor created atomically).
+    checkpoints_after_incr = _get_checkpoint_names(shell, vm_name)
+    assert len(checkpoints_after_incr) == 1, (
+        f"Expected 1 qsnap checkpoint after incremental run, "
+        f"got {len(checkpoints_after_incr)}: {checkpoints_after_incr}"
     )
-    if checkpoints_result.success:
-        for line in checkpoints_result.stdout.strip().splitlines():
-            cp = line.strip()
-            if cp.startswith("qsnap-"):
-                shell.run(
-                    [
-                        "virsh",
-                        "checkpoint-delete",
-                        "--domain",
-                        vm_name,
-                        cp,
-                        "--metadata",
-                    ],
-                    timeout=30,
-                )
+
+    # Clean up: delete all qsnap-prefixed checkpoints.
+    _cleanup_checkpoints(shell, vm_name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -562,7 +500,7 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         pytest.skip("VM did not reach running state")
 
     if not is_libvirt_new_enough(shell):
-        pytest.skip("libvirt < 6.0 — bitmap backup-begin not available")
+        pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
     vm_config = VMConfig(
         name=vm_name,
@@ -597,6 +535,14 @@ def test_int_incremental_is_smaller_than_full(test_vm):
 
     full_backup = results_full[0].target_path
     full_size = full_backup.stat().st_size
+
+    # Assert exactly one qsnap checkpoint after FULL export
+    # (atomic creation at backup-begin freeze point).
+    checkpoints_after_full = _get_checkpoint_names(shell, vm_name)
+    assert len(checkpoints_after_full) == 1, (
+        f"Expected 1 qsnap checkpoint after FULL, "
+        f"got {len(checkpoints_after_full)}: {checkpoints_after_full}"
+    )
 
     # Step 3: Write data to create dirty blocks.
     # Use QEMU QMP human-monitor-command with the HMP qemu-io command.
@@ -636,6 +582,14 @@ def test_int_incremental_is_smaller_than_full(test_vm):
     incr_backup = results_incr[0].target_path
     incr_size = incr_backup.stat().st_size
 
+    # Assert exactly one qsnap checkpoint after incremental
+    # (rotation deleted the prior, successor created atomically).
+    checkpoints_after_incr = _get_checkpoint_names(shell, vm_name)
+    assert len(checkpoints_after_incr) == 1, (
+        f"Expected 1 qsnap checkpoint after incremental, "
+        f"got {len(checkpoints_after_incr)}: {checkpoints_after_incr}"
+    )
+
     # Step 5: Verify incremental size.
     # When dirty blocks exist (write succeeded), incremental should be
     # significantly smaller than full.  When no dirty blocks were created
@@ -671,25 +625,7 @@ def test_int_incremental_is_smaller_than_full(test_vm):
     assert info_data.get("format") == "qcow2", "Incremental backup should be valid qcow2"
 
     # Clean up: delete all qsnap-prefixed checkpoints.
-    checkpoints_result = shell.run(
-        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
-        timeout=30,
-    )
-    if checkpoints_result.success:
-        for line in checkpoints_result.stdout.strip().splitlines():
-            cp = line.strip()
-            if cp.startswith("qsnap-"):
-                shell.run(
-                    [
-                        "virsh",
-                        "checkpoint-delete",
-                        "--domain",
-                        vm_name,
-                        cp,
-                        "--metadata",
-                    ],
-                    timeout=30,
-                )
+    _cleanup_checkpoints(shell, vm_name)
 
 
 # ──────────────────────────────────────────────────────────────────────

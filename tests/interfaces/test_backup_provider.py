@@ -61,8 +61,9 @@ def test_bitmap_backup_provider_no_core_inheritance():
         (BitmapBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell(), "state": InMemoryStateManager()}),
         (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "bitmap_with_state", "mock"],
+    ids=["file_copy", "bitmap", "bitmap_with_state", "mock", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, init_kwargs):
     """transfer_missing() returns a list whose elements are all BackupResult."""
@@ -93,8 +94,9 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
         (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock"],
+    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     """list() returns a list whose elements are all SnapshotInfo."""
@@ -112,8 +114,9 @@ def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
         (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
+        (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock"],
+    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
     """delete() returns a ShellResult."""

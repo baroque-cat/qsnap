@@ -1,10 +1,14 @@
-# NBD Bitmap Backup
+# Delta: nbd-bitmap-backup
 
-## Purpose
+## REMOVED Requirements
 
-NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bitmap with libvirt backup API for dirty-block extraction over Unix socket.
+### Requirement: Checkpoint-only creation when FULL exists and no prior checkpoint
 
-## Requirements
+**Reason**: The checkpoint-only path (design D4) created the baseline checkpoint *after* the FULL export finished, while the FULL is frozen at its `backup-begin` start. Guest writes inside that window were covered by neither the FULL nor any later incremental — a silent restore hole. The path also depended on state-recording timing (`get_full_backups()` already containing the FULL), which proved fragile in production. Atomic checkpoint creation (this change) makes the FULL run leave a valid baseline by construction, so the checkpoint-only shortcut is unnecessary.
+
+**Migration**: No user action required. Checkpoints previously created via `virsh checkpoint-create-as` remain valid baselines and are discovered by the newest-wins lookup. When `transfer_missing()` finds no prior checkpoint on a target that already has FULLs, the behavior reverts to a full NBD export (safe: redundant transfer, never data loss).
+
+## MODIFIED Requirements
 
 ### Requirement: NBD pull-model backup via virsh backup-begin
 
@@ -12,7 +16,7 @@ NBD pull-model backup via virsh backup-begin — replaces qemu-img convert --bit
 
 The incremental checkpoint SHALL be passed via an `<incremental>` element in the backup XML, NOT via a `--incremental` CLI flag. The `--incremental` flag does not exist in any version of virsh `backup-begin`. The `write_backup_xml()` function SHALL accept an optional `incremental: str | None = None` parameter. When non-None, the XML SHALL include `<incremental>{checkpoint_name}</incremental>` as a child of `<domainbackup>`, before the `<server>` element.
 
-The successor checkpoint SHALL be passed as a separate checkpoint XML file given as the third positional argument to `virsh backup-begin`. The `write_checkpoint_xml(checkpoint_name: str) -> Path` function in `qsnap/utils/nbd.py` SHALL generate it as `<domaincheckpoint><name>{checkpoint_name}</name></domaincheckpoint>` in a temp file. Both XML temp files SHALL be removed after the run regardless of outcome.
+The successor checkpoint SHALL be passed as a separate checkpoint XML file given as the third positional argument to `virsh backup-begin`. A new `write_checkpoint_xml(checkpoint_name: str) -> Path` function in `qsnap/utils/nbd.py` SHALL generate it as `<domaincheckpoint><name>{checkpoint_name}</name></domaincheckpoint>` in a temp file. Both XML temp files SHALL be removed after the run regardless of outcome.
 
 #### Scenario: First backup — full pull via NBD with atomic checkpoint
 
@@ -47,71 +51,68 @@ The successor checkpoint SHALL be passed as a separate checkpoint XML file given
 - **AND** the prior checkpoint is preserved
 - **AND** the successor checkpoint created by this failed run is deleted best-effort via `virsh checkpoint-delete --metadata`
 
-### Requirement: NBD socket path uniqueness
-
-`BitmapBackupProvider` SHALL use a process-unique Unix socket path: `/tmp/qsnap-backup-{pid}.sock`. Before starting `backup-begin`, the provider SHALL remove any stale socket at that path.
-
-#### Scenario: Stale socket from crashed process
-
-- **WHEN** a previous qsnap process crashed leaving `/tmp/qsnap-backup-12345.sock`
-- **THEN** the new process (different PID) removes the stale socket before starting
-
-### Requirement: Libvirt version check for NBD API
-
-`DefaultFactory.create_backup_provider()` SHALL call `is_libvirt_new_enough(shell)` from `qsnap.utils.nbd` before constructing `BitmapBackupProvider`. If the version is insufficient, the factory SHALL log a WARNING and return `FileCopyBackupProvider`. `BitmapBackupProvider.__init__()` SHALL NOT perform version checking — it SHALL NOT call `virsh --version` and SHALL NOT raise `RuntimeError` for an old libvirt.
-
-`is_libvirt_new_enough()` SHALL return `True` only for libvirt version 7.2 or newer. The incremental backup API (including the `<incremental>` XML element and the checkpoint XML argument of `backup-begin`) is complete since libvirt 7.2 per the libvirt knowledge base; the previous 6.0 threshold was insufficient.
-
-#### Scenario: Libvirt too old
-- **WHEN** `virsh --version` returns a version older than 7.2
-- **THEN** `is_libvirt_new_enough(shell)` returns `False`
-- **THEN** `DefaultFactory` does NOT construct `BitmapBackupProvider`
-- **THEN** `DefaultFactory` logs a WARNING and returns `FileCopyBackupProvider(shell, state)`
-
-#### Scenario: Libvirt sufficient
-- **WHEN** `virsh --version` returns a version 7.2 or newer
-- **THEN** `is_libvirt_new_enough(shell)` returns `True`
-- **THEN** `DefaultFactory` constructs and returns `BitmapBackupProvider(shell)`
-
-#### Scenario: BitmapBackupProvider constructor is version-check-free
-- **WHEN** `BitmapBackupProvider(shell)` is instantiated
-- **THEN** no `virsh --version` shell call is made in `__init__`
-- **AND** no `RuntimeError` is raised for version reasons
-- **AND** the only parameter is `shell: IShell`
-
 ### Requirement: BitmapBackupProvider.create_full_backup via NBD full export
 
 `BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. The method SHALL pass a `checkpoint_name` to `nbd_full_export()` so that a baseline checkpoint is created **atomically** with the FULL's `backup-begin`, named `qsnap-{target_hash}-{yyyymmddTHHMMSS}`. A bitmap-mode FULL therefore always leaves a checkpoint baseline anchored at the FULL's freeze point. When `compress=True` and `compression_type="zstd"`, the `-c -o compression_type=zstd` flags SHALL be passed to `qemu-img convert` in the NBD path. When `compress=True` and `compression_type="zlib"`, only `-c` SHALL be added. The `compression_type` parameter SHALL be passed through to `nbd_full_export()`.
 
 #### Scenario: Bitmap FULL with zstd compression
+
 - **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, compression_type="zstd", bucket_level="monthly")` is called
 - **THEN** `qemu-img convert -c -o compression_type=zstd nbd:unix:<socket> <target>` is called
 - **AND** the resulting FULL is compressed with zstd
 
 #### Scenario: Bitmap FULL with zlib compression
+
 - **WHEN** `BitmapBackupProvider.create_full_backup(snapshot, target, compress=True, compression_type="zlib", bucket_level="monthly")` is called
 - **THEN** `qemu-img convert -c nbd:unix:<socket> <target>` is called (default zlib)
 - **AND** the resulting FULL is compressed with zlib
 
 #### Scenario: Bitmap FULL socket cleanup
+
 - **WHEN** the NBD full export completes (success or failure)
 - **THEN** the Unix socket is removed via `rm -f` in a `finally` block
 
 #### Scenario: Bitmap FULL leaves an atomic checkpoint baseline
+
 - **WHEN** `BitmapBackupProvider.create_full_backup()` is called for a running VM
 - **THEN** `virsh backup-begin` is invoked with a checkpoint XML as the third positional argument
 - **AND** on success a checkpoint named `qsnap-{target_hash}-{yyyymmddTHHMMSS}` exists
 - **AND** its baseline equals the FULL export's freeze point
 
 #### Scenario: Bucket-driven FULL no longer crashes bitmap targets
+
 - **WHEN** `Core._backup_target()` triggers `_should_create_bucket_full()` for a bitmap-mode target
 - **AND** it returns `(True, bucket_level)`
 - **THEN** `BitmapBackupProvider.create_full_backup()` is called and succeeds
 - **AND** the FULL is recorded in state with the given `bucket_level`
 
-### Requirement: NBD backup job termination via domjobabort
+### Requirement: Libvirt version check for NBD API
 
-`nbd_full_export()` SHALL call `virsh domjobabort --domain <vm>` in its `finally` block, before socket cleanup. On failure, a WARNING SHALL be logged but the error SHALL NOT propagate — socket cleanup proceeds regardless.
+`DefaultFactory.create_backup_provider()` SHALL call `is_libvirt_new_enough(shell)` from `qsnap.utils.nbd` before constructing `BitmapBackupProvider`. If the version is insufficient, the factory SHALL log a WARNING and return `FileCopyBackupProvider`. `BitmapBackupProvider.__init__()` SHALL NOT perform version checking — it SHALL NOT call `virsh --version` and SHALL NOT raise `RuntimeError` for an old libvirt.
+
+`is_libvirt_new_enough()` SHALL return `True` only for libvirt version 7.2 or newer. The incremental backup API (including the `<incremental>` XML element and the checkpoint XML argument of `backup-begin` exercised by this change) is complete since libvirt 7.2 per the libvirt knowledge base; the previous 6.0 threshold was insufficient.
+
+#### Scenario: Libvirt too old
+
+- **WHEN** `virsh --version` returns a version older than 7.2
+- **THEN** `is_libvirt_new_enough(shell)` returns `False`
+- **THEN** `DefaultFactory` does NOT construct `BitmapBackupProvider`
+- **THEN** `DefaultFactory` logs a WARNING and returns `FileCopyBackupProvider(shell, state)`
+
+#### Scenario: Libvirt sufficient
+
+- **WHEN** `virsh --version` returns a version 7.2 or newer
+- **THEN** `is_libvirt_new_enough(shell)` returns `True`
+- **THEN** `DefaultFactory` constructs and returns `BitmapBackupProvider(shell)`
+
+#### Scenario: BitmapBackupProvider constructor is version-check-free
+
+- **WHEN** `BitmapBackupProvider(shell)` is instantiated
+- **THEN** no `virsh --version` shell call is made in `__init__`
+- **AND** no `RuntimeError` is raised for version reasons
+- **AND** the only parameter is `shell: IShell`
+
+## ADDED Requirements
 
 ### Requirement: Atomic checkpoint creation on every bitmap backup-begin
 
@@ -198,20 +199,3 @@ The first `transfer_missing()` incremental after a bitmap-mode FULL SHALL export
 - **WHEN** the guest wrote nothing between the FULL's freeze point and the first incremental export
 - **THEN** the incremental export completes successfully with a near-empty payload
 - **AND** the checkpoint rotation still occurs
-
-### Requirement: Compression for NBD incremental transfers
-
-`BitmapBackupProvider.transfer_missing()` SHALL pass the `-c` flag to `qemu-img convert` when `target.compress=True` (default). When `compression_type="zstd"`, the `-o compression_type=zstd` flag SHALL also be added. When `compression_type="zlib"`, only `-c` SHALL be added (default zlib). When `target.compress=False`, no compression flags SHALL be added.
-
-#### Scenario: Incremental NBD transfer with zstd compression
-- **WHEN** `transfer_missing()` is called with `target.compress=True`, `compression_type="zstd"`
-- **THEN** `qemu-img convert -O qcow2 -c -o compression_type=zstd nbd:unix:<socket> <target>` is executed
-
-#### Scenario: Incremental NBD transfer with zlib compression
-- **WHEN** `transfer_missing()` is called with `target.compress=True`, `compression_type="zlib"`
-- **THEN** `qemu-img convert -O qcow2 -c nbd:unix:<socket> <target>` is executed (default zlib)
-
-#### Scenario: Incremental NBD transfer uses stall detection
-- **WHEN** `transfer_missing()` is called with `target.backup_stall_timeout = "30m"`
-- **THEN** the `qemu-img convert` command is executed via `shell.run_with_stall_detection(cmd, output_file=target_file, stall_timeout=1800)`
-- **AND** if the output file stops growing for 30 minutes, the convert is killed

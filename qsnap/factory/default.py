@@ -65,7 +65,7 @@ class DefaultFactory(IVMModuleFactory):
         if target.incremental_mode == "bitmap":
             if not is_libvirt_new_enough(self._shell):
                 logger.warning(
-                    "BitmapBackupProvider unavailable (libvirt < 6.0); "
+                    "BitmapBackupProvider unavailable (libvirt < 7.2); "
                     "falling back to FileCopyBackupProvider",
                 )
                 return FileCopyBackupProvider(self._shell, self._state)
