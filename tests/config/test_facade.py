@@ -212,7 +212,7 @@ def test_facade_parses_global_safety_fields(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_facade_parses_vm_deep_verify_fields(tmp_path: Path) -> None:
-    """ConfigFacade parses blockcommit_deep_verify and snapshot_deep_verify from a VM section."""
+    """ConfigFacade parses blockcommit_deep_verify from a VM section."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
@@ -222,13 +222,11 @@ def test_facade_parses_vm_deep_verify_fields(tmp_path: Path) -> None:
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "blockcommit_deep_verify = true\n"
-        "snapshot_deep_verify = true\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
 
     assert vm.blockcommit_deep_verify is True
-    assert vm.snapshot_deep_verify is True
 
 
 @pytest.mark.unit
@@ -264,14 +262,12 @@ def test_facade_parses_target_retry_overrides() -> None:
 
     critical = facade.get_vm("critical-vm")
     assert critical.blockcommit_deep_verify is True
-    assert critical.snapshot_deep_verify is True
     assert len(critical.targets) == 1
     assert critical.targets[0].backup_retry_max == 5
     assert critical.targets[0].backup_retry_base == "5s"
 
     standard = facade.get_vm("standard-vm")
     assert standard.blockcommit_deep_verify is False
-    assert standard.snapshot_deep_verify is False
     assert len(standard.targets) == 1
     assert standard.targets[0].backup_retry_max == 2
     assert standard.targets[0].backup_retry_base == "1s"
@@ -485,20 +481,25 @@ def test_full_verify_after_create_hash_deprecated_maps_to_compare(
 
 
 @pytest.mark.unit
-def test_facade_parses_full_verify_before_rebase_off(tmp_path: Path) -> None:
-    """ConfigFacade parses full_verify_before_rebase='off' from the global section."""
+def test_facade_unknown_key_full_verify_before_rebase_ignored(tmp_path: Path) -> None:
+    """TOML with full_verify_before_rebase is silently ignored — no ConfigError
+    and the field is not on GlobalConfig."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
-        'full_verify_before_rebase = "off"\n'
+        'full_verify_before_rebase = "metadata"\n'
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
     )
+    # Should NOT raise ConfigError — field is silently ignored.
     facade = ConfigFacade(config_file)
-    assert facade.get_global().full_verify_before_rebase == "off"
+    global_cfg = facade.get_global()
+    # Field is NOT on GlobalConfig.
+    with pytest.raises(AttributeError):
+        _ = global_cfg.full_verify_before_rebase  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
@@ -549,23 +550,6 @@ def test_facade_invalid_full_verify_after_create_raises_config_error(tmp_path: P
         'snapshot_dir = "/tmp/snaps"\n'
     )
     with pytest.raises(ConfigError, match="Invalid full_verify_after_create"):
-        ConfigFacade(config_file)
-
-
-@pytest.mark.unit
-def test_facade_invalid_full_verify_before_rebase_raises_config_error(tmp_path: Path) -> None:
-    """An invalid full_verify_before_rebase value raises ConfigError."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        'preserve_day_of_week = "monday"\n'
-        'full_verify_before_rebase = "hash"\n'
-        "\n"
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-    )
-    with pytest.raises(ConfigError, match="Invalid full_verify_before_rebase"):
         ConfigFacade(config_file)
 
 
@@ -974,6 +958,92 @@ def test_verify_invalid_value_raises_config_error(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="Invalid verify"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TargetConfig.verify = "check" — newly allowed value
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_target_verify_check_allowed(tmp_path: Path) -> None:
+    """TOML with verify='check' is valid — target.verify == 'check'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  verify = "check"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.verify == "check"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# VMConfig.snapshot_create validation — new validation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_valid_snapshot_create_onchange(tmp_path: Path) -> None:
+    """TOML with snapshot_create='onchange' produces VMConfig.snapshot_create == 'onchange'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'snapshot_create = "onchange"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    assert vm.snapshot_create == "onchange"
+
+
+@pytest.mark.unit
+def test_facade_invalid_snapshot_create_raises_config_error(tmp_path: Path) -> None:
+    """TOML with snapshot_create='on-changed' raises ConfigError listing valid values."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'snapshot_create = "on-changed"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid snapshot_create"):
+        ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# snapshot_deep_verify silently ignored
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_facade_unknown_key_snapshot_deep_verify_ignored(tmp_path: Path) -> None:
+    """TOML with snapshot_deep_verify=true is silently ignored — no ConfigError
+    and the field is not on VMConfig."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "snapshot_deep_verify = true\n"
+    )
+    # Should NOT raise ConfigError — field is silently ignored.
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    # Field is NOT on VMConfig.
+    with pytest.raises(AttributeError):
+        _ = vm.snapshot_deep_verify  # type: ignore[attr-defined]
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -181,6 +181,17 @@ class MockBitmapBackupProvider(IBackupProvider):
             error=None,
         )
 
+    def list_checkpoints(self, vm_name: str) -> list[str]:
+        """Return an empty list — no checkpoints in mock mode."""
+        return []
+
+    @staticmethod
+    def target_hash(target_path: str) -> str:
+        """Return a deterministic 8-char hash for the target path."""
+        import hashlib
+
+        return hashlib.md5(target_path.encode()).hexdigest()[:8]  # noqa: S324
+
 
 class MockRetentionEngine(IRetentionEngine):
     """Mock retention engine returning a valid RetentionResult."""

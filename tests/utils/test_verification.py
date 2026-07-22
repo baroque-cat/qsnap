@@ -37,6 +37,7 @@ _VALID_QCOW2_INFO = {
 _VALID_CHECK = {
     "errors": 0,
     "leaks": 0,
+    "corruptions": 0,
 }
 
 

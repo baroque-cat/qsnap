@@ -73,7 +73,7 @@ def test_example_config_documents_all_safety_fields():
     Global: auto_cleanup, state_backup_count, chain_verify_before_commit,
     chain_verify_after_commit, deep_check_schedule.
 
-    Per-VM: blockcommit_deep_verify, snapshot_deep_verify.
+    Per-VM: blockcommit_deep_verify.
 
     Per-target: backup_retry_max, backup_retry_base.
     """
@@ -84,7 +84,6 @@ def test_example_config_documents_all_safety_fields():
     assert "chain_verify_after_commit" in content
     assert "deep_check_schedule" in content
     assert "blockcommit_deep_verify" in content
-    assert "snapshot_deep_verify" in content
     assert "backup_retry_max" in content
     assert "backup_retry_base" in content
 

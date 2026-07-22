@@ -27,7 +27,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/critical"
 snapshot_create = "always"
 snapshot_preserve = "48h 7d"
 blockcommit_deep_verify = true
-snapshot_deep_verify = true
 
 [[vm.target]]
 path = "/mnt/backup/critical"
@@ -42,7 +41,6 @@ name = "standard-vm"
 base_image = "/var/lib/libvirt/images/standard.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/standard"
 blockcommit_deep_verify = false
-snapshot_deep_verify = false
 
 [[vm.target]]
 path = "/mnt/backup/standard"

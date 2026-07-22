@@ -237,7 +237,6 @@ def test_safety_fields_toml_parses_correctly() -> None:
     # critical-vm with deep verify and extended retry.
     critical = facade.get_vm("critical-vm")
     assert critical.blockcommit_deep_verify is True
-    assert critical.snapshot_deep_verify is True
     assert len(critical.targets) == 1
     assert critical.targets[0].backup_retry_max == 5
     assert critical.targets[0].backup_retry_base == "5s"
@@ -247,7 +246,6 @@ def test_safety_fields_toml_parses_correctly() -> None:
     # standard-vm with default deep verify and standard retry.
     standard = facade.get_vm("standard-vm")
     assert standard.blockcommit_deep_verify is False
-    assert standard.snapshot_deep_verify is False
     assert len(standard.targets) == 1
     assert standard.targets[0].backup_retry_max == 2
     assert standard.targets[0].backup_retry_base == "1s"

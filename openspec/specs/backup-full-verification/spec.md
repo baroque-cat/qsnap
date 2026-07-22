@@ -10,29 +10,9 @@ Defines mandatory and configurable verification of FULL backup files at three li
 
 When `Core._backup_target()` creates a FULL backup, it SHALL call `verify_full_backup()` on the FULL file BEFORE calling `record_full_backup()`. On failure, the FULL file SHALL be deleted and NOT recorded in state.
 
-### Requirement: M1 metadata verification of FULL before rebase
+### Requirement: M1 metadata verification of FULL before rebase (REMOVED)
 
-When `FileCopyBackupProvider.transfer_missing()` rebases an incremental to a FULL anchor, it SHALL call M1 verification on the FULL anchor using the verification mode from `GlobalConfig.full_verify_before_rebase`. If the configured mode is `"off"`, verification SHALL be skipped. If M1 fails, an alternative (older) FULL anchor SHALL be tried. If no valid anchor exists, rebase is skipped with a WARNING. The method SHALL NOT hardcode `"metadata"` — the verification mode SHALL be passed as a parameter from the caller.
-
-#### Scenario: Rebase with full_verify_before_rebase = "metadata"
-- **WHEN** `GlobalConfig.full_verify_before_rebase` is `"metadata"`
-- **AND** `FileCopyBackupProvider.transfer_missing()` rebases to a FULL anchor
-- **THEN** M1 verification (qemu-img info format + corrupt-bit check) is performed on the anchor
-
-#### Scenario: Rebase with full_verify_before_rebase = "off"
-- **WHEN** `GlobalConfig.full_verify_before_rebase` is `"off"`
-- **AND** `FileCopyBackupProvider.transfer_missing()` rebases to a FULL anchor
-- **THEN** no verification is performed on the anchor
-
-#### Scenario: Rebase with full_verify_before_rebase = "check"
-- **WHEN** `GlobalConfig.full_verify_before_rebase` is `"check"`
-- **AND** `FileCopyBackupProvider.transfer_missing()` rebases to a FULL anchor
-- **THEN** M1 + M2 (qemu-img check) verification is performed on the anchor
-
-#### Scenario: Verification mode passed as parameter
-- **WHEN** `Core._backup_target()` calls `provider.transfer_missing(...)`
-- **THEN** the call includes the verification mode read from `self._config.get_global().full_verify_before_rebase`
-- **AND** the provider does NOT hardcode a verification mode
+This requirement has been removed. The `full_verify_before_rebase` config field was never wired into Core — it was parsed, validated, and stored in `GlobalConfig`, but zero code paths consumed it. The rebase step it was intended to protect died with `FileCopyBackupProvider`. The `BitmapBackupProvider` does not rebase incrementals to FULL anchors — it creates backing-chained COW deltas via `qemu-img create -b`. The `full_verify_before_rebase` field has been removed from `GlobalConfig`. If the field appears in a TOML config, it is silently ignored as an unknown key.
 
 ### Requirement: M1 metadata verification of FULL before cascade-deletion (NON-CONFIGURABLE)
 
@@ -40,7 +20,27 @@ Before `Core._cleanup_backups()` deletes a FULL backup, Core SHALL run M1 verifi
 
 ### Requirement: M2 structural verification of FULL (qemu-img check)
 
-When configured (`GlobalConfig.full_verify_after_create = "check"` or `"hash"`, or `full_verify_before_delete = "check"`), Core SHALL additionally run `qemu-img check` to verify zero errors and leaks.
+When configured (`GlobalConfig.full_verify_after_create = "check"` or `"compare"`, or `full_verify_before_delete = "check"`), Core SHALL additionally run `qemu-img check --output=json` and verify that ALL of `errors`, `leaks`, AND `corruptions` are zero. Any non-zero value among the three fields SHALL fail verification.
+
+#### Scenario: M2 passes when all fields are zero
+
+- **WHEN** `qemu-img check --output=json` returns `{"errors": 0, "leaks": 0, "corruptions": 0}`
+- **THEN** M2 verification passes
+
+#### Scenario: M2 fails on non-zero corruptions
+
+- **WHEN** `qemu-img check --output=json` returns `{"errors": 0, "leaks": 0, "corruptions": 3}`
+- **THEN** M2 verification fails with an error message naming the corruption count
+
+#### Scenario: M2 fails on non-zero errors
+
+- **WHEN** `qemu-img check --output=json` returns `{"errors": 2, "leaks": 0, "corruptions": 0}`
+- **THEN** M2 verification fails with an error message naming the error count
+
+#### Scenario: M2 fails on non-zero leaks
+
+- **WHEN** `qemu-img check --output=json` returns `{"errors": 0, "leaks": 5, "corruptions": 0}`
+- **THEN** M2 verification fails with an error message naming the leak count
 
 ### Requirement: M3 — Content comparison tier
 

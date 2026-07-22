@@ -581,17 +581,29 @@ def test_qemu_img_commit_blocked_by_selinux(mock_shell: MockShell, make_vm_confi
 @pytest.mark.parametrize(
     "check_stdout,expected_success,expected_error",
     [
-        # corruptions=0 → success
+        # corruptions=0, errors=0, leaks=0 → success
         (
-            json.dumps({"corruptions": 0, "leaks": 0, "check-errors": 0}),
+            json.dumps({"corruptions": 0, "errors": 0, "leaks": 0}),
             True,
             None,
         ),
         # corruptions>0 → failure
         (
-            json.dumps({"corruptions": 3, "leaks": 0, "check-errors": 1}),
+            json.dumps({"corruptions": 3, "errors": 0, "leaks": 0}),
             False,
             "deep verify: 3 corruptions in base image",
+        ),
+        # errors>0 (corruptions=0) → failure
+        (
+            json.dumps({"corruptions": 0, "errors": 2, "leaks": 0}),
+            False,
+            "deep verify: 2 errors in base image",
+        ),
+        # leaks>0 (corruptions=0, errors=0) → failure
+        (
+            json.dumps({"corruptions": 0, "errors": 0, "leaks": 4}),
+            False,
+            "deep verify: 4 leaks in base image",
         ),
     ],
 )
@@ -604,8 +616,10 @@ def test_qemu_img_commit_deep_verify(
 ):
     """With deep_verify=True, qemu-img check runs after successful commits.
 
-    - corruptions=0 → success.
+    - corruptions=0, errors=0, leaks=0 → success.
     - corruptions>0 → failure with detail message.
+    - errors>0 → failure with detail message.
+    - leaks>0 → failure with detail message.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()

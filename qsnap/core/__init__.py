@@ -56,10 +56,6 @@ from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import verify_full_backup
 
-# Lazy import — BitmapBackupProvider is only needed for orphan checkpoint
-# detection in check_state().  Imported at call time to avoid a hard
-# dependency from Core to the bitmap module for all other code paths
-# (design D6: the provider's list_checkpoints only needs IShell).
 logger = logging.getLogger(__name__)
 
 
@@ -1281,23 +1277,26 @@ class Core:
         ``target_hash(str(target.path))`` for any target configured for
         this VM.
 
-        Uses :class:`BitmapBackupProvider.list_checkpoints` (which only
-        needs ``IShell``, not ``IStateManager``) — imported lazily to
-        avoid a hard Core→bitmap-module dependency for all other code
-        paths.  Detection is non-fatal: if ``virsh checkpoint-list``
+        Uses the backup provider obtained via
+        :meth:`IVMModuleFactory.create_backup_provider` (which only
+        needs ``IShell``, not ``IStateManager``) — Core SHALL NOT
+        directly instantiate ``BitmapBackupProvider`` (design D5).
+        Detection is non-fatal: if ``virsh checkpoint-list``
         fails, a WARNING is logged (inside ``list_checkpoints``) and an
         empty list is returned.
         """
-        # Lazy import — only needed for checkpoint listing (design D6).
-        from qsnap.modules.backup.bitmap import BitmapBackupProvider
+        if not vm.targets:
+            return []
 
-        provider = BitmapBackupProvider(self._shell)
+        # Obtain the backup provider via the factory (design D5 — no
+        # direct BitmapBackupProvider instantiation in Core).
+        provider = self._factory.create_backup_provider(vm, vm.targets[0])
         checkpoints = provider.list_checkpoints(vm.name)
         if not checkpoints:
             return []
 
         # Compute the set of configured target hashes for this VM.
-        configured_hashes = {BitmapBackupProvider.target_hash(str(t.path)) for t in vm.targets}
+        configured_hashes = {provider.target_hash(str(t.path)) for t in vm.targets}
 
         orphans: list[str] = []
         for cp in checkpoints:
@@ -1697,6 +1696,33 @@ class Core:
         if not is_libnbd_available():
             broken.append(MISSING_LIBNBD_ERROR)
 
+        # (g) qemu-nbd compress driver availability — required for
+        # compressed FULL backups (design D10).  Only checked when any
+        # target has compress=True (the default).  In dry-run mode,
+        # failure is downgraded to a WARNING by the caller.
+        #
+        # The probe command ``qemu-nbd --image-opts driver=compress``
+        # always exits non-zero because ``driver=compress`` requires a
+        # ``file`` parameter.  The error message distinguishes the two
+        # cases: "Unknown driver 'compress'" means the driver is not
+        # installed; any other error (e.g. "A block device must be
+        # specified for 'file'") means the driver IS available.
+        needs_compress = any(t.compress for t in vm_config.targets)
+        if needs_compress:
+            compress_result = self._shell.run(
+                ["qemu-nbd", "--image-opts", "driver=compress"],
+                timeout=10,
+                check=False,
+            )
+            err_text = (compress_result.stderr or compress_result.error or "").lower()
+            if "unknown driver" in err_text or "command not found" in err_text:
+                broken.append(
+                    "qemu-nbd compress driver not available — "
+                    "compressed FULL backups require QEMU with compress "
+                    "driver support. Install qemu-utils >= 6.0 or set "
+                    "compress=false in config."
+                )
+
         if broken:
             return CheckResult(
                 vm_name=vm_config.name,
@@ -1984,8 +2010,8 @@ class Core:
         """Resolve disk target names from config or via ``virsh domblklist``.
 
         When ``VMConfig.disks`` is set, uses that explicit list.
-        Otherwise auto-discovers all disks.  Falls back to ``["vda"]``
-        when discovery fails.
+        Otherwise auto-discovers all disks.  When discovery fails or
+        returns no disks, returns an empty list and logs a WARNING.
         """
         if vm_config.disks is not None:
             return vm_config.disks
@@ -1994,18 +2020,18 @@ class Core:
         result = self._shell.run(domblklist_cmd, timeout=30)
         if not result.success:
             logger.warning(
-                "domblklist failed for VM %s, falling back to vda: %s",
+                "domblklist failed for VM %s: %s",
                 vm_config.name,
                 result.error,
             )
-            return ["vda"]
+            return []
         disks = parse_domblklist_disks(result.stdout)
         if not disks:
             logger.warning(
-                "domblklist returned no disks for VM %s, falling back to vda",
+                "domblklist returned no disks for VM %s",
                 vm_config.name,
             )
-            return ["vda"]
+            return []
         return [d[0] for d in disks]
 
     def _evaluate_snapshot_retention(

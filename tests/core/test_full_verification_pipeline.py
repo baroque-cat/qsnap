@@ -591,10 +591,10 @@ def test_full_verify_hash_match_success(
     assert len(fulls) == 1, "FULL should be recorded after hash verification passes"
 
 
-# ── test_full_verify_hash_mismatch_fails ─────────────────────────────────
+# ── test_full_verify_content_comparison_mismatch_fails ──────────────────────
 
 
-def test_full_verify_hash_mismatch_fails(
+def test_full_verify_content_comparison_mismatch_fails(
     make_vm_config,
     make_target,
     make_global_config,
@@ -602,7 +602,7 @@ def test_full_verify_hash_mismatch_fails(
     mock_state,
     mock_shell,
 ):
-    """Compare mode, compare mismatch, FULL deleted, NOT recorded."""
+    """Compare mode, content comparison mismatch, FULL deleted, NOT recorded."""
     global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -631,12 +631,12 @@ def test_full_verify_hash_mismatch_fails(
 
     with patch(
         "qsnap.core.verify_full_backup",
-        return_value="verification failed: hash mismatch",
+        return_value="verification failed: content comparison mismatch",
     ):
         core._backup_target(vm, target, [snap])
 
     fulls = mock_state.get_full_backups(str(target.path))
-    assert len(fulls) == 0, "FULL should NOT be recorded after hash mismatch"
+    assert len(fulls) == 0, "FULL should NOT be recorded after content comparison mismatch"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1381,4 +1381,63 @@ def test_hash_mode_passes_source_path_to_verify(
     )
     assert kwargs["source_path"] == snap.path, (
         f"source_path should be {snap.path}, got {kwargs['source_path']}"
+    )
+
+
+# ── test_bucket_strategy_via_factory ─────────────────────────────────────────
+
+
+def test_bucket_strategy_via_factory(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core._backup_target calls self._factory.create_bucket_full_strategy().
+
+    The periodic-full-backup spec requires that bucket strategy is obtained
+    via the factory, not a private ``_should_create_bucket_full()`` method.
+    Core should NOT have a ``_should_create_bucket_full`` private method.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(target_preserve="7d")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Configure mock strategy to NOT trigger FULL (so we only test the
+    # factory interaction, not the FULL creation path).
+    strategy_mock = MockBucketFullStrategy(return_value=(False, ""))
+    mock_factory._bucket_full_strategy = strategy_mock
+
+    with (
+        patch.object(
+            mock_factory,
+            "create_bucket_full_strategy",
+            wraps=mock_factory.create_bucket_full_strategy,
+        ) as factory_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Factory's create_bucket_full_strategy was called.
+    assert factory_spy.called, "create_bucket_full_strategy should be called"
+
+    # Core does NOT have a private _should_create_bucket_full method.
+    assert not hasattr(core, "_should_create_bucket_full"), (
+        "Core should not have _should_create_bucket_full private method"
     )

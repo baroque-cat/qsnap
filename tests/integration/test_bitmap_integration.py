@@ -33,6 +33,7 @@ except ImportError:
     _HAS_LIBNBD = False
 
 from qsnap.core import Core
+from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import (
     RetentionResult,
@@ -881,7 +882,13 @@ def test_int_orphaned_checkpoint_detected_by_check_state(test_vm, caplog):
 
     # check_state uses list_checkpoints which only needs libvirt — no
     # libvirt version check required (list_checkpoints works on any
-    # version with checkpoint support).
+    # version with checkpoint support).  However, DefaultFactory's
+    # create_backup_provider checks libnbd availability, so skip if
+    # libnbd is not installed.
+    try:
+        import nbd  # noqa: F401
+    except ImportError:
+        pytest.skip("python3-libnbd not installed in this interpreter")
 
     # Step 2: Create a checkpoint with an orphaned hash.
     orphan_cp = "qsnap-deadbeef-snap1"
@@ -917,8 +924,8 @@ def test_int_orphaned_checkpoint_detected_by_check_state(test_vm, caplog):
             ],
         )
         config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "qsnap-test.toml")
-        factory = MockVMModuleFactory()
         state = InMemoryStateManager()
+        factory = DefaultFactory(shell=shell, state=state)
 
         core = Core(
             config=config,

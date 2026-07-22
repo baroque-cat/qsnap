@@ -84,11 +84,6 @@ class GlobalConfig:
     #   + corrupt-bit check), ``"check"`` (M1 + M2 — qemu-img check),
     #   ``"compare"`` (M1 + M2 + M3 — qemu-img compare), ``"off"`` (none).
     full_verify_after_create: str = "check"
-    # ``full_verify_before_rebase``: lightweight re-check of a FULL anchor
-    #   before rebasing an incremental to it.  ``"metadata"`` (M1) or
-    #   ``"off"``.  M1 is the minimum — the FULL was already verified at
-    #   creation; this catches bit-rot between creation and rebase.
-    full_verify_before_rebase: str = "metadata"
     # ``full_verify_before_delete``: verification before cascade-deletion of
     #   a FULL and its dependent incrementals.  ``"metadata"`` (M1 only),
     #   ``"check"`` (M1 + M2), ``"off"`` (M1 only — M1 is ALWAYS enforced
@@ -196,7 +191,6 @@ class VMConfig:
     disks: list[str] | None = None
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False
-    snapshot_deep_verify: bool = False
     targets: list[TargetConfig] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
     def __post_init__(self) -> None:

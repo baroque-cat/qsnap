@@ -153,6 +153,20 @@ class QemuImgCommitManager(ILifecycleManager):
                         committed_snapshot="",
                         error=f"deep verify: {corruptions} corruptions in base image",
                     )
+                errors = data.get("errors", 0)
+                if errors > 0:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=f"deep verify: {errors} errors in base image",
+                    )
+                leaks = data.get("leaks", 0)
+                if leaks > 0:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=f"deep verify: {leaks} leaks in base image",
+                    )
             except json.JSONDecodeError:
                 return CommitResult(
                     success=False,

@@ -124,6 +124,12 @@ def _setup_validation_expectations(shell: MockShell) -> None:
     shell.expect("find").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
+    # Compress driver availability check (design D10) — succeeds by
+    # default so that validation passes.  Tests needing the missing-driver
+    # scenario override with ``mock_shell.expect_first("qemu-nbd --image-opts")``.
+    shell.expect("qemu-nbd --image-opts").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
 
 
 @pytest.fixture
@@ -224,7 +230,6 @@ def make_global_config():
         compression_type: str = "zstd",
         backup_stall_timeout: str = "30m",
         full_verify_after_create: str = "check",
-        full_verify_before_rebase: str = "metadata",
         full_verify_before_delete: str = "check",
         deep_check_targets: bool = False,
         transaction_log: str | None = None,
@@ -251,7 +256,6 @@ def make_global_config():
             compression_type=compression_type,
             backup_stall_timeout=backup_stall_timeout,
             full_verify_after_create=full_verify_after_create,
-            full_verify_before_rebase=full_verify_before_rebase,
             full_verify_before_delete=full_verify_before_delete,
             deep_check_targets=deep_check_targets,
             transaction_log=transaction_log,

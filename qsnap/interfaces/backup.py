@@ -76,3 +76,25 @@ class IBackupProvider(ABC):
         providers that support full backups should override this.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support full backups")
+
+    def list_checkpoints(self, vm_name: str) -> list[str]:
+        """Return qsnap-owned checkpoint names for *vm_name*.
+
+        Used by Core's orphan-checkpoint detection to identify
+        checkpoints whose target no longer exists or has moved.
+        On failure, returns an empty list (non-fatal).
+
+        Default implementation returns an empty list.  Concrete
+        providers that manage checkpoints should override this.
+        """
+        return []
+
+    @staticmethod
+    def target_hash(target_path: str) -> str:
+        """Short hash of *target_path* for checkpoint naming.
+
+        Default implementation returns an empty string.  Concrete
+        providers that use target-hashed checkpoint names should
+        override this.
+        """
+        return ""

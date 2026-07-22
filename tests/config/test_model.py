@@ -41,8 +41,6 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.full_verify_after_create = "off"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.full_verify_before_rebase = "off"  # type: ignore[misc]
-    with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.full_verify_before_delete = "off"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.deep_check_targets = True  # type: ignore[misc]
@@ -83,7 +81,6 @@ def test_global_config_defaults():
     assert cfg.backup_stall_timeout == "30m"
     # FULL backup integrity verification tiers (M1/M2/M3).
     assert cfg.full_verify_after_create == "check"
-    assert cfg.full_verify_before_rebase == "metadata"
     assert cfg.full_verify_before_delete == "check"
     assert cfg.deep_check_targets is False
 
@@ -102,7 +99,6 @@ def test_vm_config_required_fields():
     assert vm.targets == []
     # Deep verification fields (T2) default to False.
     assert vm.blockcommit_deep_verify is False
-    assert vm.snapshot_deep_verify is False
 
 
 def test_vm_config_with_targets():
@@ -459,14 +455,27 @@ def test_global_config_default_deep_check_schedule_off():
 
 
 def test_vm_config_deep_verify_defaults_false():
-    """VMConfig blockcommit_deep_verify and snapshot_deep_verify default to False (T2)."""
+    """VMConfig blockcommit_deep_verify defaults to False (T2)."""
     vm = VMConfig(
         name="testvm",
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     assert vm.blockcommit_deep_verify is False
-    assert vm.snapshot_deep_verify is False
+
+
+def test_vm_config_deep_verify_blockcommit_only():
+    """VMConfig has blockcommit_deep_verify (T2), but snapshot_deep_verify
+    has been removed — accessing it raises AttributeError."""
+    vm = VMConfig(
+        name="testvm",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+        blockcommit_deep_verify=True,
+    )
+    assert vm.blockcommit_deep_verify is True
+    with pytest.raises(AttributeError):
+        _ = vm.snapshot_deep_verify  # type: ignore[attr-defined]
 
 
 def test_target_config_default_retry_values():
@@ -553,15 +562,12 @@ def test_global_config_full_verify_after_create_off():
 # ---------------------------------------------------------------------------
 
 
-def test_global_config_full_verify_before_rebase_default():
-    """GlobalConfig().full_verify_before_rebase defaults to 'metadata' (M1)."""
-    assert GlobalConfig().full_verify_before_rebase == "metadata"
-
-
-def test_global_config_full_verify_before_rebase_off():
-    """GlobalConfig(full_verify_before_rebase='off') stores 'off'."""
-    cfg = GlobalConfig(full_verify_before_rebase="off")
-    assert cfg.full_verify_before_rebase == "off"
+def test_global_config_no_full_verify_before_rebase():
+    """full_verify_before_rebase is no longer a field on GlobalConfig;
+    accessing it raises AttributeError."""
+    cfg = GlobalConfig()
+    with pytest.raises(AttributeError):
+        _ = cfg.full_verify_before_rebase  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

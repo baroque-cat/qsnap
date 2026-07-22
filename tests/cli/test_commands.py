@@ -640,7 +640,7 @@ def test_list_deferred_no_operations(capsys):
 
 def test_list_config_shows_off_for_default_deep_verify(capsys):
     """handle_list with sub=config shows OFF for blockcommit_deep_verify
-    and snapshot_deep_verify when both are disabled (default).
+    when it is disabled (default).
 
     Also verifies the "Global safety settings" header is printed.
     """
@@ -658,7 +658,6 @@ def test_list_config_shows_off_for_default_deep_verify(capsys):
             base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
             snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
             blockcommit_deep_verify=False,
-            snapshot_deep_verify=False,
         )
     ]
 
@@ -670,14 +669,13 @@ def test_list_config_shows_off_for_default_deep_verify(capsys):
     assert "Global safety settings" in captured.out
     # Column headers are uppercased by format_output
     assert "BLOCKCOMMIT_DEEP_VERIFY" in captured.out
-    assert "SNAPSHOT_DEEP_VERIFY" in captured.out
     # Verify OFF appears in the output (it appears in the table row)
     assert "OFF" in captured.out
 
 
 def test_list_config_shows_on_for_enabled_deep_verify(capsys):
     """handle_list with sub=config shows ON for blockcommit_deep_verify
-    and snapshot_deep_verify when both are enabled.
+    when it is enabled.
     """
     mock_core = _make_mock_core()
     mock_core.config = Mock()
@@ -693,7 +691,6 @@ def test_list_config_shows_on_for_enabled_deep_verify(capsys):
             base_image=Path("/var/lib/libvirt/images/critical-db.qcow2"),
             snapshot_dir=Path("/var/lib/libvirt/snapshots/critical-db"),
             blockcommit_deep_verify=True,
-            snapshot_deep_verify=True,
         )
     ]
 
@@ -705,7 +702,6 @@ def test_list_config_shows_on_for_enabled_deep_verify(capsys):
     assert "Global safety settings" in captured.out
     # Column headers are uppercased by format_output
     assert "BLOCKCOMMIT_DEEP_VERIFY" in captured.out
-    assert "SNAPSHOT_DEEP_VERIFY" in captured.out
     assert "ON" in captured.out
 
 

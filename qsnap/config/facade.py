@@ -106,8 +106,6 @@ class ConfigFacade(IConfigFacade):
         # FULL backup integrity verification tiers (M1/M2/M3).
         if "full_verify_after_create" in raw:
             global_kwargs["full_verify_after_create"] = str(raw["full_verify_after_create"])
-        if "full_verify_before_rebase" in raw:
-            global_kwargs["full_verify_before_rebase"] = str(raw["full_verify_before_rebase"])
         if "full_verify_before_delete" in raw:
             global_kwargs["full_verify_before_delete"] = str(raw["full_verify_before_delete"])
         if "deep_check_targets" in raw:
@@ -180,13 +178,6 @@ class ConfigFacade(IConfigFacade):
                 f"{self._global.full_verify_after_create!r}. "
                 f"Must be one of: {', '.join(sorted(valid_after_create))}"
             )
-        valid_before_rebase = {"metadata", "off"}
-        if self._global.full_verify_before_rebase.lower() not in valid_before_rebase:
-            raise ConfigError(
-                f"Invalid full_verify_before_rebase: "
-                f"{self._global.full_verify_before_rebase!r}. "
-                f"Must be one of: {', '.join(sorted(valid_before_rebase))}"
-            )
         valid_before_delete = {"metadata", "check", "off"}
         if self._global.full_verify_before_delete.lower() not in valid_before_delete:
             raise ConfigError(
@@ -223,6 +214,12 @@ class ConfigFacade(IConfigFacade):
 
         # snapshot_create: VM-level or default "always".
         snapshot_create = str(vm_raw.get("snapshot_create", "always"))
+        valid_snapshot_create = {"always", "onchange", "ondemand"}
+        if snapshot_create not in valid_snapshot_create:
+            raise ConfigError(
+                f"Invalid snapshot_create: {snapshot_create!r}. "
+                f"Must be one of: {', '.join(sorted(valid_snapshot_create))}"
+            )
 
         # snapshot_quiesce: VM-level or default False.
         snapshot_quiesce = bool(vm_raw.get("snapshot_quiesce", False))
@@ -235,7 +232,6 @@ class ConfigFacade(IConfigFacade):
 
         # Deep verification fields (T2 — per-VM, default OFF).
         blockcommit_deep_verify = bool(vm_raw.get("blockcommit_deep_verify", False))
-        snapshot_deep_verify = bool(vm_raw.get("snapshot_deep_verify", False))
 
         # snapshot_preserve: VM overrides global.
         snapshot_preserve: str | None
@@ -306,7 +302,6 @@ class ConfigFacade(IConfigFacade):
             change_detection_mode=change_detection_mode,
             disks=disks,
             blockcommit_deep_verify=blockcommit_deep_verify,
-            snapshot_deep_verify=snapshot_deep_verify,
             targets=targets,
         )
 
@@ -453,9 +448,9 @@ class ConfigFacade(IConfigFacade):
                     _DEPRECATED_TARGET_VERIFY[verify],
                 )
                 verify = _DEPRECATED_TARGET_VERIFY[verify]
-            elif verify not in ("off", "metadata", "compare"):
+            elif verify not in ("off", "metadata", "check", "compare"):
                 raise ConfigError(
-                    f"Invalid verify={verify!r}. Must be one of: off, metadata, compare."
+                    f"Invalid verify={verify!r}. Must be one of: off, metadata, check, compare."
                 )
 
         # Backup retry fields (target-level — network reliability varies).

@@ -68,6 +68,7 @@ chain (FULL + incrementals) is gap-free by construction.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -324,89 +325,26 @@ class BitmapBackupProvider(IBackupProvider):
                     # the unified NBD engine with zero_skip=True.
                     # Compression applies here (and in create_full_backup)
                     # only — bitmap incrementals are uncompressed
-                    # (design D6).
-                    #
-                    # (4a) Create a standalone qcow2 .tmp (no backing).
-                    # Pass the source disk's virtual size so the target
-                    # can accept pwrite at any offset.  When
-                    # target.compress, set the qcow2 compression_type
-                    # at creation time (design D6, spec:
-                    # nbd-bitmap-backup).
+                    # (design D6).  The shared _full_pull_lifecycle
+                    # helper handles qemu-img create, _start_write_server,
+                    # _transfer, _terminate_qemu_nbd, mv .tmp → final,
+                    # and finally cleanup (design D7).
                     virtual_size = self._query_virtual_size(snapshot.path)
-                    create_cmd: list[str] = [
-                        "qemu-img",
-                        "create",
-                        "-f",
-                        "qcow2",
-                    ]
-                    if target.compress:
-                        create_cmd.extend(["-o", f"compression_type={compression_type}"])
-                    create_cmd.append(str(tmp_file))
-                    if virtual_size is not None:
-                        create_cmd.append(str(virtual_size))
-                    create_result = self._shell.run(create_cmd, timeout=60)
-                    if not create_result.success:
-                        transfer_error = f"qemu-img create failed: {create_result.error}"
-                        elapsed = time.monotonic() - start_time
-                        self._cleanup_partial_file(target_file)
-                        self._delete_checkpoint_best_effort(vm_config.name, successor)
-                        results.append(
-                            BackupResult(
-                                success=False,
-                                snapshot_name=snapshot.name,
-                                source_path=snapshot.path,
-                                target_path=target_file,
-                                bytes_transferred=0,
-                                error=transfer_error,
-                            )
-                        )
-                        continue
-                    # (4b) Start the write-side qemu-nbd (compress driver
-                    # when target.compress, design D6).
-                    nbd_proc = self._start_write_server(
-                        tmp_file,
-                        write_socket,
-                        pid_file,
-                        compress=target.compress,
-                        compression_type=compression_type,
-                    )
-                    if not nbd_proc.success:
-                        transfer_error = f"qemu-nbd failed to start: {nbd_proc.error}"
-                        elapsed = time.monotonic() - start_time
-                        self._cleanup_partial_file(target_file)
-                        self._delete_checkpoint_best_effort(vm_config.name, successor)
-                        results.append(
-                            BackupResult(
-                                success=False,
-                                snapshot_name=snapshot.name,
-                                source_path=snapshot.path,
-                                target_path=target_file,
-                                bytes_transferred=0,
-                                error=transfer_error,
-                            )
-                        )
-                        continue
-                    # (4c) Transfer via the unified engine (zero_skip=True).
-                    transfer_error, dirty_bytes = self._transfer(
-                        socket_path,
-                        write_socket,
-                        disk_target or "",
-                        [_BASE_ALLOCATION_CONTEXT],
-                        zero_skip=True,
+                    transfer_error, dirty_bytes = self._full_pull_lifecycle(
+                        vm_name=vm_config.name,
+                        tmp_file=tmp_file,
+                        final_file=target_file,
+                        socket_path=socket_path,
+                        write_socket=write_socket,
+                        pid_file=pid_file,
+                        disk_target=disk_target or "",
+                        virtual_size=virtual_size,
                         compress=target.compress,
                         compression_type=compression_type,
                         stall_timeout=stall_timeout,
+                        backup_xml_path=backup_xml_path,
+                        checkpoint_xml_path=checkpoint_xml_path,
                     )
-                    # (4d) Terminate qemu-nbd before the atomic rename.
-                    self._terminate_qemu_nbd(pid_file)
-                    self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
-                    if transfer_error is None:
-                        # (4e) Atomic rename: mv .tmp to final name.
-                        mv_result = self._shell.run(
-                            ["mv", str(tmp_file), str(target_file)], timeout=30
-                        )
-                        if not mv_result.success:
-                            transfer_error = f"atomic rename failed: {mv_result.error}"
                 else:
                     # Incremental export: in-process dirty-block copy
                     # loop via the unified NBD engine (design D2) with
@@ -573,6 +511,122 @@ class BitmapBackupProvider(IBackupProvider):
 
         return results
 
+    # ── shared FULL-pull lifecycle (design D7) ────────────────────────
+
+    def _full_pull_lifecycle(
+        self,
+        *,
+        vm_name: str,
+        tmp_file: Path,
+        final_file: Path,
+        socket_path: str,
+        write_socket: str,
+        pid_file: Path,
+        disk_target: str,
+        virtual_size: int | None,
+        compress: bool,
+        compression_type: str,
+        stall_timeout: int,
+        backup_xml_path: Path,
+        checkpoint_xml_path: Path,
+    ) -> tuple[str | None, int]:
+        """Shared FULL-pull scaffolding for ``transfer_missing()`` and
+        ``create_full_backup()`` (design D7).
+
+        Handles: ``qemu-img create``, ``_start_write_server``,
+        ``_transfer``, ``_terminate_qemu_nbd``, ``mv .tmp → final``,
+        and the ``finally`` cleanup.
+
+        Returns ``(error, dirty_bytes)`` — *error* is ``None`` on
+        success; *dirty_bytes* is the sum of transferred extent lengths.
+        """
+        try:
+            # (1) Create a standalone qcow2 .tmp file (no backing).
+            # Pass the source disk's virtual size so the target can
+            # accept pwrite at any offset.  When compress, set the
+            # qcow2 compression_type at creation time (design D6,
+            # spec: nbd-bitmap-backup).
+            create_cmd: list[str] = [
+                "qemu-img",
+                "create",
+                "-f",
+                "qcow2",
+            ]
+            if compress:
+                create_cmd.extend(["-o", f"compression_type={compression_type}"])
+            create_cmd.append(str(tmp_file))
+            if virtual_size is not None:
+                create_cmd.append(str(virtual_size))
+            create_result = self._shell.run(create_cmd, timeout=60)
+            if not create_result.success:
+                return f"qemu-img create failed: {create_result.error}", 0
+
+            # (2) Start the write-side qemu-nbd (compress driver when
+            # compress=True, design D6).
+            nbd_proc = self._start_write_server(
+                tmp_file,
+                write_socket,
+                pid_file,
+                compress=compress,
+            )
+            if not nbd_proc.success:
+                return f"qemu-nbd failed to start: {nbd_proc.error}", 0
+
+            # (3) Transfer via the unified engine (zero_skip=True).
+            transfer_error, dirty_bytes = self._transfer(
+                socket_path,
+                write_socket,
+                disk_target,
+                [_BASE_ALLOCATION_CONTEXT],
+                zero_skip=True,
+                compress=compress,
+                compression_type=compression_type,
+                stall_timeout=stall_timeout,
+            )
+
+            # (4) Terminate qemu-nbd before the atomic rename.
+            self._terminate_qemu_nbd(pid_file)
+            self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
+
+            # (5) Atomic rename: mv .tmp to final name.
+            if transfer_error is None:
+                mv_result = self._shell.run(["mv", str(tmp_file), str(final_file)], timeout=30)
+                if not mv_result.success:
+                    transfer_error = f"atomic rename failed: {mv_result.error}"
+
+            return transfer_error, dirty_bytes
+
+        finally:
+            # Cleanup (always, even on failure — design D2, spec:
+            # write-side lifecycle is crash-safe).
+            self._terminate_qemu_nbd(pid_file)
+            self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
+            self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
+            # Abort the virsh backup-begin job to release the VM state
+            # change lock (design D2).  domjobabort is idempotent.
+            abort_result = self._shell.run(
+                ["virsh", "domjobabort", "--domain", vm_name],
+                timeout=30,
+            )
+            if not abort_result.success:
+                logger.warning(
+                    "virsh domjobabort failed for VM %s (job may have already terminated): %s",
+                    vm_name,
+                    abort_result.error,
+                )
+            # Source (libvirt) socket cleanup.
+            self._shell.run(["rm", "-f", socket_path], timeout=10)
+            # Temp XML cleanup (local filesystem, not shell).
+            for xml_path in (backup_xml_path, checkpoint_xml_path):
+                try:
+                    xml_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to remove temp XML file %s: %s",
+                        xml_path,
+                        exc,
+                    )
+
     # ── unified NBD transfer engine (design D1/D2/D4) ────────────────
 
     def _start_write_server(
@@ -581,7 +635,6 @@ class BitmapBackupProvider(IBackupProvider):
         write_socket: str,
         pid_file: Path,
         compress: bool = False,
-        compression_type: str = "zstd",
     ) -> ShellResult:
         """Start a forked ``qemu-nbd`` serving *target_file* for writing.
 
@@ -1041,178 +1094,92 @@ class BitmapBackupProvider(IBackupProvider):
         backup_xml_path = write_backup_xml(socket_path)
         checkpoint_xml_path = write_checkpoint_xml(checkpoint_name)
 
-        try:
-            # (1) Create a standalone qcow2 .tmp file (no backing).
-            # Pass the source disk's virtual size so the target can
-            # accept pwrite at any offset.  When compress=True, set
-            # the qcow2 compression_type at creation time so the
-            # compress driver writes zstd/zlib clusters (design D6,
-            # spec: nbd-bitmap-backup).
-            virtual_size = self._query_virtual_size(source_snapshot.path)
-            create_cmd: list[str] = [
-                "qemu-img",
-                "create",
-                "-f",
-                "qcow2",
-            ]
-            if compress:
-                create_cmd.extend(["-o", f"compression_type={compression_type}"])
-            create_cmd.append(str(tmp_file))
-            if virtual_size is not None:
-                create_cmd.append(str(virtual_size))
-            create_result = self._shell.run(create_cmd, timeout=60)
-            if not create_result.success:
-                self._delete_checkpoint_best_effort(vm_name, checkpoint_name)
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=f"qemu-img create failed: {create_result.error}",
-                )
-
-            # (2) Start the write-side qemu-nbd (compress driver when
-            # compress=True, design D6).
-            nbd_proc = self._start_write_server(
-                tmp_file,
-                write_socket,
-                pid_file,
-                compress=compress,
-                compression_type=compression_type,
-            )
-            if not nbd_proc.success:
-                self._delete_checkpoint_best_effort(vm_name, checkpoint_name)
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=f"qemu-nbd failed to start: {nbd_proc.error}",
-                )
-
-            # (3) Start NBD export via virsh backup-begin (no
-            # <incremental> — full export).  The checkpoint XML is the
-            # third positional argument; libvirt creates the checkpoint
-            # atomically at the export's freeze point.
-            backup_cmd = [
-                "virsh",
-                "backup-begin",
-                "--domain",
-                vm_name,
-                str(backup_xml_path),
-                str(checkpoint_xml_path),
-            ]
-            backup_result = self._shell.run(backup_cmd, timeout=120)
-            if not backup_result.success:
-                # backup-begin is atomic: the successor checkpoint was
-                # NOT created, so there is nothing to roll back.
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=backup_result.error,
-                )
-
-            # (4) Transfer via the unified engine (zero_skip=True).
-            disk_target = get_first_disk_target(self._shell, vm_name)
-            transfer_error, _ = self._transfer(
-                socket_path,
-                write_socket,
-                disk_target or "",
-                [_BASE_ALLOCATION_CONTEXT],
-                zero_skip=True,
-                compress=compress,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-            )
-
-            if transfer_error is not None:
-                # Export failed: delete the just-created checkpoint
-                # best-effort so it cannot become the newest baseline
-                # of a failed export (design D3).
-                self._delete_checkpoint_best_effort(vm_name, checkpoint_name)
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=transfer_error,
-                )
-
-            # (5) Terminate qemu-nbd (the destination client already
-            # disconnected and flushed inside _transfer).
-            self._terminate_qemu_nbd(pid_file)
-            self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
-
-            # (6) Atomic rename: mv .tmp to final name.
-            mv_result = self._shell.run(["mv", str(tmp_file), str(target_file)], timeout=30)
-            if not mv_result.success:
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=mv_result.error,
-                )
-
-            # Get file size
-            try:
-                bytes_transferred = target_file.stat().st_size
-            except OSError:
-                bytes_transferred = 0
-
-            # State recording is Core's responsibility after post-create
-            # verification passes (design D4).  The provider SHALL NOT call
-            # self._state.record_full_backup() here.
-
+        # Start NBD export via virsh backup-begin (no <incremental> —
+        # full export).  The checkpoint XML is the third positional
+        # argument; libvirt creates the checkpoint atomically at the
+        # export's freeze point.  Called before the full-pull lifecycle
+        # helper — backup-begin starts the source NBD server, which is
+        # independent of the destination qcow2/qemu-nbd setup.
+        backup_cmd = [
+            "virsh",
+            "backup-begin",
+            "--domain",
+            vm_name,
+            str(backup_xml_path),
+            str(checkpoint_xml_path),
+        ]
+        backup_result = self._shell.run(backup_cmd, timeout=120)
+        if not backup_result.success:
+            # backup-begin is atomic: the successor checkpoint was
+            # NOT created, so there is nothing to roll back.
+            # Clean up XML temp files and stale socket.
+            for xml_path in (backup_xml_path, checkpoint_xml_path):
+                with contextlib.suppress(OSError):
+                    xml_path.unlink(missing_ok=True)
+            self._shell.run(["rm", "-f", socket_path], timeout=10)
             return BackupResult(
-                success=True,
+                success=False,
                 snapshot_name=source_snapshot.name,
                 source_path=source_snapshot.path,
                 target_path=target_file,
-                bytes_transferred=bytes_transferred,
-                error=None,
+                bytes_transferred=0,
+                error=backup_result.error,
             )
 
-        finally:
-            # Terminate qemu-nbd (best-effort — may have already been
-            # terminated on the success path).
-            self._terminate_qemu_nbd(pid_file)
-            # Write socket + pidfile removal.
-            self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
-            # Partial .tmp removal — a no-op on success (the .tmp was
-            # renamed to the final file).
-            self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
-            # Abort the virsh backup-begin job to release the VM state
-            # change lock (design D2).  domjobabort is idempotent.
-            abort_result = self._shell.run(
-                ["virsh", "domjobabort", "--domain", vm_name],
-                timeout=30,
+        # Full-pull lifecycle via the shared helper (design D7).
+        # The helper handles: qemu-img create, _start_write_server,
+        # _transfer, _terminate_qemu_nbd, mv .tmp → final, and
+        # finally cleanup.
+        disk_target = get_first_disk_target(self._shell, vm_name)
+        virtual_size = self._query_virtual_size(source_snapshot.path)
+        transfer_error, _ = self._full_pull_lifecycle(
+            vm_name=vm_name,
+            tmp_file=tmp_file,
+            final_file=target_file,
+            socket_path=socket_path,
+            write_socket=write_socket,
+            pid_file=pid_file,
+            disk_target=disk_target or "",
+            virtual_size=virtual_size,
+            compress=compress,
+            compression_type=compression_type,
+            stall_timeout=stall_timeout,
+            backup_xml_path=backup_xml_path,
+            checkpoint_xml_path=checkpoint_xml_path,
+        )
+
+        if transfer_error is not None:
+            # Export failed: delete the just-created checkpoint
+            # best-effort so it cannot become the newest baseline
+            # of a failed export (design D3).
+            self._delete_checkpoint_best_effort(vm_name, checkpoint_name)
+            return BackupResult(
+                success=False,
+                snapshot_name=source_snapshot.name,
+                source_path=source_snapshot.path,
+                target_path=target_file,
+                bytes_transferred=0,
+                error=transfer_error,
             )
-            if not abort_result.success:
-                logger.warning(
-                    "virsh domjobabort failed for VM %s (job may have already terminated): %s",
-                    vm_name,
-                    abort_result.error,
-                )
-            # Source (libvirt) socket cleanup.
-            self._shell.run(["rm", "-f", socket_path], timeout=10)
-            # Temp XML cleanup (local filesystem, not shell).
-            for xml_path in (backup_xml_path, checkpoint_xml_path):
-                try:
-                    xml_path.unlink(missing_ok=True)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to remove temp XML file %s: %s",
-                        xml_path,
-                        exc,
-                    )
+
+        # Get file size
+        try:
+            bytes_transferred = target_file.stat().st_size
+        except OSError:
+            bytes_transferred = 0
+
+        # State recording is Core's responsibility after post-create
+        # verification passes (design D4).  The provider SHALL NOT call
+        # self._state.record_full_backup() here.
+
+        return BackupResult(
+            success=True,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target_file,
+            bytes_transferred=bytes_transferred,
+            error=None,
+        )
 
     def list(self, target: TargetConfig) -> list[SnapshotInfo]:
         """List existing backups at *target*.

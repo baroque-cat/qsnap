@@ -63,7 +63,6 @@ def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
                 "snapshot_create": vm.snapshot_create,
                 "targets": str(len(vm.targets)),
                 "blockcommit_deep_verify": "ON" if vm.blockcommit_deep_verify else "OFF",
-                "snapshot_deep_verify": "ON" if vm.snapshot_deep_verify else "OFF",
             }
         )
     return rows
@@ -280,7 +279,6 @@ def handle_list(core: Core, args: Namespace) -> int:
             "snapshot_create",
             "targets",
             "blockcommit_deep_verify",
-            "snapshot_deep_verify",
         ]
         # Print global safety settings header
         global_cfg = core.config.get_global()

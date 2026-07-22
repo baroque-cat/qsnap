@@ -77,6 +77,12 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **THEN** the module returns `BackupResult(success=False, error=<message>)`
 - **THEN** the NBD socket and qemu-nbd process are cleaned up
 
+#### Scenario: Scaffolding dedup — both FULL paths use shared helper
+
+- **WHEN** `transfer_missing()` full-pull or `create_full_backup()` executes a FULL backup
+- **THEN** both SHALL call the private `_full_pull_lifecycle()` helper
+- **AND** the helper handles: qemu-img create, _start_write_server, _transfer, _terminate_qemu_nbd, mv .tmp → final, finally cleanup
+
 ### Requirement: List checkpoints for target
 `BitmapBackupProvider` SHALL provide a method `list_checkpoints(vm_name: str) -> list[str]` that discovers existing qsnap-owned checkpoints via `virsh checkpoint-list --name`. Only checkpoints with the `qsnap-` prefix SHALL be returned.
 

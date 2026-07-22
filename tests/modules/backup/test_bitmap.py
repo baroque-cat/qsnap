@@ -24,6 +24,7 @@ Design decisions verified:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from datetime import datetime, timedelta
@@ -199,6 +200,25 @@ def test_constructor_accepts_state_manager(mock_shell, mock_state):
 def test_constructor_works_without_state_manager(mock_shell):
     provider = BitmapBackupProvider(mock_shell)
     assert provider._state is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 1a. _start_write_server signature — compression_type removed (spec D8)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_start_write_server_signature_no_compression_type():
+    """_start_write_server no longer accepts compression_type parameter (spec D8)."""
+    sig = inspect.signature(BitmapBackupProvider._start_write_server)
+    params = sig.parameters
+    assert "compression_type" not in params, (
+        f"compression_type should NOT be in _start_write_server signature, got: {list(params.keys())}"
+    )
+    # Verify the expected parameters are present
+    assert "target_file" in params
+    assert "write_socket" in params
+    assert "pid_file" in params
+    assert "compress" in params
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1171,6 +1191,108 @@ def test_create_full_backup_dotted_vm_name_passed_untruncated(mock_shell, make_t
     assert "3.Projects_opencode" not in snapshot.name
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# shared _full_pull_lifecycle helper — both paths share scaffolding (design D7)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_full_pull_lifecycle_shared_by_both_paths(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Both transfer_missing() full-pull path and create_full_backup()
+    delegate to the shared _full_pull_lifecycle helper (design D7)."""
+    vm_config = make_vm_config()
+    target_tm = make_target(path=str(tmp_path / "target_tm"), verify="off")
+    target_cfb = make_target(path=str(tmp_path / "target_cfb"))
+    target_cfb.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    # ── Part 1: transfer_missing() full-pull path ──
+    # Expectations for _list_checkpoints_for_target → no prior checkpoint
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # Snapshot exists on disk
+    mock_shell.expect("test -f").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img info for _query_virtual_size
+    mock_shell.expect("qemu-img info.*--force-share").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"virtual-size": 65536}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Finally block cleanup: domjobabort + rm -f (write_socket, tmp file, socket)
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(
+        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 0)
+    ) as mock_helper:
+        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
+        results = provider.transfer_missing(vm_config, target_tm, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+    assert mock_helper.call_count == 1, (
+        f"transfer_missing() should call _full_pull_lifecycle once, got {mock_helper.call_count}"
+    )
+
+    # ── Part 2: create_full_backup() also calls _full_pull_lifecycle ──
+    from tests.mocks.mock_shell import MockShell
+
+    shell2 = MockShell()
+
+    shell2.expect("rm -f").returns(_ok_result())  # stale socket
+    shell2.expect("backup-begin").returns(_ok_result())
+    shell2.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    shell2.expect("qemu-img info.*--force-share").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"virtual-size": 65536}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(
+        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 0)
+    ) as mock_helper2:
+        provider2 = BitmapBackupProvider(shell2, nbd=MockNbdClient())
+        result = provider2.create_full_backup(
+            "testvm", snapshot, target_cfb, compress=False, bucket_level="monthly"
+        )
+
+    assert result.success is True
+    assert mock_helper2.call_count == 1, (
+        f"create_full_backup() should call _full_pull_lifecycle once, got {mock_helper2.call_count}"
+    )
+
+
 def test_bitmap_nbd_job_terminated_after_transfer(mock_shell, make_target, tmp_path):
     """domjobabort called after unified NBD transfer via create_full_backup."""
     target = make_target(path=str(tmp_path / "backups"))
@@ -1348,7 +1470,11 @@ def test_bitmap_first_full_pull_via_unified_engine(mock_shell, make_target, tmp_
 def test_domjobabort_called_after_successful_transfer(
     mock_shell, make_vm_config, make_target, tmp_path
 ):
-    """Successful transfer — domjobabort called via unified engine.  Checkpoint XML 3rd arg."""
+    """Successful transfer — domjobabort called via unified engine.  Checkpoint XML 3rd arg.
+    
+    domjobabort is called twice: once by _full_pull_lifecycle's finally
+    (inner cleanup) and once by transfer_missing's outer finally
+    (idempotent — domjobabort is always safe to call multiple times)."""
     vm_config = make_vm_config()
     target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off")
     snapshot = _make_snapshot()
@@ -1373,9 +1499,11 @@ def test_domjobabort_called_after_successful_transfer(
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
 
     abort_cmds = [cmd for cmd in all_run_cmds if "virsh domjobabort" in cmd]
-    assert len(abort_cmds) == 1
-    assert "--domain" in abort_cmds[0]
-    assert vm_config.name in abort_cmds[0]
+    # domjobabort is called twice: _full_pull_lifecycle finally + transfer_missing outer finally
+    assert len(abort_cmds) == 2
+    for abort_cmd in abort_cmds:
+        assert "--domain" in abort_cmd
+        assert vm_config.name in abort_cmd
 
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1
@@ -1432,7 +1560,10 @@ def test_domjobabort_called_after_failed_transfer(
 def test_domjobabort_failure_is_non_fatal(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
 ):
-    """domjobabort fails — transfer still succeeds via unified engine, WARNING logged."""
+    """domjobabort fails — transfer still succeeds via unified engine, WARNING logged.
+    
+    domjobabort is called twice (inner + outer finally, both idempotent).
+    Both calls fail, two WARNINGs are logged, and the transfer still succeeds."""
     vm_config = make_vm_config()
     target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off")
     snapshot = _make_snapshot()
@@ -1465,7 +1596,8 @@ def test_domjobabort_failure_is_non_fatal(
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
 
     abort_cmds = [cmd for cmd in all_run_cmds if "virsh domjobabort" in cmd]
-    assert len(abort_cmds) == 1
+    # domjobabort is called twice: _full_pull_lifecycle finally + transfer_missing outer finally
+    assert len(abort_cmds) == 2
 
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1

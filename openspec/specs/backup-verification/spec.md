@@ -8,7 +8,7 @@ Post-transfer verification of backup integrity — ensures copied qcow2 files ar
 
 ### Requirement: TargetConfig verify field
 
-`TargetConfig.verify` controls post-transfer verification. Valid values: `"off"` (no verification), `"metadata"` (structural checks: format, virtual-size, corrupt-bit, backing-filename, dirty-size barrier), `"compare"` (metadata + `qemu-img compare` chain-traversing content comparison). The `"hash"` and `"full"` values are deprecated — both ran `qemu-img compare`; they are now unified to `"compare"`. Existing configs with `"hash"` or `"full"` SHALL log a deprecation WARNING and be treated as `"compare"`. Default is `"metadata"`.
+`TargetConfig.verify` controls post-transfer verification. Valid values: `"off"` (no verification), `"metadata"` (structural checks: format, virtual-size, corrupt-bit, backing-filename, dirty-size barrier), `"check"` (metadata + `qemu-img check` structural verification: errors, leaks, corruptions), `"compare"` (metadata + check + `qemu-img compare` chain-traversing content comparison). The `"hash"` and `"full"` values are deprecated — both ran `qemu-img compare`; they are now unified to `"compare"`. Existing configs with `"hash"` or `"full"` SHALL log a deprecation WARNING and be treated as `"compare"`. Default is `"metadata"`.
 
 #### Scenario: Default verification is metadata
 
@@ -19,6 +19,12 @@ Post-transfer verification of backup integrity — ensures copied qcow2 files ar
 
 - **WHEN** `verify = "compare"` is set in the TOML
 - **THEN** `TargetConfig.verify` is `"compare"`
+
+#### Scenario: Explicit check verification
+
+- **WHEN** `verify = "check"` is set in the TOML
+- **THEN** `TargetConfig.verify` is `"check"`
+- **AND** `verify_bitmap_incremental()` runs `qemu-img check` in addition to metadata checks
 
 #### Scenario: Deprecated hash treated as compare
 

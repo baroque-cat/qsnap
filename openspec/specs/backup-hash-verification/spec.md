@@ -1,29 +1,31 @@
-# Backup Hash Verification
+# Backup Hash Verification (Historical Record)
 
 ## Purpose
 
-SHA-256 hash verification tier for backup integrity checks. At snapshot creation time, the SHA-256 digest of the qcow2 file is computed and stored. After transfer to the backup target, the target file's hash is compared to the stored value to detect silent corruption or transfer errors. This sits between `"metadata"` (fast, structure-only) and `"full"` (slow, `qemu-img compare`) verification tiers.
+**This capability has been removed.** SHA-256 hash verification was a file-copy-era feature that computed the SHA-256 digest of a qcow2 file at snapshot creation time and compared it after transfer. For NBD-created backups (target created via `pread`/`pwrite`), the qcow2 internal structure differs from the source — SHA-256 of raw files never matches. The `content_hash` field was removed from `SnapshotResult` and `SnapshotInfo`. The `file_sha256()` utility in `qsnap/utils/hash.py` was deleted. The file `qsnap/utils/hash.py` no longer exists.
+
+This spec is retained as a historical record. No code references `content_hash`, `file_sha256`, or `qsnap.utils.hash`. Old state files with `content_hash` keys are read-tolerant (silently ignored by `JsonStateManager`).
 
 ## Requirements
 
-### Requirement: SnapshotResult carries content_hash
+*All requirements in this capability have been removed. The following are retained for historical context only.*
 
-`SnapshotResult` SHALL have an optional `content_hash: str | None` field defaulting to `None`. When non-None, it SHALL contain the hex-encoded SHA-256 digest of the created snapshot file.
+### Requirement: SnapshotResult carries content_hash (REMOVED)
 
-#### Scenario: Hash present for newly created snapshot
-- **WHEN** `ExternalSnapshotProvider.create()` creates a snapshot successfully
-- **THEN** the returned `SnapshotResult.content_hash` SHALL be a 64-character hex string
+`SnapshotResult` no longer has a `content_hash` field. The field was removed because SHA-256 hash verification is incompatible with NBD-created backups — the qcow2 internal structure of an NBD-pulled backup differs from the source file, so raw-file hashing never matches.
 
-#### Scenario: Hash is None on creation failure
-- **WHEN** snapshot creation fails at any step (virsh, chmod, qemu-img info)
-- **THEN** `SnapshotResult.content_hash` SHALL be `None`
+**Migration**: No action needed. `SnapshotResult` never had the field in the NBD-only world. Old state files with `content_hash` are silently ignored.
 
-### Requirement: SnapshotInfo stores content_hash in persistent state
+### Requirement: SnapshotInfo stores content_hash in persistent state (REMOVED)
 
-`SnapshotInfo` SHALL have an optional `content_hash: str | None` field defaulting to `None`. `JsonStateManager` SHALL persist and restore this field in the per-VM state JSON.
+`SnapshotInfo` no longer has a `content_hash` field. `JsonStateManager` silently ignores the key in old state files.
 
-#### Scenario: Hash stored and restored from state
-- **WHEN** a `SnapshotInfo` with `content_hash="abc123..."` is recorded via `IStateManager.record_snapshot()`
-- **THEN** subsequent `IStateManager.get_snapshots()` SHALL return a `SnapshotInfo` with the same `content_hash`
+**Migration**: No action needed. Old state files load correctly — the `content_hash` key is silently ignored during deserialization.
+
+### Requirement: Shared hash utility in qsnap.utils (REMOVED)
+
+`file_sha256()` in `qsnap/utils/hash.py` was deleted. The file `qsnap/utils/hash.py` no longer exists. No code references it.
+
+**Migration**: No action needed. No code imports `file_sha256` or `qsnap.utils.hash`.
 
 

@@ -55,12 +55,12 @@ def test_is_retryable_unknown_error():
 
 
 def test_is_retryable_hash_mismatch():
-    """``is_retryable("verification failed: hash mismatch")`` returns True.
+    """``is_retryable("verification failed: hash mismatch")`` returns False.
 
-    Hash mismatch is the ONLY verification error that is retryable
-    — it may indicate transient transfer corruption that a retry can fix.
+    Hash mismatch is no longer a retryable verification error.
+    Only content comparison mismatch is retryable among verification errors.
     """
-    assert is_retryable("verification failed: hash mismatch") is True
+    assert is_retryable("verification failed: hash mismatch") is False
 
 
 def test_is_retryable_format_verification_error():

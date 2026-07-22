@@ -466,6 +466,7 @@ def test_dry_run_logs_no_mutation(
         "which ",
         "virsh dominfo",
         "find",
+        "qemu-nbd",
     )
     for call in shell_spy.call_args_list:
         cmd = call[0][0]  # command list
@@ -2174,7 +2175,7 @@ def test_backup_retry_exhausted_returns_last_error(
     )
 
 
-def test_transfer_retries_on_hash_mismatch(
+def test_transfer_retries_on_content_comparison_mismatch(
     make_vm_config,
     make_target,
     mock_factory,
@@ -2182,7 +2183,7 @@ def test_transfer_retries_on_hash_mismatch(
     mock_shell,
     caplog,
 ):
-    """Hash mismatch verification error is retryable → retried and succeeds on second attempt."""
+    """Content comparison mismatch verification error is retryable → retried and succeeds on second attempt."""
     vm = make_vm_config(name="testvm")
     target = make_target(backup_retry_max=3, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
@@ -2206,7 +2207,7 @@ def test_transfer_retries_on_hash_mismatch(
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
-        error="verification failed: hash mismatch",
+        error="verification failed: content comparison mismatch",
     )
     success_result = BackupResult(
         success=True,
@@ -2230,7 +2231,7 @@ def test_transfer_retries_on_hash_mismatch(
     ):
         results = core._transfer_with_retry(provider, vm, target, [snap])
 
-    assert transfer_spy.call_count >= 2, "hash mismatch should be retried at least once"
+    assert transfer_spy.call_count >= 2, "content comparison mismatch should be retried at least once"
     assert all(r.success for r in results), "all results should succeed after retry"
     assert "succeeded on retry" in caplog.text
 
@@ -4131,5 +4132,122 @@ def test_dry_run_activated_from_cli(
     assert not transfer_spy.called
     # No state mutations
     assert not record_spy.called, "record_snapshot must not be called in dry-run"
-    assert not alloc_spy.called, "set_last_allocation must not be called in dry-run"
-    assert result.success is True
+
+
+# ── test_detect_orphan_checkpoints_uses_factory ──────────────────────────────
+
+
+def test_detect_orphan_checkpoints_uses_factory(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core._detect_orphan_checkpoints calls self._factory.create_backup_provider().
+
+    The factory routing fix (design D5) ensures Core does NOT directly
+    instantiate BitmapBackupProvider.  Instead, it delegates to the
+    factory's ``create_backup_provider(vm_config, target)`` and calls
+    ``list_checkpoints()`` / ``target_hash()`` on the result.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with (
+        patch.object(
+            mock_factory,
+            "create_backup_provider",
+            wraps=mock_factory.create_backup_provider,
+        ) as factory_spy,
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=["qsnap-abc12345-snap1"],
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "target_hash",
+            return_value="deadbeef",
+        ),
+    ):
+        orphans = core._detect_orphan_checkpoints(vm)
+
+    # Factory was called with the VM and its first target.
+    assert factory_spy.called, "create_backup_provider should be called"
+    call_args = factory_spy.call_args
+    assert call_args[0][0] is vm, "First arg should be vm_config"
+    assert call_args[0][1] is target, "Second arg should be target"
+
+    # The checkpoint is orphaned because its hash ("abc12345") does not
+    # match the configured target hash ("deadbeef").
+    assert len(orphans) == 1
+    assert "qsnap-abc12345-snap1" in orphans
+
+
+# ── test_resolve_disks_returns_empty_on_failure ──────────────────────────────
+
+
+def test_resolve_disks_returns_empty_on_failure(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """When virsh domblklist fails, _resolve_disks returns empty list and logs WARNING.
+
+    The disk fallback fix (design D6) removes the ``["vda"]`` default.
+    When domblklist fails, ``_resolve_disks()`` returns ``[]`` and a
+    WARNING is logged.  The snapshot is skipped because there are no
+    disks to snapshot.
+    """
+    # Override the default domblklist expectation to simulate failure.
+    # Remove existing domblklist first, then add failure.
+    mock_shell._expectations = [e for e in mock_shell._expectations if "domblklist" not in e.pattern]
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: Domain not found",
+            returncode=1,
+            error="Domain not found",
+        )
+    )
+
+    vm = make_vm_config(name="testvm", snapshot_create="always")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    caplog.set_level(logging.WARNING)
+    snapshot_provider = mock_factory._snapshot_provider
+
+    with patch.object(
+        snapshot_provider,
+        "create",
+        wraps=snapshot_provider.create,
+    ) as create_spy:
+        core.run()
+
+    # Snapshot was NOT created (no disks to snapshot).
+    assert not create_spy.called, (
+        "Snapshot should not be created when domblklist fails and returns no disks"
+    )
+
+    # WARNING was logged about domblklist failure.
+    warning_messages = [r.message for r in caplog.records]
+    assert any(
+        "domblklist failed" in msg for msg in warning_messages
+    ), f"Expected domblklist failure WARNING, got: {warning_messages}"

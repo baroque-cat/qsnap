@@ -158,6 +158,10 @@ def verify_full_backup(
         if leaks > 0:
             return f"verification failed: qemu-img check found {leaks} leaks"
 
+        corruptions = int(check_data.get("corruptions", 0))
+        if corruptions > 0:
+            return f"verification failed: qemu-img check found {corruptions} corruptions"
+
     # ── M3: Content comparison via qemu-img compare (compare mode only)
 
     if verify_mode == "compare" and source_path is not None:

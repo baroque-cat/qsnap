@@ -16,6 +16,10 @@ The successor checkpoint SHALL be passed as a separate checkpoint XML file given
 
 **No `qemu-img convert` SHALL be used in the data path.** FULL and incremental transfers both use the unified `pread`/`pwrite` engine. The only qemu-utilities used are `qemu-img create` (to initialize the target qcow2), `qemu-img info` (for verification), and `qemu-nbd` (as the write-side server).
 
+The `_start_write_server()` method SHALL NOT accept a `compression_type` parameter — the compress driver auto-detects the compression algorithm from the qcow2 header (set by `qemu-img create -o compression_type=...`). The `compress: bool` parameter is sufficient to select between the compress driver (`--image-opts driver=compress,...`) and plain qcow2 (`--format=qcow2`).
+
+The FULL-pull scaffolding (qemu-img create, _start_write_server, _transfer, _terminate_qemu_nbd, mv .tmp → final, finally cleanup) SHALL be shared between `transfer_missing()` full-pull and `create_full_backup()` via a private `_full_pull_lifecycle()` helper method.
+
 #### Scenario: First backup — full pull via NBD with atomic checkpoint
 
 - **WHEN** no prior qsnap checkpoint exists for this VM+target combination
@@ -35,6 +39,18 @@ The successor checkpoint SHALL be passed as a separate checkpoint XML file given
 - **AND** a new successor checkpoint is created atomically at this export's freeze point
 - **THEN** the unified engine connects with `["base:allocation", "qemu:dirty-bitmap:backup-<disk>"]` and transfers dirty∩allocated extents via `pread`/`pwrite` with `zero_skip=False`
 - **AND** no `--incremental` CLI flag is passed to `virsh backup-begin`
+
+#### Scenario: _start_write_server does not accept compression_type
+
+- **WHEN** `_start_write_server(target_file, write_socket, pid_file, compress=True)` is called
+- **THEN** the method signature does NOT include a `compression_type` parameter
+- **AND** the compress driver auto-detects the algorithm from the qcow2 header
+
+#### Scenario: Scaffolding dedup — shared _full_pull_lifecycle helper
+
+- **WHEN** `transfer_missing()` full-pull or `create_full_backup()` executes a FULL backup
+- **THEN** both SHALL call the private `_full_pull_lifecycle()` helper
+- **AND** the helper handles: qemu-img create, _start_write_server, _transfer, _terminate_qemu_nbd, mv .tmp → final, finally cleanup
 
 #### Scenario: Socket cleanup on success
 

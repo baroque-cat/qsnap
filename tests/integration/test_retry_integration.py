@@ -44,9 +44,11 @@ def test_int_retry_on_content_mismatch():
     # ── Part A: Verify retry utility functions ──────────────────────
 
     # is_retryable() should return True for verification failures.
-    assert is_retryable("verification failed: hash mismatch"), "Hash mismatch should be retryable"
-    assert is_retryable("VERIFICATION FAILED: HASH MISMATCH"), (
-        "Hash mismatch should be retryable (case-insensitive)"
+    assert not is_retryable("verification failed: hash mismatch"), (
+        "Hash mismatch should NOT be retryable (pattern removed)"
+    )
+    assert not is_retryable("VERIFICATION FAILED: HASH MISMATCH"), (
+        "Hash mismatch should NOT be retryable (case-insensitive)"
     )
     assert is_retryable("verification failed: content comparison mismatch"), (
         "Content comparison mismatch should be retryable"
@@ -132,10 +134,9 @@ def test_int_retry_on_content_mismatch():
         assert "mismatch" in result1.lower() or "content" in result1.lower(), (
             f"Expected content mismatch, got: {result1!r}"
         )
-        # SOURCE ISSUE: is_retryable pattern only matches
-        # "verification failed: hash mismatch" — not "content comparison mismatch".
-        # The error message changed from "hash mismatch" to "content comparison mismatch"
-        # when verify modes were unified to "compare".
+        # "verification failed: hash mismatch" is NO LONGER retryable
+        # (pattern removed from _RETRYABLE_PATTERNS). Only
+        # "verification failed: content comparison mismatch" is retryable.
         result_is_retryable = is_retryable(result1)
         assert result_is_retryable, (
             f"Verification failure should be recognized as retryable: {result1!r}"

@@ -662,7 +662,7 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
-            stdout='{"corruptions": 0}',
+            stdout='{"corruptions":0, "errors":0, "leaks":0}',
             stderr="",
             returncode=0,
             error=None,
@@ -709,7 +709,7 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
-            stdout='{"corruptions": 5}',
+            stdout='{"corruptions":5, "errors":0, "leaks":0}',
             stderr="",
             returncode=0,
             error=None,
@@ -722,6 +722,103 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
     assert result.success is False
     assert "deep verify" in result.error
     assert "5" in result.error
+    assert "corruptions" in result.error
+
+
+def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_config):
+    """deep_verify=True with errors > 0 returns failure.
+
+    - domblklist and blockcommit both succeed.
+    - qemu-img check returns JSON with ``{"corruptions":0, "errors":2, "leaks":0}``.
+    - Result: ``CommitResult(success=False)`` with "deep verify" and
+      "2 errors" in the error message.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions":0, "errors":2, "leaks":0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    manager = BlockCommitManager(shell=mock_shell)
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert result.success is False
+    assert "deep verify" in result.error
+    assert "2" in result.error
+    assert "errors" in result.error
+
+
+def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_config):
+    """deep_verify=True with leaks > 0 returns failure.
+
+    - domblklist and blockcommit both succeed.
+    - qemu-img check returns JSON with ``{"corruptions":0, "errors":0, "leaks":3}``.
+    - Result: ``CommitResult(success=False)`` with "deep verify" and
+      "3 leaks" in the error message.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions":0, "errors":0, "leaks":3}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    manager = BlockCommitManager(shell=mock_shell)
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert result.success is False
+    assert "deep verify" in result.error
+    assert "3" in result.error
+    assert "leaks" in result.error
 
 
 def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_config):
@@ -800,7 +897,7 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
-            stdout='{"corruptions": 0}',
+            stdout='{"corruptions":0, "errors":0, "leaks":0}',
             stderr="",
             returncode=0,
             error=None,

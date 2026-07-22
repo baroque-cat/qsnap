@@ -10,13 +10,12 @@ from __future__ import annotations
 import re
 
 # Error patterns that indicate a transient (retryable) failure.
-# Verification mismatches ("content comparison mismatch" and the
-# legacy "hash mismatch") are the ONLY verification errors that are
-# retryable — a mismatch may indicate transient transfer corruption
-# that a retry can fix.  Other verification errors (format mismatch,
-# virtual-size mismatch) are deterministic and must NOT be retried
-# (they don't match any pattern here, so they're non-retryable by
-# default).
+# Verification mismatches ("content comparison mismatch") are the ONLY
+# verification errors that are retryable — a mismatch may indicate
+# transient transfer corruption that a retry can fix.  Other
+# verification errors (format mismatch, virtual-size mismatch) are
+# deterministic and must NOT be retried (they don't match any pattern
+# here, so they're non-retryable by default).
 _RETRYABLE_PATTERNS = [
     "connection refused",
     "no route to host",
@@ -24,7 +23,6 @@ _RETRYABLE_PATTERNS = [
     "broken pipe",
     "eof",
     "verification failed: content comparison mismatch",
-    "verification failed: hash mismatch",
 ]
 
 # Error patterns that indicate a permanent (non-retryable) failure.
@@ -41,10 +39,10 @@ def is_retryable(error: str) -> bool:
 
     Returns ``True`` for errors like "Connection refused", "No route
     to host", "timed out", "broken pipe", "EOF", and verification
-    mismatches ("content comparison mismatch" and the legacy
-    "hash mismatch") (case-insensitive).  Verification mismatches are
-    the only verification errors that are retryable — they may indicate
-    transient transfer corruption that a retry can fix.
+    mismatches ("content comparison mismatch") (case-insensitive).
+    Verification mismatches are the only verification errors that are
+    retryable — they may indicate transient transfer corruption that a
+    retry can fix.
 
     Returns ``False`` for "No space left on device", "Permission
     denied", and any error that does not match a retryable pattern.

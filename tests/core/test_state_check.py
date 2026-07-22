@@ -310,8 +310,6 @@ def test_check_state_orphaned_checkpoint_removed_target(
     """
     import hashlib
 
-    from qsnap.models.results import ShellResult
-
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
 
@@ -325,9 +323,15 @@ def test_check_state_orphaned_checkpoint_removed_target(
     deleted_hash = hashlib.md5(b"/nonexistent/deleted/target").hexdigest()[:8]
     orphan_cp = f"qsnap-{deleted_hash}-snap1"
 
-    # Mock virsh checkpoint-list to return the orphaned checkpoint
-    mock_shell.expect("virsh checkpoint-list").returns(
-        ShellResult(success=True, stdout=f"{orphan_cp}\n", stderr="", returncode=0, error=None)
+    # Compute the hash of the current target to return from target_hash().
+    current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+
+    # Configure the mock backup provider to return the orphan checkpoint
+    # and the current target hash.  The factory now routes through
+    # create_backup_provider (design D5).
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [orphan_cp]
+    mock_factory._bitmap_backup_provider.target_hash = (
+        lambda p: current_hash
     )
 
     config = MockConfigFacade(vms=[vm])
@@ -362,8 +366,6 @@ def test_check_state_orphaned_checkpoint_changed_path(
     """
     import hashlib
 
-    from qsnap.models.results import ShellResult
-
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
 
@@ -377,8 +379,12 @@ def test_check_state_orphaned_checkpoint_changed_path(
     old_hash = hashlib.md5(b"/old/backup/path").hexdigest()[:8]
     orphan_cp = f"qsnap-{old_hash}-snap1"
 
-    mock_shell.expect("virsh checkpoint-list").returns(
-        ShellResult(success=True, stdout=f"{orphan_cp}\n", stderr="", returncode=0, error=None)
+    # Current target hash (different from old hash)
+    current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [orphan_cp]
+    mock_factory._bitmap_backup_provider.target_hash = (
+        lambda p: current_hash
     )
 
     config = MockConfigFacade(vms=[vm])
@@ -408,8 +414,6 @@ def test_check_state_no_orphans_all_match(
     """All checkpoints match configured targets — orphan_checkpoints is empty."""
     import hashlib
 
-    from qsnap.models.results import ShellResult
-
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
 
@@ -422,8 +426,9 @@ def test_check_state_no_orphans_all_match(
     target_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
     matching_cp = f"qsnap-{target_hash}-snap1"
 
-    mock_shell.expect("virsh checkpoint-list").returns(
-        ShellResult(success=True, stdout=f"{matching_cp}\n", stderr="", returncode=0, error=None)
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [matching_cp]
+    mock_factory._bitmap_backup_provider.target_hash = (
+        lambda p: hashlib.md5(p.encode()).hexdigest()[:8]
     )
 
     config = MockConfigFacade(vms=[vm])
@@ -451,9 +456,13 @@ def test_check_state_checkpoint_list_failure_non_fatal(
     mock_state,
     mock_shell,
 ):
-    """virsh checkpoint-list fails — check_state() does NOT raise, orphans empty."""
-    from qsnap.models.results import ShellResult
+    """list_checkpoints returns empty — check_state() does NOT raise, orphans empty.
 
+    When the backup provider's list_checkpoints returns an empty list
+    (simulating checkpoint-list failure with WARNING logged inside the
+    provider), _detect_orphan_checkpoints returns [] and check_state
+    reports status="ok".
+    """
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
 
@@ -462,16 +471,8 @@ def test_check_state_checkpoint_list_failure_non_fatal(
     target = make_target(path=str(target_path))
     vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
 
-    # Mock virsh checkpoint-list to return failure
-    mock_shell.expect("virsh checkpoint-list").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="error: Domain not found",
-            returncode=1,
-            error="Domain not found",
-        )
-    )
+    # MockBitmapBackupProvider.list_checkpoints already returns [] by
+    # default (simulating failure / no checkpoints available).
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -503,8 +504,6 @@ def test_check_state_non_qsnap_checkpoints_ignored(
     """
     import hashlib
 
-    from qsnap.models.results import ShellResult
-
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
 
@@ -518,21 +517,18 @@ def test_check_state_non_qsnap_checkpoints_ignored(
     # Hash for a different target — this one is truly orphaned
     other_hash = hashlib.md5(b"/other/target").hexdigest()[:8]
 
-    # Mix of: non-qsnap, malformed qsnap, orphaned qsnap, matching qsnap
+    # list_checkpoints simulates the BitmapBackupProvider filter: only
+    # qsnap-prefixed checkpoints are returned.  Non-qsnap checkpoints
+    # like "not-ours-checkpoint" are already filtered out by the provider.
     checkpoints = [
-        "not-ours-checkpoint",  # non-qsnap — filtered by list_checkpoints
         "qsnap-nohash",  # malformed (2 parts after split) → skipped
         f"qsnap-{other_hash}-orphan1",  # valid format, orphaned
         f"qsnap-{target_hash}-valid1",  # valid format, matching
     ]
-    mock_shell.expect("virsh checkpoint-list").returns(
-        ShellResult(
-            success=True,
-            stdout="\n".join(checkpoints) + "\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: checkpoints
+    mock_factory._bitmap_backup_provider.target_hash = (
+        lambda p: hashlib.md5(p.encode()).hexdigest()[:8]
     )
 
     config = MockConfigFacade(vms=[vm])
@@ -544,7 +540,6 @@ def test_check_state_non_qsnap_checkpoints_ignored(
     assert f"qsnap-{other_hash}-orphan1" in result["testvm"].orphan_checkpoints
     assert f"qsnap-{target_hash}-valid1" not in result["testvm"].orphan_checkpoints
     assert "qsnap-nohash" not in result["testvm"].orphan_checkpoints
-    assert "not-ours-checkpoint" not in result["testvm"].orphan_checkpoints
     assert len(result["testvm"].orphan_checkpoints) == 1
     assert "orphan_checkpoints" in result["testvm"].status
 

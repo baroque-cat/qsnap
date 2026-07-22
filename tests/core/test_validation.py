@@ -962,11 +962,9 @@ def test_dry_run_runs_validation_non_fatal_warnings(
 # ── Compress Driver Validation ───────────────────────────────────────────
 
 
-@pytest.mark.skip(
-    reason="Compress driver validation not yet implemented in Core._validate_environment"
-)
 def test_validate_compress_driver_available(
     make_vm_config,
+    make_target,
     mock_factory,
     mock_state,
     mock_shell,
@@ -977,12 +975,11 @@ def test_validate_compress_driver_available(
     Core._validate_environment should include a compress driver check
     when any target has ``compress=True`` (which is the default).
     """
-    # Override qemu-nbd check to simulate compress driver availability
-    mock_shell.expect("qemu-nbd --image-opts").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-
-    vm = make_vm_config(name="testvm")
+    # The mock_shell fixture already has a qemu-nbd expectation returning
+    # success (set up in conftest.py).  Create a VM with a target so that
+    # needs_compress evaluates to True.
+    target = make_target(compress=True)
+    vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -999,11 +996,9 @@ def test_validate_compress_driver_available(
     )
 
 
-@pytest.mark.skip(
-    reason="Compress driver validation not yet implemented in Core._validate_environment"
-)
 def test_validate_compress_driver_missing_fails_hard(
     make_vm_config,
+    make_target,
     mock_factory,
     mock_state,
     mock_shell,
@@ -1016,7 +1011,7 @@ def test_validate_compress_driver_missing_fails_hard(
     an error message that guides the user to install the compress driver.
     """
     # Override the default qemu-nbd check expectation — we expect failure.
-    # Remove any existing qemu-nbd expectation first.
+    # Remove any existing qemu-nbd expectation first, then add a failure.
     mock_shell._expectations = [e for e in mock_shell._expectations if "qemu-nbd" not in e.pattern]
     mock_shell.expect("qemu-nbd --image-opts").returns(
         ShellResult(
@@ -1028,7 +1023,8 @@ def test_validate_compress_driver_missing_fails_hard(
         )
     )
 
-    vm = make_vm_config(name="testvm")
+    target = make_target(compress=True)
+    vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1048,3 +1044,60 @@ def test_validate_compress_driver_missing_fails_hard(
     assert "compress" in error_text or "qemu-nbd" in error_text or "nbd" in error_text, (
         f"Error should be actionable about the compress driver, got: {result.broken_snapshots}"
     )
+
+
+# ── test_validate_compress_driver_missing_dry_run_warning ────────────────────
+
+
+def test_validate_compress_driver_missing_dry_run_warning(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Compress driver missing in dry-run → WARNING logged, CheckResult returned (not RuntimeError).
+
+    When the compress driver is missing and dry_run=True, the validation
+    failure is downgraded to a WARNING.  The pipeline continues and returns
+    ``PipelineResult.success=True`` (dry-run failures are non-fatal).
+    """
+    # Override qemu-nbd check to simulate missing compress driver.
+    mock_shell._expectations = [e for e in mock_shell._expectations if "qemu-nbd" not in e.pattern]
+    mock_shell.expect("qemu-nbd --image-opts").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="Unknown driver 'compress'",
+            returncode=1,
+            error="Unknown driver 'compress'",
+        )
+    )
+
+    target = make_target(compress=True)
+    vm = make_vm_config(name="testvm", targets=[target], disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    caplog.set_level(logging.WARNING)
+    result = core.run()
+
+    # Validation was called and returned CheckResult (not RuntimeError).
+    assert result.success is True, (
+        f"Pipeline should succeed in dry-run despite compress driver missing, "
+        f"got success={result.success}"
+    )
+
+    # WARNING about environment validation failure was logged.
+    warning_messages = [r.message for r in caplog.records]
+    assert any(
+        "Environment validation failed" in msg and "dry-run" in msg
+        for msg in warning_messages
+    ), f"Expected dry-run validation WARNING, got: {warning_messages}"
