@@ -26,6 +26,7 @@ from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
 from qsnap.modules.lifecycle.qemu_img_commit import QemuImgCommitManager
 from qsnap.utils.nbd import is_libvirt_new_enough
+from qsnap.utils.nbd_client import LibnbdClient
 
 
 def test_default_factory_stores_shell_and_state(mock_shell, mock_state):
@@ -123,10 +124,16 @@ def test_factory_selects_bitmap_provider_for_bitmap_mode(
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
 
-    with patch(
-        "qsnap.factory.default.is_libvirt_new_enough",
-        wraps=is_libvirt_new_enough,
-    ) as mock_check:
+    with (
+        patch(
+            "qsnap.factory.default.is_libvirt_new_enough",
+            wraps=is_libvirt_new_enough,
+        ) as mock_check,
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=True,
+        ),
+    ):
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
@@ -247,10 +254,16 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
 
-    with patch(
-        "qsnap.factory.default.is_libvirt_new_enough",
-        return_value=True,
-    ) as mock_check:
+    with (
+        patch(
+            "qsnap.factory.default.is_libvirt_new_enough",
+            return_value=True,
+        ) as mock_check,
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=True,
+        ),
+    ):
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
@@ -269,20 +282,30 @@ def test_factory_passes_state_to_bitmap_provider(
 
     This test isolates the state-injection concern: it patches
     ``is_libvirt_new_enough`` to return True and then verifies the
-    returned provider holds a reference to the factory's state manager.
+    returned provider holds a reference to the factory's state manager
+    and has a LibnbdClient wired in.
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
 
-    with patch(
-        "qsnap.factory.default.is_libvirt_new_enough",
-        return_value=True,
+    with (
+        patch(
+            "qsnap.factory.default.is_libvirt_new_enough",
+            return_value=True,
+        ),
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=True,
+        ),
     ):
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
     assert provider._state is mock_state, (
         "Factory must inject its IStateManager into BitmapBackupProvider"
+    )
+    assert isinstance(provider._nbd, LibnbdClient), (
+        "Factory must wire a LibnbdClient into BitmapBackupProvider"
     )
 
 
@@ -362,6 +385,9 @@ def test_factory_libvirt_7_1_falls_back(
     7.0, and 7.1 are no longer sufficient for BitmapBackupProvider.
     The factory must fall back to FileCopyBackupProvider and log a WARNING
     so operators are aware of the silent degradation.
+
+    Also asserts that even when libnbd is unavailable, the version gate
+    runs first — no RuntimeError is raised.
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -375,9 +401,15 @@ def test_factory_libvirt_7_1_falls_back(
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
 
-    with caplog.at_level(
-        logging.WARNING,
-        logger="qsnap.factory.default",
+    with (
+        caplog.at_level(
+            logging.WARNING,
+            logger="qsnap.factory.default",
+        ),
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=False,
+        ),
     ):
         provider = factory.create_backup_provider(make_vm_config(), target)
 
@@ -409,10 +441,90 @@ def test_factory_libvirt_7_2_returns_bitmap(
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target(incremental_mode="bitmap")
 
-    provider = factory.create_backup_provider(make_vm_config(), target)
+    with patch(
+        "qsnap.factory.default.is_libnbd_available",
+        return_value=True,
+    ):
+        provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
     assert provider._state is mock_state
+
+
+# ── bitmap libnbd availability gating tests ─────────────────────────────
+
+
+def test_factory_bitmap_mode_without_libnbd_raises_actionable_error(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+):
+    """bitmap mode + libvirt >= 7.2 + missing libnbd → RuntimeError.
+
+    When the user explicitly selects ``incremental_mode="bitmap"`` and
+    libvirt meets the version threshold but ``python3-libnbd`` is not
+    installed, the factory raises ``RuntimeError(MISSING_LIBNBD_ERROR)``
+    naming the distro package — no silent fallback (design R4).
+    """
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True,
+            stdout="virsh 8.0.0\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+
+    with (
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=False,
+        ),
+        pytest.raises(RuntimeError, match="python3-libnbd"),
+    ):
+        factory.create_backup_provider(make_vm_config(), target)
+
+
+def test_factory_libvirt_7_1_falls_back_even_without_libnbd(
+    mock_shell,
+    mock_state,
+    make_vm_config,
+    make_target,
+    caplog,
+):
+    """libvirt 7.1 + bitmap → FileCopyBackupProvider even when libnbd is missing.
+
+    The version gate runs first in ``create_backup_provider``, so when
+    libvirt < 7.2 the factory returns ``FileCopyBackupProvider`` without
+    ever calling ``is_libnbd_available()``.  No ``RuntimeError`` is raised.
+    """
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(
+            success=True,
+            stdout="virsh 7.1.0\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    factory = DefaultFactory(shell=mock_shell, state=mock_state)
+    target = make_target(incremental_mode="bitmap")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="qsnap.factory.default"),
+        patch(
+            "qsnap.factory.default.is_libnbd_available",
+            return_value=False,
+        ),
+    ):
+        provider = factory.create_backup_provider(make_vm_config(), target)
+
+    assert isinstance(provider, FileCopyBackupProvider)
+    assert "falling back" in caplog.text or "FileCopyBackupProvider" in caplog.text
 
 
 def test_create_bucket_full_strategy_returns_bucketfullstrategy(

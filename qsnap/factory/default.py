@@ -31,6 +31,7 @@ from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.retention.time_based import TimeBasedRetention
 from qsnap.state.json_manager import JsonStateManager
 from qsnap.utils.nbd import is_libvirt_new_enough
+from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, LibnbdClient, is_libnbd_available
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,12 @@ class DefaultFactory(IVMModuleFactory):
                     "falling back to FileCopyBackupProvider",
                 )
                 return FileCopyBackupProvider(self._shell, self._state)
-            return BitmapBackupProvider(self._shell, self._state)
+            if not is_libnbd_available():
+                # Hard failure, no silent fallback (design R4): the user
+                # explicitly selected bitmap mode, so a missing transport
+                # dependency is an actionable error, not a mode switch.
+                raise RuntimeError(MISSING_LIBNBD_ERROR)
+            return BitmapBackupProvider(self._shell, self._state, LibnbdClient())
         return FileCopyBackupProvider(self._shell, self._state)
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:

@@ -20,6 +20,12 @@ Verification levels (``TargetConfig.verify``):
   byte-level comparison.  ``--force-share`` avoids lock errors on live
   sources; a WARNING is logged because results may be unreliable if the
   VM writes during the comparison.
+
+Bitmap incrementals use :func:`verify_bitmap_incremental` instead of
+:func:`verify_backup`: in addition to format and virtual-size, it checks
+the delta's ``backing-filename`` against the resolved previous backup and
+enforces the dirty-size regression barrier (``actual-size ≤ dirty_bytes ×
+2 + 64 MiB``) that catches an engine regression to full-copy behavior.
 """
 
 from __future__ import annotations
@@ -35,6 +41,12 @@ from qsnap.utils.hash import file_sha256
 logger = logging.getLogger(__name__)
 
 _VERIFY_COMPARE_TIMEOUT = 7200  # 2 hours
+
+_DIRTY_BARRIER_FACTOR = 2
+"""Multiplier on dirty bytes for the bitmap incremental regression barrier."""
+
+_DIRTY_BARRIER_SLACK = 64 * 1024 * 1024
+"""Slack (64 MiB) added to the barrier to absorb qcow2 metadata overhead."""
 
 
 def verify_full_backup(
@@ -172,6 +184,160 @@ def verify_full_backup(
                     "verification failed: content comparison failed "
                     "(source may be locked by running VM); "
                     "consider verify='metadata' or 'check'"
+                )
+            return f"verification failed: content comparison mismatch: {error_detail}"
+
+    return None
+
+
+def verify_bitmap_incremental(
+    shell: IShell,
+    source_path: str,
+    delta_path: str,
+    expected_backing: str,
+    dirty_bytes: int,
+    verify_mode: str,
+) -> str | None:
+    """Verify a bitmap-mode incremental delta (backing-chained qcow2).
+
+    Checks (all tiers except ``"off"``):
+
+    a. ``qemu-img info`` reports format ``qcow2``.
+    b. ``virtual-size`` matches the source disk exactly.
+    c. ``backing-filename`` equals *expected_backing* (the resolved
+       previous backup path the delta was chained to).
+    d. Regression barrier: the file's ``actual-size`` does not exceed
+       ``dirty_bytes × 2 + 64 MiB`` — *dirty_bytes* is the sum of dirty
+       extent lengths measured by the copy loop before transfer.  A
+       breach means the engine regressed to copying the full disk.
+
+    For ``verify_mode`` ``"hash"`` or ``"full"``,
+    ``qemu-img compare -q --force-share <source> <delta>`` additionally
+    compares virtual disk content across both backing chains
+    (chain-traversing; the live-source WARNING is logged as in
+    :func:`verify_backup`).
+
+    Args:
+        shell: :class:`IShell` instance for running qemu-img commands.
+        source_path: Path to the source snapshot qcow2 (may be the live
+            active layer — read with ``--force-share``).
+        delta_path: Path to the transferred incremental delta.
+        expected_backing: Absolute path of the previous backup the delta
+            must chain to (``backing-filename`` check).
+        dirty_bytes: Sum of dirty extent lengths measured by the copy
+            loop before transfer (regression barrier input).
+        verify_mode: One of ``"off"``, ``"metadata"``, ``"check"``,
+            ``"hash"``, ``"full"``.
+
+    Returns:
+        ``None`` on success, or an error string starting with
+        ``"verification failed: ..."`` on failure.
+    """
+    if verify_mode == "off":
+        return None
+
+    # ── Source info (for virtual-size match) ─────────────────────────
+    # --force-share: the source may be the active layer of a running
+    # VM, which has an exclusive write lock (design D5).
+    source_info_cmd = [
+        "qemu-img",
+        "info",
+        "--force-share",
+        "--output=json",
+        str(source_path),
+    ]
+    source_result = shell.run(source_info_cmd, timeout=60)
+    if not source_result.success:
+        return f"verification failed: cannot get source info: {source_result.error}"
+
+    # ── Delta info ───────────────────────────────────────────────────
+    delta_info_cmd = [
+        "qemu-img",
+        "info",
+        "--output=json",
+        str(delta_path),
+    ]
+    delta_result = shell.run(delta_info_cmd, timeout=60)
+    if not delta_result.success:
+        return f"verification failed: cannot get delta info: {delta_result.error}"
+
+    try:
+        source_info = json.loads(source_result.stdout)
+    except json.JSONDecodeError as exc:
+        return f"verification failed: cannot parse source info JSON: {exc}"
+
+    try:
+        delta_info = json.loads(delta_result.stdout)
+    except json.JSONDecodeError as exc:
+        return f"verification failed: cannot parse delta info JSON: {exc}"
+
+    # (a) format check
+    delta_format = delta_info.get("format", "")
+    if delta_format != "qcow2":
+        return f"verification failed: expected format qcow2, got {delta_format}"
+
+    # (b) virtual-size match (exact)
+    source_vsize = int(source_info.get("virtual-size", 0))
+    delta_vsize = int(delta_info.get("virtual-size", 0))
+    if source_vsize != delta_vsize:
+        return (
+            f"verification failed: virtual-size mismatch "
+            f"(expected={source_vsize}, got={delta_vsize})"
+        )
+
+    # (c) backing-filename check — the delta must chain to the resolved
+    # previous backup (design D3).  Checked before any content
+    # comparison.
+    backing = delta_info.get("backing-filename")
+    if backing != expected_backing:
+        return (
+            f"verification failed: backing-filename mismatch "
+            f"(expected={expected_backing}, got={backing})"
+        )
+
+    # (d) dirty-size regression barrier: actual-size must stay within
+    # dirty_bytes × 2 + 64 MiB slack (K=2 absorbs qcow2 metadata; a
+    # breach means the engine regressed to full-copy — design R5).
+    actual_size = int(delta_info.get("actual-size", 0))
+    barrier = dirty_bytes * _DIRTY_BARRIER_FACTOR + _DIRTY_BARRIER_SLACK
+    if actual_size > barrier:
+        return (
+            f"verification failed: delta actual-size {actual_size} exceeds "
+            f"dirty-data barrier (dirty_bytes={dirty_bytes} × "
+            f"{_DIRTY_BARRIER_FACTOR} + 64 MiB slack = {barrier}) — "
+            "engine regressed to full copy"
+        )
+
+    # ── Content comparison across chains (hash/full tiers) ───────────
+    if verify_mode in ("hash", "full"):
+        # Same live-source caveat as verify_backup: the source may be a
+        # running VM's active layer; --force-share avoids hard lock
+        # errors, but writes during the comparison may produce false
+        # mismatches (design D5/R6).
+        logger.warning(
+            "verify=%s on running VM active layer %s — "
+            "results may be unreliable, consider verify='metadata'",
+            verify_mode,
+            source_path,
+        )
+        compare_cmd = [
+            "qemu-img",
+            "compare",
+            "-q",
+            "--force-share",
+            str(source_path),
+            str(delta_path),
+        ]
+        compare_result = shell.run(
+            compare_cmd,
+            timeout=_VERIFY_COMPARE_TIMEOUT,
+        )
+        if not compare_result.success:
+            error_detail = compare_result.error or compare_result.stderr or ""
+            if "lock" in error_detail.lower() or "shared" in error_detail.lower():
+                return (
+                    "verification failed: lock conflict — "
+                    "use verify='metadata' for live sources"
                 )
             return f"verification failed: content comparison mismatch: {error_detail}"
 

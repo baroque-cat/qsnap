@@ -25,6 +25,42 @@ class ShellResult:
     error: str | None
 
 
+# ── NBD ──────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class NbdExtent:
+    """A contiguous disk region reported by an NBD block-status query.
+
+    ``offset`` and ``length`` are bytes.  ``data`` is True when the
+    region carries data relevant to the queried meta-context (allocated
+    for ``base:allocation``, dirty for ``qemu:dirty-bitmap:<name>``) and
+    False for hole/zero/clean regions.
+    """
+
+    offset: int
+    length: int
+    data: bool
+
+
+@dataclass(frozen=True)
+class NbdResult:
+    """Outcome of an NBD client operation.
+
+    ``payload`` carries the operation-specific value on success
+    (``dict[str, list[NbdExtent]]`` mapping meta-context name to
+    extents for ``block_status``, ``bytes`` for ``pread``, ``None``
+    otherwise).  ``error`` is non-None iff ``success`` is False; error
+    strings are normalized so transient conditions map to the existing
+    retryable patterns ("eof", "timed out", "broken pipe",
+    "connection refused").
+    """
+
+    success: bool
+    payload: object | None
+    error: str | None
+
+
 # ── Snapshot ─────────────────────────────────────────────────────────────
 
 

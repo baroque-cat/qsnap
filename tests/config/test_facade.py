@@ -899,8 +899,8 @@ def test_stall_timeout_zero_disables(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_bitmap_verify_hash_auto_downgrades(tmp_path: Path, caplog) -> None:
-    """Bitmap mode + verify='hash' emits WARNING and downgrades to 'metadata'."""
+def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
+    """Bitmap mode + verify='hash' is now preserved — no downgrade warning."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -914,23 +914,18 @@ def test_bitmap_verify_hash_auto_downgrades(tmp_path: Path, caplog) -> None:
         '  verify = "hash"\n'
     )
 
-    with caplog.at_level(logging.WARNING):
-        facade = ConfigFacade(config_file)
+    facade = ConfigFacade(config_file)
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
     assert target.incremental_mode == "bitmap"
-    # verify="hash" is downgraded to "metadata" in bitmap mode.
-    assert target.verify == "metadata"
-
-    warnings_text = " ".join(caplog.messages)
-    assert "not supported in bitmap mode" in warnings_text
-    assert "Downgrading" in warnings_text
+    # verify="hash" is now supported in bitmap mode.
+    assert target.verify == "hash"
 
 
 @pytest.mark.unit
-def test_bitmap_verify_full_auto_downgrades(tmp_path: Path, caplog) -> None:
-    """Bitmap mode + verify='full' emits WARNING and downgrades to 'metadata' (design D5)."""
+def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
+    """Bitmap mode + verify='full' is now preserved — no downgrade warning."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -944,19 +939,13 @@ def test_bitmap_verify_full_auto_downgrades(tmp_path: Path, caplog) -> None:
         '  verify = "full"\n'
     )
 
-    with caplog.at_level(logging.WARNING):
-        facade = ConfigFacade(config_file)
+    facade = ConfigFacade(config_file)
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
     assert target.incremental_mode == "bitmap"
-    # verify="full" is downgraded to "metadata" in bitmap mode (NBD mismatch).
-    assert target.verify == "metadata"
-
-    warnings_text = " ".join(caplog.messages)
-    assert "verify='full' is not supported in bitmap mode" in warnings_text
-    assert "qemu-img compare will always mismatch" in warnings_text
-    assert "Downgrading to verify='metadata'" in warnings_text
+    # verify="full" is now supported in bitmap mode.
+    assert target.verify == "full"
 
 
 @pytest.mark.unit

@@ -19,7 +19,6 @@ Covers mode-dependent ``verify`` default resolution (design D3/D8):
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -112,13 +111,12 @@ def test_facade_explicit_verify_overrides_mode_default() -> None:
 
 
 @pytest.mark.unit
-def test_facade_verify_full_preserved_for_filecopy_downgraded_for_bitmap(caplog) -> None:
-    """verify='full' is preserved for file-copy but downgraded to 'metadata'
-    for bitmap mode (design D5: incremental NBD exports contain only dirty
-    blocks; qemu-img compare will always mismatch against source with backing
-    chain)."""
-    with caplog.at_level(logging.WARNING):
-        facade = ConfigFacade(FIXTURES / "verify_full_both.toml")
+def test_facade_verify_full_preserved_for_both_modes() -> None:
+    """verify='full' is preserved for BOTH file-copy and bitmap modes.
+    (Previously bitmap downgraded full→metadata, but
+    verify_bitmap_incremental now supports chain-traversing
+    qemu-img compare in hash/full tiers.)"""
+    facade = ConfigFacade(FIXTURES / "verify_full_both.toml")
 
     vm_fc = facade.get_vm("vm_fc_full")
     assert vm_fc.targets[0].incremental_mode == "file-copy"
@@ -126,24 +124,15 @@ def test_facade_verify_full_preserved_for_filecopy_downgraded_for_bitmap(caplog)
 
     vm_bitmap = facade.get_vm("vm_bitmap_full")
     assert vm_bitmap.targets[0].incremental_mode == "bitmap"
-    assert vm_bitmap.targets[0].verify == "metadata"
-
-    warnings_text = " ".join(caplog.messages)
-    assert "verify='full' is not supported in bitmap mode" in warnings_text
-    assert "Downgrading to verify='metadata'" in warnings_text
+    assert vm_bitmap.targets[0].verify == "full"
 
 
 @pytest.mark.unit
-def test_facade_bitmap_mode_hash_warns_and_downgrades(caplog) -> None:
-    """Bitmap mode + verify='hash' emits WARNING and downgrades to 'metadata'."""
-    with caplog.at_level(logging.WARNING):
-        facade = ConfigFacade(FIXTURES / "verify_bitmap_hash.toml")
-
-    warnings_text = " ".join(caplog.messages)
-    assert "not supported in bitmap mode" in warnings_text
-    assert "Downgrading" in warnings_text
+def test_facade_bitmap_mode_hash_preserved() -> None:
+    """Bitmap mode + verify='hash' is now preserved (no downgrade)."""
+    facade = ConfigFacade(FIXTURES / "verify_bitmap_hash.toml")
 
     vm = facade.get_vm("vm_bitmap_hash")
     target = vm.targets[0]
     assert target.incremental_mode == "bitmap"
-    assert target.verify == "metadata"
+    assert target.verify == "hash"

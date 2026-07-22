@@ -49,6 +49,7 @@ from qsnap.models.results import (
 )
 from qsnap.retention.time_based import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import is_vm_running, nbd_full_export
+from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
@@ -1641,6 +1642,17 @@ class Core:
         if not rsync_check.success:
             broken.append("rsync not found — rsync is a hard requirement")
 
+        # (g) libnbd availability — hard requirement when any target uses
+        # incremental_mode="bitmap" (spec: env-validation delta; design R4).
+        # The check is skipped entirely when no bitmap target exists so
+        # qsnap remains fully functional without libnbd.  There is no
+        # silent fallback to file-copy: missing dependency is a hard
+        # validation error naming the system package.
+        if any(t.incremental_mode == "bitmap" for t in vm_config.targets) and (
+            not is_libnbd_available()
+        ):
+            broken.append(MISSING_LIBNBD_ERROR)
+
         if broken:
             return CheckResult(
                 vm_name=vm_config.name,
@@ -2838,11 +2850,68 @@ class Core:
                         speed,
                     )
 
+            # Record incremental→FULL dependency for bitmap-mode
+            # transfers (spec: Core records dependency; design D4 —
+            # state recording is Core's responsibility).  Bitmap
+            # incrementals are backing-chained deltas; the provider
+            # verified them, and Core now registers each as a dependent
+            # of its chain's FULL anchor so retention cascade-deletion
+            # and ``check`` treat bitmap chains like file-copy chains.
+            # Failed transfers record nothing; standalone full pulls
+            # (no backing file) have no anchor and are skipped.
+            if target.incremental_mode == "bitmap":
+                for r in results:
+                    if not r.success:
+                        continue
+                    anchor = self._resolve_chain_full_anchor(r.target_path)
+                    if anchor is not None:
+                        self._state.record_incremental_dependency(
+                            str(target.path),
+                            r.snapshot_name,
+                            anchor,
+                        )
+
         # Backup retention + cleanup
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)
         self._cleanup_backups(vm_config, target, backups, retention_result)
 
         return backup_failed
+
+    def _resolve_chain_full_anchor(self, backup_path: Path) -> str | None:
+        """Walk a backup's backing chain to its FULL anchor (bitmap mode).
+
+        Reads ``qemu-img info --output=json`` at each hop and returns the
+        stem of the first chain member whose filename contains
+        ``.FULL.`` — the anchor Core records via
+        ``record_incremental_dependency`` (design D4).  Relative backing
+        filenames resolve against the containing directory (qemu-img
+        reports what was passed to ``create -b``; qsnap passes absolute
+        paths, but restore/copied chains may be relative).  Returns
+        ``None`` when the file has no backing chain (standalone full
+        pull), the walk fails, or no ``.FULL.`` member exists.
+        """
+        current = Path(backup_path)
+        for _ in range(64):  # bound the walk — real chains are short
+            info_result = self._shell.run(
+                ["qemu-img", "info", "--output=json", str(current)],
+                timeout=60,
+            )
+            if not info_result.success:
+                return None
+            try:
+                info = json.loads(info_result.stdout)
+            except json.JSONDecodeError:
+                return None
+            backing = info.get("backing-filename")
+            if not isinstance(backing, str) or not backing:
+                return None
+            backing_path = Path(backing)
+            if not backing_path.is_absolute():
+                backing_path = current.parent / backing_path
+            if ".FULL." in backing_path.name:
+                return backing_path.stem
+            current = backing_path
+        return None
 
     # ── prune steps (retention + lifecycle only) ───────────────────────
 

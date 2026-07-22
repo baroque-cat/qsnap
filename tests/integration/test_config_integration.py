@@ -21,19 +21,20 @@ import pytest
 from qsnap.config.facade import ConfigFacade
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 1: Bitmap + hash warns and downgrades to metadata
+# Test 1: Bitmap + hash is preserved (no downgrade)
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_int_bitmap_hash_warns_and_downgrades(caplog: pytest.LogCaptureFixture):
-    """Verify that ConfigFacade logs a WARNING and downgrades
-    ``verify="hash"`` to ``"metadata"`` when ``incremental_mode="bitmap"``.
+def test_int_bitmap_hash_preserved(caplog: pytest.LogCaptureFixture):
+    """Verify that ConfigFacade preserves ``verify="hash"`` when
+    ``incremental_mode="bitmap"``.
 
-    Per design D8, bitmap mode (NBD-based) does not support hash
-    verification because NBD-converted qcow2 files have different
-    internal structure than the source snapshot.  ConfigFacade should
-    warn and auto-downgrade.
+    Previously bitmap mode downgraded ``verify="hash"``/``"full"`` to
+    ``"metadata"`` (design D5/D8).  Now ``verify_bitmap_incremental()``
+    supports chain-traversing ``qemu-img compare`` in hash/full tiers
+    (with a live-source reliability caveat), so the explicit verify
+    value is preserved and no downgrade warning is emitted.
     """
     toml_content = """\
 [[vm]]
@@ -57,25 +58,20 @@ compress = true
         with caplog.at_level(logging.WARNING, logger="qsnap.config.facade"):
             facade = ConfigFacade(str(config_path))
 
-        # Verify the WARNING was logged.
+        # Verify NO downgrade warning was emitted.
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        verify_warnings = [
+        downgrade_warnings = [
             r
             for r in warnings
-            if "verify" in (r.getMessage() or "").lower()
-            and "hash" in (r.getMessage() or "").lower()
+            if "downgrading" in (r.getMessage() or "").lower()
+            or "downgrade" in (r.getMessage() or "").lower()
         ]
-        assert len(verify_warnings) >= 1, (
-            f"Expected at least one WARNING about verify='hash' in bitmap mode. "
-            f"Warnings logged: {[r.getMessage() for r in warnings]}"
+        assert len(downgrade_warnings) == 0, (
+            f"Expected no downgrade warnings for bitmap+hash (now supported). "
+            f"Got: {[r.getMessage() for r in downgrade_warnings]}"
         )
 
-        warning_msg = verify_warnings[0].getMessage() or ""
-        assert "downgrading" in warning_msg.lower() or "downgrade" in warning_msg.lower(), (
-            f"WARNING should mention downgrading, got: {warning_msg!r}"
-        )
-
-        # Verify the target's verify mode was downgraded to "metadata".
+        # Verify the target's verify mode was preserved as configured.
         vms = facade.get_vms()
         assert len(vms) == 1, f"Expected 1 VM, got {len(vms)}"
 
@@ -84,8 +80,8 @@ compress = true
         assert len(vm.targets) == 1, f"Expected 1 target, got {len(vm.targets)}"
 
         target = vm.targets[0]
-        assert target.verify == "metadata", (
-            f"Expected verify='metadata' after downgrade, got verify={target.verify!r}"
+        assert target.verify == "hash", (
+            f"Expected verify='hash' preserved, got verify={target.verify!r}"
         )
         assert target.incremental_mode == "bitmap", "incremental_mode should remain 'bitmap'"
 

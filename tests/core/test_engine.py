@@ -964,8 +964,16 @@ def test_action_appended_on_snapshot_delete(
     )
     mock_state.record_snapshot("testvm", snap)
 
+    # On Python 3.14 Path.exists() delegates to os.path.exists().  Use a
+    # predicate that returns False for generated snapshot candidates
+    # (names containing "_vda") so the collision loop in
+    # _generate_snapshot_name terminates, while returning True for all
+    # other paths the test needs (recorded snapshots, state files).
+    def _path_exists(p: object) -> bool:
+        return "_vda" not in Path(str(p)).name
+
     with (
-        patch("os.path.exists", return_value=True),
+        patch("os.path.exists", side_effect=_path_exists),
         patch.object(core, "_get_chain_length", return_value=3),
         patch.object(
             mock_factory._retention_engine,
@@ -1452,8 +1460,16 @@ def test_snapshot_delete_info_log(
 
     caplog.set_level(logging.INFO)
 
+    # On Python 3.14 Path.exists() delegates to os.path.exists().  Use a
+    # predicate that returns False for generated snapshot candidates
+    # (names containing "_vda") so the collision loop in
+    # _generate_snapshot_name terminates, while returning True for all
+    # other paths the test needs (recorded snapshots, state files).
+    def _path_exists(p: object) -> bool:
+        return "_vda" not in Path(str(p)).name
+
     with (
-        patch("os.path.exists", return_value=True),
+        patch("os.path.exists", side_effect=_path_exists),
         patch.object(core, "_get_chain_length", return_value=3),
         patch.object(
             mock_factory._retention_engine,

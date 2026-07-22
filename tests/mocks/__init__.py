@@ -13,6 +13,7 @@ from tests.mocks.mock_modules import (
     MockRetentionEngine,
     MockSnapshotProvider,
 )
+from tests.mocks.mock_nbd import MockNbdClient
 from tests.mocks.mock_shell import MockShell
 from tests.mocks.mock_state import InMemoryStateManager
 
@@ -24,6 +25,7 @@ __all__ = [
     "MockChangeDetector",
     "MockConfigFacade",
     "MockLifecycleManager",
+    "MockNbdClient",
     "MockRetentionEngine",
     "MockShell",
     "MockSnapshotProvider",

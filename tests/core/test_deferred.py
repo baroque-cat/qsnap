@@ -389,8 +389,17 @@ def test_risk_deferred_queue_grows_across_runs(
 
     lifecycle_manager = mock_factory._lifecycle_manager
 
+    # On Python 3.14 Path.exists() delegates to os.path.exists().  Use a
+    # predicate that returns False for generated snapshot candidates
+    # (names containing "_vda") so the collision loop in
+    # _generate_snapshot_name terminates, while returning True for all
+    # other paths the test needs (recorded snapshots like /tmp/snap1.qcow2,
+    # state files).
+    def _path_exists(p: object) -> bool:
+        return "_vda" not in Path(str(p)).name
+
     with (
-        patch("os.path.exists", return_value=True),
+        patch("os.path.exists", side_effect=_path_exists),
         patch.object(
             mock_factory._retention_engine,
             "evaluate",

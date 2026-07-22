@@ -416,8 +416,11 @@ class ConfigFacade(IConfigFacade):
         verify_raw = tgt_raw.get("verify")
         if verify_raw is None:
             # Mode-dependent default — hash for file-copy (race-condition-
-            # immune SHA-256), metadata for bitmap (hash is unsupported
-            # for NBD-converted qcow2).
+            # immune SHA-256), metadata for bitmap (cheap structural
+            # check; hash/full are supported too — they run
+            # chain-traversing qemu-img compare via
+            # verify_bitmap_incremental, which carries a live-source
+            # reliability caveat).
             verify = "hash" if incremental_mode == "file-copy" else "metadata"
         else:
             verify = str(verify_raw)
@@ -426,36 +429,6 @@ class ConfigFacade(IConfigFacade):
                 raise ConfigError(
                     f"Invalid verify={verify!r}. Must be one of: off, metadata, hash, full."
                 )
-
-        # Bitmap + hash is not supported (NBD-converted qcow2 has
-        # different internal structure than the source snapshot).
-        # Warn and auto-downgrade to metadata (design D8).  This runs
-        # AFTER the mode-dependent default resolution, so it only
-        # triggers when the user explicitly sets verify="hash" for
-        # bitmap mode (the default for bitmap is already "metadata").
-        if incremental_mode == "bitmap" and verify == "hash":
-            logger.warning(
-                "verify='hash' is not supported in bitmap mode "
-                "(NBD-converted qcow2 has different internal "
-                "structure). Downgrading to verify='metadata'. "
-                "Use verify='full' for content-level verification."
-            )
-            verify = "metadata"
-
-        # Bitmap + full is not supported for incremental transfers
-        # (design D5).  An incremental NBD export produces a standalone
-        # qcow2 containing only dirty blocks (non-dirty blocks read as
-        # zeros), while the source snapshot (with backing chain) resolves
-        # to full data.  qemu-img compare between these will always
-        # mismatch.  Warn and auto-downgrade to metadata.
-        if incremental_mode == "bitmap" and verify == "full":
-            logger.warning(
-                "verify='full' is not supported in bitmap mode "
-                "(incremental NBD exports contain only dirty blocks; "
-                "qemu-img compare will always mismatch against source "
-                "with backing chain). Downgrading to verify='metadata'."
-            )
-            verify = "metadata"
 
         # Deprecation warning: verify='metadata' for file-copy mode is
         # weaker than verify='hash' (race-condition-immune SHA-256).

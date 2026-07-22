@@ -1,11 +1,19 @@
 """BitmapBackupProvider — NBD pull-model incremental backup via libvirt.
 
 Implements ``IBackupProvider``.  Does NOT inherit from Core (design D1).
-Dependency: ``IShell`` only.
+Dependencies: ``IShell``, optional ``IStateManager``, and ``INbdClient``
+(third constructor parameter — the dirty-block transfer transport).
 
 Uses ``virsh backup-begin`` with a pull-model NBD Unix socket to export
-dirty blocks, then ``qemu-img convert -n nbd:unix:<socket>`` to pull
-them into a standalone qcow2 file on the target — no backing chain.
+the frozen point-in-time view.  Incremental exports (a prior qsnap
+checkpoint exists) are pulled by an in-process dirty-block copy loop over
+``INbdClient``: the loop negotiates ``base:allocation`` and
+``qemu:dirty-bitmap:backup-<disk>`` meta-contexts, queries block status,
+intersects dirty extents with allocated extents, and ``pread``/``pwrite``s
+only dirty blocks into a **backing-chained** qcow2 delta (created via
+``qemu-img create -b <previous backup> -F qcow2`` and served by a forked
+``qemu-nbd``).  Full exports (no prior checkpoint) are pulled by
+``qemu-img convert -n nbd:unix:<socket>`` into a standalone qcow2.
 
 Every ``virsh backup-begin`` receives a checkpoint XML as its third
 positional argument, so the successor checkpoint (the dirty-bitmap
@@ -28,8 +36,19 @@ chain (FULL + incrementals) is gap-free by construction.
    starts the NBD export (full when no ``<incremental>`` element,
    incremental otherwise) and atomically creates the successor
    checkpoint at the export's freeze point.
-4. ``qemu-img convert -n nbd:unix:<socket> <target_file>``
-5. Verify the target file (if ``target.verify != "off"``).
+4. Pull the export.  Incremental: the ``INbdClient`` copy loop
+   (:meth:`_copy_dirty_blocks`) transfers only dirty∩allocated extents
+   into ``<name>.qcow2.tmp`` (backing: the previous backup at the
+   target), served through a forked ``qemu-nbd``, then atomically
+   renamed to the final name.  Full (no prior checkpoint):
+   ``qemu-img convert -n nbd:unix:<socket> <target_file>`` — the
+   ``-c``/zstd compression branch applies only here and in
+   ``create_full_backup``; bitmap incrementals are uncompressed
+   (design D6).
+5. Verify the target file (if ``target.verify != "off"``):
+   :func:`verify_backup` for full pulls, :func:`verify_bitmap_incremental`
+   (format, virtual-size, backing-filename, dirty-size regression
+   barrier) for incrementals.
 6. After a successful AND verified export, delete all superseded
    (older) qsnap checkpoints for this VM+target via
    ``virsh checkpoint-delete --metadata`` — the successor already
@@ -37,8 +56,9 @@ chain (FULL + incrementals) is gap-free by construction.
 7. On export/verify failure, preserve the prior checkpoint for retry,
    delete the just-created successor checkpoint best-effort, and
    delete the partial target file.
-8. Socket and XML temp files are always cleaned up in a ``finally``
-   block.
+8. Socket(s), the forked ``qemu-nbd`` process (via pidfile), the
+   ``.tmp`` file, and XML temp files are always cleaned up in a
+   ``finally`` block.
 """
 
 from __future__ import annotations
@@ -50,14 +70,18 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from qsnap.interfaces.backup import IBackupProvider
+from qsnap.interfaces.nbd import INbdClient
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import TargetConfig, VMConfig
-from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.models.results import BackupResult, NbdExtent, ShellResult, SnapshotInfo
+from qsnap.utils.extents import overlap_with_allocation, unify_extents
 from qsnap.utils.nbd import (
     get_first_disk_target,
     nbd_full_export,
@@ -65,9 +89,27 @@ from qsnap.utils.nbd import (
     write_checkpoint_xml,
 )
 from qsnap.utils.parsing import parse_timestamp
-from qsnap.utils.verification import verify_backup
+from qsnap.utils.verification import verify_backup, verify_bitmap_incremental
 
 logger = logging.getLogger(__name__)
+
+_BASE_ALLOCATION_CONTEXT = "base:allocation"
+"""NBD standard meta-context advertising allocated vs hole/zero extents."""
+
+
+@dataclass(frozen=True)
+class _CopyResult:
+    """Outcome of the dirty-block copy loop (design D2).
+
+    ``error`` is ``None`` on success.  ``previous_path`` is the resolved
+    backing file (needed by verification's backing-filename check) and
+    ``dirty_bytes`` the sum of dirty extent lengths measured before the
+    copy (feeds the verification regression barrier).
+    """
+
+    error: str | None
+    previous_path: Path | None
+    dirty_bytes: int
 
 
 class BitmapBackupProvider(IBackupProvider):
@@ -77,9 +119,21 @@ class BitmapBackupProvider(IBackupProvider):
         self,
         shell: IShell,
         state: IStateManager | None = None,
+        nbd: INbdClient | None = None,
     ) -> None:
+        """Create the provider.
+
+        ``nbd`` is the NBD transport for the incremental dirty-block
+        copy loop (design D1).  ``DefaultFactory`` wires a
+        :class:`LibnbdClient`; tests inject a ``MockNbdClient``.  It is
+        optional only so paths that never touch the client (FULL
+        backups, listing, deletion) can be exercised without it — the
+        incremental copy loop fails with an actionable error when it is
+        ``None``.
+        """
         self._shell = shell
         self._state = state
+        self._nbd = nbd
 
     # ── IBackupProvider implementation ────────────────────────────────
 
@@ -130,12 +184,20 @@ class BitmapBackupProvider(IBackupProvider):
         ``qemu-img rebase``.
 
         ``compression_type`` selects the compression algorithm for the
-        NBD convert command (``"zstd"`` default, ``"zlib"`` alternative).
-        Only effective when ``target.compress`` is ``True``.
+        full-pull convert command (``"zstd"`` default, ``"zlib"``
+        alternative) and only takes effect when ``target.compress`` is
+        ``True`` and a **full** export is pulled (no prior checkpoint).
+        Bitmap incrementals are written uncompressed via random-access
+        ``pwrite`` (design D6 — qcow2 compressed clusters can only be
+        produced by ``qemu-img convert``).
 
-        ``stall_timeout`` is the stall-detection timeout in seconds for
-        the convert command.  When ``0``, falls back to fixed-timeout
-        :meth:`IShell.run`.
+        ``stall_timeout`` is the stall-detection timeout in seconds.
+        For the full-pull convert it is forwarded to
+        :meth:`IShell.run_with_stall_detection`; for the incremental
+        copy loop it drives the in-process progress watchdog (abort
+        with ``"Stall detected: no progress for {N}s"`` when no chunk
+        completes for N seconds).  When ``0``, stall detection is
+        disabled on both paths.
         """
         existing = self.list(target)
         existing_names = {s.name for s in existing}
@@ -143,13 +205,17 @@ class BitmapBackupProvider(IBackupProvider):
         target_hash = self.target_hash(str(target.path))
 
         results: list[BackupResult] = []
+        compress_notice_logged = False
 
         for snapshot in snapshots:
             if snapshot.name in existing_names:
                 continue
 
             target_file = target.path / f"{snapshot.name}.qcow2"
+            tmp_file = Path(f"{target_file}.tmp")
             socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
+            write_socket = f"/tmp/qsnap-write-{os.getpid()}.sock"
+            pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}.pid")
 
             # Determine the prior checkpoint for an incremental export
             # (design D3: newest-wins discovery via ``virsh
@@ -211,51 +277,65 @@ class BitmapBackupProvider(IBackupProvider):
                     )
                     continue
 
-                # Step 4: Pull dirty blocks via NBD.
+                # Step 4: Pull the export.
                 # libvirt's NBD server exports each disk under its
-                # target device name (e.g., "vda").  We must specify
-                # exportname in the NBD URI to connect to the correct
-                # export.
+                # target device name (e.g., "vda"); the export name is
+                # needed both for the convert URI and for the dirty
+                # bitmap meta-context name.
                 disk_target = get_first_disk_target(
                     self._shell,
                     vm_config.name,
                 )
-                nbd_uri = f"nbd:unix:{socket_path}"
-                if disk_target:
-                    nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"
-
-                convert_cmd = [
-                    "qemu-img",
-                    "convert",
-                    "-O",
-                    "qcow2",
-                ]
-                # Compression: -c compresses the output qcow2.  When
-                # compression_type is "zstd", adds -o compression_type=zstd
-                # for 11x faster compression than the default zlib (D7).
-                if target.compress:
-                    convert_cmd.append("-c")
-                    if compression_type == "zstd":
-                        convert_cmd.extend(["-o", "compression_type=zstd"])
-                convert_cmd.extend([nbd_uri, str(target_file)])
                 start_time = time.monotonic()
-                if stall_timeout > 0:
-                    convert_result = self._shell.run_with_stall_detection(
-                        convert_cmd,
-                        output_file=target_file,
-                        stall_timeout=stall_timeout,
+                dirty_bytes = 0
+                previous_path: Path | None = None
+                if prior is None:
+                    # Full export (no baseline checkpoint): pull the
+                    # entire frozen view into a standalone qcow2 via
+                    # qemu-img convert.  Compression applies here (and
+                    # in create_full_backup) only — bitmap incrementals
+                    # are uncompressed (design D6).
+                    transfer_error = self._full_pull_via_convert(
+                        socket_path,
+                        disk_target,
+                        target_file,
+                        target,
+                        compression_type,
+                        stall_timeout,
                     )
                 else:
-                    convert_result = self._shell.run(convert_cmd, timeout=600)
+                    # Incremental export: in-process dirty-block copy
+                    # loop via INbdClient (design D2) — replaces the
+                    # former bare ``qemu-img convert`` pull, which never
+                    # negotiated the dirty-bitmap meta-context and
+                    # therefore always copied the full disk.
+                    if target.compress and not compress_notice_logged:
+                        logger.info(
+                            "bitmap incrementals are uncompressed — "
+                            "target.compress applies to FULL backups only (design D6)"
+                        )
+                        compress_notice_logged = True
+                    copy = self._copy_dirty_blocks(
+                        vm_config.name,
+                        target,
+                        target_file,
+                        socket_path,
+                        disk_target,
+                        stall_timeout,
+                    )
+                    transfer_error = copy.error
+                    dirty_bytes = copy.dirty_bytes
+                    previous_path = copy.previous_path
                 elapsed = time.monotonic() - start_time
-                if not convert_result.success:
+                if transfer_error is not None:
                     # Export failed: preserve the prior checkpoint for
                     # retry, delete the just-created successor checkpoint
                     # best-effort (it must not become the newest baseline
                     # of a failed export), and delete the partial target
                     # file so retention cleanup does not find it and log
                     # a misleading ``[delete] removed backup`` message
-                    # (design D3).
+                    # (design D3).  The ``.tmp`` file is removed by the
+                    # ``finally`` block.
                     self._cleanup_partial_file(target_file)
                     self._delete_checkpoint_best_effort(vm_config.name, successor)
                     results.append(
@@ -265,18 +345,31 @@ class BitmapBackupProvider(IBackupProvider):
                             source_path=snapshot.path,
                             target_path=target_file,
                             bytes_transferred=0,
-                            error=convert_result.error,
+                            error=transfer_error,
                         )
                     )
                     continue
 
-                # Step 5: Verification (if enabled).
-                verify_error = verify_backup(
-                    self._shell,
-                    str(snapshot.path),
-                    str(target_file),
-                    target.verify,
-                )
+                # Step 5: Verification (if enabled).  Incrementals use
+                # the bitmap-specific verifier (backing-filename check +
+                # dirty-size regression barrier); full pulls keep the
+                # file-copy-oriented verify_backup.
+                if prior is None:
+                    verify_error = verify_backup(
+                        self._shell,
+                        str(snapshot.path),
+                        str(target_file),
+                        target.verify,
+                    )
+                else:
+                    verify_error = verify_bitmap_incremental(
+                        self._shell,
+                        str(snapshot.path),
+                        str(target_file),
+                        str(previous_path),
+                        dirty_bytes,
+                        target.verify,
+                    )
                 if verify_error is not None:
                     # Same failure handling as the convert-failure path:
                     # preserve prior, delete successor best-effort,
@@ -322,8 +415,22 @@ class BitmapBackupProvider(IBackupProvider):
                 )
 
             finally:
-                # Step 8: NBD job abort + socket + XML temp file cleanup
-                # (always, even on failure).  Abort the virsh
+                # Step 8: write-side + NBD job abort + socket + XML temp
+                # file cleanup (always, even on failure — design D2,
+                # spec: write-side lifecycle is crash-safe).
+                #
+                # Terminate the forked qemu-nbd serving the .tmp delta
+                # via its pidfile (best-effort — the process may never
+                # have started on early failures; on success it was
+                # already terminated before the atomic rename).
+                self._terminate_qemu_nbd(pid_file)
+                # Write socket + pidfile removal.
+                self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
+                # Partial .tmp removal — a no-op on success (the .tmp
+                # was renamed to the final file), removes the partial
+                # delta on every failure/exception path.
+                self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
+                # Abort the virsh
                 # backup-begin job to release the VM state change lock
                 # (mirrors nbd_full_export in qsnap/utils/nbd.py).
                 # domjobabort is idempotent — safe to call when no job
@@ -343,7 +450,7 @@ class BitmapBackupProvider(IBackupProvider):
                         vm_config.name,
                         abort_result.error,
                     )
-                # Socket cleanup.
+                # Source (libvirt) socket cleanup.
                 self._shell.run(["rm", "-f", socket_path], timeout=10)
                 # Temp XML cleanup (local filesystem, not shell — keeps
                 # the files out of the IShell command stream).
@@ -358,6 +465,371 @@ class BitmapBackupProvider(IBackupProvider):
                         )
 
         return results
+
+    # ── incremental transfer engine (design D2/D4) ────────────────────
+
+    def _full_pull_via_convert(
+        self,
+        socket_path: str,
+        disk_target: str | None,
+        target_file: Path,
+        target: TargetConfig,
+        compression_type: str,
+        stall_timeout: int,
+    ) -> str | None:
+        """Pull a full NBD export into a standalone qcow2 via ``qemu-img convert``.
+
+        Used when no prior checkpoint exists (the export is a full
+        frozen view, there is no dirty bitmap to negotiate).  This is
+        the only remaining ``qemu-img convert`` path in
+        ``transfer_missing`` — compression (``-c`` /
+        ``-o compression_type=zstd``) applies here and in
+        ``create_full_backup`` only (design D6).
+
+        Returns ``None`` on success, or the error string on failure.
+        """
+        nbd_uri = f"nbd:unix:{socket_path}"
+        if disk_target:
+            nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"
+        convert_cmd = [
+            "qemu-img",
+            "convert",
+            "-O",
+            "qcow2",
+        ]
+        # Compression: -c compresses the output qcow2.  When
+        # compression_type is "zstd", adds -o compression_type=zstd
+        # for 11x faster compression than the default zlib (D7).
+        if target.compress:
+            convert_cmd.append("-c")
+            if compression_type == "zstd":
+                convert_cmd.extend(["-o", "compression_type=zstd"])
+        convert_cmd.extend([nbd_uri, str(target_file)])
+        if stall_timeout > 0:
+            convert_result = self._shell.run_with_stall_detection(
+                convert_cmd,
+                output_file=target_file,
+                stall_timeout=stall_timeout,
+            )
+        else:
+            convert_result = self._shell.run(convert_cmd, timeout=600)
+        if not convert_result.success:
+            return convert_result.error or "qemu-img convert failed"
+        return None
+
+    def _copy_dirty_blocks(
+        self,
+        vm_name: str,
+        target: TargetConfig,
+        target_file: Path,
+        socket_path: str,
+        disk_target: str | None,
+        stall_timeout: int,
+    ) -> _CopyResult:
+        """Copy only dirty∩allocated blocks into a backing-chained delta (design D2).
+
+        Lifecycle (spec: nbd-dirty-block-transfer / dirty-block copy loop):
+
+        1. Resolve the previous backup at the target (newest by
+           timestamp; the FULL for the first incremental) and re-check
+           its existence immediately before use — on disappearance,
+           fail with a retryable-class error (design D3/R2).
+        2. Create ``<name>.qcow2.tmp`` via ``qemu-img create -f qcow2
+           -b <previous> -F qcow2``.
+        3. Serve the ``.tmp`` through a forked ``qemu-nbd`` with
+           ``--pid-file`` and a process-unique write socket.
+        4. Connect the source ``INbdClient`` to the libvirt socket
+           requesting ``base:allocation`` and
+           ``qemu:dirty-bitmap:backup-<disk>`` meta-contexts.
+        5. Query block status, unify extents, intersect dirty with
+           allocated; compute ``dirty_bytes``.
+        6. ``pread`` each dirty extent chunk from the source and
+           ``pwrite`` it to the destination at the same offset, running
+           the in-process stall watchdog (design D4).
+        7. Disconnect both clients, terminate ``qemu-nbd`` via its
+           pidfile, remove the write socket.
+        8. Atomically ``mv <name>.qcow2.tmp <name>.qcow2``.
+
+        Cleanup of the write side on failure paths (qemu-nbd
+        termination, write socket/pidfile/``.tmp`` removal) is handled
+        by the ``finally`` block of :meth:`transfer_missing`.
+        """
+        tmp_file = Path(f"{target_file}.tmp")
+        write_socket = f"/tmp/qsnap-write-{os.getpid()}.sock"
+        pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}.pid")
+
+        if self._nbd is None:
+            return _CopyResult(
+                error=(
+                    "no INbdClient configured — the bitmap incremental copy loop "
+                    "requires an NBD client (DefaultFactory wires LibnbdClient)"
+                ),
+                previous_path=None,
+                dirty_bytes=0,
+            )
+        if not disk_target:
+            return _CopyResult(
+                error=(
+                    f"cannot determine disk target device for VM {vm_name} via "
+                    "virsh domblklist — required for the qemu:dirty-bitmap meta-context"
+                ),
+                previous_path=None,
+                dirty_bytes=0,
+            )
+
+        # (1) Resolve the previous backup (newest at target).
+        backups = self.list(target)
+        previous = backups[-1] if backups else None
+        if previous is None:
+            return _CopyResult(
+                error=(
+                    f"no previous backup found at {target.path} — cannot create "
+                    "a backing-chained delta without a FULL anchor"
+                ),
+                previous_path=None,
+                dirty_bytes=0,
+            )
+        # (1b) Re-check existence immediately before use (design D3/R2):
+        # retention could in theory remove the previous backup between
+        # listing and create.  Routed through IShell so the race is
+        # observable/testable like every other external call.  The error
+        # is retryable-class — the next run re-discovers the newest.
+        exists = self._shell.run(["test", "-f", str(previous.path)], timeout=10)
+        if not exists.success:
+            return _CopyResult(
+                error=(
+                    f"previous backup {previous.path} vanished between listing and "
+                    "delta creation (eof race) — next run re-discovers the newest"
+                ),
+                previous_path=previous.path,
+                dirty_bytes=0,
+            )
+
+        # (2) Create the delta as a backing-chained qcow2.
+        create_result = self._shell.run(
+            [
+                "qemu-img",
+                "create",
+                "-f",
+                "qcow2",
+                "-b",
+                str(previous.path),
+                "-F",
+                "qcow2",
+                str(tmp_file),
+            ],
+            timeout=60,
+        )
+        if not create_result.success:
+            return _CopyResult(
+                error=f"qemu-img create delta failed: {create_result.error}",
+                previous_path=previous.path,
+                dirty_bytes=0,
+            )
+
+        # (3) Serve the .tmp delta through a forked qemu-nbd.  Remove
+        # any stale write socket/pidfile first (process-unique paths —
+        # a crash that orphaned them must not affect this run, spec:
+        # write-side lifecycle is crash-safe).  ``--persistent`` keeps
+        # qemu-nbd alive after the destination client disconnects —
+        # without it qemu-nbd exits on the last disconnect, racing the
+        # pidfile-based termination (spec: terminate via pidfile).
+        # NOTE: ``--shared`` is intentionally left at its default of 1 —
+        # exactly one client (the destination INbdClient) ever connects
+        # to this qemu-nbd; the source client goes to libvirt's socket.
+        self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
+        nbd_proc = self._shell.run(
+            [
+                "qemu-nbd",
+                "--fork",
+                "--persistent",
+                "--pid-file",
+                str(pid_file),
+                "--socket",
+                write_socket,
+                str(tmp_file),
+            ],
+            timeout=30,
+        )
+        if not nbd_proc.success:
+            return _CopyResult(
+                error=f"qemu-nbd failed to start: {nbd_proc.error}",
+                previous_path=previous.path,
+                dirty_bytes=0,
+            )
+
+        # (4)-(6) Connect both endpoints and copy dirty extents.
+        error, dirty_bytes = self._transfer_extents(
+            socket_path,
+            write_socket,
+            disk_target,
+            stall_timeout,
+        )
+        if error is not None:
+            return _CopyResult(
+                error=error,
+                previous_path=previous.path,
+                dirty_bytes=dirty_bytes,
+            )
+
+        # (7) Terminate qemu-nbd (the destination client already
+        # disconnected, so the delta is flushed/closed) and remove the
+        # write socket + pidfile BEFORE the atomic rename.
+        self._terminate_qemu_nbd(pid_file)
+        self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
+
+        # (8) Atomic rename: mv .tmp to final name (same discipline as
+        # the FULL path).
+        mv_result = self._shell.run(["mv", str(tmp_file), str(target_file)], timeout=30)
+        if not mv_result.success:
+            return _CopyResult(
+                error=f"atomic rename failed: {mv_result.error}",
+                previous_path=previous.path,
+                dirty_bytes=dirty_bytes,
+            )
+
+        return _CopyResult(error=None, previous_path=previous.path, dirty_bytes=dirty_bytes)
+
+    def _transfer_extents(
+        self,
+        socket_path: str,
+        write_socket: str,
+        disk_target: str,
+        stall_timeout: int,
+    ) -> tuple[str | None, int]:
+        """Connect both NBD endpoints and copy dirty∩allocated extents.
+
+        Steps (4)-(6) of the copy loop: negotiate meta-contexts on the
+        source, query block status in ``max_request_size`` windows,
+        unify + intersect extents, then chunked ``pread`` → ``pwrite``
+        per dirty extent with the in-process stall watchdog (design D4):
+        a monotonic last-progress timestamp is updated after every
+        successful chunk write; if no chunk completes for
+        ``stall_timeout`` seconds the loop aborts with the exact
+        shell-level error string ``"Stall detected: no progress for
+        {N}s"`` (so Core retry classification is untouched).
+        ``stall_timeout == 0`` disables the watchdog.  No threads —
+        progress is checked between chunk writes.
+
+        Returns ``(error, dirty_bytes)`` — *error* is ``None`` on
+        success; *dirty_bytes* is the sum of dirty extent lengths
+        measured before copying (0 when the measurement never ran).
+        Both clients are always disconnected before returning.
+        """
+        assert self._nbd is not None  # guarded by _copy_dirty_blocks
+        src = self._nbd
+        # The destination is a second, independent connection of the
+        # same concrete transport (LibnbdClient in production,
+        # MockNbdClient in tests — both are zero-arg constructible).
+        # Two simultaneous connections are required because the loop
+        # interleaves pread(source) → pwrite(destination) per chunk.
+        dst = type(self._nbd)()
+        bitmap_context = f"qemu:dirty-bitmap:backup-{disk_target}"
+
+        try:
+            conn = src.connect(
+                f"nbd+unix:///?socket={socket_path}",
+                disk_target,
+                [_BASE_ALLOCATION_CONTEXT, bitmap_context],
+            )
+            if not conn.success:
+                return conn.error or "source NBD connect failed", 0
+            dst_conn = dst.connect(f"nbd+unix:///?socket={write_socket}", "", [])
+            if not dst_conn.success:
+                return dst_conn.error or "destination NBD connect failed", 0
+
+            # (5) Query block status over the disk in max-request-size
+            # windows, accumulating extents per meta-context.
+            size = src.get_size()
+            window = max(1, src.get_max_request_size())
+            dirty_raw: list[NbdExtent] = []
+            alloc_raw: list[NbdExtent] = []
+            bitmap_seen = False
+            offset = 0
+            while offset < size:
+                length = min(window, size - offset)
+                status = src.block_status(offset, length)
+                if not status.success:
+                    return status.error or "block_status failed", 0
+                payload = cast(dict[str, list[NbdExtent]], status.payload or {})
+                if bitmap_context in payload:
+                    bitmap_seen = True
+                dirty_raw.extend(payload.get(bitmap_context, []))
+                alloc_raw.extend(payload.get(_BASE_ALLOCATION_CONTEXT, []))
+                offset += length
+            if not bitmap_seen:
+                # Fail loudly: without the dirty-bitmap meta-context the
+                # loop would "succeed" with an empty delta — silent data
+                # loss.  This means the export did not advertise the
+                # bitmap (e.g. missing incremental baseline).
+                return (
+                    f"dirty bitmap meta-context {bitmap_context} not advertised "
+                    "by the NBD export — cannot identify dirty extents"
+                ), 0
+
+            dirty = unify_extents(dirty_raw)
+            allocated = unify_extents(alloc_raw)
+            to_copy = overlap_with_allocation(dirty, allocated)
+            dirty_bytes = sum(extent.length for extent in to_copy)
+
+            # (6) Copy each dirty extent in chunks bounded by both
+            # endpoints' max request size, running the stall watchdog
+            # between chunk writes (design D4).
+            chunk_size = max(
+                1,
+                min(src.get_max_request_size(), dst.get_max_request_size()),
+            )
+            last_progress = time.monotonic()
+            for extent in to_copy:
+                pos = extent.offset
+                remaining = extent.length
+                while remaining > 0:
+                    count = min(chunk_size, remaining)
+                    read = src.pread(pos, count)
+                    if not read.success:
+                        return read.error or "pread failed", dirty_bytes
+                    data = read.payload
+                    if not isinstance(data, bytes) or len(data) != count:
+                        got = len(data) if isinstance(data, bytes) else "non-bytes payload"
+                        return (
+                            f"short read at offset {pos}: expected {count} bytes, got {got}"
+                        ), dirty_bytes
+                    write = dst.pwrite(pos, data)
+                    if not write.success:
+                        return write.error or "pwrite failed", dirty_bytes
+                    now = time.monotonic()
+                    if stall_timeout > 0 and now - last_progress > stall_timeout:
+                        return f"Stall detected: no progress for {stall_timeout}s", dirty_bytes
+                    last_progress = now
+                    pos += count
+                    remaining -= count
+            return None, dirty_bytes
+        finally:
+            # (7) Disconnect both clients — safe even when the
+            # connection was never established (interface contract).
+            dst.disconnect()
+            src.disconnect()
+
+    def _terminate_qemu_nbd(self, pid_file: Path) -> None:
+        """Terminate a forked qemu-nbd via its pidfile (best-effort, design D2).
+
+        Reads the qemu-nbd PID from *pid_file* and sends SIGTERM via
+        IShell ``kill``.  A missing/unreadable pidfile is skipped
+        silently (the process never started or was already terminated).
+        Kill failures log a WARNING and never propagate — cleanup is
+        never fatal to a transfer.
+        """
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return
+        kill_result = self._shell.run(["kill", str(pid)], timeout=10)
+        if not kill_result.success:
+            logger.warning(
+                "Failed to terminate qemu-nbd (pid %d): %s",
+                pid,
+                kill_result.error,
+            )
 
     def create_full_backup(
         self,

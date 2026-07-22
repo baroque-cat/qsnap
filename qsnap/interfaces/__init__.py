@@ -8,6 +8,7 @@ from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.lifecycle import ILifecycleManager
+from qsnap.interfaces.nbd import INbdClient
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
@@ -18,6 +19,7 @@ __all__ = [
     "IBucketFullStrategy",
     "IChangeDetector",
     "IConfigFacade",
+    "INbdClient",
     "IRetentionEngine",
     "IShell",
     "ISnapshotProvider",

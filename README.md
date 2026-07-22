@@ -182,7 +182,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
 | `verify` | string | mode-dependent | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Effective default is `"hash"` for file-copy mode, `"metadata"` for bitmap mode (resolved by ConfigFacade). Explicit value takes precedence |
-| `compress` | bool | `true` | Compress backups. Applies to FULL backups (`qemu-img convert -c`), NBD incrementals (`-c` flag), and rsync incrementals (`--compress` transfer-level flag). Inherits from global → VM → target |
+| `compress` | bool | `true` | Compress backups. Applies to FULL backups (`qemu-img convert -c`) and rsync incrementals (`--compress` transfer-level flag). Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
 | `copy_base` | bool | `false` | Copy the base image to the target on first backup. When `false` (default), the first backup is created as a FULL by the bucket-driven mechanism in `Core._backup_target()` (not via `transfer_missing()`) |
@@ -373,7 +373,7 @@ The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD expo
 
 ### Bitmap Mode (NBD Incremental Backups)
 
-When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model for incremental transfers via `virsh backup-begin` with checkpoint-based dirty-block tracking. This produces standalone qcow2 files (no backing chain) that are easier to restore. Bitmap mode requires **libvirt >= 7.2** (the incremental backup API, including the checkpoint XML argument of `backup-begin`, is complete since 7.2); on older libvirt the factory falls back to `file-copy` mode with a WARNING.
+When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model for incremental transfers via `virsh backup-begin` with checkpoint-based dirty-block tracking. An in-process copy loop (over the `python3-libnbd` bindings) negotiates the `base:allocation` and `qemu:dirty-bitmap:backup-<disk>` NBD meta-contexts and copies **only dirty, allocated blocks** into a backing-chained qcow2 delta (chained to the previous backup, FULL for the first incremental) — so an incremental is proportional to the dirtied data, not the disk size. Bitmap mode requires **libvirt >= 7.2** (the incremental backup API, including the checkpoint XML argument of `backup-begin`, is complete since 7.2); on older libvirt the factory falls back to `file-copy` mode with a WARNING. It also requires the `python3-libnbd` system package (see [Requirements](#requirements)).
 
 **Atomic checkpoints:** Every `virsh backup-begin` issued in bitmap mode — both FULL exports via `create_full_backup()` and incrementals via `transfer_missing()` — receives a checkpoint XML as its third positional argument, so the successor checkpoint (named `qsnap-{target_hash}-{yyyymmddTHHMMSS}`) is created **atomically at the export's freeze point**. The dirty-bitmap baseline therefore always coincides with the exported point-in-time view, and the backup chain (FULL + incrementals) is gap-free by construction. After a successful and verified export, all superseded (older) qsnap checkpoints for that VM+target are deleted via `virsh checkpoint-delete --metadata`, keeping exactly one baseline checkpoint.
 
@@ -386,7 +386,8 @@ When `incremental_mode = "bitmap"` (the default), qsnap uses the NBD pull-model 
 Bitmap mode has several inherent constraints due to its NBD/checkpoint architecture:
 
 - **Single-disk only** — only the first disk target (via `get_first_disk_target`) is pulled through the NBD export. Multi-disk VMs are not fully covered by bitmap backups; use `file-copy` mode for multi-disk coverage.
-- **`verify="metadata"` recommended** — `verify="hash"` is unsupported (NBD-converted qcow2 has a different internal structure than the source, so SHA-256 digests never match) and `verify="full"` will mismatch for incrementals (the target contains only dirty blocks while the source resolves to full data via the backing chain). ConfigFacade auto-downgrades both to `"metadata"` with a WARNING. `verify="metadata"` is the effective default for bitmap mode.
+- **Incrementals are uncompressed** — qcow2 compressed clusters can only be produced by `qemu-img convert`; the dirty-block copy loop writes via random-access `pwrite`. `compress` / `compression_type` still apply to FULL backups (where the bulk of the bytes are). Because an incremental is proportional to dirtied data, the capacity impact is minor.
+- **`verify="metadata"` recommended** — `verify="hash"` and `verify="full"` are supported: both run `qemu-img compare -q --force-share` to compare the source snapshot chain against the FULL+delta chain (chain-traversing, meaningful now that deltas are backing-chained). On a running VM the comparison carries a reliability caveat (the guest may write during the compare), so `"metadata"` remains the default.
 - **Checkpoints live in libvirt, not in state files** — bitmap mode creates libvirt checkpoints (atomically via the checkpoint XML argument of `virsh backup-begin`) that track dirty-bitmap boundaries. These are stored by libvirt, not in qsnap's JSON state. Use `qsnap check --state` to detect orphaned checkpoints (checkpoints whose target no longer matches any configured target path), and `virsh checkpoint-delete --metadata` to clean them up.
 
 ### `compress` and `compression_type`
@@ -415,21 +416,23 @@ qsnap offers four verification tiers for incremental backups, configured per tar
 |---|---|---|---|
 | `"off"` | No verification after backup | None | When target is trusted and speed is critical |
 | `"metadata"` | Compare qcow2 metadata: format and virtual-size (actual-size is NOT checked — unreliable for live sources) | Low | Default for bitmap mode. Catches format mismatches and size corruption |
-| `"hash"` | Compute SHA-256 of the qcow2 file at snapshot creation, compare after transfer | Medium (hash at creation + hash at target) | Default for file-copy mode. Detects silent bit-rot or transfer corruption. NOT supported in bitmap mode (NBD-converted qcow2 has different internal structure) |
+| `"hash"` | File-copy mode: compute SHA-256 of the qcow2 file at snapshot creation, compare after transfer. Bitmap mode: `qemu-img compare -q --force-share` across the source and FULL+delta chains | Medium (file-copy) / High (bitmap) | Default for file-copy mode. Detects silent bit-rot or transfer corruption. In bitmap mode, equivalent to `"full"` (chain-traversing content compare) |
 | `"full"` | Metadata check + `qemu-img compare -q --force-share` against the source | High (reads entire source and target) | Maximum integrity, detects all corruption. `--force-share` avoids lock errors on live sources; a WARNING is logged because results may be unreliable if the VM writes during comparison |
+
+Bitmap incrementals additionally verify, on every tier except `"off"`: the delta's `backing-filename` equals the resolved previous backup, and a **dirty-size regression barrier** (`actual-size ≤ dirty_bytes × 2 + 64 MiB`) that fails the transfer if the engine ever regresses to copying the full disk.
 
 ### Mode-Dependent Default
 
 The effective `verify` default depends on `incremental_mode` (resolved by `ConfigFacade`, not by the dataclass field default):
 
 - **`"file-copy"` mode** → `"hash"` (SHA-256 is race-condition-immune and has negligible overhead for small incrementals)
-- **`"bitmap"` mode** → `"metadata"` (hash is unsupported for NBD-converted qcow2)
+- **`"bitmap"` mode** → `"metadata"` (cheap structural check; `"hash"`/`"full"` are supported but compare content with a live-source reliability caveat)
 
 When the user explicitly sets `verify`, the explicit value takes precedence.
 
-### Bitmap Mode + `verify="hash"` Limitation
+### Bitmap Mode Content Verification
 
-`verify="hash"` is NOT supported in bitmap (NBD) mode because NBD-converted qcow2 files have different internal structure than the source snapshot — their SHA-256 digests will never match. If configured together, ConfigFacade logs a WARNING and automatically downgrades `verify` to `"metadata"`. Use `verify="full"` for content-level verification in bitmap mode.
+In bitmap mode, `"hash"` and `"full"` both run `qemu-img compare -q --force-share <snapshot> <delta>`, which traverses both backing chains and compares the virtual disk content visible to the guest. This is meaningful because bitmap deltas are backing-chained to their FULL — the delta chain and the source snapshot chain resolve to the same freeze-point content. On a running VM the guest may write during the comparison, so a WARNING is logged and results may be unreliable; `"metadata"` remains the recommended default for bitmap mode.
 
 ### How `hash` Verification Works
 
@@ -449,7 +452,7 @@ When the user explicitly sets `verify`, the explicit value takes precedence.
 Starting with this version, `incremental_mode` defaults to `"bitmap"` (NBD) instead of `"file-copy"` (rsync). The transition is graceful:
 
 - **Existing rsync backups remain valid** — they stay on the target and are managed by retention alongside new NBD backups.
-- **New NBD backups coexist as standalone files** — NBD incrementals are standalone qcow2 files (no backing chain), while existing rsync incrementals use the backing chain. Both types are listed and retained together.
+- **New NBD backups coexist with rsync chains** — NBD incrementals are backing-chained qcow2 deltas (chained to the previous NBD backup on the target), and existing rsync incrementals use the backing chain too. Both types are listed and retained together.
 - **No state migration needed** — no `IStateManager` schema changes.
 - **Automatic fallback** — if libvirt < 6.0, the factory automatically falls back to `FileCopyBackupProvider` (rsync mode). Old systems are unaffected.
 - **Keep rsync mode** — users who want to stay on rsync can explicitly set `incremental_mode = "file-copy"` in their target config.
@@ -821,9 +824,22 @@ Before the `<incremental>` XML fix, bitmap mode incremental backups failed with 
 
 - Python 3.11+
 - libvirt + virsh (libvirt 7.2+ for NBD bitmap incremental backups; libvirt 6.0+ for NBD-based FULL backups of running VMs in file-copy mode)
-- qemu-img
+- qemu-img + qemu-nbd
+- python3-libnbd (system package, e.g. `apt install python3-libnbd`) — **required only for `incremental_mode = "bitmap"`**; the incremental dirty-block copy loop uses the libnbd bindings. qsnap runs fully without it when every target uses `file-copy` mode. There is no silent fallback: bitmap mode without the package is a hard pre-flight validation error.
 - rsync (hard requirement for all backup transfers)
 - QEMU/KVM hypervisor
+
+### Development environment (libnbd in the Poetry venv)
+
+The libnbd Python bindings ship only with the OS package (there is no PyPI distribution), compiled for the system Python's ABI. To run the libnbd-dependent integration tests inside the Poetry venv, point Poetry at the system interpreter and let the venv see system site-packages (the repo's committed `poetry.toml` already enables `system-site-packages`):
+
+```bash
+poetry env use /usr/bin/python3   # the interpreter python3-libnbd was built for
+poetry install
+poetry run python -c "import nbd"  # sanity check
+```
+
+On hosts without libnbd (or with a different system Python) this is optional: `import nbd` is lazy, all unit tests pass without it, and the libnbd-dependent integration tests skip automatically via `pytest.importorskip`.
 
 ### libvirt Incremental Backup API
 

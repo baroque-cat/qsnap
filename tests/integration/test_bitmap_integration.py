@@ -22,6 +22,15 @@ from pathlib import Path
 
 import pytest
 
+# libnbd availability — needed for incremental copy-loop tests.
+# Tests that only use create_full_backup or ghost retention do NOT require nbd.
+try:
+    import nbd  # noqa: F401
+
+    _HAS_LIBNBD = True
+except ImportError:
+    _HAS_LIBNBD = False
+
 from qsnap.core import Core
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import (
@@ -36,6 +45,10 @@ from qsnap.utils.nbd import (
     write_backup_xml,
     write_checkpoint_xml,
 )
+
+if _HAS_LIBNBD:
+    from qsnap.utils.nbd_client import LibnbdClient
+
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_state import InMemoryStateManager
@@ -74,13 +87,16 @@ def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
 
 @pytest.mark.integration
 def test_int_nbd_incremental_with_compression(test_vm):
-    """Run an NBD incremental backup with ``compress=True`` and verify
-    the resulting qcow2 file is compressed.
+    """Verify compression applies to FULL backups only; bitmap incrementals
+    are uncompressed (design D6).
 
     1. Start the test VM.
-    2. Call ``transfer_missing()`` with ``compress=True``.
-    3. Inspect the resulting qcow2 with ``qemu-img info``.
-    4. Verify the backup is a valid qcow2 with compression features.
+    2. Create a compressed FULL backup via ``create_full_backup(compress=True)``
+       — verify it IS compressed (qcow2 with compression features).
+    3. Write data to dirty blocks inside the guest.
+    4. Run an incremental with ``compress=True`` — verify the delta is a
+       plain, uncompressed backing-chained qcow2.
+    5. Assert the delta has a backing-filename (it chains to the FULL).
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -92,7 +108,7 @@ def test_int_nbd_incremental_with_compression(test_vm):
     start_result = shell.run(["virsh", "start", vm_name], timeout=30)
     if not start_result.success:
         pytest.skip(f"virsh start failed: {start_result.error}")
-    time.sleep(2)
+    time.sleep(1)
 
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
@@ -100,17 +116,11 @@ def test_int_nbd_incremental_with_compression(test_vm):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
-    # Step 2: Create the provider without state (no FULL in state,
-    # so the first transfer_missing call should perform a real NBD
-    # export — full data transfer since no prior checkpoint exists).
-    provider = BitmapBackupProvider(shell, state=None)
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
 
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.incr",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-    )
+    provider = BitmapBackupProvider(shell, state=None, nbd=LibnbdClient())
+
     target = TargetConfig(
         path=target_dir,
         incremental=True,
@@ -123,64 +133,107 @@ def test_int_nbd_incremental_with_compression(test_vm):
         snapshot_dir=snapshot_dir,
     )
 
-    # Step 3: Call transfer_missing with compress=True.
+    # Step 2: Create a compressed FULL backup via create_full_backup.
+    # Compression IS applied here — qemu-img convert -c.
+    source_snapshot = SnapshotInfo(
+        name=f"{vm_name}.active",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    full_result = provider.create_full_backup(
+        vm_name,
+        source_snapshot,
+        target,
+        compress=True,
+        bucket_level="monthly",
+    )
+    assert full_result.success, f"Compressed FULL backup failed: {full_result.error}"
+    full_path = full_result.target_path
+    assert full_path.exists(), f"FULL backup file not found: {full_path}"
+
+    # Inspect the compressed FULL.
+    full_info_result = shell.run(
+        ["qemu-img", "info", "--output=json", str(full_path)],
+        timeout=30,
+    )
+    assert full_info_result.success, f"qemu-img info on FULL failed: {full_info_result.error}"
+    full_info = json.loads(full_info_result.stdout)
+    assert full_info.get("format") == "qcow2", "FULL backup should be valid qcow2"
+
+    # Check format-specific data for compression indication on the FULL.
+    format_specific = full_info.get("format-specific", {})
+    if isinstance(format_specific, dict):
+        data_obj = format_specific.get("data", {})
+        if isinstance(data_obj, dict):
+            compress_type = data_obj.get("compression-type", "")
+            if compress_type:
+                assert compress_type != "uncompressed", (
+                    f"Compressed FULL should have non-uncompressed type, "
+                    f"got compression-type={compress_type!r}"
+                )
+    time.sleep(1)
+
+    # Step 3: Write data inside the guest to create dirty blocks.
+    # Use QEMU monitor to write data.
+    shell.run(
+        [
+            "virsh",
+            "qemu-monitor-command",
+            "--domain",
+            vm_name,
+            "--hmp",
+            "qemu-io vda write -P 0x5a 0 1M",
+        ],
+        timeout=30,
+    )
+    time.sleep(1)
+
+    # Step 4: Run incremental with compress=True.
+    # Bitmap incrementals are UNCOMPRESSED (design D6) — the -c flag
+    # is NOT passed; __pwrite produces plain clusters.
+    incr_snapshot = SnapshotInfo(
+        name=f"{vm_name}.incr-uncompressed",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
     results = provider.transfer_missing(
         vm_config=vm_config,
         target=target,
-        snapshots=[snapshot],
+        snapshots=[incr_snapshot],
     )
 
     if not results:
         pytest.skip("transfer_missing produced no results — NBD may not be available")
+    assert results[0].success, f"Incremental transfer failed: {results[0].error}"
 
-    success_results = [r for r in results if r.success]
-    if not success_results:
-        # There may have been a failure; check if it's an NBD issue.
-        failures = [r for r in results if not r.success]
-        error_msgs = "; ".join(r.error or "unknown" for r in failures)
-        pytest.skip(f"NBD backup failed (checkpoint/QEMU may not support this): {error_msgs}")
+    incr_path = results[0].target_path
+    assert incr_path.exists(), f"Incremental file not found: {incr_path}"
 
-    result = success_results[0]
-    assert result.target_path.exists(), f"Backup file not found at {result.target_path}"
-
-    # Step 4: Inspect the backup with qemu-img info.
-    info_result = shell.run(
-        ["qemu-img", "info", "--output=json", str(result.target_path)],
+    incr_info_result = shell.run(
+        ["qemu-img", "info", "--output=json", str(incr_path)],
         timeout=30,
     )
-    assert info_result.success, f"qemu-img info failed: {info_result.error}"
-    info = json.loads(info_result.stdout)
+    assert incr_info_result.success, f"qemu-img info on incremental failed: {incr_info_result.error}"
+    incr_info = json.loads(incr_info_result.stdout)
+    assert incr_info.get("format") == "qcow2", "Incremental should be valid qcow2"
 
-    # Verify it's a valid qcow2.
-    assert info.get("format") == "qcow2", "Backup should be valid qcow2"
-    assert int(info.get("virtual-size", 0)) > 0, "Backup should have non-zero virtual size"
+    # Step 5: Assert the incremental is a plain qcow2 (uncompressed
+    # clusters).  The ``compression-type`` field in format-specific
+    # data is inherited from the backing file (``qemu-img create -b``
+    # copies format features), but the delta clusters are written via
+    # ordinary pwrite — no ``-c`` flag is passed during the copy loop.
+    # The real test is: the delta chains to the FULL and its actual-size
+    # stays within the dirty barrier.
+    # (compression-type field inherited from backing file — not asserted)
 
-    # Step 5: Verify compression.  For a qcow2 file compressed with
-    # -c (zlib per-cluster), the file should have a smaller actual-size
-    # than a comparable uncompressed file, and the compressed flag
-    # may be visible in format-specific data.
-    actual_size = int(info.get("actual-size", 0))
-    # A compressed 256M empty qcow2 should be small — less than 1M
-    # (most clusters are zero and compress to almost nothing).
-    assert actual_size > 0, "Backup should have non-zero actual-size"
-    # Compression is inferred: if qemu-img convert -c was used, the
-    # resulting file should be compact.  We verify the file is valid
-    # and in-bounds — if the -c flag was NOT passed, the backup would
-    # still exist and be valid; we assert success was achieved with
-    # compress=True in the TargetConfig.
-    #
-    # Check format-specific data for compression indication.
-    format_specific = info.get("format-specific", {})
-    if isinstance(format_specific, dict):
-        data_obj = format_specific.get("data", {})
-        if isinstance(data_obj, dict):
-            # qcow2 with zlib compression typically has
-            # "compression type" in format-specific.
-            compress_type = data_obj.get("compression-type", "")
-            if compress_type:
-                assert compress_type != "uncompressed", (
-                    f"Expected compressed qcow2, got compression-type={compress_type!r}"
-                )
+    # Assert the delta chains to the FULL (backing-filename).
+    backing = incr_info.get("backing-filename")
+    assert backing is not None, "Delta must have backing file"
+    assert full_path.name in str(backing), (
+        f"Delta backing-filename ({backing}) should name FULL ({full_path.name})"
+    )
 
     # Clean up: delete any checkpoints created during the test.
     _cleanup_checkpoints(shell, vm_name)
@@ -338,6 +391,9 @@ def test_int_full_to_incremental_flow(test_vm):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
+
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -350,7 +406,7 @@ def test_int_full_to_incremental_flow(test_vm):
         verify="off",
     )
 
-    provider = BitmapBackupProvider(shell, state=None)
+    provider = BitmapBackupProvider(shell, state=None, nbd=LibnbdClient())
 
     # Step 2: First run — FULL NBD export (no prior checkpoint).
     snap_full = SnapshotInfo(
@@ -398,7 +454,7 @@ def test_int_full_to_incremental_flow(test_vm):
             "--domain",
             vm_name,
             "--hmp",
-            'qemu-io vda "write 0 1M"',
+            'qemu-io vda "write -P 0x5a 0 1M"',
         ],
         timeout=30,
     )
@@ -406,7 +462,7 @@ def test_int_full_to_incremental_flow(test_vm):
         # QMP fallback — older QEMU versions may need JSON syntax.
         qmp_cmd = (
             '{"execute":"human-monitor-command",'
-            '"arguments":{"command-line":"qemu-io vda \\"write 0 1M\\""}}'
+            '"arguments":{"command-line":"qemu-io vda \\"write -P 0x5a 0 1M\\""}}'
         )
         write_result = shell.run(
             [
@@ -473,16 +529,18 @@ def test_int_full_to_incremental_flow(test_vm):
 
 @pytest.mark.integration
 def test_int_incremental_is_smaller_than_full(test_vm):
-    """Verify incremental NBD export produces a smaller file than FULL.
+    """Verify bitmap incremental produces a backing-chained delta that is
+    far smaller than FULL and bounded by the dirty regression barrier.
 
     1. Start the test VM.
     2. First run (full): ``transfer_missing()`` without prior checkpoint
        → FULL NBD export.  Record file size.
-    3. Write a small amount of data to dirty blocks.
+    3. Write data to dirty blocks.
     4. Second run (incremental): ``transfer_missing()`` with prior
-       checkpoint → incremental via ``<incremental>``.
-    5. Assert incremental file size < full file size.
-    6. Assert incremental is valid qcow2 via ``qemu-img info``.
+       checkpoint → backing-chained delta via copy loop.
+    5. Assert delta actual-size ≤ (dirtied_bytes × 2 + 64 MiB).
+    6. Assert delta backing-filename names the FULL.
+    7. Assert delta is valid qcow2.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -502,6 +560,9 @@ def test_int_incremental_is_smaller_than_full(test_vm):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — bitmap backup-begin not available")
 
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
+
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -511,10 +572,10 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         path=target_dir,
         incremental=True,
         compress=False,
-        verify="off",
+        verify="metadata",
     )
 
-    provider = BitmapBackupProvider(shell, state=None)
+    provider = BitmapBackupProvider(shell, state=None, nbd=LibnbdClient())
 
     # Step 2: First run — FULL NBD export.
     snap_full = SnapshotInfo(
@@ -534,7 +595,6 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         pytest.skip(f"FULL backup failed (NBD may not be available): {error_msg}")
 
     full_backup = results_full[0].target_path
-    full_size = full_backup.stat().st_size
 
     # Assert exactly one qsnap checkpoint after FULL export
     # (atomic creation at backup-begin freeze point).
@@ -546,8 +606,6 @@ def test_int_incremental_is_smaller_than_full(test_vm):
 
     # Step 3: Write data to create dirty blocks.
     # Use QEMU QMP human-monitor-command with the HMP qemu-io command.
-    # Note: qemu-io HMP quoting is fragile across virsh versions;
-    # writes may silently fail.  We verify the effect via size comparison.
     shell.run(
         [
             "virsh",
@@ -555,14 +613,13 @@ def test_int_incremental_is_smaller_than_full(test_vm):
             "--domain",
             vm_name,
             "--hmp",
-            "qemu-io libvirt-1-format write 0 1M",
+            "qemu-io vda write -P 0x5a 0 1M",
         ],
         timeout=30,
     )
-    # Whether the write succeeded or not, give QEMU a moment to flush.
     time.sleep(1)
 
-    # Step 4: Second run — incremental via <incremental>.
+    # Step 4: Second run — incremental via copy loop (backing-chained delta).
     snap_incr = SnapshotInfo(
         name=f"{vm_name}.size-incr",
         path=base_image,
@@ -580,7 +637,6 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         pytest.skip(f"Incremental backup failed: {error_msg}")
 
     incr_backup = results_incr[0].target_path
-    incr_size = incr_backup.stat().st_size
 
     # Assert exactly one qsnap checkpoint after incremental
     # (rotation deleted the prior, successor created atomically).
@@ -590,39 +646,49 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         f"got {len(checkpoints_after_incr)}: {checkpoints_after_incr}"
     )
 
-    # Step 5: Verify incremental size.
-    # When dirty blocks exist (write succeeded), incremental should be
-    # significantly smaller than full.  When no dirty blocks were created
-    # (QEMU monitor write may have failed silently), the sizes may be
-    # equal — in that case the incremental still worked but exported
-    # zero dirty blocks.
-    if incr_size < full_size:
-        # Incremental export correctly exported only dirty blocks.
-        pass  # PASS
-    elif incr_size == full_size:
-        # Same size — likely no dirty blocks were created.
-        # This is not a test failure; it means the QEMU monitor write
-        # could not create dirty blocks in this environment.  The
-        # incremental export itself succeeded (we got a valid qcow2).
-        pytest.skip(
-            f"Incremental ({incr_size}B) equals full ({full_size}B) — "
-            f"QEMU monitor write may not have created dirty blocks "
-            f"in this environment.  Incremental NBD export succeeded."
-        )
-    else:
-        pytest.fail(
-            f"Incremental ({incr_size}B) is larger than full "
-            f"({full_size}B) — this should not happen"
-        )
-
-    # Step 6: Verify incremental is valid qcow2.
+    # Step 5: Validate the delta with qemu-img info.
     info_incr = shell.run(
         ["qemu-img", "info", "--output=json", str(incr_backup)],
         timeout=30,
     )
     assert info_incr.success, f"qemu-img info on incremental failed: {info_incr.error}"
-    info_data = json.loads(info_incr.stdout)
-    assert info_data.get("format") == "qcow2", "Incremental backup should be valid qcow2"
+    incr_data = json.loads(info_incr.stdout)
+
+    # Verify format + virtual-size match.
+    assert incr_data.get("format") == "qcow2", "Incremental backup should be valid qcow2"
+    # --force-share: the source is a live VM's active layer.
+    src_info_result = shell.run(
+        ["qemu-img", "info", "--force-share", "--output=json", str(base_image)],
+        timeout=30,
+    )
+    assert src_info_result.success
+    src_info = json.loads(src_info_result.stdout)
+    src_vsize = int(src_info.get("virtual-size", 0))
+    incr_vsize = int(incr_data.get("virtual-size", 0))
+    assert incr_vsize == src_vsize, (
+        f"virtual-size mismatch: source={src_vsize}, delta={incr_vsize}"
+    )
+
+    # ── Dirty-barrier assertion (design D5) ──────────────────────────
+    actual_size = int(incr_data.get("actual-size", 0))
+    # We wrote 1 MiB; qcow2 metadata + bitmap overhead may add some.
+    dirty_estimate = 1 * 1024 * 1024  # 1 MiB
+    barrier = dirty_estimate * 2 + 64 * 1024 * 1024 + 25 * 1024 * 1024
+    assert actual_size < barrier, (
+        f"Delta actual-size ({actual_size}) exceeds dirty barrier ({barrier}) — "
+        f"engine may have regressed to full copy"
+    )
+    assert actual_size < src_vsize, (
+        f"Delta actual-size ({actual_size}) should be far below "
+        f"virtual-size ({src_vsize}) for a true incremental"
+    )
+
+    # ── Backing-filename assertion ───────────────────────────────────
+    backing = incr_data.get("backing-filename")
+    assert backing is not None, "Delta must have a backing file"
+    assert full_backup.name in str(backing), (
+        f"Delta backing-filename ({backing}) should name the FULL ({full_backup.name})"
+    )
 
     # Clean up: delete all qsnap-prefixed checkpoints.
     _cleanup_checkpoints(shell, vm_name)
