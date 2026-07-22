@@ -86,15 +86,6 @@ def _setup_validation_expectations(shell: MockShell) -> None:
             error=None,
         )
     )
-    shell.expect("which rsync").returns(
-        ShellResult(
-            success=True,
-            stdout="/usr/bin/rsync\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     shell.expect("virsh dominfo").returns(
         ShellResult(
             success=True,
@@ -189,10 +180,7 @@ def make_target():
     def _make(
         path: str = "/mnt/backup/testvm",
         incremental: bool = True,
-        incremental_mode: str = "file-copy",
-        rate_limit: str = "no",
         compress: bool = True,
-        copy_base: bool = False,
         compression_type: str = "zstd",
         backup_stall_timeout: str = "30m",
         **kwargs: object,
@@ -200,10 +188,7 @@ def make_target():
         defaults: dict[str, object] = {
             "path": Path(path),
             "incremental": incremental,
-            "incremental_mode": incremental_mode,
-            "rate_limit": rate_limit,
             "compress": compress,
-            "copy_base": copy_base,
             "compression_type": compression_type,
             "backup_stall_timeout": backup_stall_timeout,
         }
@@ -226,7 +211,6 @@ def make_global_config():
         target_preserve: str | None = None,
         snapshot_preserve_min: str | None = None,
         target_preserve_min: str | None = None,
-        rate_limit: str = "no",
         deferred_warn_count: str = "5",
         deferred_crit_count: str = "10",
         deferred_warn_age: str = "7d",
@@ -254,7 +238,6 @@ def make_global_config():
             target_preserve=target_preserve,
             snapshot_preserve_min=snapshot_preserve_min,
             target_preserve_min=target_preserve_min,
-            rate_limit=rate_limit,
             deferred_warn_count=deferred_warn_count,
             deferred_crit_count=deferred_crit_count,
             deferred_warn_age=deferred_warn_age,

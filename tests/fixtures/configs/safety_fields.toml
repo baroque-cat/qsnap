@@ -8,7 +8,6 @@ snapshot_preserve = "24h 2d"
 target_preserve = "48h 7d"
 snapshot_preserve_min = "6h"
 target_preserve_min = "12h"
-rate_limit = "no"
 deferred_warn_count = "5"
 deferred_crit_count = "10"
 deferred_warn_age = "7d"
@@ -32,11 +31,9 @@ snapshot_deep_verify = true
 
 [[vm.target]]
 path = "/mnt/backup/critical"
-incremental = true
-incremental_mode = "file-copy"
-verify = "full"
-compress = true
-copy_base = false
+  incremental = true
+  verify = "full"
+  compress = true
 backup_retry_max = 5
 backup_retry_base = "5s"
 

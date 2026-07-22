@@ -1,7 +1,7 @@
 """Tests for conftest fixtures and test fixture TOML configs.
 
 Covers the ``conftest-fixtures`` group from the test plan:
-- ``make_target`` fixture defaults and overrides for ``compress`` / ``copy_base``.
+- ``make_target`` fixture defaults and overrides for ``compress``.
 - ``make_global_config`` fixture defaults and overrides for ``compress``.
 - Test fixture TOML files parse correctly through ``ConfigFacade``.
 """
@@ -24,25 +24,23 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "configs"
 
 
 @pytest.mark.unit
-def test_make_target_defaults_compress_true_copy_base_false(
+def test_make_target_defaults_compress_true(
     make_target,
 ) -> None:
-    """make_target() defaults to compress=True, copy_base=False."""
+    """make_target() defaults to compress=True."""
     target = make_target()
     assert isinstance(target, TargetConfig)
     assert target.compress is True
-    assert target.copy_base is False
 
 
 @pytest.mark.unit
-def test_make_target_compress_false_copy_base_true(
+def test_make_target_compress_false(
     make_target,
 ) -> None:
-    """make_target(compress=False, copy_base=True) overrides defaults."""
-    target = make_target(compress=False, copy_base=True)
+    """make_target(compress=False) overrides default."""
+    target = make_target(compress=False)
     assert isinstance(target, TargetConfig)
     assert target.compress is False
-    assert target.copy_base is True
 
 
 @pytest.mark.unit
@@ -77,53 +75,28 @@ def test_make_global_config_compress_false(
     assert cfg.compress is False
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# conftest fixture: mock_shell (rsync check)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_mock_shell_knows_rsync(mock_shell) -> None:
-    """mock_shell fixture has 'which rsync' returning success."""
-    result = mock_shell.run(["which", "rsync"], timeout=30)
-    assert result.success is True
-    assert "rsync" in result.stdout
-
-    # Also verify 'which virsh' and 'which qemu-img' are configured.
-    result_virsh = mock_shell.run(["which", "virsh"], timeout=30)
-    assert result_virsh.success is True
-    assert "virsh" in result_virsh.stdout
-
-    result_qemu = mock_shell.run(["which", "qemu-img"], timeout=30)
-    assert result_qemu.success is True
-    assert "qemu-img" in result_qemu.stdout
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # TOML fixture: bucket_driven.toml
 # ──────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
 def test_bucket_driven_toml_parses_without_error() -> None:
-    """bucket_driven.toml parses without error — uses compress/copy_base."""
+    """bucket_driven.toml parses without error — uses compress."""
     facade = ConfigFacade(FIXTURES / "bucket_driven.toml")
     vms = facade.get_vms()
 
     assert len(vms) == 2
 
-    # vm_bucket: global compress=True, target compress=True, copy_base=False.
+    # vm_bucket: global compress=True, target compress=True.
     vm_bucket = facade.get_vm("vm_bucket")
     assert vm_bucket.name == "vm_bucket"
     target1 = next(t for t in vm_bucket.targets if t.path == Path("/mnt/backup/vm_bucket"))
     assert target1.compress is True
-    assert target1.copy_base is False
 
-    # vm_no_compress: compress=False, copy_base=True.
+    # vm_no_compress: compress=False.
     vm_nc = facade.get_vm("vm_no_compress")
     target2 = next(t for t in vm_nc.targets if t.path == Path("/mnt/backup/vm_no_compress"))
     assert target2.compress is False
-    assert target2.copy_base is True
 
     # Global compress is True.
     assert facade.get_global().compress is True
@@ -179,8 +152,6 @@ def test_deprecated_fields_toml_parses_with_logging_warnings(caplog) -> None:
     target = vm_dep.targets[0]
     # full_compress=True → compress=True (mapped with warning).
     assert target.compress is True
-    # copy_base defaults to False.
-    assert target.copy_base is False
 
     # vm_full_every_only has full_every=14d but no full_compress.
     # compress inherits from global (default True).
@@ -191,17 +162,16 @@ def test_deprecated_fields_toml_parses_with_logging_warnings(caplog) -> None:
 
 @pytest.mark.unit
 def test_deprecated_fields_toml_full_every_ignored_in_behavior() -> None:
-    """full_every in deprecated_fields.toml does not affect compress/copy_base
+    """full_every in deprecated_fields.toml does not affect compress
     — it is silently ignored at runtime."""
     facade = ConfigFacade(FIXTURES / "deprecated_fields.toml")
 
     # Both VMs should parse; the fact that full_every is present
-    # must not cause errors or change compress/copy_base defaults.
+    # must not cause errors or change compress defaults.
     vm = facade.get_vm("vm_deprecated")
     target = vm.targets[0]
     assert target.incremental is True
     assert target.compress is True  # from full_compress mapping
-    assert target.copy_base is False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -210,24 +180,22 @@ def test_deprecated_fields_toml_full_every_ignored_in_behavior() -> None:
 
 
 @pytest.mark.unit
-def test_full_backup_toml_parses_compress_and_copy_base() -> None:
-    """full_backup.toml parses correctly with compress/copy_base fields."""
+def test_full_backup_toml_parses_compress() -> None:
+    """full_backup.toml parses correctly with compress field."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
     vms = facade.get_vms()
     assert len(vms) == 2
 
-    # vm_with_full: explicit compress=true, copy_base=false.
+    # vm_with_full: explicit compress=true.
     vm = facade.get_vm("vm_with_full")
     target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
     assert target.compress is True
-    assert target.copy_base is False
     assert target.verify == "hash"
 
-    # vm_no_full: no compress/copy_base set → defaults.
+    # vm_no_full: no compress set → defaults.
     vm2 = facade.get_vm("vm_no_full")
     target2 = vm2.targets[0]
     assert target2.compress is True  # global default
-    assert target2.copy_base is False  # default
 
 
 @pytest.mark.unit
@@ -275,7 +243,6 @@ def test_safety_fields_toml_parses_correctly() -> None:
     assert critical.targets[0].backup_retry_base == "5s"
     assert critical.targets[0].verify == "full"
     assert critical.targets[0].compress is True
-    assert critical.targets[0].copy_base is False
 
     # standard-vm with default deep verify and standard retry.
     standard = facade.get_vm("standard-vm")

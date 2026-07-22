@@ -49,9 +49,8 @@ tests/
 │   │   └── test_external.py        # ExternalSnapshotProvider specifics
 │   │
 │   ├── backup/
-│   │   ├── test_copy.py            # FileCopyBackupProvider (rsync + rebase)
 │   │   ├── test_bitmap.py          # BitmapBackupProvider (NBD pull-model)
-│   │   ├── test_verification.py    # verify_backup() utility
+│   │   ├── test_bitmap_incremental.py  # Bitmap incremental transfer
 │   │   └── test_full_verification.py  # verify_full_backup() utility
 │   │
 │   ├── retention/
@@ -116,9 +115,6 @@ tests/
 │   │   ├── preserve_min.toml       # Preserve-min floor logic
 │   │   ├── preserve_dow_valid.toml  # Preserve day-of-week (valid)
 │   │   ├── preserve_dow_invalid.toml  # Preserve day-of-week (invalid)
-│   │   ├── rate_limit_global.toml  # Global rate limit
-│   │   ├── rate_limit_target_override.toml  # Per-target rate limit override
-│   │   ├── rate_limit_invalid.toml  # Malformed rate limit
 │   │   └── deprecated_fields.toml  # Deprecated field handling
 │   ├── shell_outputs/              # Canned virsh/qemu-img output
 │   │   ├── domblklist.txt

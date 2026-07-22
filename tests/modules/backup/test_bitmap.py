@@ -59,9 +59,7 @@ def _make_snapshot() -> SnapshotInfo:
     )
 
 
-def _setup_incr_expectations(
-    mock_shell, target, prev_data: tuple[Path, str, str]
-) -> MockNbdClient:
+def _setup_incr_expectations(mock_shell, target, prev_data: tuple[Path, str, str]) -> MockNbdClient:
     """Register incremental copy-loop expectations and return a MockNbdClient.
 
     *prev_data* is ``(prev_backup_path, disk_target, prev_backup_name)``.
@@ -95,9 +93,7 @@ def _setup_incr_expectations(
     mock_shell.expect_first("qemu-img info.*" + prev_name).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": 65536, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -241,7 +237,8 @@ def test_checkpoint_cleanup_after_successful_transfer(
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
-        mock_shell, target,
+        mock_shell,
+        target,
         (prev_backup, "vda", prev_backup.name),
     )
 
@@ -334,14 +331,18 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
         ShellResult(
             success=True,
             stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
@@ -392,8 +393,7 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
     # (the .tmp removal has " <target_file>.tmp" so trailing-space match
     # avoids the false hit).
     partial_file_cmds = [
-        cmd for cmd in all_cmds
-        if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
+        cmd for cmd in all_cmds if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
     ]
     assert len(partial_file_cmds) == 1, (
         f"Expected exactly one rm -f of {target_file}, got:\n" + "\n".join(all_cmds)
@@ -511,56 +511,6 @@ def test_list_checkpoints_filters_qsnap_prefix(mock_shell):
     assert "--name" in cp_list_cmds[0]
     assert "--domain" in cp_list_cmds[0]
     assert "testvm" in cp_list_cmds[0]
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 9. Rate limit is accepted but ignored
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def test_bitmap_backup_ignores_rate_limit(mock_shell, make_vm_config, make_target, tmp_path):
-    """Rate limit accepted but ignored — NBD cannot be throttled.
-    Checkpoint XML passed as 3rd arg to backup-begin (D1)."""
-    vm_config = make_vm_config()
-    target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off", rate_limit="100M")
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("virsh --version").returns(_ok_version_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("checkpoint-list").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("qemu-img convert").returns(_ok_result())
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-
-    with (
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
-        patch.object(
-            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
-        ) as stall_spy,
-    ):
-        provider = BitmapBackupProvider(mock_shell)
-        results = provider.transfer_missing(vm_config, target, [snapshot], rate_limit="100M")
-
-    assert len(results) == 1
-    assert results[0].success is True
-
-    all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
-    all_stall_cmds = [" ".join(call_obj.args[0]) for call_obj in stall_spy.call_args_list]
-    all_cmds = all_run_cmds + all_stall_cmds
-
-    rsync_cmds = [cmd for cmd in all_cmds if "rsync" in cmd]
-    assert len(rsync_cmds) == 0
-    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
-    assert len(convert_cmds) == 1
-    assert "nbd:unix:" in convert_cmds[0]
-    backup_cmds = [cmd for cmd in all_cmds if "backup-begin" in cmd]
-    assert len(backup_cmds) == 1
-    assert "qsnap-checkpoint-" in backup_cmds[0]
-    create_cmds = [cmd for cmd in all_cmds if "checkpoint-create-as" in cmd]
-    assert len(create_cmds) == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1395,7 +1345,7 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
     vm_config = make_vm_config()
     target_path = tmp_path / "target"
     target_path.mkdir()
-    target = make_target(path=str(target_path), incremental_mode="bitmap", verify="off")
+    target = make_target(path=str(target_path), verify="off")
     snapshot = _make_snapshot()
     target_file = target.path / f"{snapshot.name}.qcow2"
 
@@ -1420,14 +1370,18 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
         ShellResult(
             success=True,
             stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
@@ -1467,8 +1421,7 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
     all_cmds = all_run_cmds + all_stall_cmds
 
     partial_file_cmds = [
-        cmd for cmd in all_cmds
-        if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
+        cmd for cmd in all_cmds if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
     ]
     assert len(partial_file_cmds) == 1
     delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
@@ -1482,7 +1435,7 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
     vm_config = make_vm_config()
     target_path = tmp_path / "target"
     target_path.mkdir()
-    target = make_target(path=str(target_path), incremental_mode="bitmap", verify="metadata")
+    target = make_target(path=str(target_path), verify="metadata")
     snapshot = _make_snapshot()
     target_file = target.path / f"{snapshot.name}.qcow2"
 
@@ -1506,14 +1459,18 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
         ShellResult(
             success=True,
             stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
-            stderr="", returncode=0, error=None,
+            stderr="",
+            returncode=0,
+            error=None,
         )
     )
     mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
@@ -1560,8 +1517,7 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
     all_cmds = all_run_cmds + all_stall_cmds
 
     partial_file_cmds = [
-        cmd for cmd in all_cmds
-        if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
+        cmd for cmd in all_cmds if cmd.startswith("rm -f") and cmd.endswith(" " + str(target_file))
     ]
     assert len(partial_file_cmds) == 1
     delete_cmds = [cmd for cmd in all_cmds if "checkpoint-delete" in cmd]
@@ -1855,7 +1811,8 @@ def test_atomic_incremental_passes_checkpoint_xml_and_incremental(
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
-        mock_shell, target,
+        mock_shell,
+        target,
         (prev_backup, "vda", prev_backup.name),
     )
 
@@ -2034,7 +1991,8 @@ def test_atomic_rotation_deletes_older_after_success(
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
-        mock_shell, target,
+        mock_shell,
+        target,
         (prev_backup, "vda", prev_backup.name),
     )
 
@@ -2095,7 +2053,8 @@ def test_checkpoint_delete_failure_non_fatal(
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
-        mock_shell, target,
+        mock_shell,
+        target,
         (prev_backup, "vda", prev_backup.name),
     )
 
@@ -2296,7 +2255,8 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
-        mock_shell, target,
+        mock_shell,
+        target,
         (prev_backup, "vda", prev_backup.name),
     )
 
@@ -2393,3 +2353,50 @@ def test_newest_checkpoint_unchanged_contract(mock_shell):
     cp_list_cmds = [cmd for cmd in all_run_cmds if "checkpoint-list" in cmd]
     assert len(cp_list_cmds) == 1
     assert "testvm" in cp_list_cmds[0]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW TESTS: remove-rsync-filecopy — stopped VM error handling
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_create_full_backup_stopped_vm_returns_error(mock_shell, make_target, tmp_path):
+    """When the VM is stopped, backup-begin fails with 'domain not running'.
+    ``create_full_backup`` returns ``BackupResult(success=False)`` with an
+    error message and does NOT fall back to ``qemu-img convert`` on the
+    snapshot file."""
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+    # backup-begin fails: domain is not running
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: domain is not running",
+            returncode=1,
+            error="error: domain is not running",
+        )
+    )
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+        )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "not running" in result.error.lower()
+
+    # No qemu-img convert fallback on the snapshot file
+    all_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, (
+        "No qemu-img convert fallback on snapshot file when VM is stopped"
+    )

@@ -2,37 +2,21 @@
 
 ## Purpose
 
-Periodic creation of standalone (anchor) full backups via `qemu-img convert` on backup targets. Full backups provide a self-contained restore point independent of the incremental chain. Incremental backups rebase to the most recent FULL anchor, protecting against chain corruption and simplifying restore.
+Periodic creation of standalone (anchor) full backups via `qemu-img convert` on backup targets. Full backups provide a self-contained restore point independent of the incremental chain.
 
 ## Requirements
 
-### Requirement: FileCopyBackupProvider creates full backups via qemu-img convert
-
-`FileCopyBackupProvider.create_full_backup(source_snapshot, target, compress=False, bucket_level="monthly")` SHALL run `qemu-img convert [-c] -f qcow2 -O qcow2 <source> <target_path>/vm.FULL.YYYYMMDD.qcow2` (with `-c` when `compress=True`). The method SHALL accept a `bucket_level` parameter indicating which retention bucket triggered this FULL. After creation, the FULL SHALL be recorded via `IStateManager.record_full_backup(target_path, name, timestamp, bucket_level)`. The method SHALL return a `BackupResult`.
-
-#### Scenario: Uncompressed full backup
-- **WHEN** `create_full_backup(snapshot, target, compress=False, bucket_level="monthly")` is called
-- **THEN** `qemu-img convert` is called WITHOUT `-c` and a `BackupResult(success=True)` is returned
-- **AND** the FULL is recorded in state with `bucket_level="monthly"`
-
-#### Scenario: Compressed full backup
-- **WHEN** `create_full_backup(snapshot, target, compress=True, bucket_level="yearly")` is called
-- **THEN** `qemu-img convert -c` is called and a `BackupResult(success=True)` is returned
-- **AND** the FULL is recorded in state with `bucket_level="yearly"`
-
 ### Requirement: Core triggers full backup before incremental transfer
 
-`Core._backup_target()` SHALL retrieve ALL full backups via `state.get_full_backups(target.path)` and pass the complete list to `_should_create_bucket_full()`. The first backup to a target SHALL always be a FULL. When `_should_create_bucket_full()` returns `(True, bucket_level)`, Core SHALL call `provider.create_full_backup(most_recent, target, compress=target.compress, bucket_level=bucket_level)`. The provider SHALL internally decide whether to use NBD (running VM) or direct convert (stopped VM). Core SHALL NOT pass VM running state to the provider — the provider detects it itself via `virsh dominfo`. After FULL creation, Core SHALL record it via `IStateManager.record_full_backup()`.
+`Core._backup_target()` SHALL retrieve ALL full backups via `state.get_full_backups(target.path)` and pass the complete list to `_should_create_bucket_full()`. The first backup to a target SHALL always be a FULL. When `_should_create_bucket_full()` returns `(True, bucket_level)`, Core SHALL call `provider.create_full_backup(vm_config.name, most_recent, target, compress=target.compress, bucket_level=bucket_level)` — the NBD pull-model is the single FULL backup path (see `live-vm-full-backup`). After FULL creation, Core SHALL record it via `IStateManager.record_full_backup()`.
 
 #### Scenario: First backup to target creates FULL
 - **WHEN** `get_full_backups(target.path)` returns an empty list and a snapshot is available
-- **THEN** a FULL backup is created via `provider.create_full_backup()`
-- **AND** the provider selects NBD or direct convert based on VM running state
+- **THEN** a FULL backup is created via `provider.create_full_backup()` using NBD
 
 #### Scenario: New weekly period triggers FULL (all-buckets mode)
 - **WHEN** the policy has `weekly=4` active and no F-anchors, and the current snapshot's ISO week differs from the last weekly FULL's week
 - **THEN** a FULL backup is created with `bucket_level="weekly"`
-- **AND** the provider uses NBD if the VM is running, direct convert if stopped
 
 #### Scenario: F-anchor on weekly only triggers FULL at week boundaries
 - **WHEN** the policy has `weekly=4, anchor_weekly=True, daily=7, anchor_daily=False`
@@ -40,32 +24,18 @@ Periodic creation of standalone (anchor) full backups via `qemu-img convert` on 
 - **THEN** no FULL is created (daily is not an F-anchor)
 - **AND** if the current snapshot's week differs from the last weekly FULL's week, a FULL IS created
 
-#### Scenario: FULL creation works for both file-copy and bitmap targets
-- **WHEN** `_should_create_bucket_full()` returns `(True, "monthly")` for a bitmap-mode target
-- **THEN** `BitmapBackupProvider.create_full_backup()` is called (no longer raises `NotImplementedError`)
+#### Scenario: FULL creation works for bitmap targets
+- **WHEN** `_should_create_bucket_full()` returns `(True, "monthly")` for a target
+- **THEN** `BitmapBackupProvider.create_full_backup()` is called
 - **AND** the FULL is created via NBD full export
 - **AND** the FULL is recorded in state with `bucket_level="monthly"`
 
 #### Scenario: Dry-run logs FULL-would-be-created without executing
 - **WHEN** `Core._backup_target()` is called in dry-run mode
 - **AND** `_should_create_bucket_full()` returns `(True, "weekly")`
-- **THEN** an INFO log is emitted: "[dry-run] Would create FULL backup (bucket=weekly)"
-- **AND** the log includes the transfer method: "via NBD (VM running)" or "via direct convert (VM stopped)"
+- **THEN** an INFO log is emitted: "[dry-run] Would create FULL backup (bucket=weekly, method=NBD, VM=running)"
 - **AND** `provider.create_full_backup()` is NOT called
 - **AND** no `virsh backup-begin` or `qemu-img convert` is executed
-
-### Requirement: Incremental backups rebase to the FULL anchor
-
-`FileCopyBackupProvider.transfer_missing()` SHALL check for an existing FULL anchor. When an anchor exists, newly transferred incrementals SHALL be rebased via `qemu-img rebase -u -b ./vm.FULL.YYYYMMDD.qcow2` to point at the FULL. After rebase, the dependency SHALL be recorded via `IStateManager.record_incremental_dependency(target_path, incremental_name, full_name)`. The FULL anchor SHALL be selected by timestamp parsed from the filename (not file mtime).
-
-#### Scenario: New incremental rebased to FULL
-- **WHEN** target directory contains `vm.FULL.20260701.qcow2` and a new incremental `vm.20260702.qcow2` is transferred
-- **THEN** `qemu-img rebase -u -b ./vm.FULL.20260701.qcow2 vm.20260702.qcow2` is called
-- **AND** `record_incremental_dependency(target_path, "vm.20260702.qcow2", "vm.FULL.20260701.qcow2")` is called
-
-#### Scenario: No FULL anchor uses source backing
-- **WHEN** target directory has no `vm.FULL.*.qcow2` files
-- **THEN** incremental rebase uses the source backing filename as before
 
 ### Requirement: IStateManager tracks full backups per target
 

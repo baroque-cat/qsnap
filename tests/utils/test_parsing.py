@@ -17,9 +17,7 @@ from qsnap.utils.parsing import (
     parse_domblklist_disks,
     parse_domblklist_path,
     parse_domblklist_target,
-    parse_rate_limit,
     parse_timestamp,
-    rate_limit_to_kib,
 )
 
 # ── parse_domblklist_path ──────────────────────────────────────────────────
@@ -169,77 +167,3 @@ def test_parse_timestamp_long_iso_priority_over_long():
     # Explicitly check that it is NOT the (wrong) long-format result
     long_only = datetime(2025, 1, 1, 12, 0)
     assert result != long_only
-
-
-# ── parse_rate_limit ────────────────────────────────────────────────────────
-
-
-def test_parse_rate_limit_500k():
-    """parse_rate_limit('500K') == 512000 (500 × 1024)."""
-    assert parse_rate_limit("500K") == 512000
-
-
-def test_parse_rate_limit_100m():
-    """parse_rate_limit('100M') == 104857600 (100 × 1024²)."""
-    assert parse_rate_limit("100M") == 104857600
-
-
-def test_parse_rate_limit_no_is_zero():
-    """parse_rate_limit('no') == 0 (unlimited)."""
-    assert parse_rate_limit("no") == 0
-
-
-def test_parse_rate_limit_zero_string_is_zero():
-    """parse_rate_limit('0') == 0 (unlimited)."""
-    assert parse_rate_limit("0") == 0
-
-
-def test_parse_rate_limit_empty_string_is_zero():
-    """parse_rate_limit('') == 0 (unlimited)."""
-    assert parse_rate_limit("") == 0
-
-
-def test_parse_rate_limit_1g():
-    """parse_rate_limit('1G') == 1073741824 (1 × 1024³)."""
-    assert parse_rate_limit("1G") == 1073741824
-
-
-def test_parse_rate_limit_lowercase_suffix():
-    """parse_rate_limit is case-insensitive: '100m' == 104857600."""
-    assert parse_rate_limit("100m") == 104857600
-
-
-def test_parse_rate_limit_invalid_string_raises_value_error():
-    """parse_rate_limit('abc') raises ValueError."""
-    with pytest.raises(ValueError, match="Invalid rate_limit value"):
-        parse_rate_limit("abc")
-
-
-def test_parse_rate_limit_no_suffix_raises_value_error():
-    """parse_rate_limit('100') (bare integer, no suffix) raises ValueError."""
-    with pytest.raises(ValueError, match="Invalid rate_limit value"):
-        parse_rate_limit("100")
-
-
-def test_parse_rate_limit_invalid_suffix_raises_value_error():
-    """parse_rate_limit('100X') (unknown suffix) raises ValueError."""
-    with pytest.raises(ValueError, match="Invalid rate_limit value"):
-        parse_rate_limit("100X")
-
-
-# ── rate_limit_to_kib ────────────────────────────────────────────────────────
-
-
-def test_rate_limit_to_kib_100m():
-    """rate_limit_to_kib('100M') == 102400 (104857600 // 1024)."""
-    assert rate_limit_to_kib("100M") == 102400
-
-
-def test_rate_limit_to_kib_no_is_zero():
-    """rate_limit_to_kib('no') == 0."""
-    assert rate_limit_to_kib("no") == 0
-
-
-def test_rate_limit_to_kib_500k():
-    """rate_limit_to_kib('500K') == 500 (512000 // 1024)."""
-    assert rate_limit_to_kib("500K") == 500

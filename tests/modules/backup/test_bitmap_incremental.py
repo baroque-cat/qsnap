@@ -102,9 +102,7 @@ def _setup_full_copy_loop_expectations(
     mock_shell.expect_first("qemu-img info.*" + str(prev_path.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -115,18 +113,14 @@ def _setup_full_copy_loop_expectations(
     # qemu-img create -f qcow2 -b <prev> -F qcow2 <tmp>
     mock_shell.expect("qemu-img create").returns(_ok_result())
     # rm -f write socket + pidfile (stale cleanup before qemu-nbd)
-    mock_shell.expect(
-        f"rm -f {write_socket} {pid_file}"
-    ).returns(_ok_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     # qemu-nbd --fork --pid-file --socket
     mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
     # kill (terminate qemu-nbd) — pre-create pidfile so _terminate_qemu_nbd finds it
     Path(pid_file).write_text("99999")
     mock_shell.expect("kill 99999").returns(_ok_result())
     # rm -f write socket + pidfile (post-kill cleanup)
-    mock_shell.expect(
-        f"rm -f {write_socket} {pid_file}"
-    ).returns(_ok_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     # mv tmp -> final
     mock_shell.expect("^mv ").returns(_ok_result())
 
@@ -164,16 +158,12 @@ def _setup_verify_bitmap_incremental_expectations(
     }
 
     # Use expect_first so these beat any generic qemu-img info patterns
-    mock_shell.expect_first(
-        rf"qemu-img info.*--force-share.*{source_path}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*--force-share.*{source_path}").returns(
         ShellResult(
             success=True, stdout=json.dumps(source_info), stderr="", returncode=0, error=None
         )
     )
-    mock_shell.expect_first(
-        rf"qemu-img info.*{delta_path_str}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*{delta_path_str}").returns(
         ShellResult(
             success=True, stdout=json.dumps(delta_info), stderr="", returncode=0, error=None
         )
@@ -204,9 +194,7 @@ def test_copy_loop_reads_only_dirty_extents(
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
     # Override block_status to return dirty AND clean extents
     nbd.block_status_payload = {
         "base:allocation": [
@@ -286,9 +274,7 @@ def test_first_incremental_backing_is_full(
     prev_backup = target_path / "testvm.FULL.20241230.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     delta_file = target_path / f"{snapshot.name}.qcow2"
     _setup_verify_bitmap_incremental_expectations(
@@ -370,9 +356,7 @@ def test_previous_backup_vanished_retryable_failure(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -423,9 +407,7 @@ def test_previous_backup_vanished_retryable_failure(
     assert "vanished" in results[0].error.lower(), (
         f"Error should mention 'vanished', got: {results[0].error}"
     )
-    assert "eof" in results[0].error.lower(), (
-        f"Error should mention 'eof', got: {results[0].error}"
-    )
+    assert "eof" in results[0].error.lower(), f"Error should mention 'eof', got: {results[0].error}"
     assert is_retryable(results[0].error) is True, (
         f"Vanished error should be retryable, got is_retryable={is_retryable(results[0].error)}"
     )
@@ -457,9 +439,7 @@ def test_previous_existence_rechecked_before_create(
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
@@ -504,9 +484,7 @@ def test_previous_existence_rechecked_before_create(
             create_idx = i
     assert test_f_idx is not None, "test -f <prev> must appear in shell history"
     assert create_idx is not None, "qemu-img create must appear in shell history"
-    assert test_f_idx < create_idx, (
-        "test -f must appear BEFORE qemu-img create in shell history"
-    )
+    assert test_f_idx < create_idx, "test -f must appear BEFORE qemu-img create in shell history"
 
 
 def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
@@ -554,9 +532,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -654,9 +630,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
     write_socket = f"/tmp/qsnap-write-{pid}.sock"
     tmp_suffix = f"{snapshot.name}.qcow2.tmp"
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
@@ -703,9 +677,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
 
     # write socket cleanup (at least twice: pre-nbd rm + post-kill rm)
     write_socket_cmds = [cmd for cmd in all_run_cmds if write_socket in cmd]
-    assert len(write_socket_cmds) >= 2, (
-        "Write socket should be in both pre-nbd rm and post-kill rm"
-    )
+    assert len(write_socket_cmds) >= 2, "Write socket should be in both pre-nbd rm and post-kill rm"
 
 
 def test_stall_watchdog_aborts_with_correct_error_string(
@@ -756,9 +728,7 @@ def test_stall_watchdog_aborts_with_correct_error_string(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -861,9 +831,7 @@ def test_slow_progressing_loop_not_killed(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -904,9 +872,7 @@ def test_slow_progressing_loop_not_killed(
         mock_wbxml.return_value = tmp_path / "backup-test.xml"
         mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
         provider = BitmapBackupProvider(mock_shell, nbd=nbd)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], stall_timeout=5
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot], stall_timeout=5)
 
     assert len(results) == 1
     assert results[0].success is True
@@ -956,9 +922,7 @@ def test_zero_stall_timeout_disables_watchdog(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -999,9 +963,7 @@ def test_zero_stall_timeout_disables_watchdog(
         mock_wbxml.return_value = tmp_path / "backup-test.xml"
         mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
         provider = BitmapBackupProvider(mock_shell, nbd=nbd)
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], stall_timeout=0
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot], stall_timeout=0)
 
     assert len(results) == 1
     assert results[0].success is True
@@ -1024,9 +986,7 @@ def test_incremental_uses_inbd_client_copy_loop(
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
@@ -1119,9 +1079,7 @@ def test_qemu_img_info_shows_backing_filename(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -1214,9 +1172,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     delta_file = target_path / f"{snapshot.name}.qcow2"
     _setup_verify_bitmap_incremental_expectations(
@@ -1286,9 +1242,7 @@ def test_bitmap_incremental_ignores_compress_setting(
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    nbd = _setup_full_copy_loop_expectations(
-        mock_shell, target, prev_backup, disk_target="vda"
-    )
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
@@ -1342,17 +1296,12 @@ def test_bitmap_incremental_ignores_compress_setting(
     compress_logs = [
         rec
         for rec in caplog.records
-        if "uncompressed" in rec.getMessage().lower()
-        and "design d6" in rec.getMessage().lower()
+        if "uncompressed" in rec.getMessage().lower() and "design d6" in rec.getMessage().lower()
     ]
-    assert len(compress_logs) >= 1, (
-        "Expected INFO log about bitmap incrementals being uncompressed"
-    )
+    assert len(compress_logs) >= 1, "Expected INFO log about bitmap incrementals being uncompressed"
 
 
-def test_missing_libnbd_fails_factory_construction(
-    make_target, tmp_path
-) -> None:
+def test_missing_libnbd_fails_factory_construction(make_target, tmp_path) -> None:
     """DefaultFactory: monkeypatch is_libnbd_available → False; bitmap
     target with libvirt >= 7.2 mocked; create_backup_provider raises
     RuntimeError with message naming python3-libnbd."""
@@ -1367,16 +1316,14 @@ def test_missing_libnbd_fails_factory_construction(
 
     target = make_target(
         path=str(tmp_path / "target"),
-        incremental_mode="bitmap",
     )
 
-    with patch(
-        "qsnap.factory.default.is_libnbd_available", return_value=False
-    ):
+    with patch("qsnap.factory.default.is_libnbd_available", return_value=False):
         factory = DefaultFactory(mock_shell, Mock())
         with pytest.raises(RuntimeError) as exc_info:
             factory.create_backup_provider(
-                Mock(), target  # Mock VMConfig
+                Mock(),
+                target,  # Mock VMConfig
             )
 
     assert "python3-libnbd" in str(exc_info.value)
@@ -1425,9 +1372,7 @@ def test_full_size_verify_failure_triggers_cleanup(
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
-            stdout=json.dumps(
-                {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}
-            ),
+            stdout=json.dumps({"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 100}),
             stderr="",
             returncode=0,
             error=None,
@@ -1458,14 +1403,10 @@ def test_full_size_verify_failure_triggers_cleanup(
         }
     )
 
-    mock_shell.expect_first(
-        rf"qemu-img info.*--force-share.*{snapshot.path}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*--force-share.*{snapshot.path}").returns(
         ShellResult(success=True, stdout=source_info, stderr="", returncode=0, error=None)
     )
-    mock_shell.expect_first(
-        rf"qemu-img info.*{delta_file.name}"
-    ).returns(
+    mock_shell.expect_first(rf"qemu-img info.*{delta_file.name}").returns(
         ShellResult(success=True, stdout=delta_info, stderr="", returncode=0, error=None)
     )
 
@@ -1514,11 +1455,7 @@ def test_full_size_verify_failure_triggers_cleanup(
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
     # Final file deleted
-    delta_rm = [
-        cmd
-        for cmd in all_run_cmds
-        if cmd.startswith("rm -f") and str(delta_file) in cmd
-    ]
+    delta_rm = [cmd for cmd in all_run_cmds if cmd.startswith("rm -f") and str(delta_file) in cmd]
     assert len(delta_rm) >= 1, "Delta file should be cleaned up"
 
     # Successor checkpoint deleted

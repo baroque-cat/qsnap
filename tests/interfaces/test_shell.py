@@ -37,8 +37,7 @@ def test_ishell_has_run_with_stall_detection():
     """IShell declares ``run_with_stall_detection`` as an abstract method.
 
     The method supports stall detection via output-file growth monitoring
-    for long-running data-transfer commands (``qemu-img convert``,
-    ``rsync``).  It must be present in ``IShell.__abstractmethods__`` so
+    for long-running data-transfer commands (``qemu-img convert``).  It must be present in ``IShell.__abstractmethods__`` so
     that any concrete implementation is required to provide it.
     """
     assert hasattr(IShell, "run_with_stall_detection")

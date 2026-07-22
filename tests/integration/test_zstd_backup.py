@@ -1,7 +1,7 @@
-"""Integration tests for zstd compression in qemu-img and rsync.
+"""Integration tests for zstd compression in qemu-img.
 
-All tests use real ``qemu-img`` and ``rsync`` binaries.  They are
-marked ``@pytest.mark.integration`` and create real test disks in
+All tests use real ``qemu-img`` binaries.  They are marked
+``@pytest.mark.integration`` and create real test disks in
 ``tmp_path``.  No libvirt daemon is required.
 
 These tests may be slow — that is expected for integration-level
@@ -14,7 +14,6 @@ Run only when explicitly requested::
 
 from __future__ import annotations
 
-import hashlib
 import re
 import time
 from pathlib import Path
@@ -38,29 +37,6 @@ def _get_qemu_version(shell: SubprocessShell) -> tuple[int, int, int] | None:
     if not match:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-
-
-def _get_rsync_version(shell: SubprocessShell) -> tuple[int, int, int] | None:
-    """Parse *rsync --version* output.
-
-    Returns ``(major, minor, patch)`` or ``None`` if parsing fails.
-    """
-    result = shell.run(["rsync", "--version"], timeout=10)
-    if not result.success:
-        return None
-    match = re.search(r"rsync\s+version\s+(\d+)\.(\d+)\.(\d+)", result.stdout)
-    if not match:
-        return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-
-
-def _file_sha256(path: Path) -> str:
-    """Return SHA-256 hex digest of *path*."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────
@@ -267,61 +243,6 @@ def test_zstd_faster_than_zlib(tmp_path: Path) -> None:
     assert ratio <= 1.5, (
         f"zstd ({zstd_elapsed:.1f}s) was significantly slower than "
         f"zlib ({zlib_elapsed:.1f}s); ratio={ratio:.2f}"
-    )
-
-
-@pytest.mark.integration
-def test_rsync_zstd_transfer(tmp_path: Path) -> None:
-    """Transfer a file via rsync with zstd compression and verify integrity.
-
-    1. Create a source file with random data.
-    2. Run ``rsync --compress --compress-choice=zstd source dest``.
-    3. Verify source and destination have matching SHA-256 checksums.
-    """
-    shell = SubprocessShell()
-
-    # Check rsync version (>= 3.2.0 required for --compress-choice).
-    rsync_version = _get_rsync_version(shell)
-    if rsync_version is None:
-        pytest.skip("rsync not available")
-    if rsync_version < (3, 2, 0):
-        pytest.skip(
-            f"rsync {rsync_version[0]}.{rsync_version[1]}.{rsync_version[2]} "
-            f"does not support --compress-choice=zstd (need >= 3.2.0)"
-        )
-
-    src_file = tmp_path / "source_data.bin"
-    dest_file = tmp_path / "dest_data.bin"
-
-    # Create a 50 MB source file with random data.
-    dd_result = shell.run(
-        ["dd", "if=/dev/urandom", f"of={src_file}", "bs=1M", "count=50"],
-        timeout=120,
-    )
-    if not dd_result.success:
-        pytest.skip(f"dd /dev/urandom failed: {dd_result.error}")
-
-    # Record pre-transfer checksum.
-    src_checksum = _file_sha256(src_file)
-
-    # Transfer via rsync with zstd compression.
-    rsync_result = shell.run(
-        [
-            "rsync",
-            "--compress",
-            "--compress-choice=zstd",
-            str(src_file),
-            str(dest_file),
-        ],
-        timeout=120,
-    )
-    assert rsync_result.success, f"rsync with zstd failed: {rsync_result.error}"
-
-    # Verify destination exists and has the correct content.
-    assert dest_file.exists(), "Destination file was not created"
-    dest_checksum = _file_sha256(dest_file)
-    assert src_checksum == dest_checksum, (
-        f"Checksum mismatch: source={src_checksum[:16]}... dest={dest_checksum[:16]}..."
     )
 
 

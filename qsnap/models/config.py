@@ -54,7 +54,6 @@ class GlobalConfig:
     target_preserve: str | None = None
     snapshot_preserve_min: str | None = None
     target_preserve_min: str | None = None
-    rate_limit: str = "no"
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
@@ -69,13 +68,12 @@ class GlobalConfig:
     # Compress full backups (global default, overridden per-VM/target).
     compress: bool = True
     # Compression algorithm for FULL backups (``qemu-img convert -c -o
-    # compression_type=<type>``) and rsync incrementals
-    # (``--compress --compress-choice=<type>``).  ``"zstd"`` (default) is
-    # 11x faster than ``"zlib"``.  Only effective when ``compress=True``;
-    # when ``compress=False``, no compression is applied regardless.
+    # compression_type=<type>``).  ``"zstd"`` (default) is 11x faster
+    # than ``"zlib"``.  Only effective when ``compress=True``; when
+    # ``compress=False``, no compression is applied regardless.
     compression_type: str = "zstd"
     # Stall detection timeout for data-transfer commands (``qemu-img
-    # convert``, ``rsync``).  Duration string (e.g. ``"30m"``, ``"1h"``)
+    # convert``).  Duration string (e.g. ``"30m"``, ``"1h"``)
     # parsed to seconds via ``parse_duration()``.  When the output file
     # shows no growth for this duration, the process is killed.  ``"0s"``
     # disables stall detection (falls back to fixed-timeout ``run()``).
@@ -112,32 +110,25 @@ class GlobalConfig:
 class TargetConfig:
     """A single backup target for a VM.
 
-    ``incremental_mode`` selects the backup strategy: ``"bitmap"``
-    (default — dirty-block extraction via NBD/checkpoint, crash-consistent
-    and produces standalone backups) or ``"file-copy"`` (whole-file copy
-    via rsync).  The dataclass-level default is ``"bitmap"``; the factory
-    automatically falls back to ``FileCopyBackupProvider`` (file-copy)
-    when libvirt is too old (< 6.0) for NBD backup-begin, so old systems
-    are unaffected.  Users who want rsync mode must explicitly set
-    ``incremental_mode = "file-copy"``.
+    All backups use the NBD bitmap strategy (dirty-block extraction via
+    NBD/checkpoint, crash-consistent, backing-chained incrementals).
+    ``libvirt >= 7.2`` and ``python3-libnbd`` are hard requirements.
 
     ``target_preserve`` is a raw retention-policy string resolved via
     option inheritance (global → VM → target).
 
-    ``verify`` controls post-transfer verification.  The dataclass-level
-    default is ``"metadata"`` (checks qcow2 format and virtual-size
-    match), but the *effective* default is mode-dependent and resolved
-    by ``ConfigFacade._build_target()``: ``"hash"`` for file-copy mode
-    (race-condition-immune SHA-256), ``"metadata"`` for bitmap mode
-    (hash is unsupported for NBD-converted qcow2).  When the user
-    explicitly sets ``verify``, the explicit value takes precedence.
-    ``"full"`` additionally runs ``qemu-img compare``, ``"off"`` skips
-    verification.
+    ``verify`` controls post-transfer verification.  The default is
+    ``"metadata"`` (checks qcow2 format, corrupt-bit, and — for bitmap
+    incrementals — backing-filename plus the dirty-size regression
+    barrier).  ``"hash"`` and ``"full"`` additionally run
+    chain-traversing ``qemu-img compare`` content verification,
+    ``"off"`` skips verification.  When the user explicitly sets
+    ``verify``, the explicit value takes precedence.
 
     ``compress`` controls whether backups are compressed (default
-    ``True``).  Applies to FULL backups (``qemu-img convert -c``), NBD
-    incrementals (``-c`` flag), and rsync incrementals (``--compress``
-    transfer-level flag).  Inherited from global → VM → target.
+    ``True``).  Applies to FULL backups (``qemu-img convert -c``) only
+    — bitmap incrementals are always uncompressed.  Inherited from
+    global → VM → target.
 
     ``compression_type`` selects the compression algorithm (default
     ``"zstd"`` — 11x faster than ``"zlib"``).  Only effective when
@@ -147,23 +138,16 @@ class TargetConfig:
     controlling stall detection on data-transfer commands.  ``"0s"``
     disables stall detection (falls back to fixed-timeout ``run()``).
     Inherited from global → VM → target.
-
-    ``copy_base`` controls whether the base image is copied to the
-    target on first backup (default ``False`` — first backup is always
-    a FULL via ``qemu-img convert``).
     """
 
     path: Path
     incremental: bool = True
-    incremental_mode: str = "bitmap"
     target_preserve: str | None = None
     verify: str = "metadata"
     target_preserve_min: str | None = None
     compress: bool = True
     compression_type: str = "zstd"
     backup_stall_timeout: str = "30m"
-    copy_base: bool = False
-    rate_limit: str = "no"
     # Backup retry controls (target-level — network reliability varies
     # per target).
     backup_retry_max: int = 3

@@ -258,9 +258,7 @@ def test_int_watchdog_aborts_stalled_loop(test_vm) -> None:
         pytest.skip("transfer_missing produced no results — NBD may not be available")
 
     # Step 5: Assert transfer failed with the exact error string.
-    assert not results[0].success, (
-        "Transfer should have failed due to stall timeout"
-    )
+    assert not results[0].success, "Transfer should have failed due to stall timeout"
     assert results[0].error is not None
     assert "Stall detected: no progress for 2s" in results[0].error, (
         f"Expected 'Stall detected: no progress for 2s', got: {results[0].error!r}"

@@ -20,7 +20,7 @@ class IShell(ABC):
     - :meth:`run` — fixed-timeout execution for short commands (``virsh``,
       ``qemu-img info``).  Kills the process after *timeout* seconds.
     - :meth:`run_with_stall_detection` — output-growth monitoring for
-      long-running data-transfer commands (``qemu-img convert``, ``rsync``).
+      long-running data-transfer commands (``qemu-img convert``).
       Polls the *output_file* size every 60 seconds; kills the process
       only when no growth is observed for *stall_timeout* seconds.  No
       maximum timeout — if data flows, the process runs to completion.
@@ -50,7 +50,7 @@ class IShell(ABC):
         """Execute *cmd* with stall detection via output-file growth.
 
         Used for long-running data-transfer commands (``qemu-img
-        convert``, ``rsync``) where a fixed timeout would kill a
+        convert``) where a fixed timeout would kill a
         correctly-progressing but slow transfer.  Instead, the process
         is killed only when *output_file* shows no size growth for
         *stall_timeout* seconds.

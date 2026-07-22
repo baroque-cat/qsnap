@@ -101,7 +101,6 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
     target = TargetConfig(
         path=target_dir,
         incremental=True,
-        incremental_mode="file-copy",
         compress=False,
         verify="off",
     )

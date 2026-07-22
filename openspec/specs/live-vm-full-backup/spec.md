@@ -2,36 +2,29 @@
 
 ## Purpose
 
-Full backup creation for live (running) VMs via the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert -n nbd:unix:<socket>`). When the VM is stopped, falls back to direct `qemu-img convert`. Avoids lock conflicts on the active layer of running VMs without using `--force-share` on data-copying operations.
+Full backup creation for live (running) VMs via the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert -n nbd:unix:<socket>`). Stopped-VM FULL backups return `BackupResult(success=False)` — there is no direct `qemu-img convert` fallback. Avoids lock conflicts on the active layer of running VMs without using `--force-share` on data-copying operations.
 
 ## Requirements
 
-### Requirement: VM running-state detection for FULL backup method selection
+### Requirement: FULL backup requires a running VM
 
-`FileCopyBackupProvider.create_full_backup()` and `BitmapBackupProvider.create_full_backup()` SHALL receive `vm_name: str` as an explicit method parameter (the first positional argument, passed from Core's `vm_config.name`). The method SHALL NOT extract the VM name from the snapshot filename. The method SHALL detect whether the source VM is running by calling `virsh dominfo --domain <vm_name>` with the full, untruncated VM name and parsing the `State:` line. If the VM state is `running`, the provider SHALL use the NBD pull-model to export a frozen point-in-time view of the disk. If the VM state is `shut off` (or any non-running state), the provider SHALL use direct `qemu-img convert` on the snapshot file (existing behavior, no lock conflict).
+`BitmapBackupProvider.create_full_backup()` SHALL receive `vm_name: str` as an explicit method parameter (the first positional argument, passed from Core's `vm_config.name`). The method SHALL NOT extract the VM name from the snapshot filename. The method SHALL use the NBD pull-model (`virsh backup-begin` without `--incremental`) to export a frozen point-in-time view of the disk. A running VM is required: when the VM is shut off, `virsh backup-begin` fails and the method SHALL return `BackupResult(success=False, error=<virsh error>)`. No direct `qemu-img convert` fallback SHALL be attempted.
 
 #### Scenario: Running VM triggers NBD-based FULL backup
-- **WHEN** `virsh dominfo --domain myvm` returns `State: running`
-- **AND** `create_full_backup("myvm", ...)` is called
+- **WHEN** `create_full_backup("myvm", ...)` is called and the VM is running
 - **THEN** the provider uses `virsh backup-begin` + `qemu-img convert -n nbd:unix:<socket>` to create the FULL
 - **AND** no direct `qemu-img convert` on the snapshot file is attempted
 
-#### Scenario: Stopped VM triggers direct convert FULL backup
-- **WHEN** `virsh dominfo --domain myvm` returns `State: shut off`
-- **AND** `create_full_backup("myvm", ...)` is called
-- **THEN** the provider uses `qemu-img convert [-c] -f qcow2 -O qcow2 <source> <target>` directly
-- **AND** no NBD export is started
-
-#### Scenario: VM state detection failure falls back to direct convert with warning
-- **WHEN** `virsh dominfo` fails (non-zero exit code)
-- **THEN** the provider logs a WARNING and attempts direct `qemu-img convert`
-- **AND** if direct convert fails with a lock error, `BackupResult(success=False, error="...lock...")` is returned
+#### Scenario: Stopped VM fails with a BackupResult error
+- **WHEN** `create_full_backup("myvm", ...)` is called and the VM is shut off
+- **THEN** `virsh backup-begin` fails (domain not running)
+- **AND** `BackupResult(success=False, error=...)` is returned
+- **AND** no direct `qemu-img convert` fallback is attempted
 
 #### Scenario: Dotted VM name passed untruncated to is_vm_running
 - **WHEN** `create_full_backup("3.Projects_opencode", ...)` is called
-- **THEN** `is_vm_running(shell, "3.Projects_opencode")` is called with the full VM name
-- **AND** `virsh dominfo --domain 3.Projects_opencode` is executed (not `--domain 3`)
-- **AND** if the VM is running, `nbd_full_export(shell, "3.Projects_opencode", ...)` is called with the full VM name
+- **THEN** `nbd_full_export(shell, "3.Projects_opencode", ...)` is called with the full VM name
+- **AND** `virsh backup-begin --domain 3.Projects_opencode` is executed (not `--domain 3`)
 
 #### Scenario: Core passes vm_config.name to create_full_backup
 - **WHEN** `Core._backup_target(vm_config, target, snapshots)` is called with `vm_config.name = "3.Projects_opencode"`
@@ -41,7 +34,7 @@ Full backup creation for live (running) VMs via the NBD pull-model (`virsh backu
 
 ### Requirement: NBD full-export helper for FULL backups
 
-The system SHALL provide a shared NBD full-export mechanism used by both `FileCopyBackupProvider.create_full_backup()` and `BitmapBackupProvider.create_full_backup()`. The mechanism SHALL: (1) remove any stale socket at `/tmp/qsnap-backup-{pid}.sock`, (2) write a backup XML, (3) run `virsh backup-begin --domain <vm> <xml>` WITHOUT `--incremental` (full export, no checkpoint), (4) run `qemu-img convert -O qcow2 [-c -o compression_type=<type>] nbd:unix:<socket> <target_file>` to pull the full disk, (5) clean up the socket via `rm -f` in a `finally` block. The function signature SHALL be `nbd_full_export(shell: IShell, vm_name: str, target_file: str | Path, compress: bool = False, compression_type: str = "zstd") -> ShellResult`. When `compress=True` and `compression_type="zstd"`, the convert command SHALL include `-c -o compression_type=zstd`. When `compress=True` and `compression_type="zlib"`, the convert command SHALL include only `-c` (default zlib). The `qemu-img convert` command SHALL be executed via `IShell.run_with_stall_detection()` with `output_file` set to `target_file` and `stall_timeout` from the target config.
+The system SHALL provide a shared NBD full-export mechanism used by `BitmapBackupProvider.create_full_backup()` and by Core's restore/fork path. The mechanism SHALL: (1) remove any stale socket at `/tmp/qsnap-backup-{pid}.sock`, (2) write a backup XML, (3) run `virsh backup-begin --domain <vm> <xml>` WITHOUT `--incremental` (full export, no checkpoint), (4) run `qemu-img convert -O qcow2 [-c -o compression_type=<type>] nbd:unix:<socket> <target_file>` to pull the full disk, (5) clean up the socket via `rm -f` in a `finally` block. The function signature SHALL be `nbd_full_export(shell: IShell, vm_name: str, target_file: str | Path, compress: bool = False, compression_type: str = "zstd") -> ShellResult`. When `compress=True` and `compression_type="zstd"`, the convert command SHALL include `-c -o compression_type=zstd`. When `compress=True` and `compression_type="zlib"`, the convert command SHALL include only `-c` (default zlib). The `qemu-img convert` command SHALL be executed via `IShell.run_with_stall_detection()` with `output_file` set to `target_file` and `stall_timeout` from the target config.
 
 #### Scenario: NBD full export with zstd compression
 - **WHEN** `nbd_full_export(shell, "myvm", "/target/full.qcow2", compress=True, compression_type="zstd")` is called
@@ -79,12 +72,6 @@ The system SHALL provide a shared NBD full-export mechanism used by both `FileCo
 - **THEN** the Unix socket file is still removed via `rm -f` in the `finally` block
 - **AND** `BackupResult(success=False, error=<stderr>)` is returned
 
-#### Scenario: No checkpoint created for file-copy NBD FULL
-- **WHEN** `FileCopyBackupProvider` uses NBD for a FULL backup
-- **THEN** no `virsh checkpoint-create-as` is called
-- **AND** no `virsh checkpoint-delete` is called
-- **AND** the NBD export is a one-shot frozen view with no persistent checkpoint
-
 ### Requirement: NBD FULL exports current disk state
 
 The NBD full-export mechanism exports the disk state at the moment of `virsh backup-begin`, which MAY be slightly newer than the last snapshot (writes between snapshot creation and FULL backup creation). The FULL backup timestamp SHALL be recorded as the snapshot's timestamp (for retention bucket alignment), NOT the NBD export time.
@@ -95,19 +82,9 @@ The NBD full-export mechanism exports the disk state at the moment of `virsh bac
 - **THEN** the FULL is recorded in state with `timestamp = T_snapshot`
 - **AND** retention bucket alignment uses T_snapshot
 
-### Requirement: Libvirt version check for NBD FULL path
-
-Before attempting the NBD full-export path, the provider SHALL verify libvirt >= 6.0 (required for `backup-begin`). If libvirt is too old, the provider SHALL fall back to direct `qemu-img convert` and log a WARNING that the backup may fail due to lock conflict on running VMs.
-
-#### Scenario: Old libvirt falls back to direct convert with warning
-- **WHEN** libvirt version is < 6.0 and the VM is running
-- **THEN** the provider logs a WARNING: "libvirt < 6.0 — NBD unavailable, attempting direct convert (may fail on running VM)"
-- **THEN** direct `qemu-img convert` is attempted
-- **AND** if it fails with a lock error, `BackupResult(success=False)` is returned
-
 ### Requirement: Atomic FULL file creation via NBD
 
-When using NBD for FULL backup, the target file SHALL be created at a `.tmp` path first, then atomically renamed to the final `vm.FULL.YYYYMMDD.qcow2` name on success. This matches the existing `FileCopyBackupProvider` atomic-creation pattern.
+When using NBD for FULL backup, the target file SHALL be created at a `.tmp` path first, then atomically renamed to the final `vm.FULL.YYYYMMDD.qcow2` name on success. This matches the project-wide atomic-creation pattern for backup outputs.
 
 #### Scenario: NBD FULL creates tmp then renames
 - **WHEN** NBD full export succeeds

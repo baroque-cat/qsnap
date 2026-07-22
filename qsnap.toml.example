@@ -46,11 +46,6 @@ target_preserve = "48h 14d 8w 12m 1y"
 # snapshot_preserve_min.
 # target_preserve_min = "all"
 
-# Rate limit for backup transfers.  "no" (default) disables rate limiting.
-# Format: "<number><unit>" where unit is k, m, or g (KB/s, MB/s, GB/s).
-# Example: "500k" limits to 500 KB/s.
-# rate_limit = "no"
-
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
 # deferred_warn_count = "5"
@@ -83,16 +78,15 @@ target_preserve = "48h 14d 8w 12m 1y"
 # compress = true
 
 # Compression algorithm for FULL backups (qemu-img convert -c -o
-# compression_type=<type>) and rsync incrementals
-# (--compress --compress-choice=<type>).
+# compression_type=<type>).
 #   "zstd" (default) — 11x faster than zlib, slightly larger files
 #   "zlib"           — standard qcow2 compression (slower, smaller)
 # Only effective when compress = true.
 # compression_type = "zstd"
 
-# Stall detection timeout for data-transfer commands (qemu-img convert,
-# rsync).  Duration string (e.g. "30m", "1h", "0s").  When the output
-# file shows no growth for this duration, the process is killed.
+# Stall detection timeout for data-transfer commands (qemu-img convert).
+# Duration string (e.g. "30m", "1h", "0s").  When the output file shows
+# no growth for this duration, the process is killed.
 # "0s" disables stall detection (falls back to fixed-timeout run()).
 # backup_stall_timeout = "30m"
 
@@ -156,15 +150,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # snapshot_deep_verify = false
 
   # ── Backup targets ───────────────────────────────────────────────────
+  # Backups use NBD dirty-block extraction via checkpoint (bitmap mode).
+  # libvirt >= 7.2 and python3-libnbd are hard requirements.
   [[vm.target]]
   path = "/mnt/backup/debiantest"
   incremental = true
-
-  # Incremental backup mode:
-  #   "bitmap"    — dirty-block extraction via checkpoint (default since 2026-07-19)
-  #   "file-copy" — whole-file copy (rsync)
-  # The factory automatically falls back to "file-copy" when libvirt < 6.0.
-  # incremental_mode = "bitmap"
 
   # Override backup retention for this target only
   # target_preserve = "72h 21d 12w 18m 3y"
@@ -186,22 +176,12 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # Duration string like "30m", "1h", "0s" (disables stall detection).
   # backup_stall_timeout = "30m"
 
-  # Copy the base image to the target on first backup.  When false
-  # (default), the first backup is always a FULL via qemu-img convert.
-  # copy_base = false
-
   # Backup verification level:
-  #   "metadata" — verify qcow2 format + virtual-size match
-  #   "hash"     — metadata + SHA-256 content hash (default for file-copy)
-  #   "full"     — metadata + qemu-img compare
+  #   "metadata" — verify qcow2 format + structure (default)
+  #   "hash"     — metadata + chain-traversing qemu-img compare
+  #   "full"     — same as "hash" for bitmap chains
   #   "off"      — no verification
-  # Mode-dependent default: "hash" for file-copy, "metadata" for bitmap.
-  # In bitmap mode, "hash" and "full" are auto-downgraded to "metadata"
-  # (NBD-converted qcow2 has different internal structure than source).
   # verify = "metadata"
-
-  # Rate limit for this target only (overrides global rate_limit).
-  # rate_limit = "no"
 
   # ── Backup retry controls (per-target) ───────────────────────────────
   # Retry transient backup failures with exponential backoff.
@@ -227,8 +207,7 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   [[vm.target]]
 #   path = "/mnt/backup/critical-db"
 #   incremental = true
-#   incremental_mode = "bitmap"
-#   verify = "metadata"          # max effective for bitmap (full/hash auto-downgraded)
+#   verify = "metadata"
 #   compress = true
 #   backup_retry_max = 5
 #   backup_retry_base = "10s"

@@ -1033,14 +1033,10 @@ def test_int_export_failure_deletes_successor_preserves_prior(test_vm):
     import glob as glob_mod
 
     socks = glob_mod.glob(f"/tmp/qsnap-write-{os.getpid()}.sock")
-    assert len(socks) == 0, (
-        f"Orphaned write socket detected after failure: {socks}"
-    )
+    assert len(socks) == 0, f"Orphaned write socket detected after failure: {socks}"
 
     tmp_candidate = target_dir / f"{fail_snapshot_name}.qcow2.tmp"
-    assert not tmp_candidate.exists(), (
-        f"Temporary file {tmp_candidate} should have been cleaned up"
-    )
+    assert not tmp_candidate.exists(), f"Temporary file {tmp_candidate} should have been cleaned up"
 
     # Clean up any checkpoints.
     _cleanup_checkpoints(shell, vm_name)

@@ -11,11 +11,8 @@ which defines:
   - target ``vm_override_override``: ``target_preserve = "10d 5w"``
 - ``vm_inherit``: inherits both globals
 
-Covers mode-dependent ``verify`` default resolution (design D3/D8):
-- File-copy defaults to ``"hash"``, bitmap defaults to ``"metadata"``
-- Explicit ``verify`` takes precedence over the mode-dependent default
-- Bitmap + ``verify="hash"`` warns and auto-downgrades to ``"metadata"``
-"""
+With rsync/file-copy removed, verify always defaults to ``"metadata"``
+(there is no mode-dependent default)."""
 
 from __future__ import annotations
 
@@ -75,64 +72,3 @@ def test_target_overrides_vm_retention() -> None:
     assert vm.target_preserve == "20d 10w"
     assert override_target.target_preserve == "10d 5w"
     assert override_target.target_preserve != vm.target_preserve
-
-
-# ── mode-dependent verify default resolution ───────────────────────────
-
-
-@pytest.mark.unit
-def test_facade_resolves_hash_default_for_file_copy_mode() -> None:
-    """File-copy mode with no explicit verify defaults to 'hash'."""
-    facade = ConfigFacade(FIXTURES / "verify_mode_defaults.toml")
-    vm = facade.get_vm("vm_fc_default")
-    target = vm.targets[0]
-    assert target.incremental_mode == "file-copy"
-    assert target.verify == "hash"
-
-
-@pytest.mark.unit
-def test_facade_resolves_metadata_default_for_bitmap_mode() -> None:
-    """Bitmap mode with no explicit verify defaults to 'metadata'."""
-    facade = ConfigFacade(FIXTURES / "verify_mode_defaults.toml")
-    vm = facade.get_vm("vm_bitmap_default")
-    target = vm.targets[0]
-    assert target.incremental_mode == "bitmap"
-    assert target.verify == "metadata"
-
-
-@pytest.mark.unit
-def test_facade_explicit_verify_overrides_mode_default() -> None:
-    """Explicit verify='metadata' beats file-copy's default of 'hash'."""
-    facade = ConfigFacade(FIXTURES / "verify_mode_defaults.toml")
-    vm = facade.get_vm("vm_fc_override")
-    target = vm.targets[0]
-    assert target.incremental_mode == "file-copy"
-    assert target.verify == "metadata"
-
-
-@pytest.mark.unit
-def test_facade_verify_full_preserved_for_both_modes() -> None:
-    """verify='full' is preserved for BOTH file-copy and bitmap modes.
-    (Previously bitmap downgraded full→metadata, but
-    verify_bitmap_incremental now supports chain-traversing
-    qemu-img compare in hash/full tiers.)"""
-    facade = ConfigFacade(FIXTURES / "verify_full_both.toml")
-
-    vm_fc = facade.get_vm("vm_fc_full")
-    assert vm_fc.targets[0].incremental_mode == "file-copy"
-    assert vm_fc.targets[0].verify == "full"
-
-    vm_bitmap = facade.get_vm("vm_bitmap_full")
-    assert vm_bitmap.targets[0].incremental_mode == "bitmap"
-    assert vm_bitmap.targets[0].verify == "full"
-
-
-@pytest.mark.unit
-def test_facade_bitmap_mode_hash_preserved() -> None:
-    """Bitmap mode + verify='hash' is now preserved (no downgrade)."""
-    facade = ConfigFacade(FIXTURES / "verify_bitmap_hash.toml")
-
-    vm = facade.get_vm("vm_bitmap_hash")
-    target = vm.targets[0]
-    assert target.incremental_mode == "bitmap"
-    assert target.verify == "hash"

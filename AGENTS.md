@@ -33,7 +33,7 @@ Provider         Provider  Detector  Manager
        │ (no Core     │         │         │
        │  inheritance)│         │         │
  ┌─────┴──────┐  ┌───┴──────┐  ┌┴──────┐  ┌┴──────────┐
- │External    │  │FileCopy  │  │Alloc  │  │BlockCommit │
+ │External    │  │Bitmap    │  │Alloc  │  │BlockCommit │
  │Snapshot    │  │Backup    │  │Size   │  │Manager     │
  │Provider    │  │Provider  │  │Detect │  │            │
  └────────────┘  └──────────┘  └───────┘  └────────────┘
@@ -94,7 +94,7 @@ Core._execute_pipeline(vm):
        backup = factory.create_backup_provider(...)
        _should_create_bucket_full(target, policy, last_full, snapshot_ts)
          → if new period of highest active bucket: create_full_backup(...)
-       transfer missing snapshots (rsync only — design D3)
+       transfer missing snapshots (NBD dirty-block transfer — bitmap only)
        recordincremental_dependency(target, incremental, full)
        retention.evaluate(backups) → keep/remove
        _cleanup_backups() → cascade deletion (design D2):
@@ -137,7 +137,7 @@ All `virsh`, `qemu-img`, and filesystem calls go through `IShell` (thin wrapper 
 
 `IShell` provides two execution methods:
 - `run(cmd, timeout, check)` — fixed-timeout execution for short commands (`virsh`, `qemu-img info`). Kills the process after *timeout* seconds.
-- `run_with_stall_detection(cmd, output_file, stall_timeout, check)` — output-growth monitoring for long-running data-transfer commands (`qemu-img convert`, `rsync`). Polls the *output_file* size every 60 seconds; kills the process only when no growth is observed for *stall_timeout* seconds. No maximum timeout — if data flows, the process runs to completion.
+- `run_with_stall_detection(cmd, output_file, stall_timeout, check)` — output-growth monitoring for long-running data-transfer commands (`qemu-img convert`). Polls the *output_file* size every 60 seconds; kills the process only when no growth is observed for *stall_timeout* seconds. No maximum timeout — if data flows, the process runs to completion.
 
 ---
 
@@ -202,7 +202,7 @@ Core → ExternalSnapshot   ← acceptable
 
 If you need a third level, extract the variation into a **strategy** that is composed, not inherited.
 
-Note: domain modules (`ExternalSnapshotProvider`, `FileCopyBackupProvider`, etc.) do NOT inherit Core at all (design D1). They implement their ABC directly. The "2 levels from Core" rule applies if a hierarchy of *module base classes* is ever introduced — in that case, keep it ≤2 deep.
+Note: domain modules (`ExternalSnapshotProvider`, `BitmapBackupProvider`, etc.) do NOT inherit Core at all (design D1). They implement their ABC directly. The "2 levels from Core" rule applies if a hierarchy of *module base classes* is ever introduced — in that case, keep it ≤2 deep.
 
 ### ❌ Skipping the factory
 

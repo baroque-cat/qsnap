@@ -56,15 +56,15 @@ ConfigFacade SHALL provide `get_vm(name)` that returns the VMConfig for a specif
 - **THEN** a KeyError or ConfigError is raised
 
 ### Requirement: ConfigFacade parses new fault-tolerance fields
-`ConfigFacade` SHALL parse `auto_cleanup`, `state_backup_count`, `chain_verify_before_commit`, `chain_verify_after_commit`, and `deep_check_schedule` from the global section. It SHALL parse `blockcommit_deep_verify` and `snapshot_deep_verify` from each `[[vm]]` section. It SHALL parse `backup_retry_max`, `backup_retry_base`, `compress`, and `copy_base` from each `[[vm.target]]` section. All fields SHALL use their documented defaults when absent. `ConfigFacade` SHALL NOT parse `full_every` (removed). If `full_every` is present in TOML, a deprecation WARNING SHALL be logged. If `full_compress` is present and `compress` is not, `full_compress` SHALL be mapped to `compress` with a deprecation WARNING.
+`ConfigFacade` SHALL parse `auto_cleanup`, `state_backup_count`, `chain_verify_before_commit`, `chain_verify_after_commit`, and `deep_check_schedule` from the global section. It SHALL parse `blockcommit_deep_verify` and `snapshot_deep_verify` from each `[[vm]]` section. It SHALL parse `backup_retry_max`, `backup_retry_base`, and `compress` from each `[[vm.target]]` section. All fields SHALL use their documented defaults when absent. `ConfigFacade` SHALL NOT parse `full_every` (removed). If `full_every` is present in TOML, a deprecation WARNING SHALL be logged. If `full_compress` is present and `compress` is not, `full_compress` SHALL be mapped to `compress` with a deprecation WARNING. If any of `incremental_mode`, `rate_limit`, or `copy_base` are present in TOML (target-level), a deprecation WARNING SHALL be logged naming the field — the fields are ignored.
 
 #### Scenario: Global safety fields parsed
 - **WHEN** config TOML contains `auto_cleanup = true`, `state_backup_count = 2`, `chain_verify_before_commit = true`
 - **THEN** `GlobalConfig.auto_cleanup` is `True`, `state_backup_count` is `2`, `chain_verify_before_commit` is `True`
 
-#### Scenario: Target compress and copy_base parsed
-- **WHEN** a `[[vm.target]]` section contains `compress = true` and `copy_base = false`
-- **THEN** that target's `TargetConfig.compress` is `True` and `copy_base` is `False`
+#### Scenario: Target compress parsed
+- **WHEN** a `[[vm.target]]` section contains `compress = true`
+- **THEN** that target's `TargetConfig.compress` is `True`
 
 #### Scenario: full_every in config triggers deprecation warning
 - **WHEN** a `[[vm.target]]` section contains `full_every = "7d"`
@@ -85,7 +85,7 @@ ConfigFacade SHALL provide `get_vm(name)` that returns the VMConfig for a specif
 - **THEN** that target's `TargetConfig.backup_retry_max` is `5` and `backup_retry_base` is `"10s"`
 
 ### Requirement: ConfigFacade updates example config
-The shipped `qsnap.toml.example` SHALL document all fault-tolerance fields plus all existing-but-not-shown fields: `snapshot_preserve_min`, `target_preserve_min`, `rate_limit`, `compress`, `copy_base`, `incremental_mode`, `change_detection_mode`, `disks`, `deferred_warn_count`, `deferred_crit_count`, `deferred_warn_age`, `deferred_crit_age`. It SHALL NOT document `full_every` or `full_compress` (removed).
+The shipped `qsnap.toml.example` SHALL document all fault-tolerance fields plus all existing-but-not-shown fields: `snapshot_preserve_min`, `target_preserve_min`, `compress`, `change_detection_mode`, `disks`, `deferred_warn_count`, `deferred_crit_count`, `deferred_warn_age`, `deferred_crit_age`. It SHALL NOT document `full_every`, `full_compress`, `rate_limit`, `incremental_mode`, or `copy_base` (removed). Removed fields (`incremental_mode`, `rate_limit`, `copy_base`) present in existing user TOMLs SHALL trigger a deprecation WARNING naming the field and be otherwise ignored.
 
 #### Scenario: Example config is parseable with all fields documented
 - **WHEN** `qsnap -c qsnap.toml.example list config` is executed

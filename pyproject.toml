@@ -97,8 +97,15 @@ known-first-party = ["qsnap"]
 include = ["qsnap", "tests"]
 exclude = [".venv", "build", "dist", ".git"]
 pythonVersion = "3.11"
-typeCheckingMode = "strict"
+# Default mode is basic (tests/ and any auxiliary code); production
+# sources are checked strictly via the execution environment below
+# (same granularity pattern as copium's simlece/tgcopiumapp).
+typeCheckingMode = "basic"
 reportMissingTypeStubs = false
+
+[[tool.pyright.executionEnvironments]]
+root = "qsnap"
+typeCheckingMode = "strict"
 
 # ── black ───────────────────────────────────────────────────────────────
 

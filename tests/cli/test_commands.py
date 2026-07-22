@@ -464,7 +464,7 @@ def test_summary_printed_after_run_with_failures(capsys):
                 vm_name="vm1",
                 name="backup_target",
                 path=Path("/mnt/backup/vm1"),
-                error="rsync failed: permission denied",
+                error="backup failed: permission denied",
             ),
         ],
         dry_run=False,

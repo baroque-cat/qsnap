@@ -92,9 +92,9 @@ def test_unify_mixed_sequence() -> None:
     ]
     result = unify_extents(inp)
     assert result == [
-        _e(0, 131072, True),       # first two merged
+        _e(0, 131072, True),  # first two merged
         _e(131072, 131072, False),  # next two merged
-        _e(262144, 65536, True),    # last one alone
+        _e(262144, 65536, True),  # last one alone
     ]
 
 
@@ -181,8 +181,8 @@ def test_overlap_partial_boundaries() -> None:
 @pytest.mark.unit
 def test_overlap_dirty_starts_after_allocation() -> None:
     """Zero overlap when dirty starts at or after allocation ends."""
-    dirty = [_e(1000, 500, True)]     # [1000, 1500)
-    allocated = [_e(0, 1000, True)]   # [0, 1000)
+    dirty = [_e(1000, 500, True)]  # [1000, 1500)
+    allocated = [_e(0, 1000, True)]  # [0, 1000)
     result = overlap_with_allocation(dirty, allocated)
     assert result == []
 
@@ -193,9 +193,9 @@ def test_overlap_two_allocated_islands() -> None:
     in between — two output extents returned."""
     dirty = [_e(0, 1000, True)]  # [0, 1000)
     allocated = [
-        _e(0, 300, True),    # first island  [0, 300)
+        _e(0, 300, True),  # first island  [0, 300)
         _e(300, 200, False),  # hole          [300, 500)
-        _e(500, 500, True),   # second island [500, 1000)
+        _e(500, 500, True),  # second island [500, 1000)
     ]
     result = overlap_with_allocation(dirty, allocated)
     assert result == [
@@ -208,23 +208,23 @@ def test_overlap_two_allocated_islands() -> None:
 def test_overlap_multiple_vs_multiple() -> None:
     """Multiple dirty extents against multiple allocated extents."""
     dirty = [
-        _e(0, 200, True),      # [0, 200)
-        _e(300, 400, True),     # [300, 700)
-        _e(800, 200, False),    # clean → skipped
-        _e(1000, 200, True),    # [1000, 1200)
+        _e(0, 200, True),  # [0, 200)
+        _e(300, 400, True),  # [300, 700)
+        _e(800, 200, False),  # clean → skipped
+        _e(1000, 200, True),  # [1000, 1200)
     ]
     allocated = [
-        _e(0, 500, True),      # [0, 500)
-        _e(500, 300, False),   # hole [500, 800)
-        _e(800, 500, True),    # [800, 1300)
+        _e(0, 500, True),  # [0, 500)
+        _e(500, 300, False),  # hole [500, 800)
+        _e(800, 500, True),  # [800, 1300)
     ]
     result = overlap_with_allocation(dirty, allocated)
     assert result == [
-        _e(0, 200, True),       # dirty[0] ∩ allocated[0]
-        _e(300, 200, True),     # dirty[1] ∩ allocated[0] → [300, 500)
+        _e(0, 200, True),  # dirty[0] ∩ allocated[0]
+        _e(300, 200, True),  # dirty[1] ∩ allocated[0] → [300, 500)
         # gap [500, 800): dirty[1] ends at 700 < allocated[1].offset=800, j advances
         # dirty[2] skipped (data=False)
-        _e(1000, 200, True),    # dirty[3] ∩ allocated[2] → [1000, 1200)
+        _e(1000, 200, True),  # dirty[3] ∩ allocated[2] → [1000, 1200)
     ]
 
 

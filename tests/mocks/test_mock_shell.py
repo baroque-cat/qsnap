@@ -67,7 +67,7 @@ def test_run_with_stall_detection_returns_default_error_on_no_match():
     mock_shell = MockShell()
 
     result = mock_shell.run_with_stall_detection(
-        ["rsync", "-avz", "src/", "dst/"],
+        ["qemu-img", "convert", "source.qcow2", "dest.qcow2"],
         output_file=Path("/tmp/backup.qcow2"),
         stall_timeout=1800,
     )
@@ -82,11 +82,13 @@ def test_run_with_stall_detection_raises_on_expectation_raises():
     import subprocess
 
     mock_shell = MockShell()
-    mock_shell.expect("rsync").raises(subprocess.TimeoutExpired(cmd="rsync", timeout=30))
+    mock_shell.expect("qemu-img convert").raises(
+        subprocess.TimeoutExpired(cmd="qemu-img convert", timeout=30)
+    )
 
     try:
         mock_shell.run_with_stall_detection(
-            ["rsync", "-avz", "src/", "dst/"],
+            ["qemu-img", "convert", "source.qcow2", "dest.qcow2"],
             output_file=Path("/tmp/backup.qcow2"),
             stall_timeout=300,
         )

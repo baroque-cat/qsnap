@@ -70,9 +70,12 @@ def test_metadata_tier_passes_for_valid_delta() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success, f"qemu-img create delta failed: {r.error}"
@@ -116,9 +119,12 @@ def test_wrong_backing_fails_verify() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success
@@ -160,9 +166,12 @@ def test_bloated_delta_fails_barrier() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success
@@ -208,9 +217,12 @@ def test_hash_tier_compare_passes_for_consistent_chains() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success
@@ -226,8 +238,10 @@ def test_hash_tier_compare_passes_for_consistent_chains() -> None:
         r = _run_qemu_img(
             shell,
             "convert",
-            "-f", "qcow2",
-            "-O", "qcow2",
+            "-f",
+            "qcow2",
+            "-O",
+            "qcow2",
             str(delta),
             str(source),
         )
@@ -270,9 +284,12 @@ def test_hash_tier_compare_fails_for_divergent_chains() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success
@@ -318,9 +335,12 @@ def test_full_tier_compare_passes_for_consistent_chains() -> None:
         r = _run_qemu_img(
             shell,
             "create",
-            "-f", "qcow2",
-            "-b", str(full),
-            "-F", "qcow2",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full),
+            "-F",
+            "qcow2",
             str(delta),
         )
         assert r.success
@@ -329,8 +349,14 @@ def test_full_tier_compare_passes_for_consistent_chains() -> None:
         # Convert delta to standalone source for consistent content.
         source = tmp / "source.qcow2"
         r = _run_qemu_img(
-            shell, "convert", "-f", "qcow2", "-O", "qcow2",
-            str(delta), str(source),
+            shell,
+            "convert",
+            "-f",
+            "qcow2",
+            "-O",
+            "qcow2",
+            str(delta),
+            str(source),
         )
         assert r.success
 

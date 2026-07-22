@@ -83,13 +83,19 @@ def _mock_both_info(
     shell.expect(r"qemu-img info --output=json.*" + _DELTA).returns(dlt_result)
 
 
-def _mock_compare(shell: MockShell, *, success: bool = True, error_msg: str = "Images differ") -> None:
+def _mock_compare(
+    shell: MockShell, *, success: bool = True, error_msg: str = "Images differ"
+) -> None:
     """Register a ``qemu-img compare`` expectation."""
     result = (
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
         if success
         else ShellResult(
-            success=False, stdout="", stderr=error_msg, returncode=1, error=error_msg,
+            success=False,
+            stdout="",
+            stderr=error_msg,
+            returncode=1,
+            error=error_msg,
         )
     )
     shell.expect(r"qemu-img compare -q --force-share.*").returns(result)
@@ -290,7 +296,7 @@ def test_wrong_backing_file_fails_verification() -> None:
 def test_delta_within_barrier_passes() -> None:
     """actual-size within dirty_bytes×2 + 64 MiB barrier passes."""
     dirty_bytes = 100 * 1024 * 1024  # 100 MiB
-    actual_size = 150 * 1024 * 1024   # 150 MiB < 100×2 + 64 = 264 MiB
+    actual_size = 150 * 1024 * 1024  # 150 MiB < 100×2 + 64 = 264 MiB
 
     shell = MockShell()
     _mock_both_info(shell, actual_size=actual_size)
@@ -309,8 +315,8 @@ def test_delta_within_barrier_passes() -> None:
 @pytest.mark.unit
 def test_full_size_incremental_fails_barrier() -> None:
     """actual-size exceeding the barrier fails with regression message."""
-    dirty_bytes = 1 * 1024 * 1024          # 1 MiB
-    actual_size = 200 * 1024 * 1024        # 200 MiB ≫ 66 MiB barrier
+    dirty_bytes = 1 * 1024 * 1024  # 1 MiB
+    actual_size = 200 * 1024 * 1024  # 200 MiB ≫ 66 MiB barrier
 
     shell = MockShell()
     _mock_both_info(shell, actual_size=actual_size)

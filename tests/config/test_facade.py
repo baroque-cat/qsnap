@@ -5,7 +5,7 @@ Covers the ``config-parsing`` spec requirements:
 - VM lookup by name (existing and non-existent).
 - Example config parseable with all fields documented.
 - preserve_min validation without buckets.
-- compress / copy_base parsing (bucket-driven model).
+- compress parsing (bucket-driven model).
 """
 
 from __future__ import annotations
@@ -153,15 +153,6 @@ def test_facade_parses_target_compress() -> None:
 
 
 @pytest.mark.unit
-def test_facade_parses_target_copy_base() -> None:
-    """ConfigFacade parses copy_base=False from a [[vm.target]] section."""
-    facade = ConfigFacade(FIXTURES / "full_backup.toml")
-    vm = facade.get_vm("vm_with_full")
-    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
-    assert target.copy_base is False
-
-
-@pytest.mark.unit
 def test_facade_target_compress_defaults_to_global() -> None:
     """When no compress is set on a target, it inherits the global default (True)."""
     facade = ConfigFacade(FIXTURES / "full_backup.toml")
@@ -169,48 +160,8 @@ def test_facade_target_compress_defaults_to_global() -> None:
     target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_no_full"))
     # vm_no_full does not set compress, so inherits global default True.
     assert target.compress is True
-    # copy_base defaults to False.
-    assert target.copy_base is False
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# rate_limit parsing (global default + target override + validation)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_global_rate_limit_parsed() -> None:
-    """ConfigFacade parses a top-level rate_limit='100M' into GlobalConfig."""
-    facade = ConfigFacade(FIXTURES / "rate_limit_global.toml")
-    assert facade.get_global().rate_limit == "100M"
-
-
-@pytest.mark.unit
-def test_invalid_rate_limit_raises_config_error() -> None:
-    """An invalid global rate_limit='abc' raises ConfigError."""
-    with pytest.raises(ConfigError, match="Invalid global rate_limit"):
-        ConfigFacade(FIXTURES / "rate_limit_invalid.toml")
-
-
-@pytest.mark.unit
-def test_target_overrides_global_rate_limit() -> None:
-    """A target-level rate_limit='500K' overrides the global '100M'."""
-    facade = ConfigFacade(FIXTURES / "rate_limit_target_override.toml")
-    vm = facade.get_vm("testvm")
-    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/testvm"))
-    assert target.rate_limit == "500K"
-
-
-@pytest.mark.unit
-def test_target_inherits_global_rate_limit() -> None:
-    """A target with no rate_limit inherits the global '100M'."""
-    facade = ConfigFacade(FIXTURES / "rate_limit_global.toml")
-    vm = facade.get_vm("testvm")
-    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/testvm"))
-    assert target.rate_limit == "100M"
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # deferred-monitoring thresholds parsing
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -375,7 +326,6 @@ def test_example_config_parseable_all_fields() -> None:
     # Defaults.
     assert target.incremental is True
     assert target.compress is True
-    assert target.copy_base is False
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -900,7 +850,7 @@ def test_stall_timeout_zero_disables(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
-    """Bitmap mode + verify='hash' is now preserved — no downgrade warning."""
+    """verify='hash' is preserved — no downgrade."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -910,7 +860,6 @@ def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
-        '  incremental_mode = "bitmap"\n'
         '  verify = "hash"\n'
     )
 
@@ -918,14 +867,13 @@ def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
-    assert target.incremental_mode == "bitmap"
-    # verify="hash" is now supported in bitmap mode.
+    # verify="hash" is supported.
     assert target.verify == "hash"
 
 
 @pytest.mark.unit
 def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
-    """Bitmap mode + verify='full' is now preserved — no downgrade warning."""
+    """verify='full' is preserved — no downgrade."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -935,7 +883,6 @@ def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
-        '  incremental_mode = "bitmap"\n'
         '  verify = "full"\n'
     )
 
@@ -943,14 +890,13 @@ def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
-    assert target.incremental_mode == "bitmap"
-    # verify="full" is now supported in bitmap mode.
+    # verify="full" is supported.
     assert target.verify == "full"
 
 
 @pytest.mark.unit
 def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
-    """Bitmap mode + verify='metadata' is the recommended mode — NO warning emitted."""
+    """verify='metadata' is the recommended mode — NO warning emitted."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -960,7 +906,6 @@ def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
-        '  incremental_mode = "bitmap"\n'
         '  verify = "metadata"\n'
     )
 
@@ -969,7 +914,6 @@ def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
-    assert target.incremental_mode == "bitmap"
     # metadata is the correct/recommended mode — no downgrade.
     assert target.verify == "metadata"
 
@@ -979,11 +923,24 @@ def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
         assert "Downgrading" not in msg
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Removed rsync/file-copy fields — deprecation WARNING, no ConfigError
+# ──────────────────────────────────────────────────────────────────────────
+
+
 @pytest.mark.unit
-def test_filecopy_verify_full_no_downgrade(tmp_path: Path) -> None:
-    """File-copy mode + verify='full' is supported — NOT downgraded."""
+def test_removed_fields_trigger_deprecation_warnings(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """TOML containing removed fields (incremental_mode, rate_limit, copy_base
+    at target-level and rate_limit at global-level) triggers a deprecation
+    WARNING for each field, does NOT raise ConfigError, and produces valid
+    default values for surviving fields."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
+        'rate_limit = "100M"\n'
+        "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
@@ -991,39 +948,36 @@ def test_filecopy_verify_full_no_downgrade(tmp_path: Path) -> None:
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
+        "  incremental = true\n"
         '  incremental_mode = "file-copy"\n'
-        '  verify = "full"\n'
+        '  rate_limit = "500K"\n'
+        "  copy_base = true\n"
     )
 
-    facade = ConfigFacade(config_file)
+    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
+        facade = ConfigFacade(config_file)
 
-    vm = facade.get_vm("testvm")
-    target = vm.targets[0]
-    assert target.incremental_mode == "file-copy"
-    # file-copy mode supports full verification — NOT downgraded.
-    assert target.verify == "full"
+    # Each removed field triggers a deprecation WARNING naming the field.
+    warnings_text = " ".join(caplog.messages)
+    assert "incremental_mode" in warnings_text, "Expected deprecation warning for incremental_mode"
+    assert "rate_limit" in warnings_text, "Expected deprecation warning for rate_limit"
+    assert "copy_base" in warnings_text, "Expected deprecation warning for copy_base"
 
-
-@pytest.mark.unit
-def test_filecopy_verify_hash_no_downgrade(tmp_path: Path) -> None:
-    """File-copy mode + verify='hash' is supported — NOT downgraded."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-        "\n"
-        "  [[vm.target]]\n"
-        '  path = "/mnt/backup/testvm"\n'
-        '  incremental_mode = "file-copy"\n'
-        '  verify = "hash"\n'
+    # Verify the global rate_limit warning was emitted (global-level).
+    assert any("rate_limit" in msg for msg in caplog.messages), (
+        "Expected deprecation warning for global rate_limit"
     )
 
-    facade = ConfigFacade(config_file)
-
+    # No ConfigError should have been raised — the config parses fine.
     vm = facade.get_vm("testvm")
+    assert vm.name == "testvm"
     target = vm.targets[0]
-    assert target.incremental_mode == "file-copy"
-    # file-copy mode supports hash verification — NOT downgraded.
-    assert target.verify == "hash"
+    # TargetConfig carries valid defaults for surviving fields.
+    assert isinstance(target.incremental, bool)
+    assert target.incremental is True
+    assert target.verify == "metadata"
+    assert target.compress is True
+    assert target.compression_type == "zstd"
+    # GlobalConfig carries valid defaults.
+    global_cfg = facade.get_global()
+    assert global_cfg.compress is True

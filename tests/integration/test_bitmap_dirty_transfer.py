@@ -155,7 +155,9 @@ def _write_dirty_blocks(shell: SubprocessShell, vm_name: str, size: str = "10M")
     )
 
 
-def _qemu_img_info_json(shell: SubprocessShell, path: Path, force_share: bool = False) -> dict | None:
+def _qemu_img_info_json(
+    shell: SubprocessShell, path: Path, force_share: bool = False
+) -> dict | None:
     """Return ``qemu-img info --output=json`` for *path* as a dict.
 
     Passes ``--force-share`` when *force_share* is True (reading a
@@ -346,9 +348,7 @@ def test_int_full_pipeline_dirty_transfer(test_vm) -> None:
     assert src_info is not None, "qemu-img info on source failed"
     src_vsize = int(src_info.get("virtual-size", 0))
     incr_vsize = int(info.get("virtual-size", 0))
-    assert incr_vsize == src_vsize, (
-        f"virtual-size mismatch: source={src_vsize}, delta={incr_vsize}"
-    )
+    assert incr_vsize == src_vsize, f"virtual-size mismatch: source={src_vsize}, delta={incr_vsize}"
 
     # Step 6: Dirty-barrier check.
     # The dirty barrier is: actual-size ≤ dirty_bytes × 2 + 64 MiB.
@@ -500,18 +500,12 @@ def test_int_no_qemu_nbd_orphan_after_failure(test_vm) -> None:
     # Brief pause for qemu-nbd process cleanup.
     time.sleep(0.5)
     # No orphaned qemu-nbd processes.
-    assert _no_orphaned_processes(), (
-        "Orphaned qemu-nbd process detected after failure"
-    )
+    assert _no_orphaned_processes(), "Orphaned qemu-nbd process detected after failure"
     # No lingering write socket.
-    assert _no_orphaned_sockets(), (
-        "Orphaned write socket detected after failure"
-    )
+    assert _no_orphaned_sockets(), "Orphaned write socket detected after failure"
     # No .tmp file for the failed snapshot.
     tmp_candidate = target_dir / f"{vm_name}.incr-fail-inject.qcow2.tmp"
-    assert not tmp_candidate.exists(), (
-        f"Temporary file {tmp_candidate} should have been cleaned up"
-    )
+    assert not tmp_candidate.exists(), f"Temporary file {tmp_candidate} should have been cleaned up"
 
     # Prior checkpoint should still exist.
     checkpoints_after = _get_checkpoint_names(shell, vm_name)

@@ -67,22 +67,26 @@ def test_mock_retention_engine_accepts_preserve_day_of_week(make_vm_config):
     assert isinstance(result, RetentionResult)
 
 
-def test_mock_factory_returns_bitmap_provider_for_bitmap_mode(make_vm_config, make_target):
-    """create_backup_provider() returns MockBitmapBackupProvider when
-    target.incremental_mode == 'bitmap'."""
+def test_mock_factory_always_returns_bitmap_provider(make_vm_config, make_target):
+    """create_backup_provider() always returns MockBitmapBackupProvider
+    regardless of target configuration — bitmap is the sole backup provider
+    after rsync/file-copy removal."""
     factory = MockVMModuleFactory()
-    target = make_target(incremental_mode="bitmap")
+    target = make_target()
     provider = factory.create_backup_provider(make_vm_config(), target)
     assert isinstance(provider, MockBitmapBackupProvider)
     assert isinstance(provider, IBackupProvider)
 
 
-def test_mock_factory_returns_file_copy_provider_for_default_mode(make_vm_config, make_target):
-    """create_backup_provider() returns MockBackupProvider for default mode."""
+def test_mock_factory_always_returns_bitmap_provider_for_different_target(
+    make_vm_config, make_target
+):
+    """create_backup_provider() always returns MockBitmapBackupProvider
+    for any target (different paths/configs make no difference)."""
     factory = MockVMModuleFactory()
-    target = make_target(incremental_mode="file-copy")
+    target = make_target(path="/mnt/other-backup/testvm")
     provider = factory.create_backup_provider(make_vm_config(), target)
-    assert isinstance(provider, MockBackupProvider)
+    assert isinstance(provider, MockBitmapBackupProvider)
     assert isinstance(provider, IBackupProvider)
 
 

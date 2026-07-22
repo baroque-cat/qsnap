@@ -46,9 +46,9 @@ chain (FULL + incrementals) is gap-free by construction.
    ``create_full_backup``; bitmap incrementals are uncompressed
    (design D6).
 5. Verify the target file (if ``target.verify != "off"``):
-   :func:`verify_backup` for full pulls, :func:`verify_bitmap_incremental`
-   (format, virtual-size, backing-filename, dirty-size regression
-   barrier) for incrementals.
+   :func:`verify_full_backup` for full pulls,
+   :func:`verify_bitmap_incremental` (format, virtual-size,
+   backing-filename, dirty-size regression barrier) for incrementals.
 6. After a successful AND verified export, delete all superseded
    (older) qsnap checkpoints for this VM+target via
    ``virsh checkpoint-delete --metadata`` — the successor already
@@ -89,7 +89,7 @@ from qsnap.utils.nbd import (
     write_checkpoint_xml,
 )
 from qsnap.utils.parsing import parse_timestamp
-from qsnap.utils.verification import verify_backup, verify_bitmap_incremental
+from qsnap.utils.verification import verify_bitmap_incremental, verify_full_backup
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,6 @@ class BitmapBackupProvider(IBackupProvider):
         vm_config: VMConfig,
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
-        rate_limit: str = "no",
         *,
         full_verify_before_rebase: str = "metadata",
         compression_type: str = "zstd",
@@ -175,9 +174,6 @@ class BitmapBackupProvider(IBackupProvider):
         """Transfer missing snapshots via NBD pull-model.
 
         See module docstring for the NBD backup lifecycle.
-
-        ``rate_limit`` is accepted for interface compatibility but ignored
-        — NBD-based transfers cannot be throttled via ``rsync --bwlimit``.
 
         ``full_verify_before_rebase`` is accepted for interface
         compatibility but ignored — the bitmap path does not use
@@ -352,14 +348,18 @@ class BitmapBackupProvider(IBackupProvider):
 
                 # Step 5: Verification (if enabled).  Incrementals use
                 # the bitmap-specific verifier (backing-filename check +
-                # dirty-size regression barrier); full pulls keep the
-                # file-copy-oriented verify_backup.
+                # dirty-size regression barrier); full pulls produce a
+                # standalone qcow2 and are verified with the FULL
+                # verifier.  ``target.verify == "full"`` maps to "hash"
+                # for the FULL verifier — both tiers mean
+                # chain-traversing ``qemu-img compare`` (same semantics
+                # as verify_bitmap_incremental).
                 if prior is None:
-                    verify_error = verify_backup(
+                    verify_error = verify_full_backup(
                         self._shell,
-                        str(snapshot.path),
-                        str(target_file),
-                        target.verify,
+                        target_file,
+                        "hash" if target.verify == "full" else target.verify,
+                        source_path=snapshot.path,
                     )
                 else:
                     verify_error = verify_bitmap_incremental(
@@ -871,8 +871,7 @@ class BitmapBackupProvider(IBackupProvider):
 
         This method SHALL NOT call ``self._state.record_full_backup()``
         — state recording is Core's responsibility after post-create
-        verification passes (matches ``FileCopyBackupProvider``
-        behavior).
+        verification passes.
         """
         # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
         date_str = source_snapshot.timestamp.strftime("%Y%m%d")
@@ -928,9 +927,8 @@ class BitmapBackupProvider(IBackupProvider):
             bytes_transferred = 0
 
         # State recording is Core's responsibility after post-create
-        # verification passes (design D4 — matches FileCopyBackupProvider
-        # behavior, which also does not self-record).  The provider SHALL
-        # NOT call self._state.record_full_backup() here.
+        # verification passes (design D4).  The provider SHALL NOT call
+        # self._state.record_full_backup() here.
 
         return BackupResult(
             success=True,

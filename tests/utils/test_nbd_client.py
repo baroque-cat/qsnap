@@ -93,9 +93,7 @@ def _make_fake_nbd_module() -> tuple[types.ModuleType, list[Any]]:
         def get_size(self) -> int:
             return 10 * 1024 * 1024  # 10 MiB
 
-        def block_status(
-            self, length: int, offset: int, callback: Callable[..., None]
-        ) -> None:
+        def block_status(self, length: int, offset: int, callback: Callable[..., None]) -> None:
             if self._block_status_entries:
                 for metacontext, entries in self._block_status_entries:
                     callback(metacontext, offset, entries, 0)
@@ -143,7 +141,8 @@ class TestLazyImportAndMissingPackage:
         assert client is not None
 
     def test_missing_package_returns_actionable_error(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``connect()`` with the ``nbd`` package unavailable returns a
         failure ``NbdResult`` whose error names ``python3-libnbd`` (using
@@ -194,7 +193,8 @@ class TestConnect:
         )
 
     def test_connect_requests_exact_meta_contexts(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``connect()`` passes every requested meta‑context to
         ``add_meta_context()`` on the NBD handle, in order."""
@@ -213,7 +213,8 @@ class TestConnect:
         )
 
     def test_connect_sets_export_name_only_when_non_empty(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``connect(export_name="")`` does NOT call ``set_export_name``.
         ``connect(export_name="vda")`` passes ``"vda"`` to
@@ -240,7 +241,8 @@ class TestConnect:
         )
 
     def test_connect_success_sets_size_and_max_request(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After a successful connect with ``_server_max=65536``,
         ``get_max_request_size()`` returns 65536 and ``get_size()``
@@ -257,7 +259,8 @@ class TestConnect:
         assert client.get_max_request_size() == 65536
 
     def test_connect_caps_max_request_at_32_mib(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When the server advertises a maximum larger than 32 MiB, the
         client caps ``get_max_request_size()`` at 32 MiB."""
@@ -271,7 +274,8 @@ class TestConnect:
         assert client.get_max_request_size() == 32 * 1024 * 1024
 
     def test_connect_server_max_zero_defaults_to_cap(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When the server reports a maximum of 0, the client uses the
         32 MiB cap as the effective ``get_max_request_size()``."""
@@ -313,7 +317,9 @@ class TestPread:
         ],
     )
     def test_pread_eof_normalized_for_retry(
-        self, monkeypatch: pytest.MonkeyPatch, error_message: str,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error_message: str,
     ) -> None:
         """When the fake ``pread`` raises ``nbd.Error`` whose message
         contains ``"end of file"`` or ``"closed the connection"``, the
@@ -329,12 +335,8 @@ class TestPread:
 
         assert result.success is False
         assert result.error is not None
-        assert "eof" in result.error.lower(), (
-            f"Expected 'eof' in error, got: {result.error!r}"
-        )
-        assert is_retryable(result.error) is True, (
-            f"Error must be retryable: {result.error!r}"
-        )
+        assert "eof" in result.error.lower(), f"Expected 'eof' in error, got: {result.error!r}"
+        assert is_retryable(result.error) is True, f"Error must be retryable: {result.error!r}"
 
     def test_pread_not_connected_returns_error(self) -> None:
         """``pread()`` without a prior ``connect()`` returns an error
@@ -356,7 +358,8 @@ class TestChunkedReadWrite:
     CHUNK_SIZE = 65536  # 64 KiB
 
     def test_large_read_chunked_to_max_request_size(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``pread(offset=100, length=200 KiB)`` with a 64 KiB chunk cap
         issues 4 sequential read calls and concatenates the result."""
@@ -396,7 +399,8 @@ class TestChunkedReadWrite:
             assert length <= self.CHUNK_SIZE
 
     def test_large_pwrite_chunked_to_max_request_size(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``pwrite(offset=200, data=200 KiB)`` with a 64 KiB chunk cap
         issues 4 sequential write calls at ascending offsets."""
@@ -435,7 +439,8 @@ class TestChunkedReadWrite:
             assert length <= self.CHUNK_SIZE
 
     def test_read_max_request_size_zero_uses_cap(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When ``get_max_request_size()`` returns the 32 MiB cap (server
         max was 0), a 35 MiB read is chunked into two calls."""
@@ -467,7 +472,8 @@ class TestBlockStatus:
     """``block_status()`` extent parsing into ``dict[str, list[NbdExtent]]``."""
 
     def test_block_status_returns_extent_dict(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The fake fires the callback once per meta‑context.  The result
         payload maps each context name to a list of ``NbdExtent`` objects
@@ -483,9 +489,7 @@ class TestBlockStatus:
         monkeypatch.setitem(sys.modules, "nbd", mod)
 
         client = LibnbdClient()
-        client.connect(
-            "nbd://localhost", "", ["base:allocation", "qemu:dirty-bitmap:backup-vda"]
-        )
+        client.connect("nbd://localhost", "", ["base:allocation", "qemu:dirty-bitmap:backup-vda"])
         query_offset = 0
         result = client.block_status(query_offset, 4096)
 
@@ -525,7 +529,8 @@ class TestBlockStatus:
         assert result.error == "not connected"
 
     def test_block_status_non_zero_offset(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Extents are reported with offsets relative to the query offset."""
         mod, _ = _make_fake_nbd_module()
@@ -596,7 +601,8 @@ class TestDisconnect:
         client.disconnect()  # must not raise
 
     def test_disconnect_safe_second_call(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After connect + disconnect, a second ``disconnect()`` is safe."""
         mod, _ = _make_fake_nbd_module()
@@ -608,7 +614,8 @@ class TestDisconnect:
         client.disconnect()  # must not raise
 
     def test_disconnect_calls_shutdown_and_clears_handle(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After a successful connect, ``disconnect()`` calls
         ``handle.shutdown()`` and clears the internal handle."""
@@ -633,7 +640,8 @@ class TestIsLibnbdAvailable:
     bindings are importable."""
 
     def test_returns_false_when_not_installed(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When ``importlib.util.find_spec('nbd')`` returns ``None``,
         ``is_libnbd_available()`` returns ``False`` (environment‑agnostic:
@@ -646,7 +654,8 @@ class TestIsLibnbdAvailable:
         assert is_libnbd_available() is False
 
     def test_returns_true_when_package_found(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When ``importlib.util.find_spec('nbd')`` returns a truthy
         value, ``is_libnbd_available()`` returns ``True``."""

@@ -47,4 +47,4 @@ The cleanup step SHALL detect `.qcow2` files in `VMConfig.snapshot_dir` whose fi
 
 ### Requirement: Truncated qcow2 detection on backup targets
 
-After cleaning `*.tmp` and `*.partial` files, `Core._preflight_cleanup()` SHALL scan backup target directories for `.qcow2` files that are NOT `*.FULL.*.qcow2`. For each candidate, run `qemu-img info --output=json` with a 10-second timeout. If the command fails, the file is a truncated rsync artifact — delete it and log WARNING.
+After cleaning `*.tmp` and `*.partial` files, `Core._preflight_cleanup()` SHALL scan backup target directories for `.qcow2` files that are NOT `*.FULL.*.qcow2`. For each candidate, run `qemu-img info --output=json` with a 10-second timeout. If the command fails, the file is a truncated transfer artifact — delete it and log WARNING.

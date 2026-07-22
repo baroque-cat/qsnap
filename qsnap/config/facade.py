@@ -16,7 +16,6 @@ from typing import cast
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from qsnap.retention.time_based import parse_stall_timeout
-from qsnap.utils.parsing import parse_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,6 @@ class ConfigFacade(IConfigFacade):
             "target_preserve",
             "snapshot_preserve_min",
             "target_preserve_min",
-            "rate_limit",
             "deferred_warn_count",
             "deferred_crit_count",
             "deferred_warn_age",
@@ -121,11 +119,14 @@ class ConfigFacade(IConfigFacade):
 
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
-        # Validate rate_limit format.
-        try:
-            parse_rate_limit(self._global.rate_limit)
-        except ValueError as exc:
-            raise ConfigError(f"Invalid global rate_limit: {exc}") from exc
+        # rate_limit is deprecated (removed backup strategy) — log a
+        # warning naming the field and ignore the value (design D3).
+        if "rate_limit" in raw:
+            logging.getLogger("qsnap.config").warning(
+                "rate_limit is deprecated and ignored — NBD bitmap backups "
+                "do not support transfer throttling. "
+                "Remove rate_limit from your config."
+            )
 
         # Validate preserve_day_of_week.
         valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
@@ -274,7 +275,6 @@ class ConfigFacade(IConfigFacade):
                     tgt_raw,
                     target_preserve,
                     target_preserve_min,
-                    global_cfg.rate_limit,
                     global_cfg.compress,
                     global_cfg.compression_type,
                     global_cfg.backup_stall_timeout,
@@ -304,7 +304,6 @@ class ConfigFacade(IConfigFacade):
         tgt_raw: dict[str, object],
         vm_target_preserve: str | None,
         vm_target_preserve_min: str | None = None,
-        global_rate_limit: str = "no",
         global_compress: bool = True,
         global_compression_type: str = "zstd",
         global_backup_stall_timeout: str = "30m",
@@ -314,7 +313,28 @@ class ConfigFacade(IConfigFacade):
 
         path = Path(str(tgt_raw["path"]))
         incremental = bool(tgt_raw.get("incremental", True))
-        incremental_mode = str(tgt_raw.get("incremental_mode", "bitmap"))
+
+        # Removed fields (removed backup strategy) — log a deprecation
+        # WARNING naming the field and ignore the value (design D3,
+        # same mechanism as the full_every deprecation below).
+        if "incremental_mode" in tgt_raw:
+            logging.getLogger("qsnap.config").warning(
+                "incremental_mode is deprecated and ignored — NBD bitmap "
+                "backup is now the only backup strategy. "
+                "Remove incremental_mode from your config."
+            )
+        if "rate_limit" in tgt_raw:
+            logging.getLogger("qsnap.config").warning(
+                "rate_limit is deprecated and ignored — NBD bitmap backups "
+                "do not support transfer throttling. "
+                "Remove rate_limit from your config."
+            )
+        if "copy_base" in tgt_raw:
+            logging.getLogger("qsnap.config").warning(
+                "copy_base is deprecated and ignored — the first backup is "
+                "always a FULL via qemu-img convert. "
+                "Remove copy_base from your config."
+            )
 
         # target_preserve: target overrides VM.
         target_preserve: str | None
@@ -363,8 +383,6 @@ class ConfigFacade(IConfigFacade):
 
         # full_every is deprecated — log warning and ignore.
         if "full_every" in tgt_raw:
-            import logging
-
             logging.getLogger("qsnap.config").warning(
                 "full_every is deprecated and ignored — FULL backups are now "
                 "triggered by the retention policy's highest active bucket. "
@@ -377,8 +395,6 @@ class ConfigFacade(IConfigFacade):
         if "compress" in tgt_raw:
             compress = bool(tgt_raw["compress"])
         elif "full_compress" in tgt_raw:
-            import logging
-
             logging.getLogger("qsnap.config").warning(
                 "full_compress is deprecated — use 'compress' instead. "
                 "Mapping full_compress → compress for this target."
@@ -386,9 +402,6 @@ class ConfigFacade(IConfigFacade):
             compress = bool(tgt_raw["full_compress"])
         else:
             compress = global_compress
-
-        # copy_base: target-level, default False.
-        copy_base = bool(tgt_raw.get("copy_base", False))
 
         # compression_type: target overrides global default.
         compression_type = str(tgt_raw.get("compression_type", global_compression_type))
@@ -409,19 +422,13 @@ class ConfigFacade(IConfigFacade):
                 f"Must be a duration string like '30m', '1h', '0s'."
             ) from exc
 
-        # verify: mode-dependent default ("hash" for file-copy,
-        # "metadata" for bitmap), or explicit user value (design D3).
-        # The dataclass field default is "metadata", but the *effective*
-        # default is resolved here based on incremental_mode.
+        # verify: default "metadata", or explicit user value.  No
+        # mode-dependence — bitmap is the only backup strategy; the
+        # "hash"/"full" tiers run chain-traversing qemu-img compare via
+        # verify_bitmap_incremental (live-source reliability caveat).
         verify_raw = tgt_raw.get("verify")
         if verify_raw is None:
-            # Mode-dependent default — hash for file-copy (race-condition-
-            # immune SHA-256), metadata for bitmap (cheap structural
-            # check; hash/full are supported too — they run
-            # chain-traversing qemu-img compare via
-            # verify_bitmap_incremental, which carries a live-source
-            # reliability caveat).
-            verify = "hash" if incremental_mode == "file-copy" else "metadata"
+            verify = "metadata"
         else:
             verify = str(verify_raw)
             # Validate user-provided value.
@@ -429,23 +436,6 @@ class ConfigFacade(IConfigFacade):
                 raise ConfigError(
                     f"Invalid verify={verify!r}. Must be one of: off, metadata, hash, full."
                 )
-
-        # Deprecation warning: verify='metadata' for file-copy mode is
-        # weaker than verify='hash' (race-condition-immune SHA-256).
-        # Informational only — the explicit value is still honored.
-        if incremental_mode == "file-copy" and verify == "metadata":
-            logger.warning(
-                "verify='metadata' for file-copy mode — consider "
-                "verify='hash' for stronger, race-condition-immune "
-                "verification."
-            )
-
-        # rate_limit: target overrides global default.
-        rate_limit = str(tgt_raw.get("rate_limit", global_rate_limit))
-        try:
-            parse_rate_limit(rate_limit)
-        except ValueError as exc:
-            raise ConfigError(f"Invalid target rate_limit: {exc}") from exc
 
         # Backup retry fields (target-level — network reliability varies).
         backup_retry_max = cast(int, tgt_raw.get("backup_retry_max", 3))
@@ -461,15 +451,12 @@ class ConfigFacade(IConfigFacade):
         return TargetConfig(
             path=path,
             incremental=incremental,
-            incremental_mode=incremental_mode,
             target_preserve=target_preserve,
             verify=verify,
             target_preserve_min=target_preserve_min,
             compress=compress,
             compression_type=compression_type,
             backup_stall_timeout=backup_stall_timeout,
-            copy_base=copy_base,
-            rate_limit=rate_limit,
             backup_retry_max=backup_retry_max,
             backup_retry_base=backup_retry_base,
         )

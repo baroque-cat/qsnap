@@ -18,7 +18,7 @@ import pytest
 
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
-from qsnap.modules.backup.file_copy import FileCopyBackupProvider
+from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_state import InMemoryStateManager
 
@@ -34,7 +34,7 @@ def test_stale_state_snapshot_removed_when_file_missing(test_vm):
 
     1. Register a snapshot in ``InMemoryStateManager`` pointing to a
        non-existent path.
-    2. Create ``FileCopyBackupProvider`` with the state manager.
+    2. Create ``BitmapBackupProvider`` with the state manager.
     3. Configure a ``TargetConfig`` that is non-empty (contains at least
        one file) so the FULL-backup short-circuit is not triggered and
        ``transfer_missing()`` iterates over the snapshot list.
@@ -72,8 +72,8 @@ def test_stale_state_snapshot_removed_when_file_missing(test_vm):
     assert len(snapshots_before) == 1, "Stale snapshot should be registered in state"
     assert snapshots_before[0].name == stale_snapshot.name
 
-    # Step 3: Create FileCopyBackupProvider with state manager.
-    provider = FileCopyBackupProvider(shell, state=state)
+    # Step 3: Create BitmapBackupProvider with state manager.
+    provider = BitmapBackupProvider(shell, state=state)
     target = TargetConfig(
         path=target_dir,
         incremental=True,
@@ -163,7 +163,7 @@ def test_stale_state_crash_recovery_simulated(test_vm):
     assert len(snapshots_before) == 2, f"Expected 2 snapshots in state, got {len(snapshots_before)}"
 
     # Step 2: Create provider and call transfer_missing.
-    provider = FileCopyBackupProvider(shell, state=state)
+    provider = BitmapBackupProvider(shell, state=state)
     target = TargetConfig(
         path=target_dir,
         incremental=True,

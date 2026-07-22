@@ -3,8 +3,8 @@
 Covers:
 - All validation checks pass → CheckResult(status="ok").
 - Individual check failures: snapshot_dir missing, virsh not in PATH,
-  VM not defined in libvirt, rsync not found (hard error, design D3).
-- rsync check always runs (no longer conditional on rate_limit).
+  VM not defined in libvirt.
+- libnbd missing → hard error in normal mode, WARNING in dry-run mode.
 - Pipeline-level behaviour: validation passes → pipeline continues;
   validation fails → VMRunResult(success=False).
 - ondemand mode with no reachable target → snapshot skipped (validation
@@ -139,112 +139,6 @@ def test_validate_environment_vm_not_defined(
 
     assert result.status == "validation_failed"
     assert any("VM not defined" in b for b in result.broken_snapshots)
-
-
-# ── test_rsync_available_validation_passes ────────────────────────────────
-
-
-def test_rsync_available_validation_passes(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """``which rsync`` succeeds → validation passes, no warnings.
-
-    rsync check is always run (design D3).  When rsync is available,
-    validation passes with status ``"ok"`` and no broken snapshots.
-    """
-    target = make_target(rate_limit="100M")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    with caplog.at_level(logging.WARNING, logger="qsnap.core"):
-        result = core._validate_environment(vm)
-
-    assert result.status == "ok"
-    assert result.broken_snapshots == []
-    assert not any("rsync not found" in r.message for r in caplog.records)
-
-
-# ── test_rsync_unavailable_pipeline_aborts ─────────────────────────────
-
-
-def test_rsync_unavailable_pipeline_aborts(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """``which rsync`` fails → validation_failed (hard error, not a warning).
-
-    rsync is now a hard requirement (design D3).  Missing rsync causes
-    ``validation_failed`` status and adds "rsync not found" to the
-    broken list — the pipeline will not proceed.
-    """
-    _override(mock_shell, "which rsync", _FAIL)
-    target = make_target(rate_limit="100M")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    result = core._validate_environment(vm)
-
-    # Hard error: validation fails.
-    assert result.status == "validation_failed"
-    assert any("rsync not found" in b for b in result.broken_snapshots)
-
-
-# ── test_rsync_check_always_runs_regardless_of_rate_limit ─────────────
-
-
-def test_rsync_check_always_runs_regardless_of_rate_limit(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """rate_limit='no' → ``which rsync`` still runs (always checked).
-
-    rsync availability is now a hard requirement (design D3).  The check
-    runs unconditionally — even when every target has ``rate_limit == "no"``,
-    ``which rsync`` must be invoked.
-    """
-    target = make_target(rate_limit="no")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
-        result = core._validate_environment(vm)
-
-    # Validation passes (rsync is available in mock_shell fixture).
-    assert result.status == "ok"
-    assert result.broken_snapshots == []
-
-    # ``which rsync`` WAS called — the check always runs.
-    rsync_calls = [call for call in run_spy.call_args_list if call.args and "rsync" in call.args[0]]
-    assert len(rsync_calls) > 0, "which rsync must always run regardless of rate_limit"
 
 
 # ── test_validate_environment_ondemand_target_missing_skipped ──────────────
@@ -424,6 +318,69 @@ def test_pipeline_returns_failure_on_missing_snapshot_dir(
     assert result.results[0].success is False
     assert result.results[0].error is not None
     assert "snapshot_dir not found" in result.results[0].error
+
+
+# ── test_dry_run_downgrades_libnbd_missing_to_warning ──────────────────
+
+
+def test_dry_run_downgrades_libnbd_missing_to_warning(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """libnbd missing → dry-run logs WARNING, normal mode returns failure.
+
+    In dry-run mode, ``_validate_environment()`` still runs (design D6),
+    but when the unconditional libnbd check fails, the failure is downgraded
+    to a WARNING and the pipeline continues.  In normal (non-dry-run) mode,
+    the libnbd failure causes ``PipelineResult.success=False`` with the
+    ``MISSING_LIBNBD_ERROR`` captured in the per-VM error.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda"])
+    config = MockConfigFacade(vms=[vm])
+
+    # ── dry-run: WARNING, no RuntimeError ─────────────────────────
+    core_dry = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core_dry.dry_run = True
+
+    caplog.set_level(logging.WARNING)
+    with patch("qsnap.core.is_libnbd_available", return_value=False):
+        result = core_dry.run()
+
+    # Pipeline succeeds in dry-run (validation failure is non-fatal).
+    assert result.success is True
+
+    # WARNING about libnbd missing was logged.
+    warning_messages = [r.message for r in caplog.records]
+    assert any(
+        "Environment validation failed" in msg and "dry-run" in msg for msg in warning_messages
+    ), f"Expected dry-run validation WARNING, got: {warning_messages}"
+
+    # ── normal mode: returns failure result with libnbd error ────
+    core_normal = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core_normal.dry_run = False
+
+    caplog.clear()
+    with patch("qsnap.core.is_libnbd_available", return_value=False):
+        result_normal = core_normal.run()
+
+    # Normal mode: pipeline fails, error includes libnbd missing error.
+    assert result_normal.success is False
+    assert len(result_normal.results) == 1
+    assert result_normal.results[0].success is False
+    assert "python3-libnbd" in (result_normal.results[0].error or "")
 
 
 # ── Pre-flight cleanup: stale .tmp/.partial files ────────────────────────

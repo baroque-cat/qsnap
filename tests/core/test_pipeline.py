@@ -2699,7 +2699,11 @@ def test_dry_run_detects_vm_running_state_for_method(
     mock_shell,
     caplog,
 ):
-    """Dry-run detects VM state: running → method=NBD, stopped → method=direct convert."""
+    """Dry-run detects VM state: running → VM=running, stopped → VM=stopped.
+
+    Method is always NBD (bitmap-only), but VM state is still reported
+    in the dry-run log for informational purposes.
+    """
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -2735,9 +2739,7 @@ def test_dry_run_detects_vm_running_state_for_method(
     with patch("qsnap.core.is_vm_running", return_value=False):
         core._backup_target(vm, target, [snap])
 
-    assert "method=direct convert" in caplog.text, (
-        "Stopped VM should produce method=direct convert in dry-run log"
-    )
+    assert "method=NBD" in caplog.text, "Stopped VM should also produce method=NBD (bitmap-only)"
     assert "VM=stopped" in caplog.text
 
 
@@ -2797,21 +2799,20 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 # ── Bitmap Target FULL Backup Test ──────────────────────────────────────────
 
 
-def test_full_creation_works_for_file_copy_and_bitmap(
+def test_full_creation_works_for_bitmap(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Bitmap-mode target with weekly trigger → BitmapBackupProvider.create_full_backup() called.
+    """Bitmap backup provider (always used) → create_full_backup() called.
 
-    Verifies that the factory returns the bitmap provider when incremental_mode="bitmap"
+    Verifies that the factory always returns the bitmap backup provider
     and that create_full_backup succeeds without raising NotImplementedError.
     """
     target = make_target(
         target_preserve="7d",
-        incremental_mode="bitmap",
     )
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -2842,9 +2843,7 @@ def test_full_creation_works_for_file_copy_and_bitmap(
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, (
-        "BitmapBackupProvider.create_full_backup() should be called for bitmap target"
-    )
+    assert full_spy.called, "BitmapBackupProvider.create_full_backup() should be called"
 
 
 # ── Check Integrity: --force-share on Active Layer ──────────────────────────

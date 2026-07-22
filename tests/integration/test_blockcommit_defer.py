@@ -56,7 +56,6 @@ def _build_core(
             TargetConfig(
                 path=target_dir,
                 incremental=True,
-                incremental_mode="file-copy",
                 compress=False,
                 verify="off",
             )

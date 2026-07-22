@@ -15,7 +15,6 @@ from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from tests.mocks.mock_modules import (
-    MockBackupProvider,
     MockBitmapBackupProvider,
     MockBucketFullStrategy,
     MockChangeDetector,
@@ -30,8 +29,11 @@ class MockVMModuleFactory(IVMModuleFactory):
 
     def __init__(self) -> None:
         self._snapshot_provider = MockSnapshotProvider()
-        self._backup_provider = MockBackupProvider()
         self._bitmap_backup_provider = MockBitmapBackupProvider()
+        # After rsync/file-copy removal, the factory always returns the
+        # bitmap backup provider.  Alias _backup_provider so existing
+        # tests that spy on it continue to work.
+        self._backup_provider = self._bitmap_backup_provider
         self._retention_engine = MockRetentionEngine()
         self._change_detector = MockChangeDetector()
         self._lifecycle_manager = MockLifecycleManager()
@@ -45,9 +47,10 @@ class MockVMModuleFactory(IVMModuleFactory):
         vm_config: VMConfig,
         target: TargetConfig,
     ) -> IBackupProvider:
-        if target.incremental_mode == "bitmap":
-            return self._bitmap_backup_provider
-        return self._backup_provider
+        # Bitmap is the only backup strategy now — always return the
+        # bitmap backup provider mock (matches DefaultFactory behaviour
+        # after rsync/file-copy removal).
+        return self._bitmap_backup_provider
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:
         return self._retention_engine

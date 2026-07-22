@@ -21,22 +21,24 @@ Each factory method SHALL return an instance implementing the corresponding ABC 
 - **WHEN** DefaultFactory is created with a mock shell and mock state manager
 - **THEN** both are stored and available for module construction
 
-### Requirement: DefaultFactory gates BitmapBackupProvider on libvirt version
+### Requirement: DefaultFactory returns BitmapBackupProvider with hard dependency gates
 
-`DefaultFactory.create_backup_provider()` SHALL, when `target.incremental_mode == "bitmap"`, call `is_libvirt_new_enough(shell)` from `qsnap.utils.nbd` BEFORE constructing `BitmapBackupProvider`. If the version check returns `False`, the factory SHALL log a WARNING and return `FileCopyBackupProvider(shell, state)`. If `True`, the factory SHALL construct and return `BitmapBackupProvider(shell)`.
+`DefaultFactory.create_backup_provider()` SHALL always return a `BitmapBackupProvider` — it is the sole backup provider. Before constructing it, the factory SHALL verify: (a) `is_libvirt_new_enough(shell)` returns `True` (libvirt >= 7.2); if the version is insufficient, the factory SHALL raise `RuntimeError` with an actionable message requiring a libvirt upgrade — there SHALL be no fallback to any other provider; (b) `is_libnbd_available()` returns `True`; if libnbd is missing, the factory SHALL raise `RuntimeError` naming the `python3-libnbd` system package. The factory SHALL pass `self._state` as the `state` parameter to the provider constructor.
 
-#### Scenario: Bitmap mode with old libvirt falls back to FileCopy
-- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode == "bitmap"`
-- **AND** `is_libvirt_new_enough(shell)` returns `False`
-- **THEN** the factory returns `FileCopyBackupProvider(shell, state)`
-- **AND** a WARNING is logged
+#### Scenario: Sufficient platform returns BitmapBackupProvider
 
-#### Scenario: Bitmap mode with sufficient libvirt returns BitmapBackupProvider
-- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode == "bitmap"`
-- **AND** `is_libvirt_new_enough(shell)` returns `True`
-- **THEN** the factory returns `BitmapBackupProvider(shell)`
+- **WHEN** `create_backup_provider(vm_config, target)` is called
+- **AND** `is_libvirt_new_enough(shell)` returns `True` and the `nbd` module is importable
+- **THEN** the factory returns `BitmapBackupProvider(shell, state)`
 
-#### Scenario: Non-bitmap mode bypasses version check
-- **WHEN** `create_backup_provider(vm_config, target)` is called with `target.incremental_mode != "bitmap"`
-- **THEN** no call to `is_libvirt_new_enough(shell)` is made
-- **THEN** `FileCopyBackupProvider` is returned directly
+#### Scenario: Old libvirt is a hard error
+
+- **WHEN** `is_libvirt_new_enough(shell)` returns `False` (libvirt < 7.2)
+- **THEN** the factory raises `RuntimeError` with a message requiring libvirt >= 7.2
+- **AND** no provider is returned and no fallback occurs
+
+#### Scenario: Missing libnbd is a hard error
+
+- **WHEN** the `nbd` module is not importable
+- **THEN** the factory raises `RuntimeError` naming the `python3-libnbd` package
+- **AND** no provider is returned and no fallback occurs

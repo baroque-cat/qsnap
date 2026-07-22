@@ -29,9 +29,7 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
     instance = cls()
 
     # isinstance check against the ABC.
-    assert isinstance(instance, INbdClient), (
-        f"{cls.__name__} must pass isinstance(INbdClient)"
-    )
+    assert isinstance(instance, INbdClient), f"{cls.__name__} must pass isinstance(INbdClient)"
 
     # All seven interface methods must exist.
     for method_name in (
@@ -43,18 +41,14 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
         "pwrite",
         "disconnect",
     ):
-        assert hasattr(instance, method_name), (
-            f"{cls.__name__} is missing method {method_name!r}"
-        )
+        assert hasattr(instance, method_name), f"{cls.__name__} is missing method {method_name!r}"
         assert callable(getattr(instance, method_name)), (
             f"{cls.__name__}.{method_name} must be callable"
         )
 
     # get_size() returns int.
     size = instance.get_size()
-    assert isinstance(size, int), (
-        f"{cls.__name__}.get_size() must return int, got {type(size)}"
-    )
+    assert isinstance(size, int), f"{cls.__name__}.get_size() must return int, got {type(size)}"
 
     # get_max_request_size() returns int.
     max_sz = instance.get_max_request_size()
@@ -70,6 +64,4 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
 def test_mock_nbd_client_is_inbdclient() -> None:
     """MockNbdClient passes ``isinstance`` against ``INbdClient``."""
     mock = MockNbdClient()
-    assert isinstance(mock, INbdClient), (
-        "MockNbdClient must be an instance of INbdClient"
-    )
+    assert isinstance(mock, INbdClient), "MockNbdClient must be an instance of INbdClient"

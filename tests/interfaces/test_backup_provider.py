@@ -17,10 +17,8 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
-from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvider
 from tests.mocks.mock_shell import MockShell
-from tests.mocks.mock_state import InMemoryStateManager
 
 
 def test_ibackup_provider_is_abstract():
@@ -32,16 +30,6 @@ def test_ibackup_provider_is_abstract():
     assert len(IBackupProvider.__abstractmethods__) > 0
     with pytest.raises(TypeError):
         IBackupProvider()  # type: ignore[abstract]
-
-
-def test_file_copy_backup_provider_is_ibackup_provider():
-    """FileCopyBackupProvider is a subclass of IBackupProvider."""
-    assert issubclass(FileCopyBackupProvider, IBackupProvider)
-
-
-def test_file_copy_backup_provider_no_core_inheritance():
-    """FileCopyBackupProvider does NOT inherit from Core (design D1)."""
-    assert not issubclass(FileCopyBackupProvider, Core)
 
 
 def test_bitmap_backup_provider_is_ibackup_provider():
@@ -57,13 +45,11 @@ def test_bitmap_backup_provider_no_core_inheritance():
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
-        (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (BitmapBackupProvider, {"shell": MockShell(), "state": InMemoryStateManager()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "bitmap_with_state", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, init_kwargs):
     """transfer_missing() returns a list whose elements are all BackupResult."""
@@ -91,12 +77,11 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
-        (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     """list() returns a list whose elements are all SnapshotInfo."""
@@ -111,12 +96,11 @@ def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
-        (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
     """delete() returns a ShellResult."""
@@ -129,12 +113,6 @@ def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
     )
     result = provider.delete(backup)
     assert isinstance(result, ShellResult)
-
-
-def test_file_copy_backup_provider_requires_shell():
-    """FileCopyBackupProvider requires an IShell constructor argument."""
-    with pytest.raises(TypeError):
-        FileCopyBackupProvider()  # type: ignore[call-arg]
 
 
 def test_ibackup_provider_create_full_backup_abstract():
@@ -181,29 +159,24 @@ def test_ibackup_provider_create_full_backup_abstract():
         )
 
     # Concrete implementations that override it expose the method.
-    assert callable(FileCopyBackupProvider.create_full_backup)
     assert callable(MockBackupProvider.create_full_backup)
 
 
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
-        (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwargs):
     """create_full_backup() returns a BackupResult instance.
 
-    For ``FileCopyBackupProvider`` the bare ``MockShell`` causes the
-    ``qemu-img convert`` step to fail, but the provider still returns a
-    ``BackupResult`` (with ``success=False``).  ``BitmapBackupProvider``
-    similarly fails on the NBD export step but returns a
-    ``BackupResult(success=False)``.  ``MockBackupProvider`` returns a
-    successful ``BackupResult``.
+    ``BitmapBackupProvider`` with bare ``MockShell`` fails on the NBD
+    export step but returns a ``BackupResult(success=False)``.
+    ``MockBackupProvider`` returns a successful ``BackupResult``.
     """
     provider = cls(**init_kwargs)
     source_snapshot = SnapshotInfo(
@@ -247,12 +220,11 @@ def test_ibackup_provider_create_full_backup_bucket_level_parameter():
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
-        (FileCopyBackupProvider, {"shell": MockShell()}),
         (BitmapBackupProvider, {"shell": MockShell()}),
         (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["file_copy", "bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_bucket_level_in_concrete_signatures(
     cls,

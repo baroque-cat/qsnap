@@ -1,31 +1,23 @@
 """Cross-cutting backup verification logic.
 
-Provides stateless verification functions used by both
-``FileCopyBackupProvider`` and ``BitmapBackupProvider`` to verify that
-a transferred backup file is a valid qcow2 image matching the source.
+Provides stateless verification functions used by
+``BitmapBackupProvider`` and ``Core`` to verify that a transferred
+backup file is a valid qcow2 image.
 
 These functions do not implement any ABC and are shared across module
 boundaries, so they live in ``qsnap.utils`` rather than under
 ``qsnap.modules.backup``.
 
-Verification levels (``TargetConfig.verify``):
-- ``"off"``: no verification.
-- ``"metadata"``: ``qemu-img info`` consistency check (format,
-  virtual-size).  ``actual-size`` is intentionally NOT checked — it is
-  unreliable for live sources because the running VM writes data to the
-  active snapshot layer between transfer and verification.
-- ``"hash"``: SHA-256 hash comparison (computed at snapshot creation time,
-  stored in ``SnapshotInfo.content_hash``, validated on target after transfer).
-- ``"full"``: metadata check + ``qemu-img compare -q --force-share``
-  byte-level comparison.  ``--force-share`` avoids lock errors on live
-  sources; a WARNING is logged because results may be unreliable if the
-  VM writes during the comparison.
+:func:`verify_full_backup` verifies standalone FULL backup files
+(structural integrity via ``qemu-img info``/``qemu-img check``, plus
+optional content comparison).
 
-Bitmap incrementals use :func:`verify_bitmap_incremental` instead of
-:func:`verify_backup`: in addition to format and virtual-size, it checks
-the delta's ``backing-filename`` against the resolved previous backup and
-enforces the dirty-size regression barrier (``actual-size ≤ dirty_bytes ×
-2 + 64 MiB``) that catches an engine regression to full-copy behavior.
+:func:`verify_bitmap_incremental` verifies backing-chained bitmap
+delta files: in addition to format and virtual-size, it checks the
+delta's ``backing-filename`` against the resolved previous backup and
+enforces the dirty-size regression barrier (``actual-size ≤ dirty_bytes
+× 2 + 64 MiB``) that catches an engine regression to full-copy
+behavior.
 """
 
 from __future__ import annotations
@@ -36,7 +28,6 @@ from pathlib import Path
 from typing import cast
 
 from qsnap.interfaces.shell import IShell
-from qsnap.utils.hash import file_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +47,10 @@ def verify_full_backup(
     source_path: Path | None = None,
     expected_virtual_size: int | None = None,
 ) -> str | None:
-    """Verify a standalone FULL backup file (no source comparison).
+    """Verify a standalone FULL backup file.
 
-    Unlike :func:`verify_backup` (which compares source and target),
-    this function verifies a standalone FULL backup file's structural
-    integrity.  Used at three FULL lifecycle points: post-creation
+    Verifies a standalone FULL backup file's structural integrity.
+    Used at three FULL lifecycle points: post-creation
     (before state recording), pre-rebase (before linking incrementals),
     and pre-deletion (before cascade-deletion).
 
@@ -214,8 +204,7 @@ def verify_bitmap_incremental(
     For ``verify_mode`` ``"hash"`` or ``"full"``,
     ``qemu-img compare -q --force-share <source> <delta>`` additionally
     compares virtual disk content across both backing chains
-    (chain-traversing; the live-source WARNING is logged as in
-    :func:`verify_backup`).
+    (chain-traversing; a live-source WARNING is logged).
 
     Args:
         shell: :class:`IShell` instance for running qemu-img commands.
@@ -310,10 +299,10 @@ def verify_bitmap_incremental(
 
     # ── Content comparison across chains (hash/full tiers) ───────────
     if verify_mode in ("hash", "full"):
-        # Same live-source caveat as verify_backup: the source may be a
-        # running VM's active layer; --force-share avoids hard lock
-        # errors, but writes during the comparison may produce false
-        # mismatches (design D5/R6).
+        # Live-source caveat: the source may be a running VM's active
+        # layer; --force-share avoids hard lock errors, but writes
+        # during the comparison may produce false mismatches (design
+        # D5/R6).
         logger.warning(
             "verify=%s on running VM active layer %s — "
             "results may be unreliable, consider verify='metadata'",
@@ -335,147 +324,7 @@ def verify_bitmap_incremental(
         if not compare_result.success:
             error_detail = compare_result.error or compare_result.stderr or ""
             if "lock" in error_detail.lower() or "shared" in error_detail.lower():
-                return (
-                    "verification failed: lock conflict — "
-                    "use verify='metadata' for live sources"
-                )
+                return "verification failed: lock conflict — use verify='metadata' for live sources"
             return f"verification failed: content comparison mismatch: {error_detail}"
-
-    return None
-
-
-def verify_backup(
-    shell: IShell,
-    source_path: str,
-    target_path: str,
-    verify_mode: str,
-    expected_hash: str | None = None,
-) -> str | None:
-    """Verify a backup file against its source.
-
-    Metadata verification (always runs unless ``verify_mode == "off"``)
-    checks: (a) target format is ``"qcow2"``, (b) target ``virtual-size``
-    matches the source exactly.  ``actual-size`` is intentionally NOT
-    checked — it is unreliable for live sources because the running VM
-    writes data to the active snapshot layer between transfer completion
-    and verification (design D1).
-
-    Args:
-        shell: IShell instance for running qemu-img commands.
-        source_path: Path to the source qcow2 file.
-        target_path: Path to the target (backup) qcow2 file.
-        verify_mode: One of ``"off"``, ``"metadata"``, ``"hash"``, ``"full"``.
-        expected_hash: SHA-256 hex digest of the source file, required
-            for ``"hash"`` mode.  If ``None`` in ``"hash"`` mode, hash
-            verification is skipped.
-
-    Returns:
-        ``None`` on success, or an error string starting with
-        ``"verification failed: ..."`` on failure.
-    """
-    if verify_mode == "off":
-        return None
-
-    # ── Metadata verification ────────────────────────────────────────
-
-    # Source info
-    # --force-share: the source may be the active layer of a running
-    # VM, which has an exclusive write lock.  --force-share requests a
-    # shared lock for this metadata-only read (design D5).
-    source_info_cmd = [
-        "qemu-img",
-        "info",
-        "--force-share",
-        "--output=json",
-        str(source_path),
-    ]
-    source_result = shell.run(source_info_cmd, timeout=60)
-    if not source_result.success:
-        return f"verification failed: cannot get source info: {source_result.error}"
-
-    # Target info
-    target_info_cmd = [
-        "qemu-img",
-        "info",
-        "--output=json",
-        str(target_path),
-    ]
-    target_result = shell.run(target_info_cmd, timeout=60)
-    if not target_result.success:
-        return f"verification failed: cannot get target info: {target_result.error}"
-
-    try:
-        source_info = json.loads(source_result.stdout)
-    except json.JSONDecodeError as exc:
-        return f"verification failed: cannot parse source info JSON: {exc}"
-
-    try:
-        target_info = json.loads(target_result.stdout)
-    except json.JSONDecodeError as exc:
-        return f"verification failed: cannot parse target info JSON: {exc}"
-
-    # (a) format check
-    target_format = target_info.get("format", "")
-    if target_format != "qcow2":
-        return f"verification failed: expected format qcow2, got {target_format}"
-
-    # (b) virtual-size match (exact)
-    source_vsize = int(source_info.get("virtual-size", 0))
-    target_vsize = int(target_info.get("virtual-size", 0))
-    if source_vsize != target_vsize:
-        return "verification failed: virtual-size mismatch"
-
-    # NOTE: actual-size is intentionally NOT checked.  It is unreliable
-    # for live sources because the running VM writes data to the active
-    # snapshot layer between transfer completion and verification,
-    # causing the source's actual-size to grow beyond any reasonable
-    # tolerance (design D1).  Format + virtual-size are sufficient for
-    # metadata-level verification.
-
-    # ── Hash verification (mid-level between metadata and full) ──────
-
-    if verify_mode == "hash" and expected_hash is not None:
-        try:
-            actual_hash = file_sha256(Path(target_path))
-        except OSError as exc:
-            return f"verification failed: cannot read target file for hashing: {exc}"
-        if actual_hash != expected_hash:
-            return "verification failed: hash mismatch"
-
-    # ── Full verification ────────────────────────────────────────────
-
-    if verify_mode == "full":
-        # Warn: if the source is a live VM active layer, qemu-img compare
-        # with --force-share opens the image in shared mode — the
-        # comparison may produce false mismatches if the VM writes
-        # during the comparison.  --force-share is used to avoid hard
-        # lock errors (design D5); a potential false mismatch is better
-        # than no verification at all.
-        logger.warning(
-            "verify=full on running VM active layer %s — "
-            "results may be unreliable, consider verify='metadata' "
-            "or verify='hash'",
-            source_path,
-        )
-        compare_cmd = [
-            "qemu-img",
-            "compare",
-            "-q",
-            "--force-share",
-            str(source_path),
-            str(target_path),
-        ]
-        compare_result = shell.run(
-            compare_cmd,
-            timeout=_VERIFY_COMPARE_TIMEOUT,
-        )
-        if not compare_result.success:
-            error_detail = compare_result.error or compare_result.stderr or ""
-            if "lock" in error_detail.lower() or "shared" in error_detail.lower():
-                return (
-                    "verification failed: lock conflict — "
-                    "use verify='metadata' or verify='hash' for live sources"
-                )
-            return f"verification failed: data comparison mismatch: {error_detail}"
 
     return None

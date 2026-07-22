@@ -215,7 +215,9 @@ def test_int_nbd_incremental_with_compression(test_vm):
         ["qemu-img", "info", "--output=json", str(incr_path)],
         timeout=30,
     )
-    assert incr_info_result.success, f"qemu-img info on incremental failed: {incr_info_result.error}"
+    assert incr_info_result.success, (
+        f"qemu-img info on incremental failed: {incr_info_result.error}"
+    )
     incr_info = json.loads(incr_info_result.stdout)
     assert incr_info.get("format") == "qcow2", "Incremental should be valid qcow2"
 
@@ -665,9 +667,7 @@ def test_int_incremental_is_smaller_than_full(test_vm):
     src_info = json.loads(src_info_result.stdout)
     src_vsize = int(src_info.get("virtual-size", 0))
     incr_vsize = int(incr_data.get("virtual-size", 0))
-    assert incr_vsize == src_vsize, (
-        f"virtual-size mismatch: source={src_vsize}, delta={incr_vsize}"
-    )
+    assert incr_vsize == src_vsize, f"virtual-size mismatch: source={src_vsize}, delta={incr_vsize}"
 
     # ── Dirty-barrier assertion (design D5) ──────────────────────────
     actual_size = int(incr_data.get("actual-size", 0))

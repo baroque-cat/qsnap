@@ -112,7 +112,7 @@ The copy loop SHALL implement stall detection without `IShell`: a progress times
 
 ### Requirement: Incremental output is a backing-chained COW delta
 
-Every bitmap incremental SHALL be a qcow2 whose `backing-filename` resolves to the previous backup on the same target (previous incremental or FULL). Blocks not dirtied since the prior checkpoint SHALL NOT be written to the delta (they read through the backing chain). After Core records the incremental→FULL dependency, retention cascade-deletion and `check` SHALL treat bitmap chains exactly like file-copy chains.
+Every bitmap incremental SHALL be a qcow2 whose `backing-filename` resolves to the previous backup on the same target (previous incremental or FULL). Blocks not dirtied since the prior checkpoint SHALL NOT be written to the delta (they read through the backing chain). After Core records the incremental→FULL dependency, retention cascade-deletion and `check` SHALL treat bitmap chains as standard backup chains.
 
 #### Scenario: qemu-img info shows the backing chain
 

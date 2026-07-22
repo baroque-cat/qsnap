@@ -1491,8 +1491,9 @@ class Core:
                 )
 
             # (d) Detect truncated .qcow2 files on backup targets
-            #     (partial rsync artifacts).  Only scan non-FULL .qcow2
-            #     files — FULL files are verified at lifecycle points.
+            #     (partial transfer artifacts).  Only scan non-FULL
+            #     .qcow2 files — FULL files are verified at lifecycle
+            #     points.
             for target_dir in (t.path for t in vm_config.targets):
                 for qcow2_file in target_dir.glob("*.qcow2"):
                     # Skip FULL anchor files (verified elsewhere)
@@ -1633,24 +1634,13 @@ class Core:
                 else:
                     broken.append(f"target directory not found: {target.path}")
 
-        # (f) rsync availability — hard requirement (design D3)
-        rsync_check = self._shell.run(
-            ["which", "rsync"],
-            timeout=10,
-            check=True,
-        )
-        if not rsync_check.success:
-            broken.append("rsync not found — rsync is a hard requirement")
-
-        # (g) libnbd availability — hard requirement when any target uses
-        # incremental_mode="bitmap" (spec: env-validation delta; design R4).
-        # The check is skipped entirely when no bitmap target exists so
-        # qsnap remains fully functional without libnbd.  There is no
-        # silent fallback to file-copy: missing dependency is a hard
-        # validation error naming the system package.
-        if any(t.incremental_mode == "bitmap" for t in vm_config.targets) and (
-            not is_libnbd_available()
-        ):
+        # (f) libnbd availability — unconditional hard requirement
+        # (spec: env-validation delta; design D5/R4).  Bitmap is the only
+        # backup strategy, so the NBD transport is always needed.  There
+        # is no silent fallback: a missing dependency is a hard
+        # validation error naming the system package.  In dry-run mode
+        # the failure is downgraded to a WARNING by the caller.
+        if not is_libnbd_available():
             broken.append(MISSING_LIBNBD_ERROR)
 
         if broken:
@@ -2615,7 +2605,6 @@ class Core:
                 vm_config,
                 target,
                 snapshots,
-                rate_limit=target.rate_limit,
                 full_verify_before_rebase=full_verify_before_rebase,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
@@ -2627,7 +2616,6 @@ class Core:
                 vm_config,
                 target,
                 snapshots,
-                rate_limit=target.rate_limit,
                 full_verify_before_rebase=full_verify_before_rebase,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
@@ -2721,14 +2709,15 @@ class Core:
             )
             if should_full:
                 if self._dry_run:
-                    # Log FULL-would-be-created without executing (design D7)
-                    vm_running = is_vm_running(self._shell, vm_config.name)
-                    method = "NBD" if vm_running else "direct convert"
-                    vm_state = "running" if vm_running else "stopped"
+                    # Log FULL-would-be-created without executing (design D7).
+                    # Single NBD path — no direct-convert fallback, so no
+                    # method selection (live-vm-full-backup delta).
+                    vm_state = (
+                        "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
+                    )
                     logger.info(
-                        "[dry-run] Would create FULL backup (bucket=%s, method=%s, VM=%s)",
+                        "[dry-run] Would create FULL backup (bucket=%s, method=NBD, VM=%s)",
                         bucket_level,
-                        method,
                         vm_state,
                     )
                 else:
@@ -2850,26 +2839,25 @@ class Core:
                         speed,
                     )
 
-            # Record incremental→FULL dependency for bitmap-mode
-            # transfers (spec: Core records dependency; design D4 —
-            # state recording is Core's responsibility).  Bitmap
-            # incrementals are backing-chained deltas; the provider
-            # verified them, and Core now registers each as a dependent
-            # of its chain's FULL anchor so retention cascade-deletion
-            # and ``check`` treat bitmap chains like file-copy chains.
-            # Failed transfers record nothing; standalone full pulls
-            # (no backing file) have no anchor and are skipped.
-            if target.incremental_mode == "bitmap":
-                for r in results:
-                    if not r.success:
-                        continue
-                    anchor = self._resolve_chain_full_anchor(r.target_path)
-                    if anchor is not None:
-                        self._state.record_incremental_dependency(
-                            str(target.path),
-                            r.snapshot_name,
-                            anchor,
-                        )
+            # Record incremental→FULL dependency for bitmap transfers
+            # (spec: Core records dependency; design D4 — state
+            # recording is Core's responsibility).  Bitmap incrementals
+            # are backing-chained deltas; the provider verified them,
+            # and Core now registers each as a dependent of its chain's
+            # FULL anchor so retention cascade-deletion and ``check``
+            # see the whole chain.  Failed transfers record nothing;
+            # standalone full pulls (no backing file) have no anchor
+            # and are skipped.
+            for r in results:
+                if not r.success:
+                    continue
+                anchor = self._resolve_chain_full_anchor(r.target_path)
+                if anchor is not None:
+                    self._state.record_incremental_dependency(
+                        str(target.path),
+                        r.snapshot_name,
+                        anchor,
+                    )
 
         # Backup retention + cleanup
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)

@@ -56,29 +56,6 @@ The successor checkpoint SHALL be passed as a separate checkpoint XML file given
 - **WHEN** a previous qsnap process crashed leaving `/tmp/qsnap-backup-12345.sock`
 - **THEN** the new process (different PID) removes the stale socket before starting
 
-### Requirement: Libvirt version check for NBD API
-
-`DefaultFactory.create_backup_provider()` SHALL call `is_libvirt_new_enough(shell)` from `qsnap.utils.nbd` before constructing `BitmapBackupProvider`. If the version is insufficient, the factory SHALL log a WARNING and return `FileCopyBackupProvider`. `BitmapBackupProvider.__init__()` SHALL NOT perform version checking — it SHALL NOT call `virsh --version` and SHALL NOT raise `RuntimeError` for an old libvirt.
-
-`is_libvirt_new_enough()` SHALL return `True` only for libvirt version 7.2 or newer. The incremental backup API (including the `<incremental>` XML element and the checkpoint XML argument of `backup-begin`) is complete since libvirt 7.2 per the libvirt knowledge base; the previous 6.0 threshold was insufficient.
-
-#### Scenario: Libvirt too old
-- **WHEN** `virsh --version` returns a version older than 7.2
-- **THEN** `is_libvirt_new_enough(shell)` returns `False`
-- **THEN** `DefaultFactory` does NOT construct `BitmapBackupProvider`
-- **THEN** `DefaultFactory` logs a WARNING and returns `FileCopyBackupProvider(shell, state)`
-
-#### Scenario: Libvirt sufficient
-- **WHEN** `virsh --version` returns a version 7.2 or newer
-- **THEN** `is_libvirt_new_enough(shell)` returns `True`
-- **THEN** `DefaultFactory` constructs and returns `BitmapBackupProvider(shell)`
-
-#### Scenario: BitmapBackupProvider constructor is version-check-free
-- **WHEN** `BitmapBackupProvider(shell)` is instantiated
-- **THEN** no `virsh --version` shell call is made in `__init__`
-- **AND** no `RuntimeError` is raised for version reasons
-- **AND** the only parameter is `shell: IShell`
-
 ### Requirement: BitmapBackupProvider.create_full_backup via NBD full export
 
 `BitmapBackupProvider` SHALL implement `create_full_backup()` using the NBD full-export path (no `--incremental` flag). This produces a standalone qcow2 on the target. The method SHALL NOT raise `NotImplementedError`. The method SHALL pass a `checkpoint_name` to `nbd_full_export()` so that a baseline checkpoint is created **atomically** with the FULL's `backup-begin`, named `qsnap-{target_hash}-{yyyymmddTHHMMSS}`. A bitmap-mode FULL therefore always leaves a checkpoint baseline anchored at the FULL's freeze point. When `compress=True` and `compression_type="zstd"`, the `-c -o compression_type=zstd` flags SHALL be passed to `qemu-img convert` in the NBD path. When `compress=True` and `compression_type="zlib"`, only `-c` SHALL be added. The `compression_type` parameter SHALL be passed through to `nbd_full_export()`.
@@ -201,7 +178,7 @@ The first `transfer_missing()` incremental after a bitmap-mode FULL SHALL export
 
 ### Requirement: Incremental verification includes backing-file check and dirty-size regression barrier
 
-Verification of a bitmap incremental (`target.verify != "off"`) SHALL assert: (a) `qemu-img info` reports format `qcow2`, (b) `virtual-size` matches the source disk, (c) `backing-filename` equals the resolved previous backup path, and (d) the file's `actual-size` does not exceed `dirty_bytes × 2 + 64 MiB`, where `dirty_bytes` is the sum of dirty extent lengths measured by the copy loop before transfer. Breach of any check SHALL fail the transfer with `"verification failed: ..."` and trigger the standard failure path. For `verify="hash"` or `verify="full"`, `qemu-img compare -q --force-share <snapshot> <delta>` SHALL additionally compare virtual disk content across both backing chains. A dedicated `verify_bitmap_incremental()` helper SHALL live in `qsnap/utils/verification.py`; the file-copy-oriented `verify_backup()` SHALL NOT be used for bitmap incrementals.
+Verification of a bitmap incremental (`target.verify != "off"`) SHALL assert: (a) `qemu-img info` reports format `qcow2`, (b) `virtual-size` matches the source disk, (c) `backing-filename` equals the resolved previous backup path, and (d) the file's `actual-size` does not exceed `dirty_bytes × 2 + 64 MiB`, where `dirty_bytes` is the sum of dirty extent lengths measured by the copy loop before transfer. Breach of any check SHALL fail the transfer with `"verification failed: ..."` and trigger the standard failure path. For `verify="hash"` or `verify="full"`, `qemu-img compare -q --force-share <snapshot> <delta>` SHALL additionally compare virtual disk content across both backing chains. A dedicated `verify_bitmap_incremental()` helper SHALL live in `qsnap/utils/verification.py`.
 
 #### Scenario: Delta proportional to dirtied data passes
 
@@ -221,7 +198,7 @@ Verification of a bitmap incremental (`target.verify != "off"`) SHALL assert: (a
 
 ### Requirement: Core records incremental→FULL dependency for bitmap transfers
 
-After a bitmap incremental transfer succeeds **and passes verification**, Core SHALL call `record_incremental_dependency()` for the incremental and its chain's FULL anchor — the same post-success recording used for file-copy transfers (design D4: state recording is Core's responsibility). Retention cascade-deletion and `check` SHALL therefore see bitmap incrementals as dependents of their FULL.
+After a bitmap incremental transfer succeeds **and passes verification**, Core SHALL call `record_incremental_dependency()` for the incremental and its chain's FULL anchor — state recording is Core's responsibility (design D4). Retention cascade-deletion and `check` SHALL therefore see bitmap incrementals as dependents of their FULL.
 
 #### Scenario: Bitmap incremental registered as dependent
 

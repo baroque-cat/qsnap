@@ -18,13 +18,12 @@ from qsnap.utils.nbd import (
     is_vm_running,
     nbd_full_export,
 )
-from qsnap.utils.verification import verify_backup, verify_full_backup
+from qsnap.utils.verification import verify_full_backup
 
 __all__ = [
     "file_sha256",
     "is_libvirt_new_enough",
     "is_vm_running",
     "nbd_full_export",
-    "verify_backup",
     "verify_full_backup",
 ]

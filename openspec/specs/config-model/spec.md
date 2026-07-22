@@ -1,7 +1,7 @@
 ## Requirements
 
 ### Requirement: GlobalConfig dataclass
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, preserve day of week, state directory, lockfile path, snapshot/target preserve policies, rate limit, deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, and backup stall timeout.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, preserve day of week, state directory, lockfile path, snapshot/target preserve policies, deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, and backup stall timeout.
 
 #### Scenario: GlobalConfig is immutable
 - **WHEN** a GlobalConfig instance is created with `timestamp_format="long"` and `preserve_day_of_week="monday"`
@@ -9,11 +9,11 @@ The system SHALL provide an immutable `GlobalConfig` dataclass with frozen field
 
 #### Scenario: GlobalConfig default values
 - **WHEN** a GlobalConfig is created with only required fields
-- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `rate_limit="no"`, `compress=True`, `compression_type="zstd"`, `backup_stall_timeout="30m"`, `deferred_warn_count="5"`, `deferred_crit_count="10"`, `deferred_warn_age="7d"`, `deferred_crit_age="14d"`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
+- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `compress=True`, `compression_type="zstd"`, `backup_stall_timeout="30m"`, `deferred_warn_count="5"`, `deferred_crit_count="10"`, `deferred_warn_age="7d"`, `deferred_crit_age="14d"`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
 
 ### Requirement: compression_type field in GlobalConfig
 
-`GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. This field selects the compression algorithm used by `qemu-img convert -c` (via `-o compression_type=<type>`) and `rsync --compress` (via `--compress-choice=<type>`) when `compress=True`. The field is immutable (frozen dataclass).
+`GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. This field selects the compression algorithm used by `qemu-img convert -c` (via `-o compression_type=<type>`) when `compress=True`. The field is immutable (frozen dataclass).
 
 #### Scenario: GlobalConfig default compression_type is zstd
 - **WHEN** a GlobalConfig is created with only required fields
@@ -51,11 +51,11 @@ The system SHALL provide an immutable `VMConfig` dataclass representing a single
 - **THEN** `vm.targets` contains those targets in order
 
 ### Requirement: TargetConfig dataclass
-The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, its rate limit setting, verification mode, retry controls, compression setting, compression type, backup stall timeout, and base-copy behavior. The `verify` field SHALL default to `"metadata"` at the dataclass level. `ConfigFacade._build_target()` SHALL resolve the effective default based on `incremental_mode`: `"hash"` when `incremental_mode == "file-copy"`, `"metadata"` when `incremental_mode == "bitmap"`. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence over the mode-dependent default. The `incremental_mode` field SHALL default to `"bitmap"` (NBD dirty-block extraction); the factory SHALL fall back to `FileCopyBackupProvider` when libvirt < 6.0. The `compression_type` field SHALL default to `"zstd"` and inherit from `GlobalConfig.compression_type` when not explicitly set. The `backup_stall_timeout` field SHALL default to `"30m"` and inherit from `GlobalConfig.backup_stall_timeout` when not explicitly set.
+The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, verification mode, retry controls, compression setting, compression type, and backup stall timeout. The `verify` field SHALL default to `"metadata"` at the dataclass level. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence. The `compression_type` field SHALL default to `"zstd"` and inherit from `GlobalConfig.compression_type` when not explicitly set. The `backup_stall_timeout` field SHALL default to `"30m"` and inherit from `GlobalConfig.backup_stall_timeout` when not explicitly set.
 
 #### Scenario: TargetConfig with incremental enabled
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and `incremental=True`
-- **THEN** both fields are accessible, `rate_limit` defaults to `"no"`, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `compression_type` defaults to `"zstd"`, `backup_stall_timeout` defaults to `"30m"`, `copy_base` defaults to `False`, and the instance is frozen
+- **THEN** both fields are accessible, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `compression_type` defaults to `"zstd"`, `backup_stall_timeout` defaults to `"30m"`, and the instance is frozen
 
 ### Requirement: compression_type field in TargetConfig
 
@@ -168,31 +168,19 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **THEN** only `vda` and `vdb` are snapshotted
 
 ### Requirement: TargetConfig verify field
-`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The *effective* default SHALL be resolved by `ConfigFacade._build_target()` based on `incremental_mode`: `"hash"` when `incremental_mode == "file-copy"`, `"metadata"` when `incremental_mode == "bitmap"`. When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (qemu-img info consistency check), `"hash"` (SHA-256 digest comparison), and `"full"` (qemu-img compare byte-level verification). The field SHALL be immutable (`frozen=True`).
+`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The default SHALL be `"metadata"` (NBD bitmap is the only backup strategy). When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (qemu-img info consistency check), `"hash"` (qemu-img compare chain-traversing content verification), and `"full"` (same as `"hash"` for bitmap chains — chain-traversing content compare). The field SHALL be immutable (`frozen=True`).
 
 #### Scenario: Dataclass-level verify default is metadata
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and no `verify`
-- **THEN** `target.verify` is `"metadata"` (dataclass-level; effective default resolved by ConfigFacade)
-
-#### Scenario: ConfigFacade resolves hash default for file-copy mode
-- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="file-copy"` and no explicit `verify`
-- **THEN** the resulting `TargetConfig.verify` is `"hash"`
-
-#### Scenario: ConfigFacade resolves metadata default for bitmap mode
-- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="bitmap"` and no explicit `verify`
-- **THEN** the resulting `TargetConfig.verify` is `"metadata"`
+- **THEN** `target.verify` is `"metadata"`
 
 #### Scenario: Explicit full verification
 - **WHEN** a TargetConfig is created with `verify="full"`
 - **THEN** `target.verify` is `"full"`
 
-#### Scenario: Explicit verify overrides mode-dependent default
-- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="file-copy"` and explicit `verify="metadata"`
-- **THEN** the resulting `TargetConfig.verify` is `"metadata"` (explicit value takes precedence)
-
-#### Scenario: Bitmap mode with verify="hash" warns and downgrades
-- **WHEN** `ConfigFacade._build_target()` processes a target with `incremental_mode="bitmap"` and `verify="hash"` explicitly set
-- **THEN** a WARNING is logged and `verify` is auto-downgraded to `"metadata"`
+#### Scenario: Explicit verify overrides default
+- **WHEN** a TargetConfig is created with explicit `verify="hash"`
+- **THEN** `target.verify` is `"hash"` (explicit value takes precedence)
 
 ### Requirement: VMConfig snapshot_quiesce field
 `VMConfig` SHALL gain a `snapshot_quiesce: bool` field with default `False`. When `True`, snapshot creation SHALL request guest-agent filesystem freeze via `--quiesce`.
@@ -281,17 +269,6 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 #### Scenario: Explicit compress disabled
 - **WHEN** a TargetConfig is created with `compress=False`
 - **THEN** `target.compress` is `False`
-
-### Requirement: TargetConfig copy_base field
-`TargetConfig` SHALL have a `copy_base: bool` field with default `False`. When `False`, `base.qcow2` SHALL NOT be copied to the target — the first backup is always a FULL via `qemu-img convert`. When `True`, the legacy behavior of copying `base.qcow2` to the target is preserved.
-
-#### Scenario: Default copy_base is false
-- **WHEN** a TargetConfig is created without `copy_base`
-- **THEN** `target.copy_base` is `False`
-
-#### Scenario: Explicit copy_base enabled
-- **WHEN** a TargetConfig is created with `copy_base=True`
-- **THEN** `target.copy_base` is `True`
 
 ### Requirement: GlobalConfig compress field
 `GlobalConfig` SHALL have a `compress: bool` field with default `True`. This serves as the global default for `TargetConfig.compress` when the target does not explicitly set it.

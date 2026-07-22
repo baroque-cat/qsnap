@@ -32,10 +32,9 @@ _MAX_REQUEST_CAP = 32 * 1024 * 1024
 _BASE_ALLOCATION_CONTEXT = "base:allocation"
 
 # Actionable error naming the distro package (design R4: no silent
-# fallback — the user explicitly selected bitmap mode).
+# fallback — libnbd is the transport for all backup transfers).
 MISSING_LIBNBD_ERROR = (
-    "python3-libnbd is required for incremental_mode='bitmap' — "
-    "install via: apt install python3-libnbd"
+    "python3-libnbd is required for NBD bitmap backups — install via: apt install python3-libnbd"
 )
 
 # libnbd errno names mapped to Core's retryable error patterns.
@@ -145,7 +144,9 @@ class LibnbdClient(INbdClient):
         collected: dict[str, list[NbdExtent]] = {}
         positions: dict[str, int] = {}
 
-        def _callback(metacontext: str, _chunk_offset: int, entries: list[int], _status: int) -> None:
+        def _callback(
+            metacontext: str, _chunk_offset: int, entries: list[int], _status: int
+        ) -> None:
             pos = positions.get(metacontext, offset)
             extents = collected.setdefault(metacontext, [])
             for i in range(0, len(entries), 2):
@@ -256,8 +257,6 @@ class LibnbdClient(INbdClient):
             if canonical in lower:
                 return detail
             return f"{canonical}: {detail}"
-        if (
-            "end of file" in lower or "closed the connection" in lower
-        ) and "eof" not in lower:
+        if ("end of file" in lower or "closed the connection" in lower) and "eof" not in lower:
             return f"eof: {detail}"
         return detail

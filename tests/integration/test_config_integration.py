@@ -27,14 +27,12 @@ from qsnap.config.facade import ConfigFacade
 
 @pytest.mark.integration
 def test_int_bitmap_hash_preserved(caplog: pytest.LogCaptureFixture):
-    """Verify that ConfigFacade preserves ``verify="hash"`` when
-    ``incremental_mode="bitmap"``.
+    """Verify that ConfigFacade preserves ``verify="hash"`` for targets.
 
-    Previously bitmap mode downgraded ``verify="hash"``/``"full"`` to
-    ``"metadata"`` (design D5/D8).  Now ``verify_bitmap_incremental()``
-    supports chain-traversing ``qemu-img compare`` in hash/full tiers
-    (with a live-source reliability caveat), so the explicit verify
-    value is preserved and no downgrade warning is emitted.
+    Now ``verify_bitmap_incremental()`` supports chain-traversing
+    ``qemu-img compare`` in hash/full tiers (with a live-source
+    reliability caveat), so the explicit verify value is preserved
+    and no downgrade warning is emitted.
     """
     toml_content = """\
 [[vm]]
@@ -44,7 +42,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/test-vm"
 
 [[vm.target]]
 path = "/mnt/backup/test-vm"
-incremental_mode = "bitmap"
 verify = "hash"
 compress = true
 """
@@ -83,7 +80,6 @@ compress = true
         assert target.verify == "hash", (
             f"Expected verify='hash' preserved, got verify={target.verify!r}"
         )
-        assert target.incremental_mode == "bitmap", "incremental_mode should remain 'bitmap'"
 
     finally:
         import shutil

@@ -1,12 +1,11 @@
 """Integration tests for environment validation (libnbd availability check).
 
-Covers the ``_validate_environment`` libnbd check:
-- Bitmap mode with libnbd installed → validation passes.
-- No bitmap targets → check skipped (runs even when nbd absent).
+Covers the ``_validate_environment`` unconditional libnbd hard check:
+- Libnbd installed → validation passes.
+- Libnbd missing → hard failure (RuntimeError naming python3-libnbd).
 
 All tests are marked ``@pytest.mark.integration``.  They use the
-``test_vm`` fixture from ``conftest.py`` where available, and fall
-back to mock-based setup for the no-bitmap-targets test.
+``test_vm`` fixture from ``conftest.py`` where available.
 
 Run only when explicitly requested::
 
@@ -17,6 +16,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -28,21 +28,19 @@ from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_state import InMemoryStateManager
 
-# ── Test 1: Bitmap mode with libnbd installed passes validation ────────
+# ── Test 1: Validation passes with libnbd installed ────────────────────
 
 
 @pytest.mark.integration
-def test_bitmap_mode_with_libnbd_installed_passes(test_vm) -> None:
-    """Verify Core._validate_environment with a bitmap target passes
-    the libnbd check when the ``nbd`` package is importable.
+def test_validate_environment_passes_with_libnbd(test_vm) -> None:
+    """Verify Core._validate_environment passes the unconditional libnbd
+    check when the ``nbd`` package is importable.
 
     Skip-guarded: the test requires the real ``nbd`` package, but
     since it's an integration test that also requires libvirt, we
     guard both at function level.
     """
-    # Skip if nbd not importable (separate from the module-level skip
-    # in the other files — this file is designed to have tests that
-    # run WITHOUT nbd as well, so no module-level importorskip).
+    # Skip if nbd not importable.
     try:
         import nbd  # noqa: F401
     except ImportError:
@@ -64,10 +62,7 @@ def test_bitmap_mode_with_libnbd_installed_passes(test_vm) -> None:
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
 
-    # libvirt version check is NOT needed for env validation —
-    # _validate_environment only calls dominfo, not backup-begin.
-
-    # Create a VMConfig with a bitmap target.
+    # Create a VMConfig with a target (no incremental_mode kwarg — removed).
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -76,7 +71,6 @@ def test_bitmap_mode_with_libnbd_installed_passes(test_vm) -> None:
             TargetConfig(
                 path=target_dir,
                 incremental=True,
-                incremental_mode="bitmap",
                 verify="metadata",
             ),
         ],
@@ -101,18 +95,18 @@ def test_bitmap_mode_with_libnbd_installed_passes(test_vm) -> None:
     )
 
 
-# ── Test 2: No bitmap targets — libnbd check skipped ───────────────────
+# ── Test 2: Libnbd missing → hard failure (NEW — test-plan R9) ────────
 
 
 @pytest.mark.integration
-def test_no_bitmap_targets_skips_libnbd_check(test_vm) -> None:
-    """Verify that when no target uses ``incremental_mode='bitmap'``,
-    ``Core._validate_environment`` passes even when the ``nbd``
-    package is absent — the libnbd check is not consulted.
+def test_libnbd_missing_hard_failure(test_vm) -> None:
+    """Verify that when libnbd is not available, _validate_environment
+    returns a validation_failed status naming python3-libnbd, and the
+    pipeline (via _execute_pipeline) raises RuntimeError in normal mode.
 
-    This test is designed to RUN in the venv where ``nbd`` is not
-    importable, validating that file-copy-only configs work without
-    the python3-libnbd package.
+    This test patches ``is_libnbd_available`` to return False within
+    the ``qsnap.core`` module scope, simulates the missing package
+    scenario regardless of whether the real nbd package is installed.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -121,7 +115,7 @@ def test_no_bitmap_targets_skips_libnbd_check(test_vm) -> None:
     target_dir: Path = test_vm["target_dir"]
     tmpdir: Path = test_vm["tmpdir"]
 
-    # Start VM — needed for _validate_environment's dominfo check.
+    # Start VM — needed for dominfo check.
     start_result = shell.run(["virsh", "start", vm_name], timeout=30)
     if not start_result.success:
         pytest.skip(f"virsh start failed: {start_result.error}")
@@ -130,7 +124,7 @@ def test_no_bitmap_targets_skips_libnbd_check(test_vm) -> None:
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
 
-    # Create a VMConfig with ONLY file-copy targets (no bitmap).
+    # Minimal config — no incremental_mode field (removed from TargetConfig).
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -139,13 +133,11 @@ def test_no_bitmap_targets_skips_libnbd_check(test_vm) -> None:
             TargetConfig(
                 path=target_dir,
                 incremental=True,
-                incremental_mode="file-copy",
-                verify="metadata",
             ),
         ],
     )
 
-    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "qsnap-fc-test.toml")
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "qsnap-libnbd-fail.toml")
     factory = MockVMModuleFactory()
     state = InMemoryStateManager()
 
@@ -156,16 +148,24 @@ def test_no_bitmap_targets_skips_libnbd_check(test_vm) -> None:
         shell=shell,
     )
 
-    # Run validation — should pass regardless of nbd availability.
-    result = core._validate_environment(vm_config)
-    assert result.status == "ok", (
-        f"Validation should pass for file-copy-only config (libnbd check skipped), "
-        f"got status={result.status!r} broken={result.broken_snapshots!r}"
+    # Patch is_libnbd_available within the qsnap.core module to simulate
+    # the missing package.  The env validation is unconditional now, so
+    # the check should fail even for minimal configs.
+    with mock.patch("qsnap.core.is_libnbd_available", return_value=False):
+        result = core._validate_environment(vm_config)
+
+    # Validation should report failure naming python3-libnbd.
+    assert result.status == "validation_failed", (
+        f"Expected validation_failed when libnbd missing, got {result.status!r}"
+    )
+    libnbd_errors = [b for b in result.broken_snapshots if "python3-libnbd" in b]
+    assert len(libnbd_errors) >= 1, (
+        f"Expected a broken entry naming python3-libnbd, got: {result.broken_snapshots}"
     )
 
-    # Also assert: no "python3-libnbd" mention in any broken entry.
-    # The libnbd check should not have been consulted at all.
-    for broken_item in result.broken_snapshots:
-        assert "libnbd" not in broken_item.lower(), (
-            f"Libnbd-related failure found in file-copy-only config: {broken_item!r}"
-        )
+    # In normal (non-dry-run) mode, _execute_pipeline should raise RuntimeError.
+    with (
+        mock.patch("qsnap.core.is_libnbd_available", return_value=False),
+        pytest.raises(RuntimeError, match="python3-libnbd"),
+    ):
+        core._execute_pipeline(vm_config)

@@ -1,5 +1,5 @@
 # bucket_driven config — tests bucket-driven FULL backup model
-# Uses compress and copy_base, no deprecated full_every/full_compress.
+# Uses compress; no deprecated full_every/full_compress.
 
 timestamp_format = "long"
 preserve_day_of_week = "monday"
@@ -19,7 +19,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_bucket"
   incremental = true
   verify = "metadata"
   compress = true
-  copy_base = false
 
 [[vm]]
 name = "vm_no_compress"
@@ -30,4 +29,3 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_compress"
   path = "/mnt/backup/vm_no_compress"
   incremental = true
   compress = false
-  copy_base = true

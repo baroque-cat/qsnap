@@ -25,7 +25,7 @@ import pytest
 from qsnap.core import Core
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
-from qsnap.modules.backup.file_copy import FileCopyBackupProvider
+from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import (
     is_libvirt_new_enough,
@@ -48,7 +48,7 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
 
     1. Start the test VM.
     2. Verify ``is_vm_running()`` returns True.
-    3. Create ``FileCopyBackupProvider`` and call ``create_full_backup()``.
+    3. Create ``BitmapBackupProvider`` and call ``create_full_backup()``.
     4. Verify the result file is a standalone qcow2 with no backing file.
     5. Verify no lock conflict occurred (the backup succeeded despite
        the VM holding an exclusive write lock on the active layer).
@@ -76,7 +76,7 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
 
     # Step 4: Create the backup provider and SnapshotInfo for the
     # active disk layer.
-    provider = FileCopyBackupProvider(shell)
+    provider = BitmapBackupProvider(shell)
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -127,19 +127,19 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 2: Direct convert full backup of a stopped VM
+# Test 2: Full backup of a stopped VM returns error (no direct-convert fallback)
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
-    """Create a full backup of a stopped VM via direct qemu-img convert.
+def test_full_backup_stopped_vm_returns_error(test_vm):
+    """Attempt a full backup of a stopped VM via BitmapBackupProvider.
 
     1. Ensure the VM is stopped (fixture never started it).
     2. Verify ``is_vm_running()`` returns False.
-    3. Create ``FileCopyBackupProvider`` and call ``create_full_backup()``.
-    4. Verify the result file exists and is a standalone qcow2.
-    5. Verify no NBD socket was created (direct convert path used).
+    3. Create ``BitmapBackupProvider`` and call ``create_full_backup()``.
+    4. Verify the result is failure (no direct-convert fallback — the
+       bitmap path requires a running VM for virsh backup-begin).
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -152,10 +152,10 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
 
-    assert not is_vm_running(shell, vm_name), "VM should be stopped for direct convert test"
+    assert not is_vm_running(shell, vm_name), "VM should be stopped for stopped-VM test"
 
     # Step 2: Create backup provider.
-    provider = FileCopyBackupProvider(shell)
+    provider = BitmapBackupProvider(shell)
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -169,7 +169,9 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
         verify="off",
     )
 
-    # Step 3: Create full backup — should use direct qemu-img convert.
+    # Step 3: Create full backup — should fail because virsh backup-begin
+    # requires a running VM and BitmapBackupProvider has no direct-convert
+    # fallback.
     result = provider.create_full_backup(
         vm_name,
         source_snapshot,
@@ -178,27 +180,12 @@ def test_full_backup_stopped_vm_direct_convert_integration(test_vm):
         bucket_level="monthly",
     )
 
-    assert result.success, f"Direct convert full backup failed: {result.error}"
-    assert result.target_path.exists(), f"Backup file not found at {result.target_path}"
-    assert result.bytes_transferred > 0
-
-    # Step 4: Verify standalone qcow2.
-    info_result = shell.run(
-        ["qemu-img", "info", "--output=json", str(result.target_path)],
-        timeout=30,
+    assert not result.success, (
+        f"BitmapBackupProvider should fail on stopped VM (no direct-convert fallback), "
+        f"but got success. Error field: {result.error!r}"
     )
-    assert info_result.success, f"qemu-img info failed: {info_result.error}"
-    info = json.loads(info_result.stdout)
-    backing = info.get("backing-filename")
-    assert backing is None or backing == "", (
-        f"FULL backup should be standalone, got backing: {backing!r}"
-    )
-
-    # Step 5: Verify no NBD socket was created (confirm direct path).
-    socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
-    assert not socket_path.exists(), (
-        f"NBD socket {socket_path} should not exist — direct convert path should not touch NBD"
-    )
+    assert result.error is not None, "Error should be set when backup fails"
+    assert result.bytes_transferred == 0, "No bytes should be transferred on failure"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -213,7 +200,7 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
     1. Create stale socket and .tmp files to simulate a crashed run.
     2. Start the test VM.
     3. Call ``create_full_backup()`` — this will take the NBD path.
-    4. Verify the socket file is removed (step (a) + finally block).
+    4. Verify the socket file is removed (stale cleanup + finally block).
     5. Verify the .tmp file is removed on failure or renamed on success.
     """
     shell: SubprocessShell = test_vm["shell"]
@@ -222,12 +209,10 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
     target_dir: Path = test_vm["target_dir"]
 
     # Step 1: Create stale artifacts from a simulated crashed run.
-    # Use today's date for the .tmp file so it matches what
-    # create_full_backup() would create (it uses the snapshot timestamp,
-    # which is datetime.now() in this test).
     socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
     today_str = datetime.now().strftime("%Y%m%d")
-    tmp_file = target_dir / f"{vm_name}.FULL.{today_str}.qcow2.tmp"
+    full_name = f"{vm_name}.FULL.{today_str}"
+    tmp_file = target_dir / f"{full_name}.qcow2.tmp"
 
     socket_path.write_text("")  # empty socket file
     tmp_file.write_bytes(b"\x00" * 1024)  # 1 KB of corrupted data
@@ -243,10 +228,10 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
     nbd_available = is_libvirt_new_enough(shell)
 
     if vm_running and nbd_available:
-        # NBD path will be taken.  Even if the export fails (e.g.
-        # backup-begin not supported on this QEMU version), the socket
-        # *must* be cleaned up by nbd_full_export's finally block.
-        provider = FileCopyBackupProvider(shell)
+        # NBD path will be taken.  The BitmapBackupProvider's
+        # create_full_backup delegates to nbd_full_export which
+        # handles socket cleanup in its finally block.
+        provider = BitmapBackupProvider(shell)
         source_snapshot = SnapshotInfo(
             name=f"{vm_name}.active",
             path=base_image,
@@ -270,17 +255,21 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
             f"nbd_full_export should always clean up in finally."
         )
 
-        # The .tmp file MUST be gone — either renamed to final
-        # (success) or rm -f'd (failure).
-        assert not tmp_file.exists(), (
-            f"Temporary file {tmp_file} was not cleaned up!  "
-            f"create_full_backup should remove .tmp on failure "
-            f"or rename it on success."
-        )
+        if result.success:
+            # On success, .tmp should be renamed to the final file.
+            assert not tmp_file.exists(), (
+                f"Temporary file {tmp_file} should have been renamed (success path)."
+            )
+        else:
+            # On failure, .tmp should be removed.
+            assert not tmp_file.exists(), (
+                f"Temporary file {tmp_file} was not cleaned up on failure!  "
+                f"create_full_backup should remove .tmp on failure."
+            )
     else:
-        # NBD not available — test the direct convert cleanup path
-        # with a source that will fail, proving .tmp cleanup.
-        provider = FileCopyBackupProvider(shell)
+        # NBD not available — test with a source that will fail,
+        # proving .tmp cleanup.
+        provider = BitmapBackupProvider(shell)
         source_snapshot = SnapshotInfo(
             name=f"{vm_name}.active",
             path=Path("/nonexistent/path.qcow2"),
@@ -459,7 +448,7 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
         pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
 
     # Step 2: Run NBD full backup.
-    provider = FileCopyBackupProvider(shell)
+    provider = BitmapBackupProvider(shell)
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -510,7 +499,7 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 6: Stale state recovery — integration with FileCopyBackupProvider
+# Test 6: Stale state recovery — integration with BitmapBackupProvider
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -522,7 +511,7 @@ def test_stale_state_recovery_integration(test_vm):
        non-existent file path.
     2. Create a real file in the target directory so the "empty target →
        create FULL" short-circuit is not triggered.
-    3. Configure ``FileCopyBackupProvider`` with the state manager.
+    3. Configure ``BitmapBackupProvider`` with the state manager.
     4. Call ``transfer_missing()`` with the stale snapshot.
     5. Verify the stale entry was removed from state.
     """
@@ -532,7 +521,7 @@ def test_stale_state_recovery_integration(test_vm):
     snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
-    # Ensure target is not empty (avoids the FULL-backup short-circuit).
+    # Ensure target is not empty (avoids "empty → FULL" detection).
     sentinel = target_dir / "_keep_nonempty.qcow2"
     sentinel.write_bytes(b"\x00" * 1024)
 
@@ -550,7 +539,7 @@ def test_stale_state_recovery_integration(test_vm):
     assert len(state.get_snapshots(vm_name)) == 1
 
     # Execute transfer_missing — should detect and remove the stale entry.
-    provider = FileCopyBackupProvider(shell, state=state)
+    provider = BitmapBackupProvider(shell, state=state)
     target = TargetConfig(path=target_dir, incremental=True, verify="off")
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 

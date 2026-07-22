@@ -22,7 +22,6 @@ from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.backup.bucket_strategy import BucketFullStrategy
-from qsnap.modules.backup.file_copy import FileCopyBackupProvider
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
@@ -63,20 +62,20 @@ class DefaultFactory(IVMModuleFactory):
         vm_config: VMConfig,
         target: TargetConfig,
     ) -> IBackupProvider:
-        if target.incremental_mode == "bitmap":
-            if not is_libvirt_new_enough(self._shell):
-                logger.warning(
-                    "BitmapBackupProvider unavailable (libvirt < 7.2); "
-                    "falling back to FileCopyBackupProvider",
-                )
-                return FileCopyBackupProvider(self._shell, self._state)
-            if not is_libnbd_available():
-                # Hard failure, no silent fallback (design R4): the user
-                # explicitly selected bitmap mode, so a missing transport
-                # dependency is an actionable error, not a mode switch.
-                raise RuntimeError(MISSING_LIBNBD_ERROR)
-            return BitmapBackupProvider(self._shell, self._state, LibnbdClient())
-        return FileCopyBackupProvider(self._shell, self._state)
+        # BitmapBackupProvider is the sole backup provider.  Both gates
+        # are hard failures with actionable messages — no silent
+        # fallback (design D2/R4).
+        if not is_libvirt_new_enough(self._shell):
+            raise RuntimeError(
+                "libvirt >= 7.2 required for NBD bitmap backups "
+                "(virsh backup-begin pull-model) — upgrade libvirt. "
+                "There is no file-copy fallback."
+            )
+        if not is_libnbd_available():
+            # Hard failure: the backup transport dependency is an
+            # actionable error naming the system package.
+            raise RuntimeError(MISSING_LIBNBD_ERROR)
+        return BitmapBackupProvider(self._shell, self._state, LibnbdClient())
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:
         return TimeBasedRetention(policy)

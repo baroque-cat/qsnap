@@ -5,9 +5,10 @@ Covers the ``config-parsing`` spec requirements:
 - Missing required VM field raises ConfigError.
 - Malformed TOML raises ConfigError.
 - Global fault-tolerance safety fields parsed.
-- Target compress and copy_base parsed.
+- Target compress parsed.
 - full_every deprecation warning.
 - full_compress mapped to compress with warning.
+- Removed rsync/file-copy fields trigger deprecation WARNINGs.
 """
 
 from __future__ import annotations
@@ -110,27 +111,23 @@ def test_config_parser_reads_auto_cleanup_state_backup_count() -> None:
     assert global_cfg.state_backup_count == 3
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# bucket-driven-backup-model: Target compress and copy_base parsing
-# ──────────────────────────────────────────────────────────────────────────
+# bucket-driven-backup-model: Target compress parsing
 
 
 @pytest.mark.unit
-def test_parse_target_compress_and_copy_base() -> None:
-    """Target-level compress and copy_base fields are parsed correctly."""
+def test_parse_target_compress() -> None:
+    """Target-level compress field is parsed correctly."""
     facade = ConfigFacade(FIXTURES / "bucket_driven.toml")
 
-    # vm_bucket: compress=True, copy_base=False (explicit)
+    # vm_bucket: compress=True (explicit)
     vm1 = facade.get_vm("vm_bucket")
     t1 = next(t for t in vm1.targets if t.path == Path("/mnt/backup/vm_bucket"))
     assert t1.compress is True
-    assert t1.copy_base is False
 
-    # vm_no_compress: compress=False, copy_base=True (explicit)
+    # vm_no_compress: compress=False (explicit)
     vm2 = facade.get_vm("vm_no_compress")
     t2 = next(t for t in vm2.targets if t.path == Path("/mnt/backup/vm_no_compress"))
     assert t2.compress is False
-    assert t2.copy_base is True
 
 
 # ──────────────────────────────────────────────────────────────────────────

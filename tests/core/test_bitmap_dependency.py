@@ -5,8 +5,7 @@ Covers:
 - Failed transfers do not record dependencies.
 - Standalone pull (no backing chain) records nothing.
 - ``check_state`` reports no missing deps when dependencies are present.
-- ``_validate_environment``: bitmap + missing libnbd → validation_failed.
-- ``_validate_environment``: file-copy skips libnbd check.
+- ``_validate_environment``: missing libnbd → validation_failed (unconditional).
 """
 
 from __future__ import annotations
@@ -33,8 +32,6 @@ def _make_bitmap_target(path: str = "/mnt/backup/testvm") -> TargetConfig:
     return TargetConfig(
         path=Path(path),
         incremental=True,
-        incremental_mode="bitmap",
-        rate_limit="no",
         compress=True,
         compression_type="zstd",
         backup_stall_timeout="30m",
@@ -152,7 +149,9 @@ def test_bitmap_incremental_registers_dependency(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with patch.object(mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency) as spy:
+    with patch.object(
+        mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
+    ) as spy:
         core._backup_target(vm, target, [snap])
 
     # ── assert dependency was recorded ──────────────────────────────
@@ -191,7 +190,10 @@ def test_failed_transfer_records_no_dependency(
     failing_provider = MockBitmapBackupProvider()
 
     def _failing_transfer(
-        vm_config, target, snapshots, rate_limit="no", *,
+        vm_config,
+        target,
+        snapshots,
+        *,
         full_verify_before_rebase="metadata",
         compression_type="zstd",
         stall_timeout=1800,
@@ -219,7 +221,9 @@ def test_failed_transfer_records_no_dependency(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with patch.object(mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency) as spy:
+    with patch.object(
+        mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
+    ) as spy:
         core._backup_target(vm, target, [snap])
 
     # ── assert nothing was recorded ─────────────────────────────────
@@ -230,7 +234,10 @@ def test_failed_transfer_records_no_dependency(
     # result short-circuited before the chain walk.  We verify by checking
     # that the shell was never asked a qemu-img info command (the mock
     # would return an error for any unmatched command):
-    result = shell.run(["qemu-img", "info", "--output=json", str(target_dir / "vm.failed.20250101T000000.qcow2")], timeout=60)
+    result = shell.run(
+        ["qemu-img", "info", "--output=json", str(target_dir / "vm.failed.20250101T000000.qcow2")],
+        timeout=60,
+    )
     assert "No mock configured" in (result.error or ""), (
         "qemu-img info was unexpectedly configured for a failed result path"
     )
@@ -277,7 +284,9 @@ def test_standalone_no_backing_records_no_dependency(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with patch.object(mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency) as spy:
+    with patch.object(
+        mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
+    ) as spy:
         core._backup_target(vm, target, [snap])
 
     spy.assert_not_called()
@@ -344,13 +353,12 @@ def test_validate_environment_bitmap_without_libnbd_fails(
     mock_state,
     mock_shell,
 ) -> None:
-    """Bitmap target + ``is_libnbd_available()`` → False →
+    """Backup target + ``is_libnbd_available()`` → False →
     ``validation_failed`` with ``MISSING_LIBNBD_ERROR`` in broken items.
 
-    When any target uses ``incremental_mode="bitmap"`` and the libnbd
-    bindings are not installed, the pre-flight validation fails with an
-    actionable error naming the distro package (design R4 — no silent
-    fallback).
+    When the libnbd bindings are not installed, the (unconditional)
+    pre-flight validation fails with an actionable error naming the
+    distro package (design R4 — no silent fallback).
     """
     target = _make_bitmap_target("/mnt/backup/testvm")
     vm = _make_bitmap_vm(target)
@@ -370,41 +378,3 @@ def test_validate_environment_bitmap_without_libnbd_fails(
     assert any(MISSING_LIBNBD_ERROR in b for b in result.broken_snapshots), (
         f"Expected {MISSING_LIBNBD_ERROR!r} in broken items: {result.broken_snapshots}"
     )
-
-
-# ── env-validation: file-copy skips libnbd check ───────────────────────
-
-
-def test_validate_environment_file_copy_skips_libnbd_check(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-) -> None:
-    """No bitmap targets → libnbd check skipped entirely, validation passes.
-
-    When every target uses ``incremental_mode="file-copy"`` (the default),
-    ``is_libnbd_available()`` is never consulted.  This test monkeypatches
-    ``is_libnbd_available`` to raise ``RuntimeError`` to prove the check
-    is truly skipped — no error occurs, and validation passes.
-    """
-    target = make_target(incremental_mode="file-copy", path="/mnt/backup/testvm")
-    vm = _make_bitmap_vm(target)
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    def _raises() -> bool:
-        raise RuntimeError("is_libnbd_available should not be called")
-
-    with patch("qsnap.core.is_libnbd_available", side_effect=_raises):
-        result = core._validate_environment(vm)
-
-    assert isinstance(result, CheckResult)
-    assert result.status == "ok"
-    assert result.broken_snapshots == []

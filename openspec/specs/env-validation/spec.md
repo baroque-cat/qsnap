@@ -2,30 +2,13 @@
 
 ## Purpose
 
-Pre-flight environment validation before pipeline execution — verifies snapshot_dir, base_image, virsh/qemu-img in PATH, VM defined in libvirt, target paths are reachable, and rsync availability (hard requirement).
+Pre-flight environment validation before pipeline execution — verifies snapshot_dir, base_image, virsh/qemu-img in PATH, VM defined in libvirt, target paths are reachable, and libnbd availability (hard requirement, NBD is the sole backup transfer mechanism).
 
 ## Requirements
 
-### Requirement: Pre-flight rsync availability check
-
-The pre-flight environment validation SHALL check that the `rsync` binary is available in PATH on every pipeline run. If `rsync` is not found, validation SHALL fail with an error and the pipeline SHALL NOT proceed. This is a hard requirement — `rsync` is the sole file transfer mechanism and no fallback exists.
-
-#### Scenario: Rsync available — validation passes
-- **WHEN** `which rsync` succeeds
-- **THEN** validation passes and pipeline execution continues
-
-#### Scenario: Rsync unavailable — pipeline aborts
-- **WHEN** `which rsync` returns non-zero
-- **THEN** validation fails with an error: "rsync is required but not found in PATH"
-- **AND** the pipeline does NOT proceed to change detection or snapshot creation
-
-#### Scenario: Rsync check always runs
-- **WHEN** `_validate_environment()` is called
-- **THEN** `which rsync` is always called, regardless of `rate_limit` configuration
-
 ### Requirement: Pre-flight environment validation before pipeline
 
-Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) stale `.tmp`, `.partial`, and NBD socket files are cleaned up per `auto_cleanup` config, (b) orphan `.qcow2` snapshots are detected (WARNING only), (c) `snapshot_dir` exists and is a writable directory, (d) `base_image` file exists, (e) `virsh` and `qemu-img` binaries are in PATH, (f) VM is defined in libvirt (`virsh dominfo` returns 0), (g) `rsync` is in PATH (hard requirement, pipeline aborts if missing). Failure on checks (c)-(f) SHALL return immediately — no partial pipeline execution. Cleanup steps (a)-(b) SHALL be skipped when `auto_cleanup = false`. Checks (a)-(b) SHALL NOT block pipeline execution — they are defensive, not critical.
+Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) stale `.tmp`, `.partial`, and NBD socket files are cleaned up per `auto_cleanup` config, (b) orphan `.qcow2` snapshots are detected (WARNING only), (c) `snapshot_dir` exists and is a writable directory, (d) `base_image` file exists, (e) `virsh` and `qemu-img` binaries are in PATH, (f) VM is defined in libvirt (`virsh dominfo` returns 0), (g) the Python `nbd` module (libnbd bindings) is importable (hard requirement, pipeline aborts if missing). Failure on checks (c)-(f) SHALL return immediately — no partial pipeline execution. Cleanup steps (a)-(b) SHALL be skipped when `auto_cleanup = false`. Checks (a)-(b) SHALL NOT block pipeline execution — they are defensive, not critical.
 
 In dry-run mode, `_validate_environment()` SHALL still be called. Validation failures SHALL be logged as WARNING (non-fatal) in dry-run mode. The pipeline SHALL NOT abort on validation failure in dry-run mode. In non-dry-run mode, validation failure SHALL raise `RuntimeError` and abort the pipeline as before.
 
@@ -88,23 +71,24 @@ Pre-flight validation SHALL check each configured target: if `target.path` does 
 - **THEN** a `RuntimeError` is raised with the broken checks
 - **AND** the pipeline does NOT proceed to snapshot or backup steps
 
-### Requirement: libnbd availability check for bitmap mode
+### Requirement: libnbd availability check
 
-Pre-flight environment validation SHALL verify that the Python `nbd` module (libnbd bindings, system package `python3-libnbd`) is importable whenever any configured target uses `incremental_mode = "bitmap"`. If the import fails, validation SHALL fail with an actionable error naming the system package (e.g. "python3-libnbd is required for incremental_mode='bitmap' — install via apt install python3-libnbd"). When no bitmap-mode target is configured, the check SHALL NOT run and qsnap SHALL remain fully functional without libnbd. There SHALL be no silent fallback to file-copy mode: the user explicitly selected bitmap mode, so a missing dependency is a hard validation error.
+Pre-flight environment validation SHALL verify that the Python `nbd` module (libnbd bindings, system package `python3-libnbd`) is importable on every pipeline run — NBD/libnbd is the sole backup transfer mechanism. If the import fails, validation SHALL fail with an actionable error naming the system package (e.g. "python3-libnbd is required — install via: apt install python3-libnbd"). There SHALL be no fallback to any other transfer mechanism: a missing dependency is a hard validation error. In dry-run mode the failure SHALL be logged as a WARNING and SHALL NOT abort the pipeline.
 
-#### Scenario: Bitmap mode with libnbd installed
+#### Scenario: libnbd installed — validation passes
 
-- **WHEN** a target uses `incremental_mode = "bitmap"` and `import nbd` succeeds
+- **WHEN** `import nbd` succeeds (via `importlib.util.find_spec("nbd")`)
 - **THEN** validation passes for that check
 
-#### Scenario: Bitmap mode without libnbd — hard failure
+#### Scenario: libnbd missing — hard failure
 
-- **WHEN** a target uses `incremental_mode = "bitmap"` and `import nbd` fails
+- **WHEN** the `nbd` module is not importable
 - **THEN** validation fails with an error naming `python3-libnbd`
 - **AND** the pipeline does NOT proceed (non-dry-run)
-- **AND** no fallback to file-copy mode occurs
+- **AND** no fallback to any other transfer mechanism occurs
 
-#### Scenario: No bitmap targets — check skipped
+#### Scenario: Dry-run downgrades the failure to a warning
 
-- **WHEN** every configured target uses `incremental_mode = "file"` (or another non-bitmap mode)
-- **THEN** the libnbd import check is not performed
+- **WHEN** the `nbd` module is not importable and the pipeline runs in dry-run mode
+- **THEN** the failure is logged as a WARNING
+- **AND** the dry-run continues

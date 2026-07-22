@@ -87,7 +87,7 @@ The function SHALL NOT use `split(".")` to extract the timestamp segment, as VM 
 - **AND** the long pattern (`%Y%m%dT%H%M`) is NOT matched (would give wrong result)
 
 ### Requirement: Modules use shared parsers
-`ExternalSnapshotProvider`, `AllocationSizeDetector`, and `FileCopyBackupProvider` SHALL import from `qsnap.utils.parsing` instead of defining their own `_parse_domblklist_path`, `_parse_domblklist_target`, and `_parse_timestamp` helpers.
+`ExternalSnapshotProvider` and `AllocationSizeDetector` SHALL import from `qsnap.utils.parsing` instead of defining their own `_parse_domblklist_path`, `_parse_domblklist_target`, and `_parse_timestamp` helpers.
 
 #### Scenario: ExternalSnapshotProvider uses shared parser
 - **WHEN** inspecting `qsnap/modules/snapshot/external.py`

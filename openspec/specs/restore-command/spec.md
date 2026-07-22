@@ -11,7 +11,7 @@ The `qsnap restore` command SHALL identify a backup by its snapshot name, copy t
 
 The chain file path extraction from `qemu-img info --backing-chain --output=json` SHALL accept both `"image"` (legacy QEMU) and `"filename"` (QEMU 11.0+) as the key for the disk image file path in each chain entry.
 
-#### Scenario: Restore a file-copy backup chain with FULL anchor
+#### Scenario: Restore a backup chain with FULL anchor
 - **WHEN** `qsnap restore debiantest.20250101T1200 /restore/path` is executed
 - **AND** the backup chain includes a FULL anchor `vm.FULL.20250101.qcow2`
 - **THEN** the FULL anchor and all incremental files in the chain are copied to `/restore/path/`

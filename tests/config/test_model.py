@@ -29,10 +29,6 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.timestamp_format = "short"  # type: ignore[misc]
 
-    # Mutating rate_limit also raises FrozenInstanceError.
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.rate_limit = "100M"  # type: ignore[misc]
-
     # Mutating new fault-tolerance fields also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.auto_cleanup = False  # type: ignore[misc]
@@ -69,7 +65,6 @@ def test_global_config_defaults():
     assert cfg.lockfile is None
     assert cfg.snapshot_preserve is None
     assert cfg.target_preserve is None
-    assert cfg.rate_limit == "no"
     assert cfg.deferred_warn_count == "5"
     assert cfg.deferred_crit_count == "10"
     assert cfg.deferred_warn_age == "7d"
@@ -160,16 +155,12 @@ def test_target_config_incremental():
     default_target = TargetConfig(path=Path("/backup/testvm"))
     assert default_target.incremental is True
 
-    # rate_limit defaults to "no" on TargetConfig.
-    assert default_target.rate_limit == "no"
-
     # Backup retry fields use their documented defaults.
     assert default_target.backup_retry_max == 3
     assert default_target.backup_retry_base == "2s"
 
-    # New bucket-driven backup fields: compress defaults to True, copy_base to False.
+    # Compress defaults to True in the bucket-driven model.
     assert default_target.compress is True
-    assert default_target.copy_base is False
 
 
 def test_retention_policy_hourly_daily():
@@ -192,24 +183,6 @@ def test_retention_policy_defaults():
     assert policy.monthly == 0
     assert policy.yearly == 0
     assert policy.preserve_min == "all"
-
-
-def test_target_config_default_incremental_mode_is_bitmap():
-    """TargetConfig with no incremental_mode arg defaults to 'bitmap' (NBD)."""
-    target = TargetConfig(path=Path("/backup/testvm"))
-    assert target.incremental_mode == "bitmap"
-
-
-def test_target_config_explicit_file_copy_overrides_default():
-    """TargetConfig(incremental_mode='file-copy') explicitly overrides bitmap default."""
-    target = TargetConfig(path=Path("/backup/testvm"), incremental_mode="file-copy")
-    assert target.incremental_mode == "file-copy"
-
-
-def test_target_config_explicit_incremental_mode_bitmap():
-    """TargetConfig(incremental_mode='bitmap') stores 'bitmap'."""
-    target = TargetConfig(path=Path("/backup/testvm"), incremental_mode="bitmap")
-    assert target.incremental_mode == "bitmap"
 
 
 def test_vm_config_disks_default_none_auto_discovery():
@@ -358,7 +331,7 @@ def test_global_config_preserve_min_set_from_constructor(make_global_config):
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.compress / copy_base — bucket-driven backup fields
+# TargetConfig.compress — bucket-driven backup fields
 # ---------------------------------------------------------------------------
 
 
@@ -372,18 +345,6 @@ def test_target_config_compress_explicit_false(make_target):
     """TargetConfig(compress=False) stores False."""
     target = make_target(compress=False)
     assert target.compress is False
-
-
-def test_target_config_copy_base_default_false(make_target):
-    """TargetConfig() has copy_base=False by default."""
-    target = make_target()
-    assert target.copy_base is False
-
-
-def test_target_config_copy_base_explicit_true(make_target):
-    """TargetConfig(copy_base=True) stores True."""
-    target = make_target(copy_base=True)
-    assert target.copy_base is True
 
 
 def test_global_config_compress_default_true():
@@ -420,28 +381,8 @@ def test_vm_config_preserve_min_fields_exist(make_vm_config):
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.rate_limit / deferred thresholds
+# GlobalConfig deferred thresholds
 # ---------------------------------------------------------------------------
-
-
-def test_global_config_rate_limit_defaults_no():
-    """GlobalConfig() defaults rate_limit to 'no' (unlimited)."""
-    cfg = GlobalConfig()
-    assert cfg.rate_limit == "no"
-
-
-def test_global_config_rate_limit_frozen():
-    """GlobalConfig is frozen; mutating rate_limit raises FrozenInstanceError."""
-    cfg = GlobalConfig(rate_limit="100M")
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.rate_limit = "500K"  # type: ignore[misc]
-
-
-def test_target_config_rate_limit_frozen():
-    """TargetConfig is frozen; mutating rate_limit raises FrozenInstanceError."""
-    target = TargetConfig(path=Path("/mnt/backup/testvm"), rate_limit="100M")
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        target.rate_limit = "500K"  # type: ignore[misc]
 
 
 def test_global_config_deferred_thresholds_defaults():
@@ -466,12 +407,6 @@ def test_global_config_deferred_thresholds_frozen():
         cfg.deferred_crit_age = "30d"  # type: ignore[misc]
 
 
-def test_global_config_has_rate_limit_field():
-    """GlobalConfig dataclass has a 'rate_limit' field."""
-    field_names = {f.name for f in dataclasses.fields(GlobalConfig)}
-    assert "rate_limit" in field_names
-
-
 def test_global_config_has_deferred_threshold_fields():
     """GlobalConfig dataclass has all four deferred-monitoring fields."""
     field_names = {f.name for f in dataclasses.fields(GlobalConfig)}
@@ -481,21 +416,7 @@ def test_global_config_has_deferred_threshold_fields():
     assert "deferred_crit_age" in field_names
 
 
-def test_target_config_has_rate_limit_field():
-    """TargetConfig dataclass has a 'rate_limit' field."""
-    field_names = {f.name for f in dataclasses.fields(TargetConfig)}
-    assert "rate_limit" in field_names
-
-
-# ---------------------------------------------------------------------------
 # Fixture support — make_global_config / make_target accept new kwargs
-# ---------------------------------------------------------------------------
-
-
-def test_make_global_config_accepts_rate_limit_kwarg(make_global_config):
-    """make_global_config fixture forwards the rate_limit kwarg to GlobalConfig."""
-    cfg = make_global_config(rate_limit="100M")
-    assert cfg.rate_limit == "100M"
 
 
 def test_make_global_config_accepts_deferred_kwargs(make_global_config):
@@ -512,15 +433,7 @@ def test_make_global_config_accepts_deferred_kwargs(make_global_config):
     assert cfg.deferred_crit_age == "30d"
 
 
-def test_make_target_accepts_rate_limit_kwarg(make_target):
-    """make_target fixture forwards the rate_limit kwarg to TargetConfig."""
-    target = make_target(rate_limit="500K")
-    assert target.rate_limit == "500K"
-
-
-# ---------------------------------------------------------------------------
 # Fault-tolerance safety fields — standalone default value tests
-# ---------------------------------------------------------------------------
 
 
 def test_global_config_default_auto_cleanup_true():

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Output-file-growth monitoring for long-running data-transfer commands (qemu-img convert, rsync). Replaces hardcoded timeouts with stall detection: processes are killed only when the output file stops growing for a configurable duration. If data flows (even slowly), the process is allowed to continue.
+Output-file-growth monitoring for long-running data-transfer commands (qemu-img convert). Replaces hardcoded timeouts with stall detection: processes are killed only when the output file stops growing for a configurable duration. If data flows (even slowly), the process is allowed to continue.
 
 ## Requirements
 
@@ -76,7 +76,7 @@ The `IShell` ABC SHALL provide a `run_with_stall_detection(cmd: list[str], outpu
 
 ### Requirement: In-process stall watchdog for in-process transfers
 
-When a data transfer executes as an in-process loop rather than a subprocess (currently: the bitmap dirty-block copy loop), stall detection SHALL be implemented as a progress watchdog inside that loop: a monotonic timestamp updated after every successful chunk write; if no chunk completes for `stall_timeout` seconds, the loop SHALL abort and the transfer SHALL return an error string identical to the shell-level contract — `"Stall detected: no progress for {N}s"`. When `stall_timeout` is 0, the watchdog SHALL be disabled. The watchdog SHALL NOT spawn threads and SHALL NOT log speed or progress — only the stall event. `IShell.run_with_stall_detection` remains the mechanism for subprocess-based transfers (`qemu-img convert` FULL exports, `rsync`) and is unchanged by this requirement.
+When a data transfer executes as an in-process loop rather than a subprocess (currently: the bitmap dirty-block copy loop), stall detection SHALL be implemented as a progress watchdog inside that loop: a monotonic timestamp updated after every successful chunk write; if no chunk completes for `stall_timeout` seconds, the loop SHALL abort and the transfer SHALL return an error string identical to the shell-level contract — `"Stall detected: no progress for {N}s"`. When `stall_timeout` is 0, the watchdog SHALL be disabled. The watchdog SHALL NOT spawn threads and SHALL NOT log speed or progress — only the stall event. `IShell.run_with_stall_detection` remains the mechanism for subprocess-based transfers (`qemu-img convert` FULL exports) and is unchanged by this requirement.
 
 #### Scenario: Watchdog aborts stalled copy loop
 

@@ -74,19 +74,6 @@ class TestCoreImportsNbdFromUtils:
                 f"{fn.__name__} must originate from qsnap.utils.nbd, got {fn.__module__}"
             )
 
-    def test_file_copy_provider_imports_nbd_from_utils(self) -> None:
-        """FileCopyBackupProvider imports NBD utilities from
-        ``qsnap.utils.nbd`` (not from any other location)."""
-        import qsnap.modules.backup.file_copy as fc_mod
-
-        fc_source = inspect.getsource(fc_mod)
-        assert "from qsnap.utils.nbd import" in fc_source, (
-            "FileCopyBackupProvider must import NBD utilities from qsnap.utils.nbd"
-        )
-        assert "is_libvirt_new_enough" in fc_source
-        assert "is_vm_running" in fc_source
-        assert "nbd_full_export" in fc_source
-
     def test_bitmap_provider_imports_write_backup_xml_from_utils(self) -> None:
         """BitmapBackupProvider imports ``write_backup_xml`` from
         ``qsnap.utils.nbd`` and does NOT define its own private

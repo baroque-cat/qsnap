@@ -1,8 +1,7 @@
 """Cross-cutting NBD (Network Block Device) utilities.
 
-Provides stateless helper functions used by both
-``FileCopyBackupProvider`` and ``BitmapBackupProvider`` for creating
-FULL backups via the libvirt pull-model NBD API
+Provides stateless helper functions used by ``BitmapBackupProvider``
+for creating FULL backups via the libvirt pull-model NBD API
 (``virsh backup-begin`` + ``qemu-img convert -n nbd:unix:<socket>``).
 
 These functions do not implement any ABC and are shared across module
@@ -211,8 +210,7 @@ def nbd_full_export(
             so writes during the export are tracked for the next
             incremental.  When *checkpoint_name* is ``None``, the
             command line is byte-identical to the pre-checkpoint
-            behavior (used by the file-copy path, which creates no
-            checkpoints).
+            behavior (no checkpoint is created).
         (d) Run ``qemu-img convert [-c] [-o compression_type=<type>]
             -O qcow2 nbd:unix:<socket> <target_file>`` to pull the full
             disk.  When *compress* is ``True``, the ``-c`` flag is passed
@@ -247,7 +245,7 @@ def nbd_full_export(
             checkpoint is written and passed as the third positional
             argument to ``virsh backup-begin``, creating the checkpoint
             atomically with the export.  Defaults to ``None`` (no
-            checkpoint — file-copy behavior).
+            checkpoint).
 
     Returns the :class:`ShellResult` from the final step — the
     ``qemu-img convert`` result on success/failure of that step, or
