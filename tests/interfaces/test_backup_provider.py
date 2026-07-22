@@ -134,7 +134,7 @@ def test_ibackup_provider_create_full_backup_abstract():
     # default implementation that raises NotImplementedError.
     class _BareBackupProvider(IBackupProvider):
         def transfer_missing(
-            self, vm_config, target, snapshots, *, full_verify_before_rebase="metadata"
+            self, vm_config, target, snapshots, *, compression_type="zstd", stall_timeout=1800
         ):
             return []
 

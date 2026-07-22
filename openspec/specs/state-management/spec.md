@@ -21,11 +21,12 @@ The system SHALL provide a `JsonStateManager` that persists per-VM state as JSON
 #### Scenario: Record and list snapshots
 - **WHEN** `record_snapshot("myvm", SnapshotInfo(...))` is called for two snapshots
 - **THEN** `get_snapshots("myvm")` returns a list with both entries, sorted by creation time
-- **AND** `SnapshotInfo.content_hash` is preserved across write and read when non-None
 
-#### Scenario: Hash persists across runs
-- **WHEN** `record_snapshot("vm", SnapshotInfo(content_hash="abc123"))` is called and then `get_snapshots("vm")` is called
-- **THEN** the returned `SnapshotInfo.content_hash` is `"abc123"`
+#### Scenario: content_hash silently ignored on deserialization
+- **WHEN** an old state file containing `content_hash` is loaded
+- **THEN** no error is raised
+- **AND** the `content_hash` value is silently ignored
+- **AND** all other fields are loaded normally
 
 ### Requirement: Atomic file writes
 JsonStateManager SHALL use atomic write pattern: write to a temporary file, then rename over the target, to prevent corruption on crash.

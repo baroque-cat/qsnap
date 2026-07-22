@@ -264,7 +264,7 @@ def test_virtual_size_mismatch_fails_verification() -> None:
 def test_wrong_backing_file_fails_verification() -> None:
     """Backing-filename mismatch fails BEFORE any compare command.
 
-    Uses verify='hash' tier to prove the backing check short-circuits
+    Uses verify='compare' tier to prove the backing check short-circuits
     before qemu-img compare is ever issued.
     """
     shell = MockShell()
@@ -276,7 +276,7 @@ def test_wrong_backing_file_fails_verification() -> None:
         delta_path=_DELTA,
         expected_backing=_BACKING,
         dirty_bytes=100 * 1024 * 1024,
-        verify_mode="hash",
+        verify_mode="compare",
     )
     assert result is not None
     assert result.startswith("verification failed: ")
@@ -374,12 +374,12 @@ def test_barrier_slack_exceeded_by_one_byte_fails() -> None:
     assert "exceeds dirty-data barrier" in result
 
 
-# ── Hash tier ───────────────────────────────────────────────────────────
+# ── Compare tier ────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_hash_tier_logs_live_source_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """verify='hash' logs a WARNING about live-source caveat before compare."""
+def test_compare_tier_logs_live_source_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """verify='compare' logs a WARNING about live-source caveat before compare."""
     shell = MockShell()
     _mock_both_info(shell)
     _mock_compare(shell, success=True)
@@ -391,7 +391,7 @@ def test_hash_tier_logs_live_source_warning(caplog: pytest.LogCaptureFixture) ->
             delta_path=_DELTA,
             expected_backing=_BACKING,
             dirty_bytes=0,
-            verify_mode="hash",
+            verify_mode="compare",
         )
 
     assert result is None
@@ -400,8 +400,8 @@ def test_hash_tier_logs_live_source_warning(caplog: pytest.LogCaptureFixture) ->
 
 
 @pytest.mark.unit
-def test_hash_tier_compare_failure_mismatch_error() -> None:
-    """Hash-tier compare failure (not lock-related) → mismatch error."""
+def test_compare_tier_mismatch_error() -> None:
+    """Compare-tier compare failure (not lock-related) → mismatch error."""
     shell = MockShell()
     _mock_both_info(shell)
     _mock_compare(shell, success=False, error_msg="Content mismatch at offset 0x1000")
@@ -412,7 +412,7 @@ def test_hash_tier_compare_failure_mismatch_error() -> None:
         delta_path=_DELTA,
         expected_backing=_BACKING,
         dirty_bytes=0,
-        verify_mode="hash",
+        verify_mode="compare",
     )
     assert result is not None
     assert result.startswith("verification failed: ")
@@ -420,12 +420,12 @@ def test_hash_tier_compare_failure_mismatch_error() -> None:
     assert "Content mismatch at offset 0x1000" in result
 
 
-# ── Full tier ───────────────────────────────────────────────────────────
+# ── Compare tier (second variant) ─────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_full_tier_compare_failure_mismatch_error() -> None:
-    """Full-tier compare failure (not lock-related) → mismatch error."""
+def test_compare_tier_images_differ_error() -> None:
+    """Compare-tier compare failure (not lock-related) → mismatch error."""
     shell = MockShell()
     _mock_both_info(shell)
     _mock_compare(shell, success=False, error_msg="Images differ")
@@ -436,7 +436,7 @@ def test_full_tier_compare_failure_mismatch_error() -> None:
         delta_path=_DELTA,
         expected_backing=_BACKING,
         dirty_bytes=0,
-        verify_mode="full",
+        verify_mode="compare",
     )
     assert result is not None
     assert result.startswith("verification failed: ")
@@ -460,7 +460,7 @@ def test_lock_conflict_error_detected() -> None:
         delta_path=_DELTA,
         expected_backing=_BACKING,
         dirty_bytes=0,
-        verify_mode="full",
+        verify_mode="compare",
     )
     assert result is not None
     assert result.startswith("verification failed: ")
@@ -548,8 +548,8 @@ def test_metadata_tier_happy_path_returns_none() -> None:
 
 
 @pytest.mark.unit
-def test_hash_tier_happy_path_returns_none() -> None:
-    """Hash tier + successful compare → None."""
+def test_compare_tier_happy_path_returns_none() -> None:
+    """Compare tier + successful compare → None."""
     shell = MockShell()
     _mock_both_info(shell)
     _mock_compare(shell, success=True)
@@ -560,6 +560,6 @@ def test_hash_tier_happy_path_returns_none() -> None:
         delta_path=_DELTA,
         expected_backing=_BACKING,
         dirty_bytes=10 * 1024 * 1024,
-        verify_mode="hash",
+        verify_mode="compare",
     )
     assert result is None

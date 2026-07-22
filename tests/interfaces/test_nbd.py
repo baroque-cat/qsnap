@@ -31,7 +31,7 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
     # isinstance check against the ABC.
     assert isinstance(instance, INbdClient), f"{cls.__name__} must pass isinstance(INbdClient)"
 
-    # All seven interface methods must exist.
+    # All nine interface methods must exist.
     for method_name in (
         "connect",
         "get_size",
@@ -39,6 +39,8 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
         "block_status",
         "pread",
         "pwrite",
+        "can_flush",
+        "flush",
         "disconnect",
     ):
         assert hasattr(instance, method_name), f"{cls.__name__} is missing method {method_name!r}"
@@ -54,6 +56,20 @@ def test_nbd_client_contract_parametrized(cls: Callable[[], INbdClient]) -> None
     max_sz = instance.get_max_request_size()
     assert isinstance(max_sz, int), (
         f"{cls.__name__}.get_max_request_size() must return int, got {type(max_sz)}"
+    )
+
+    # can_flush() returns bool on freshly-constructed client.
+    flush_supported = instance.can_flush()
+    assert isinstance(flush_supported, bool), (
+        f"{cls.__name__}.can_flush() must return bool, got {type(flush_supported)}"
+    )
+
+    # flush() is safe to call without a prior connect() — returns NbdResult.
+    flush_result = instance.flush()
+    from qsnap.models.results import NbdResult
+
+    assert isinstance(flush_result, NbdResult), (
+        f"{cls.__name__}.flush() must return NbdResult, got {type(flush_result)}"
     )
 
     # disconnect() is safe on a freshly-constructed / unconnected client.

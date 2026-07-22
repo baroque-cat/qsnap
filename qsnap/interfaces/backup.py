@@ -18,25 +18,18 @@ class IBackupProvider(ABC):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         *,
-        full_verify_before_rebase: str = "metadata",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> list[BackupResult]:
         """Transfer snapshots not yet present at *target*.
-
-        ``full_verify_before_rebase`` is the M1 verification mode
-        (``"metadata"`` or ``"off"``) to apply to a FULL anchor before
-        rebasing an incremental onto it.  Defaults to ``"metadata"``
-        for backward compatibility.  Implementations that do not use
-        rebase may ignore it.
 
         ``compression_type`` selects the compression algorithm for
         transfer (``"zstd"`` default, ``"zlib"`` alternative).  Only
         effective when ``target.compress`` is ``True``.
 
         ``stall_timeout`` is the stall-detection timeout in seconds for
-        data-transfer commands.  When ``0``, implementations fall back
-        to fixed-timeout :meth:`IShell.run`.
+        data-transfer commands.  When ``0``, stall detection is
+        disabled.
         """
         ...
 
@@ -60,7 +53,7 @@ class IBackupProvider(ABC):
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> BackupResult:
-        """Create a standalone full (anchor) backup via ``qemu-img convert``.
+        """Create a standalone full (anchor) backup via the NBD engine.
 
         ``vm_name`` is the full, untruncated VM name (e.g.
         ``"3.Projects_opencode"``), passed from Core's
@@ -77,8 +70,7 @@ class IBackupProvider(ABC):
         when ``compress`` is ``True``.
 
         ``stall_timeout`` is the stall-detection timeout in seconds
-        for the convert command.  When ``0``, falls back to
-        fixed-timeout :meth:`IShell.run`.
+        for the transfer.  When ``0``, stall detection is disabled.
 
         Default implementation raises ``NotImplementedError``.  Concrete
         providers that support full backups should override this.

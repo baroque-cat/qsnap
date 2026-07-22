@@ -15,7 +15,8 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_with_full"
   [[vm.target]]
   path = "/mnt/backup/vm_with_full"
   incremental = true
-  verify = "hash"
+  verify = "compare"
+  full_verify_after_create = "compare"
   compress = true
 
 [[vm]]

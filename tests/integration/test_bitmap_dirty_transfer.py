@@ -404,7 +404,7 @@ def test_int_no_qemu_nbd_orphan_after_failure(test_vm) -> None:
        connection, e.g. removing the socket mid-transfer).
     5. Assert failure result.
     6. Assert no orphaned qemu-nbd processes, no lingering write sockets,
-       no .tmp file, prior checkpoint preserved.
+        no .tmp file, prior checkpoint preserved.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]

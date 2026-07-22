@@ -1,7 +1,7 @@
 ## Requirements
 
 ### Requirement: IShell ABC
-The system SHALL provide an `IShell` ABC with a `run(cmd: list[str], timeout: int) → ShellResult` method that wraps subprocess execution. The ABC SHALL also provide a `run_with_stall_detection(cmd: list[str], output_file: Path | None = None, stall_timeout: int = 1800, check: bool = False) → ShellResult` method for long-running data-transfer commands that monitors output file growth and kills the process if no progress is detected for `stall_timeout` seconds.
+The system SHALL provide an `IShell` ABC with a `run(cmd: list[str], timeout: int) → ShellResult` method that wraps subprocess execution. The ABC SHALL also provide a `run_with_stall_detection(cmd: list[str], output_file: Path | None = None, stall_timeout: int = 1800, check: bool = False) → ShellResult` method for long-running data-transfer commands that monitors output file growth and kills the process if no progress is detected for `stall_timeout` seconds. After the NBD transfer unification, the primary data path is `pread`/`pwrite` through `INbdClient` with an in-process stall watchdog (not `IShell.run_with_stall_detection`). The method survives for any remaining subprocess-based data-transfer needs (e.g., future offline backup via standalone `qemu-nbd`).
 
 #### Scenario: IShell is an ABC
 - **WHEN** attempting to instantiate IShell directly

@@ -17,7 +17,6 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
-from qsnap.utils.hash import file_sha256
 from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -149,20 +148,12 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                 error=f"Failed to parse qemu-img info output: {exc}",
             )
 
-        # Step 4: Compute SHA-256 hash of the snapshot file
-        content_hash: str | None = None
-        try:
-            content_hash = file_sha256(snapshot_path)
-        except OSError as exc:
-            logger.warning("Failed to compute SHA-256 for %s: %s", snapshot_path, exc)
-
         return SnapshotResult(
             success=True,
             name=snapshot_name,
             path=snapshot_path,
             new_allocation=actual_size,
             error=None,
-            content_hash=content_hash,
         )
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:

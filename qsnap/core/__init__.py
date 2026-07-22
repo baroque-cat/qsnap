@@ -48,7 +48,7 @@ from qsnap.models.results import (
     StateCheckResult,
 )
 from qsnap.retention.time_based import parse_duration, parse_stall_timeout
-from qsnap.utils.nbd import is_vm_running, nbd_full_export
+from qsnap.utils.nbd import get_first_disk_target, is_vm_running, write_backup_xml
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
@@ -876,7 +876,7 @@ class Core:
         """Create a standalone VM from a snapshot or backup.
 
         Resolves *snapshot_name* via ``_resolve_snapshot()``, then runs
-        ``qemu-img convert -O qcow2`` to produce a single standalone qcow2
+        image conversion to produce a single standalone qcow2
         with no backing dependencies.  Defines a new libvirt VM using a
         modified copy of the source VM's XML (new name, new UUID, new disk
         path, MAC removed).
@@ -949,7 +949,7 @@ class Core:
                 error=f"Failed to create directory {vm_dir}: {mkdir_result.error}",
             )
 
-        # Step 5: Execute qemu-img convert (hybrid NBD/direct — design D9)
+        # Step 5: Execute image conversion (hybrid NBD/direct — design D9)
         # If the source VM is running, the active layer has an exclusive
         # write lock.  Use NBD pull-model to avoid the lock conflict.
         # If stopped, direct convert is safe.
@@ -958,7 +958,61 @@ class Core:
                 "VM %s is running — using NBD export for fork",
                 source_vm.name,
             )
-            convert_result = nbd_full_export(self._shell, source_vm.name, str(target_qcow2))
+            # Inline NBD export + convert (the former full-export helper
+            # was removed in the unify-nbd-transfer change — the restore
+            # simple full pull without checkpoints or the unified engine).
+            import os as _os
+
+            _fork_socket = f"/tmp/qsnap-restore-{_os.getpid()}.sock"
+            self._shell.run(["rm", "-f", _fork_socket], timeout=10)
+            _fork_xml = write_backup_xml(_fork_socket)
+            # libvirt's NBD server exports each disk under its target
+            # device name (e.g., "vda") — needed for the export name.
+            _fork_disk_target = get_first_disk_target(self._shell, source_vm.name)
+            try:
+                _begin_result = self._shell.run(
+                    [
+                        "virsh",
+                        "backup-begin",
+                        "--domain",
+                        source_vm.name,
+                        str(_fork_xml),
+                    ],
+                    timeout=120,
+                )
+                if not _begin_result.success:
+                    convert_result = _begin_result
+                else:
+                    _nbd_uri = f"nbd:unix:{_fork_socket}"
+                    if _fork_disk_target:
+                        _nbd_uri = f"nbd:unix:{_fork_socket}:exportname={_fork_disk_target}"
+                    convert_result = self._shell.run(
+                        [
+                            "qemu-img",
+                            "convert",
+                            "-O",
+                            "qcow2",
+                            _nbd_uri,
+                            str(target_qcow2),
+                        ],
+                        timeout=7200,
+                    )
+            finally:
+                _abort_result = self._shell.run(
+                    ["virsh", "domjobabort", "--domain", source_vm.name],
+                    timeout=30,
+                )
+                if not _abort_result.success:
+                    logger.warning(
+                        "virsh domjobabort failed for VM %s (job may have already terminated): %s",
+                        source_vm.name,
+                        _abort_result.error,
+                    )
+                self._shell.run(["rm", "-f", _fork_socket], timeout=10)
+                try:
+                    _fork_xml.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Failed to remove temp XML file %s: %s", _fork_xml, exc)
         else:
             convert_result = self._shell.run(
                 [
@@ -977,7 +1031,7 @@ class Core:
                 snapshot_name=snapshot_name,
                 restored_path=vm_dir,
                 chain_files=[],
-                error=f"qemu-img convert failed: {convert_result.error}",
+                error=f"image conversion failed: {convert_result.error}",
             )
 
         # Step 6: Obtain source VM XML
@@ -1896,7 +1950,6 @@ class Core:
                     path=result.path,
                     timestamp=datetime.now(),
                     allocation=result.new_allocation,
-                    content_hash=result.content_hash,
                 )
                 self._state.record_snapshot(vm_config.name, info)
                 self._state.set_last_allocation(vm_config.name, result.new_allocation)
@@ -2576,7 +2629,6 @@ class Core:
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         *,
-        full_verify_before_rebase: str = "metadata",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> list[BackupResult]:
@@ -2586,10 +2638,6 @@ class Core:
         ``transfer_missing()`` call in a retry loop.  Only retries on
         transient errors (determined by ``is_retryable()``).  Non-
         retryable errors fail immediately.
-
-        ``full_verify_before_rebase`` is the M1 verification mode threaded
-        from ``GlobalConfig.full_verify_before_rebase``; passed through to
-        the provider's ``transfer_missing()``.
 
         ``compression_type`` and ``stall_timeout`` are threaded from
         ``TargetConfig`` to the provider's ``transfer_missing()``.
@@ -2605,7 +2653,6 @@ class Core:
                 vm_config,
                 target,
                 snapshots,
-                full_verify_before_rebase=full_verify_before_rebase,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
             )
@@ -2616,7 +2663,6 @@ class Core:
                 vm_config,
                 target,
                 snapshots,
-                full_verify_before_rebase=full_verify_before_rebase,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
             )
@@ -2790,13 +2836,11 @@ class Core:
 
         # Transfer missing snapshots (with retry when configured)
         if not self._dry_run:
-            full_verify_mode = self._config.get_global().full_verify_before_rebase
             results = self._transfer_with_retry(
                 provider,
                 vm_config,
                 target,
                 snapshots,
-                full_verify_before_rebase=full_verify_mode,
                 compression_type=target.compression_type,
                 stall_timeout=stall_timeout,
             )

@@ -1,11 +1,14 @@
 """Integration tests for ``verify_bitmap_incremental()``.
 
 Creates real qcow2 chains via ``qemu-img`` and passes them through
-``verify_bitmap_incremental()`` to exercise metadata, hash, and full
-tiers.  Uses ``SubprocessShell`` for real command execution.
+``verify_bitmap_incremental()`` to exercise metadata and compare tiers.
+Uses ``SubprocessShell`` for real command execution.
 
 Guarded by ``pytest.mark.skipif(shutil.which("qemu-img") is None,
 reason="qemu-img not available")`` — no libvirt or libnbd required.
+
+The ``"hash"`` and ``"full"`` verify modes have been unified into
+``"compare"`` (chain-traversing ``qemu-img compare``).
 """
 
 from __future__ import annotations
@@ -195,9 +198,9 @@ def test_bloated_delta_fails_barrier() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("qemu-img") is None, reason="qemu-img not available")
-def test_hash_tier_compare_passes_for_consistent_chains() -> None:
-    """Hash tier passes when a standalone source has the same virtual
-    content as the full+delta chain."""
+def test_compare_tier_passes_for_consistent_chains() -> None:
+    """Compare tier passes when a standalone source has the same virtual
+    content as the full+delta chain (was "hash" tier, now "compare")."""
     shell = SubprocessShell()
 
     with tempfile.TemporaryDirectory(prefix="qsnap-int-verify-bitmap-") as td:
@@ -256,16 +259,16 @@ def test_hash_tier_compare_passes_for_consistent_chains() -> None:
             delta_path=str(delta),
             expected_backing=str(full),
             dirty_bytes=4 * 1024 * 1024,
-            verify_mode="hash",
+            verify_mode="compare",
         )
-        assert result is None, f"hash verify should pass, got: {result}"
+        assert result is None, f"compare verify should pass, got: {result}"
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("qemu-img") is None, reason="qemu-img not available")
-def test_hash_tier_compare_fails_for_divergent_chains() -> None:
-    """Hash tier fails when standalone source content differs from
-    full+delta resolved content."""
+def test_compare_tier_fails_for_divergent_chains() -> None:
+    """Compare tier fails when standalone source content differs from
+    full+delta resolved content (was "hash" tier, now "compare")."""
     shell = SubprocessShell()
 
     with tempfile.TemporaryDirectory(prefix="qsnap-int-verify-bitmap-") as td:
@@ -310,7 +313,7 @@ def test_hash_tier_compare_fails_for_divergent_chains() -> None:
             delta_path=str(delta),
             expected_backing=str(full),
             dirty_bytes=4 * 1024 * 1024,
-            verify_mode="hash",
+            verify_mode="compare",
         )
         assert result is not None
         assert "content comparison mismatch" in result
@@ -318,8 +321,9 @@ def test_hash_tier_compare_fails_for_divergent_chains() -> None:
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("qemu-img") is None, reason="qemu-img not available")
-def test_full_tier_compare_passes_for_consistent_chains() -> None:
-    """Full tier passes when standalone source matches delta chain content."""
+def test_compare_tier_passes_for_consistent_chain_full() -> None:
+    """Compare tier passes when standalone source matches delta chain content
+    (was "full" tier, now unified as "compare")."""
     shell = SubprocessShell()
 
     with tempfile.TemporaryDirectory(prefix="qsnap-int-verify-bitmap-") as td:
@@ -366,6 +370,6 @@ def test_full_tier_compare_passes_for_consistent_chains() -> None:
             delta_path=str(delta),
             expected_backing=str(full),
             dirty_bytes=4 * 1024 * 1024,
-            verify_mode="full",
+            verify_mode="compare",
         )
-        assert result is None, f"full verify should pass, got: {result}"
+        assert result is None, f"compare verify should pass, got: {result}"

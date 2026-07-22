@@ -162,8 +162,19 @@ class ConfigFacade(IConfigFacade):
             ) from exc
 
         # Validate FULL verification tiers.
-        valid_after_create = {"metadata", "check", "hash", "off"}
-        if self._global.full_verify_after_create.lower() not in valid_after_create:
+        valid_after_create = {"metadata", "check", "compare", "off"}
+        # Deprecation: "hash" was replaced by "compare" (unify-nbd-transfer).
+        _DEPRECATED_VERIFY = {"hash": "compare"}
+        after_create_lower = self._global.full_verify_after_create.lower()
+        if after_create_lower in _DEPRECATED_VERIFY:
+            remapped = _DEPRECATED_VERIFY[after_create_lower]
+            logger.warning(
+                "full_verify_after_create=%r is deprecated — treating as %r",
+                self._global.full_verify_after_create,
+                remapped,
+            )
+            object.__setattr__(self._global, "full_verify_after_create", remapped)
+        elif after_create_lower not in valid_after_create:
             raise ConfigError(
                 f"Invalid full_verify_after_create: "
                 f"{self._global.full_verify_after_create!r}. "
@@ -332,7 +343,7 @@ class ConfigFacade(IConfigFacade):
         if "copy_base" in tgt_raw:
             logging.getLogger("qsnap.config").warning(
                 "copy_base is deprecated and ignored — the first backup is "
-                "always a FULL via qemu-img convert. "
+                "always a FULL via the unified NBD engine. "
                 "Remove copy_base from your config."
             )
 
@@ -424,17 +435,27 @@ class ConfigFacade(IConfigFacade):
 
         # verify: default "metadata", or explicit user value.  No
         # mode-dependence — bitmap is the only backup strategy; the
-        # "hash"/"full" tiers run chain-traversing qemu-img compare via
+        # "compare" tier runs chain-traversing qemu-img compare via
         # verify_bitmap_incremental (live-source reliability caveat).
         verify_raw = tgt_raw.get("verify")
         if verify_raw is None:
             verify = "metadata"
         else:
             verify = str(verify_raw)
-            # Validate user-provided value.
-            if verify not in ("off", "metadata", "hash", "full"):
+            # Deprecation: "hash" and "full" were replaced by "compare"
+            # (unify-nbd-transfer).  Old values are accepted with a
+            # WARNING and treated as "compare".
+            _DEPRECATED_TARGET_VERIFY = {"hash": "compare", "full": "compare"}
+            if verify in _DEPRECATED_TARGET_VERIFY:
+                logger.warning(
+                    "verify=%r is deprecated — treating as %r",
+                    verify,
+                    _DEPRECATED_TARGET_VERIFY[verify],
+                )
+                verify = _DEPRECATED_TARGET_VERIFY[verify]
+            elif verify not in ("off", "metadata", "compare"):
                 raise ConfigError(
-                    f"Invalid verify={verify!r}. Must be one of: off, metadata, hash, full."
+                    f"Invalid verify={verify!r}. Must be one of: off, metadata, compare."
                 )
 
         # Backup retry fields (target-level — network reliability varies).

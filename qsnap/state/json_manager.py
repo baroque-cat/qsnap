@@ -143,18 +143,18 @@ class JsonStateManager(IStateManager):
             "timestamp": info.timestamp.isoformat(),
             "allocation": info.allocation,
         }
-        if info.content_hash is not None:
-            d["content_hash"] = info.content_hash
         return d
 
     @staticmethod
     def _dict_to_snapshot(d: dict[str, object]) -> SnapshotInfo:
+        # Read-tolerance: old state files may contain a legacy hash
+        # key — it is silently ignored (the field was removed in the
+        # unify-nbd-transfer change).
         return SnapshotInfo(
             name=str(d["name"]),
             path=Path(str(d["path"])),
             timestamp=datetime.fromisoformat(str(d["timestamp"])),
             allocation=int(str(d["allocation"])),
-            content_hash=str(d["content_hash"]) if "content_hash" in d else None,
         )
 
     # ── IStateManager implementation ──────────────────────────────────

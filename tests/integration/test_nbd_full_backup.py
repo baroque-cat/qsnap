@@ -1,8 +1,12 @@
-"""Integration tests for NBD full backup and fork on live VMs.
+"""Integration tests for NBD full backup via the unified NBD engine.
 
 All tests in this module require a running libvirt daemon and are
 marked ``@pytest.mark.integration``.  They use the ``test_vm`` fixture
 from ``conftest.py`` which creates a disposable throwaway VM.
+
+The unified NBD engine uses ``pread``/``pwrite`` via libnbd — not
+``qemu-img convert``.  Every FULL backup creates a checkpoint atomically
+via ``virsh backup-begin`` with checkpoint XML.
 
 Run only when explicitly requested::
 
@@ -22,6 +26,14 @@ from pathlib import Path
 
 import pytest
 
+# libnbd availability — needed by the unified NBD transfer engine.
+try:
+    import nbd  # noqa: F401
+
+    _HAS_LIBNBD = True
+except ImportError:
+    _HAS_LIBNBD = False
+
 from qsnap.core import Core
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
@@ -31,27 +43,59 @@ from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
 )
+
+if _HAS_LIBNBD:
+    from qsnap.utils.nbd_client import LibnbdClient
+
 from tests.mocks import (
     InMemoryStateManager,
     MockConfigFacade,
     MockVMModuleFactory,
 )
 
+
+def _get_checkpoint_names(shell: SubprocessShell, vm_name: str) -> list[str]:
+    """Return qsnap-prefixed checkpoint names for *vm_name*."""
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if not result.success:
+        return []
+    return [
+        line.strip()
+        for line in result.stdout.strip().splitlines()
+        if line.strip().startswith("qsnap-")
+    ]
+
+
+def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
+    """Delete all qsnap-prefixed checkpoints for *vm_name*."""
+    for cp in _get_checkpoint_names(shell, vm_name):
+        shell.run(
+            ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
+            timeout=30,
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────
-# Test 1: NBD full backup of a running VM
+# Test 1: NBD full backup of a running VM via unified engine
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_nbd_full_backup_running_vm_integration(test_vm):
-    """Create a full backup of a running VM via NBD pull-model.
+def test_nbd_full_backup_running_vm_integration(test_vm, caplog):
+    """Create a full backup of a running VM via the unified NBD engine.
 
     1. Start the test VM.
     2. Verify ``is_vm_running()`` returns True.
-    3. Create ``BitmapBackupProvider`` and call ``create_full_backup()``.
-    4. Verify the result file is a standalone qcow2 with no backing file.
-    5. Verify no lock conflict occurred (the backup succeeded despite
-       the VM holding an exclusive write lock on the active layer).
+    3. Create ``BitmapBackupProvider`` (with ``LibnbdClient``) and call
+       ``create_full_backup()``.
+    4. Verify no ``qemu-img convert`` was used (unified engine = pread/pwrite).
+    5. Verify the result file is a standalone qcow2 with no backing file.
+    6. Verify a checkpoint was created atomically.
+    7. Verify atomic rename (no .tmp file remaining).
+    8. Verify no lock conflict occurred.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -74,9 +118,12 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
 
-    # Step 4: Create the backup provider and SnapshotInfo for the
-    # active disk layer.
-    provider = BitmapBackupProvider(shell)
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
+
+    # Step 4: Create the backup provider with LibnbdClient for the
+    # unified NBD engine (pread/pwrite loop, not qemu-img convert).
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -90,8 +137,10 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
         verify="off",
     )
 
-    # Step 5: Create full backup — this should use the NBD path
-    # because the VM is running and libvirt is new enough.
+    # Clear any pre-existing checkpoints.
+    _cleanup_checkpoints(shell, vm_name)
+
+    # Step 5: Create full backup via unified NBD engine.
     result = provider.create_full_backup(
         vm_name,
         source_snapshot,
@@ -101,7 +150,8 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     )
 
     assert result.success, (
-        f"NBD full backup failed: {result.error}. QEMU/libvirt may not support backup-begin."
+        f"Unified NBD full backup failed: {result.error}. "
+        f"QEMU/libvirt may not support backup-begin."
     )
     assert result.target_path.exists(), f"Backup file not found at {result.target_path}"
     assert result.bytes_transferred > 0, "Backup should contain non-zero bytes"
@@ -124,6 +174,31 @@ def test_nbd_full_backup_running_vm_integration(test_vm):
     # used rather than direct qemu-img convert.
     assert info.get("format") == "qcow2", "Backup should be valid qcow2"
     assert int(info.get("virtual-size", 0)) > 0, "Backup should have non-zero virtual size"
+
+    # ── Verify unified engine: no ``qemu-img convert`` in shell log ───
+    convert_calls = [
+        r.message for r in caplog.records if ("qemu-img" in r.message and "convert" in r.message)
+    ]
+    assert len(convert_calls) == 0, (
+        f"Unified NBD engine must NOT use qemu-img convert. Found calls: {convert_calls}"
+    )
+
+    # ── Verify atomic checkpoint creation ──────────────────────────
+    checkpoints = _get_checkpoint_names(shell, vm_name)
+    assert len(checkpoints) >= 1, (
+        f"Expected at least one qsnap checkpoint after FULL backup, "
+        f"got {len(checkpoints)}: {checkpoints}"
+    )
+
+    # ── Verify atomic rename: no .tmp file left behind ─────────────
+    date_str = source_snapshot.timestamp.strftime("%Y%m%d")
+    expected_tmp = target_dir / f"{vm_name}.FULL.{date_str}.qcow2.tmp"
+    assert not expected_tmp.exists(), (
+        f"Temporary file {expected_tmp} should have been atomically renamed"
+    )
+
+    # Clean up checkpoints.
+    _cleanup_checkpoints(shell, vm_name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -154,8 +229,11 @@ def test_full_backup_stopped_vm_returns_error(test_vm):
 
     assert not is_vm_running(shell, vm_name), "VM should be stopped for stopped-VM test"
 
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
+
     # Step 2: Create backup provider.
-    provider = BitmapBackupProvider(shell)
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -199,8 +277,9 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
 
     1. Create stale socket and .tmp files to simulate a crashed run.
     2. Start the test VM.
-    3. Call ``create_full_backup()`` — this will take the NBD path.
-    4. Verify the socket file is removed (stale cleanup + finally block).
+    3. Call ``create_full_backup()`` — the unified engine will use
+       its own socket paths.
+    4. Verify the write-side socket is removed (cleanup in finally block).
     5. Verify the .tmp file is removed on failure or renamed on success.
     """
     shell: SubprocessShell = test_vm["shell"]
@@ -210,14 +289,17 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
 
     # Step 1: Create stale artifacts from a simulated crashed run.
     socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
+    write_socket = Path(f"/tmp/qsnap-write-{os.getpid()}.sock")
     today_str = datetime.now().strftime("%Y%m%d")
     full_name = f"{vm_name}.FULL.{today_str}"
     tmp_file = target_dir / f"{full_name}.qcow2.tmp"
 
     socket_path.write_text("")  # empty socket file
+    write_socket.write_text("")  # empty write socket
     tmp_file.write_bytes(b"\x00" * 1024)  # 1 KB of corrupted data
 
     assert socket_path.exists(), "Stale socket file should exist before test"
+    assert write_socket.exists(), "Stale write socket should exist before test"
     assert tmp_file.exists(), "Stale .tmp file should exist before test"
 
     # Step 2: Start the VM to trigger the NBD path.
@@ -226,12 +308,10 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
 
     vm_running = is_vm_running(shell, vm_name)
     nbd_available = is_libvirt_new_enough(shell)
+    has_libnbd = _HAS_LIBNBD
 
-    if vm_running and nbd_available:
-        # NBD path will be taken.  The BitmapBackupProvider's
-        # create_full_backup delegates to nbd_full_export which
-        # handles socket cleanup in its finally block.
-        provider = BitmapBackupProvider(shell)
+    if vm_running and nbd_available and has_libnbd:
+        provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
         source_snapshot = SnapshotInfo(
             name=f"{vm_name}.active",
             path=base_image,
@@ -248,12 +328,14 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
             bucket_level="monthly",
         )
 
-        # The socket MUST be gone — either removed by step (a) (rm -f
-        # stale socket before starting) or by the finally block.
+        # The backup (source) socket MUST be gone — cleaned up in
+        # the finally block of create_full_backup.
         assert not socket_path.exists(), (
             f"Socket {socket_path} was not cleaned up!  "
-            f"nbd_full_export should always clean up in finally."
+            f"create_full_backup should always clean up in finally."
         )
+        # The write-side socket MUST be gone.
+        assert not write_socket.exists(), f"Write socket {write_socket} was not cleaned up!"
 
         if result.success:
             # On success, .tmp should be renamed to the final file.
@@ -288,8 +370,11 @@ def test_nbd_socket_cleanup_after_crash_integration(test_vm):
         assert not result.success, "Expected failure with nonexistent source"
         assert not tmp_file.exists(), f"Temporary file {tmp_file} was not cleaned up on failure"
 
-    # Final safety check: ensure the socket is gone regardless.
+    # Final safety check: ensure both sockets are gone regardless.
     assert not socket_path.exists(), f"Socket {socket_path} should be cleaned up in all code paths"
+    assert not write_socket.exists(), (
+        f"Write socket {write_socket} should be cleaned up in all code paths"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -419,13 +504,13 @@ def test_fork_running_vm_nbd_integration(test_vm):
 def test_domjobabort_called_after_nbd_backup_integration(test_vm):
     """Verify that ``virsh domjobabort`` is called after NBD full backup.
 
-    The ``nbd_full_export()`` helper calls ``virsh domjobabort`` in its
-    ``finally`` block (design D3).  This test verifies the effect: after
-    a successful NBD backup on a running VM, there should be no active
+    The ``create_full_backup()`` method calls ``virsh domjobabort`` in
+    its ``finally`` block.  This test verifies the effect: after a
+    successful NBD backup on a running VM, there should be no active
     block job left behind.
 
     1. Start the test VM.
-    2. Run ``create_full_backup()`` via the NBD path.
+    2. Run ``create_full_backup()`` via the unified NBD engine.
     3. After the backup completes, check ``virsh domjobinfo`` — it should
        either fail (no active job) or report no current block job.
     4. Verify the VM is still running and in a healthy state.
@@ -447,8 +532,11 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
 
-    # Step 2: Run NBD full backup.
-    provider = BitmapBackupProvider(shell)
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed in this interpreter")
+
+    # Step 2: Run NBD full backup via unified engine.
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
@@ -465,7 +553,7 @@ def test_domjobabort_called_after_nbd_backup_integration(test_vm):
         bucket_level="monthly",
     )
 
-    assert backup_result.success, f"NBD full backup failed: {backup_result.error}"
+    assert backup_result.success, f"Unified NBD full backup failed: {backup_result.error}"
 
     # Step 3: After the backup, domjobabort should have been called
     # in the finally block.  Verify no active block job remains.

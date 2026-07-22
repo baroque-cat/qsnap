@@ -983,85 +983,6 @@ def test_external_snapshot_provider_imports_shared_parsers():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 9. Content hash (SHA-256) on snapshot creation
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def test_create_snapshot_returns_content_hash(mock_shell, make_vm_config):
-    """When snapshot creation succeeds, ``create()`` returns a
-    ``SnapshotResult`` whose ``content_hash`` is a 64-character hex string
-    (SHA-256 digest).
-
-    The ``file_sha256`` call reads the snapshot file on disk; since no real
-    file exists in the unit test, we patch ``file_sha256`` in the
-    ``external`` module to return a known 64-char hex digest.
-    """
-    vm_config = make_vm_config()
-    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
-
-    fake_hash = "a" * 64  # 64-char hex string simulating a SHA-256 digest
-
-    with (
-        patch("qsnap.modules.snapshot.external.file_sha256", return_value=fake_hash),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-    ):
-        provider = ExternalSnapshotProvider(mock_shell)
-        result = provider.create(
-            vm_config=vm_config,
-            snapshot_name="snap.20250101T000000",
-            disk="vda",
-            snapshot_path=snapshot_path,
-        )
-
-    assert result.success is True
-    assert result.content_hash is not None
-    assert len(result.content_hash) == 64
-    # All characters are valid lowercase hex
-    assert all(c in "0123456789abcdef" for c in result.content_hash)
-    assert result.content_hash == fake_hash
-
-    # Verify --force-share on qemu-img info (design D5)
-    all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
-    qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
-    assert "--force-share" in qemu_cmd
-
-
-def test_create_snapshot_failure_content_hash_none(mock_shell, make_vm_config):
-    """When snapshot creation fails (virsh returns an error),
-    ``SnapshotResult.content_hash`` is ``None``.
-
-    The provider short-circuits before the hash computation step, so
-    ``content_hash`` must be its default value of ``None``.
-    """
-    vm_config = make_vm_config()
-    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-
-    stderr_msg = "error: internal error: snapshot creation failed"
-    mock_shell.expect("virsh snapshot-create-as").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr=stderr_msg,
-            returncode=1,
-            error=stderr_msg,
-        )
-    )
-
-    provider = ExternalSnapshotProvider(mock_shell)
-    result = provider.create(
-        vm_config=vm_config,
-        snapshot_name="snap.20250101T000000",
-        disk="vda",
-        snapshot_path=snapshot_path,
-    )
-
-    assert result.success is False
-    assert result.content_hash is None
-    assert result.error == stderr_msg
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # 10. Post-snapshot qemu-img info uses --force-share (design D5)
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -1201,28 +1122,6 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
         "This likely means --force-share was removed from qemu-img info."
     )
     assert result.new_allocation == 1048576
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# 11. Architecture — hash import and cross-domain checks
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def test_create_snapshot_uses_hash_from_utils():
-    """Verify ``ExternalSnapshotProvider`` imports ``file_sha256`` from
-    ``qsnap.utils.hash`` (not from a backup module).
-
-    The module-level import ``from qsnap.utils.hash import file_sha256``
-    means ``qsnap.modules.snapshot.external.file_sha256`` is the same
-    function object as ``qsnap.utils.hash.file_sha256``.
-    """
-    from qsnap.modules.snapshot import external
-    from qsnap.utils.hash import file_sha256 as hash_fn
-
-    assert hasattr(external, "file_sha256"), "external.py module must import file_sha256"
-    assert external.file_sha256 is hash_fn, (
-        "external.file_sha256 must be the same function as qsnap.utils.hash.file_sha256"
-    )
 
 
 def test_external_snapshot_no_cross_domain_imports():

@@ -67,7 +67,7 @@ class GlobalConfig:
     deep_check_schedule: str = "off"
     # Compress full backups (global default, overridden per-VM/target).
     compress: bool = True
-    # Compression algorithm for FULL backups (``qemu-img convert -c -o
+    # Compression algorithm for FULL backups (compress driver on the
     # compression_type=<type>``).  ``"zstd"`` (default) is 11x faster
     # than ``"zlib"``.  Only effective when ``compress=True``; when
     # ``compress=False``, no compression is applied regardless.
@@ -82,7 +82,7 @@ class GlobalConfig:
     # ``full_verify_after_create``: verification after ``create_full_backup()``
     #   completes, before state recording.  ``"metadata"`` (M1 — qemu-img info
     #   + corrupt-bit check), ``"check"`` (M1 + M2 — qemu-img check),
-    #   ``"hash"`` (M1 + M2 + M3 — SHA-256 comparison), ``"off"`` (none).
+    #   ``"compare"`` (M1 + M2 + M3 — qemu-img compare), ``"off"`` (none).
     full_verify_after_create: str = "check"
     # ``full_verify_before_rebase``: lightweight re-check of a FULL anchor
     #   before rebasing an incremental to it.  ``"metadata"`` (M1) or
@@ -120,15 +120,15 @@ class TargetConfig:
     ``verify`` controls post-transfer verification.  The default is
     ``"metadata"`` (checks qcow2 format, corrupt-bit, and — for bitmap
     incrementals — backing-filename plus the dirty-size regression
-    barrier).  ``"hash"`` and ``"full"`` additionally run
-    chain-traversing ``qemu-img compare`` content verification,
-    ``"off"`` skips verification.  When the user explicitly sets
-    ``verify``, the explicit value takes precedence.
+    barrier).  ``"compare"`` additionally runs chain-traversing
+    ``qemu-img compare`` content verification, ``"off"`` skips
+    verification.  When the user explicitly sets ``verify``, the
+    explicit value takes precedence.
 
     ``compress`` controls whether backups are compressed (default
-    ``True``).  Applies to FULL backups (``qemu-img convert -c``) only
-    — bitmap incrementals are always uncompressed.  Inherited from
-    global → VM → target.
+    ``True``).  Applies to FULL backups (compress driver on the
+    write-side qemu-nbd) only — bitmap incrementals are always
+    uncompressed.  Inherited from global → VM → target.
 
     ``compression_type`` selects the compression algorithm (default
     ``"zstd"`` — 11x faster than ``"zlib"``).  Only effective when

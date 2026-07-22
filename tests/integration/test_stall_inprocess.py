@@ -168,9 +168,9 @@ def test_int_watchdog_aborts_stalled_loop(test_vm) -> None:
     4. Run incremental with a ``_StallingClient`` that sleeps in
        ``pread`` (simulated stalled NBD read), with ``stall_timeout=2``.
     5. Assert the transfer fails with the exact string
-       ``"Stall detected: no progress for 2s"``.
+        ``"Stall detected: no progress for 2s"``.
     6. Assert cleanup ran: no orphaned qemu-nbd, no write sockets,
-       no .tmp file, prior checkpoint preserved.
+        no .tmp file, prior checkpoint preserved.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]

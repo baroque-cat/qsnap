@@ -18,7 +18,6 @@ from qsnap.models.results import (
     RetentionItem,
     RetentionResult,
     SnapshotInfo,
-    SnapshotResult,
 )
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
@@ -143,27 +142,6 @@ def test_mock_backup_provider_has_create_full_backup(make_vm_config, make_target
     )
     result = provider.create_full_backup("testvm", source_snapshot, make_target())
     assert isinstance(result, BackupResult)
-
-
-def test_mock_snapshot_provider_returns_content_hash(make_vm_config):
-    """MockVMModuleFactory.create_snapshot_provider() returns a provider
-    whose create() returns a SnapshotResult with content_hash being a
-    64-char hex string (not None)."""
-    factory = MockVMModuleFactory()
-    provider = factory.create_snapshot_provider(make_vm_config())
-    assert isinstance(provider, ISnapshotProvider)
-
-    result = provider.create(
-        make_vm_config(),
-        "test-snap",
-        "vda",
-        Path("/tmp/test-snap.qcow2"),
-    )
-    assert isinstance(result, SnapshotResult)
-    assert result.content_hash is not None
-    assert len(result.content_hash) == 64
-    # Verify it is a valid hex string (0-9, a-f).
-    int(result.content_hash, 16)
 
 
 def test_mock_factory_create_bucket_full_strategy_returns_mock():

@@ -8,12 +8,34 @@ Post-transfer verification of backup integrity — ensures copied qcow2 files ar
 
 ### Requirement: TargetConfig verify field
 
-`TargetConfig` SHALL have a `verify: str` field with default value `"metadata"`. Accepted values SHALL be `"off"` (no verification), `"metadata"` (structural checks: format, virtual-size, backing-filename, dirty-size barrier for bitmap incrementals), `"hash"` and `"full"` (content-level verification via chain-traversing `qemu-img compare` — see the `nbd-bitmap-backup` capability). The field SHALL be immutable (`frozen=True`). The default SHALL NOT depend on any transfer mode.
+`TargetConfig.verify` controls post-transfer verification. Valid values: `"off"` (no verification), `"metadata"` (structural checks: format, virtual-size, corrupt-bit, backing-filename, dirty-size barrier), `"compare"` (metadata + `qemu-img compare` chain-traversing content comparison). The `"hash"` and `"full"` values are deprecated — both ran `qemu-img compare`; they are now unified to `"compare"`. Existing configs with `"hash"` or `"full"` SHALL log a deprecation WARNING and be treated as `"compare"`. Default is `"metadata"`.
 
 #### Scenario: Default verification is metadata
 
-- **WHEN** a TargetConfig is created without explicit `verify`
-- **THEN** `target.verify` is `"metadata"`
+- **WHEN** `verify` is not set in the TOML
+- **THEN** `TargetConfig.verify` defaults to `"metadata"`
+
+#### Scenario: Explicit compare verification
+
+- **WHEN** `verify = "compare"` is set in the TOML
+- **THEN** `TargetConfig.verify` is `"compare"`
+
+#### Scenario: Deprecated hash treated as compare
+
+- **WHEN** `verify = "hash"` is set in the TOML
+- **THEN** a WARNING is logged naming the deprecated value
+- **AND** `TargetConfig.verify` is treated as `"compare"`
+
+#### Scenario: Deprecated full treated as compare
+
+- **WHEN** `verify = "full"` is set in the TOML
+- **THEN** a WARNING is logged naming the deprecated value
+- **AND** `TargetConfig.verify` is treated as `"compare"`
+
+#### Scenario: Invalid verify value raises ConfigError
+
+- **WHEN** `verify = "invalid"` is set in the TOML
+- **THEN** `ConfigError` is raised
 
 ### Requirement: verify_full_backup function for standalone FULL verification
 

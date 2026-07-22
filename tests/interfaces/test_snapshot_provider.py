@@ -6,7 +6,6 @@ contract: correct return types, ABC enforcement, and no Core inheritance (D1).
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -120,17 +119,11 @@ def test_snapshot_provider_delete_returns_shellresult(cls, init_kwargs):
     ],
     ids=["external", "mock"],
 )
-def test_snapshot_provider_create_returns_content_hash(cls, init_kwargs):
-    """create() returns a SnapshotResult whose content_hash is None or a 64-char hex string.
+def test_snapshot_provider_create_returns_no_content_hash(cls, init_kwargs):
+    """create() returns a SnapshotResult — content_hash field has been removed.
 
-    ``SnapshotResult.content_hash`` is either ``None`` (when hashing was not
-    performed or failed) or a 64-character lowercase SHA-256 hex digest.
-
-    For ``ExternalSnapshotProvider`` the bare ``MockShell`` causes the
-    ``virsh snapshot-create-as`` step to fail, so ``create()`` returns a
-    failed ``SnapshotResult`` with ``content_hash=None``.  For
-    ``MockSnapshotProvider`` the returned ``content_hash`` is a 64-char
-    hex string.
+    ``SnapshotResult`` no longer carries ``content_hash``.  Accessing
+    ``result.content_hash`` raises ``AttributeError``.
     """
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
@@ -140,9 +133,6 @@ def test_snapshot_provider_create_returns_content_hash(cls, init_kwargs):
     )
     result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False)
     assert isinstance(result, SnapshotResult)
-    # content_hash must be None or a 64-char lowercase hex string.
-    assert result.content_hash is None or (
-        isinstance(result.content_hash, str)
-        and len(result.content_hash) == 64
-        and re.fullmatch(r"[0-9a-f]{64}", result.content_hash) is not None
-    )
+    # content_hash field was removed — accessing it must raise AttributeError.
+    with pytest.raises(AttributeError):
+        _ = result.content_hash  # type: ignore[reportAttributeAccessIssue]

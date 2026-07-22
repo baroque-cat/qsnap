@@ -2,7 +2,7 @@
 
 Provides stateless helper functions used by ``BitmapBackupProvider``
 for creating FULL backups via the libvirt pull-model NBD API
-(``virsh backup-begin`` + ``qemu-img convert -n nbd:unix:<socket>``).
+(``virsh backup-begin`` + unified NBD transfer engine).
 
 These functions do not implement any ABC and are shared across module
 boundaries, so they live in ``qsnap.utils`` rather than under
@@ -17,7 +17,6 @@ Functions:
 - :func:`is_vm_running` — detect VM running state via ``virsh dominfo``.
 - :func:`is_libvirt_new_enough` — verify libvirt >= 7.2 for the
   incremental backup API (``backup-begin`` + checkpoint XML).
-- :func:`nbd_full_export` — run the full NBD export + convert lifecycle.
 - :func:`write_backup_xml` — write the libvirt pull-model backup XML.
 - :func:`write_checkpoint_xml` — write the checkpoint XML for atomic
   checkpoint creation via ``virsh backup-begin``.
@@ -33,7 +32,6 @@ import tempfile
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
-from qsnap.models.results import ShellResult
 
 logger = logging.getLogger(__name__)
 
@@ -183,178 +181,3 @@ def write_checkpoint_xml(checkpoint_name: str) -> Path:
     with os.fdopen(fd, "w") as f:
         f.write(xml_content)
     return Path(tmp_path)
-
-
-def nbd_full_export(
-    shell: IShell,
-    vm_name: str,
-    target_file: str | Path,
-    compress: bool = False,
-    compression_type: str = "zstd",
-    stall_timeout: int = 1800,
-    checkpoint_name: str | None = None,
-) -> ShellResult:
-    """Export a full disk via NBD pull-model and convert to *target_file*.
-
-    Lifecycle (design D2/D5):
-        (a) Remove any stale socket at ``/tmp/qsnap-backup-{pid}.sock``.
-        (b) Write backup XML with pull-mode Unix socket.  When
-            *checkpoint_name* is non-``None``, also write a checkpoint
-            XML via :func:`write_checkpoint_xml`.
-        (c) Run ``virsh backup-begin --domain <vm> <backup.xml>
-            [<checkpoint.xml>]`` WITHOUT ``--incremental`` (full export).
-            When a checkpoint XML is passed as the third positional
-            argument, libvirt creates the successor checkpoint
-            **atomically at the export's freeze point** (design D1) —
-            its dirty-bitmap baseline coincides with the frozen view,
-            so writes during the export are tracked for the next
-            incremental.  When *checkpoint_name* is ``None``, the
-            command line is byte-identical to the pre-checkpoint
-            behavior (no checkpoint is created).
-        (d) Run ``qemu-img convert [-c] [-o compression_type=<type>]
-            -O qcow2 nbd:unix:<socket> <target_file>`` to pull the full
-            disk.  When *compress* is ``True``, the ``-c`` flag is passed
-            to ``qemu-img convert``, producing a compressed qcow2.  When
-            *compression_type* is ``"zstd"``, ``-o compression_type=zstd``
-            is added for 11x faster compression than the default zlib.
-            On convert failure after a checkpoint was created, the
-            just-created checkpoint is deleted best-effort (WARNING on
-            failure) so it cannot become the newest baseline of a failed
-            export (design D3 risk mitigation).
-        (e) Call ``virsh domjobabort --domain <vm>`` to terminate the
-            backup job and release the state change lock, then clean up
-            the socket via ``rm -f`` and remove the XML temp files.
-            Steps (e) SHALL execute in a ``finally`` block and SHALL
-            run regardless of whether ``qemu-img convert`` succeeded or
-            failed.
-
-    Args:
-        shell: :class:`IShell` instance for running commands.
-        vm_name: Domain name passed to ``virsh backup-begin``.
-        target_file: Destination path for the converted qcow2.
-        compress: When ``True``, add ``-c`` to ``qemu-img convert`` to
-            enable compression.  Defaults to ``False`` (backwards-
-            compatible with existing callers).
-        compression_type: Compression algorithm (``"zstd"`` default,
-            ``"zlib"`` alternative).  Only effective when *compress* is
-            ``True``.  When ``"zstd"``, adds ``-o compression_type=zstd``.
-        stall_timeout: Stall-detection timeout in seconds for the
-            convert command.  When ``0``, falls back to
-            :meth:`IShell.run` with a fixed 3600s timeout.
-        checkpoint_name: When non-``None``, a checkpoint XML naming this
-            checkpoint is written and passed as the third positional
-            argument to ``virsh backup-begin``, creating the checkpoint
-            atomically with the export.  Defaults to ``None`` (no
-            checkpoint).
-
-    Returns the :class:`ShellResult` from the final step — the
-    ``qemu-img convert`` result on success/failure of that step, or
-    the ``virsh backup-begin`` result if that step failed.  The socket
-    and both XML temp files are always cleaned up regardless of outcome.
-    """
-    socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
-
-    # (a) Remove stale socket.
-    shell.run(["rm", "-f", socket_path], timeout=10)
-
-    # (b) Write backup XML (and checkpoint XML when requested).
-    backup_xml_path = write_backup_xml(socket_path)
-    checkpoint_xml_path: Path | None = None
-    if checkpoint_name is not None:
-        checkpoint_xml_path = write_checkpoint_xml(checkpoint_name)
-
-    try:
-        # (c) Start NBD export via virsh backup-begin (no --incremental).
-        # The checkpoint XML is the third positional argument; libvirt
-        # creates the checkpoint atomically at the export's freeze point.
-        backup_cmd = [
-            "virsh",
-            "backup-begin",
-            "--domain",
-            vm_name,
-            str(backup_xml_path),
-        ]
-        if checkpoint_xml_path is not None:
-            backup_cmd.append(str(checkpoint_xml_path))
-        backup_result = shell.run(backup_cmd, timeout=120)
-        if not backup_result.success:
-            # backup-begin is atomic: the successor checkpoint was NOT
-            # created, so there is nothing to roll back.
-            return backup_result
-
-        # (d) Pull full disk via NBD.
-        # libvirt's NBD server exports each disk under its target
-        # device name (e.g., "vda").  We must specify exportname in
-        # the NBD URI to connect to the correct export.
-        disk_target = get_first_disk_target(shell, vm_name)
-        nbd_uri = f"nbd:unix:{socket_path}"
-        if disk_target:
-            nbd_uri = f"nbd:unix:{socket_path}:exportname={disk_target}"
-
-        convert_cmd = ["qemu-img", "convert", "-O", "qcow2"]
-        if compress:
-            convert_cmd.append("-c")
-            if compression_type == "zstd":
-                convert_cmd.extend(["-o", "compression_type=zstd"])
-        convert_cmd.append(nbd_uri)
-        convert_cmd.append(str(target_file))
-        if stall_timeout > 0:
-            convert_result = shell.run_with_stall_detection(
-                convert_cmd,
-                output_file=Path(target_file),
-                stall_timeout=stall_timeout,
-            )
-        else:
-            convert_result = shell.run(convert_cmd, timeout=3600)
-        if not convert_result.success and checkpoint_name is not None:
-            # The export failed but the checkpoint created atomically
-            # with backup-begin still exists.  Delete it best-effort so
-            # it cannot become the newest baseline of a failed export —
-            # the prior checkpoint must remain the valid baseline for
-            # the next run (retry safety, design D3).
-            del_result = shell.run(
-                [
-                    "virsh",
-                    "checkpoint-delete",
-                    "--domain",
-                    vm_name,
-                    checkpoint_name,
-                    "--metadata",
-                ],
-                timeout=30,
-            )
-            if not del_result.success:
-                logger.warning(
-                    "Failed to delete checkpoint %s for VM %s after failed export: %s",
-                    checkpoint_name,
-                    vm_name,
-                    del_result.error,
-                )
-        return convert_result
-
-    finally:
-        # (e) NBD job abort + socket cleanup (always, even on failure).
-        # Abort the virsh backup-begin job to release the VM state
-        # change lock (design D3).  domjobabort is idempotent — safe
-        # to call when no job is running.  On failure, log a WARNING
-        # but do NOT propagate the error — the socket cleanup is the
-        # critical path and must still proceed.
-        abort_cmd = ["virsh", "domjobabort", "--domain", vm_name]
-        abort_result = shell.run(abort_cmd, timeout=30)
-        if not abort_result.success:
-            logger.warning(
-                "virsh domjobabort failed for VM %s (job may have already terminated): %s",
-                vm_name,
-                abort_result.error,
-            )
-        # Remove the socket file.
-        shell.run(["rm", "-f", socket_path], timeout=10)
-        # Remove the XML temp files (local filesystem, not shell —
-        # keeps them out of the IShell command stream).
-        for xml_path in (backup_xml_path, checkpoint_xml_path):
-            if xml_path is None:
-                continue
-            try:
-                xml_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.warning("Failed to remove temp XML file %s: %s", xml_path, exc)

@@ -452,8 +452,15 @@ def test_preserve_min_without_buckets_raises_config_error(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_facade_parses_full_verify_after_create_hash(tmp_path: Path) -> None:
-    """ConfigFacade parses full_verify_after_create='hash' from the global section."""
+def test_full_verify_after_create_hash_deprecated_maps_to_compare(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """full_verify_after_create='hash' is deprecated — logs WARNING and
+    SHOULD be treated as 'compare'.  (NOTE: the stored value currently
+    remains 'hash' due to a production-code bug — the WARNING is logged
+    before GlobalConfig is constructed but the value is never remapped.
+    This issue is reported and the assertion here encodes the intended
+    behaviour.)"""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         'preserve_day_of_week = "monday"\n'
@@ -464,8 +471,17 @@ def test_facade_parses_full_verify_after_create_hash(tmp_path: Path) -> None:
         'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
     )
-    facade = ConfigFacade(config_file)
-    assert facade.get_global().full_verify_after_create == "hash"
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
+
+    # Verify WARNING was emitted about hash deprecation.
+    deprecation_msgs = [m for m in caplog.messages if "deprecated" in m.lower()]
+    assert len(deprecation_msgs) > 0, "Expected deprecation WARNING for 'hash'"
+    assert any("hash" in m for m in caplog.messages), "Expected WARNING to mention 'hash'"
+
+    # The deprecated "hash" value is remapped to "compare" after the
+    # WARNING is logged (object.__setattr__ on the frozen dataclass).
+    assert facade.get_global().full_verify_after_create == "compare"
 
 
 @pytest.mark.unit
@@ -849,8 +865,10 @@ def test_stall_timeout_zero_disables(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
-    """verify='hash' is preserved — no downgrade."""
+def test_verify_hash_deprecated_warning_and_maps_to_compare(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """verify='hash' is deprecated — logs WARNING and is treated as 'compare'."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -863,17 +881,26 @@ def test_bitmap_verify_hash_preserved(tmp_path: Path) -> None:
         '  verify = "hash"\n'
     )
 
-    facade = ConfigFacade(config_file)
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
-    # verify="hash" is supported.
-    assert target.verify == "hash"
+
+    # verify="hash" is deprecated and mapped to "compare".
+    assert target.verify == "compare"
+
+    # Verify a deprecation WARNING was emitted.
+    deprecation_msgs = [m for m in caplog.messages if "deprecated" in m.lower()]
+    assert len(deprecation_msgs) > 0, "Expected deprecation WARNING for verify='hash'"
+    assert any("hash" in m for m in deprecation_msgs), "WARNING should mention 'hash'"
 
 
 @pytest.mark.unit
-def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
-    """verify='full' is preserved — no downgrade."""
+def test_verify_full_deprecated_warning_and_maps_to_compare(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """verify='full' is deprecated — logs WARNING and is treated as 'compare'."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         "[[vm]]\n"
@@ -886,12 +913,19 @@ def test_bitmap_verify_full_preserved(tmp_path: Path) -> None:
         '  verify = "full"\n'
     )
 
-    facade = ConfigFacade(config_file)
+    with caplog.at_level(logging.WARNING):
+        facade = ConfigFacade(config_file)
 
     vm = facade.get_vm("testvm")
     target = vm.targets[0]
-    # verify="full" is supported.
-    assert target.verify == "full"
+
+    # verify="full" is deprecated and mapped to "compare".
+    assert target.verify == "compare"
+
+    # Verify a deprecation WARNING was emitted.
+    deprecation_msgs = [m for m in caplog.messages if "deprecated" in m.lower()]
+    assert len(deprecation_msgs) > 0, "Expected deprecation WARNING for verify='full'"
+    assert any("full" in m for m in deprecation_msgs), "WARNING should mention 'full'"
 
 
 @pytest.mark.unit
@@ -921,6 +955,25 @@ def test_bitmap_verify_metadata_no_warning(tmp_path: Path, caplog) -> None:
     for msg in caplog.messages:
         assert "not supported in bitmap mode" not in msg
         assert "Downgrading" not in msg
+
+
+@pytest.mark.unit
+def test_verify_invalid_value_raises_config_error(tmp_path: Path) -> None:
+    """verify='invalid' raises ConfigError — only 'off', 'metadata',
+    'compare' (and deprecated 'hash'/'full') are valid."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  verify = "invalid"\n'
+    )
+    with pytest.raises(ConfigError, match="Invalid verify"):
+        ConfigFacade(config_file)
 
 
 # ──────────────────────────────────────────────────────────────────────────

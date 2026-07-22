@@ -27,14 +27,12 @@ def _make_snapshot(
     ts: datetime,
     allocation: int = 1024,
     path: str = "/tmp/snap.qcow2",
-    content_hash: str | None = None,
 ) -> SnapshotInfo:
     return SnapshotInfo(
         name=name,
         path=Path(path),
         timestamp=ts,
         allocation=allocation,
-        content_hash=content_hash,
     )
 
 
@@ -332,42 +330,64 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
     assert ops[0].last_warned_at == warned
 
 
-# ── content_hash persistence tests ───────────────────────────────────────
+def test_new_state_file_excludes_content_hash(tmp_path: Path) -> None:
+    """Recording a SnapshotInfo does NOT write a 'content_hash' key to the JSON.
 
-
-def test_record_snapshot_with_content_hash_restored(tmp_path: Path) -> None:
-    """record_snapshot stores content_hash; get_snapshots returns it preserved."""
+    The ``content_hash`` field has been removed from ``SnapshotInfo``
+    (unify-nbd-transfer change).  State files created by the current
+    version must not contain the key.
+    """
     manager = JsonStateManager(state_dir=tmp_path)
 
-    snap = _make_snapshot(
-        "snap_hash",
-        datetime(2024, 1, 1, 12, 0, 0),
-        content_hash="abc123",
-    )
+    snap = _make_snapshot("snap_no_hash", datetime(2024, 1, 1, 12, 0, 0), allocation=65536)
     manager.record_snapshot("testvm", snap)
 
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists()
+
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    snapshots = data.get("snapshots", [])
+    assert len(snapshots) == 1
+    assert "content_hash" not in snapshots[0], "New state files must NOT contain 'content_hash' key"
+
+
+def test_old_state_content_hash_ignored_on_load(tmp_path: Path) -> None:
+    """State files with a legacy 'content_hash' key load without error.
+
+    The key is silently ignored — the snapshot is loaded, and accessing
+    ``content_hash`` on the loaded ``SnapshotInfo`` raises ``AttributeError``
+    because the field no longer exists.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Manually write a state file with a legacy "content_hash" key.
+    state_data = {
+        "last_allocation": 65536,
+        "snapshots": [
+            {
+                "name": "snap_legacy",
+                "path": "/tmp/snap_legacy.qcow2",
+                "timestamp": "2024-01-01T12:00:00",
+                "allocation": 1024,
+                "content_hash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            }
+        ],
+    }
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(json.dumps(state_data), encoding="utf-8")
+
+    # Load via JsonStateManager — must not raise.
     snapshots = manager.get_snapshots("testvm")
-
     assert len(snapshots) == 1
-    assert snapshots[0].content_hash == "abc123"
+    snap = snapshots[0]
+    assert snap.name == "snap_legacy"
+    assert snap.allocation == 1024
 
-
-def test_snapshot_content_hash_persists_across_runs(tmp_path: Path) -> None:
-    """content_hash survives across JsonStateManager instances (disk reload)."""
-    manager1 = JsonStateManager(state_dir=tmp_path)
-    snap = _make_snapshot(
-        "snap_persist",
-        datetime(2024, 1, 1, 12, 0, 0),
-        content_hash="deadbeef",
-    )
-    manager1.record_snapshot("testvm", snap)
-
-    # New manager instance, same state directory — must load persisted data.
-    manager2 = JsonStateManager(state_dir=tmp_path)
-    snapshots = manager2.get_snapshots("testvm")
-
-    assert len(snapshots) == 1
-    assert snapshots[0].content_hash == "deadbeef"
+    # content_hash field no longer exists on SnapshotInfo.
+    with pytest.raises(AttributeError):
+        _ = snap.content_hash  # type: ignore[reportAttributeAccessIssue]
 
 
 # ── full backup tracking tests ───────────────────────────────────────────

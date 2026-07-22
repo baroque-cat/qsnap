@@ -60,6 +60,37 @@ def test_snapshot_result_failure():
     assert result.error == "virsh timed out"
 
 
+def test_snapshot_result_content_hash_absent():
+    """SnapshotResult no longer has a ``content_hash`` field.
+
+    Accessing ``result.content_hash`` raises ``AttributeError``.
+    """
+    result = SnapshotResult(
+        success=True,
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+        new_allocation=1024,
+        error=None,
+    )
+    with pytest.raises(AttributeError):
+        _ = result.content_hash  # type: ignore[reportAttributeAccessIssue]
+
+
+def test_snapshot_info_content_hash_absent():
+    """SnapshotInfo no longer has a ``content_hash`` field.
+
+    Accessing ``info.content_hash`` raises ``AttributeError``.
+    """
+    info = SnapshotInfo(
+        name="testvm.20250101",
+        path=Path("/snapshots/testvm.20250101"),
+        timestamp=datetime(2025, 1, 1, 12, 0, 0),
+        allocation=1024,
+    )
+    with pytest.raises(AttributeError):
+        _ = info.content_hash  # type: ignore[reportAttributeAccessIssue]
+
+
 def test_backup_result_success():
     """A successful BackupResult carries all fields."""
     result = BackupResult(
@@ -180,42 +211,6 @@ def test_vm_run_result_backup_failed_field():
     # Verify mutation raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.backup_failed = True
-
-
-def test_snapshot_result_content_hash_defaults_none():
-    """SnapshotResult.content_hash defaults to None when not provided."""
-    result = SnapshotResult(
-        success=True,
-        name="testvm.20250101",
-        path=Path("/snapshots/testvm.20250101"),
-        new_allocation=1024,
-        error=None,
-    )
-    assert result.content_hash is None
-
-
-def test_snapshot_result_content_hash_set():
-    """SnapshotResult.content_hash can be set to a hash string."""
-    result = SnapshotResult(
-        success=True,
-        name="testvm.20250101",
-        path=Path("/snapshots/testvm.20250101"),
-        new_allocation=1024,
-        error=None,
-        content_hash="abc123",
-    )
-    assert result.content_hash == "abc123"
-
-
-def test_snapshot_info_content_hash_defaults_none():
-    """SnapshotInfo.content_hash defaults to None when not provided."""
-    info = SnapshotInfo(
-        name="testvm.20250101",
-        path=Path("/snapshots/testvm.20250101"),
-        timestamp=datetime(2025, 1, 1, 12, 0, 0),
-        allocation=1024,
-    )
-    assert info.content_hash is None
 
 
 def test_full_backup_info_dataclass_fields_and_frozen():

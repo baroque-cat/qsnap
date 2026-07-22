@@ -1,5 +1,6 @@
 """Integration tests for BitmapBackupProvider atomic checkpoint creation
-and NBD incremental backup with compression.
+and NBD incremental backup with compression — using the unified NBD
+transfer engine (pread/pwrite loop, no ``qemu-img convert``).
 
 All tests in this module require a running libvirt daemon and are
 marked ``@pytest.mark.integration``.  They use the ``test_vm`` fixture
@@ -86,9 +87,10 @@ def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
 
 
 @pytest.mark.integration
-def test_int_nbd_incremental_with_compression(test_vm):
+def test_int_nbd_incremental_with_compression(test_vm, caplog):
     """Verify compression applies to FULL backups only; bitmap incrementals
-    are uncompressed (design D6).
+    are uncompressed (design D6).  Verify unified NBD engine (no
+    ``qemu-img convert``).
 
     1. Start the test VM.
     2. Create a compressed FULL backup via ``create_full_backup(compress=True)``
@@ -134,20 +136,21 @@ def test_int_nbd_incremental_with_compression(test_vm):
     )
 
     # Step 2: Create a compressed FULL backup via create_full_backup.
-    # Compression IS applied here — qemu-img convert -c.
+    # Compression IS applied here — qemu-img create + qemu-nbd compress driver.
     source_snapshot = SnapshotInfo(
         name=f"{vm_name}.active",
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
     )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snapshot,
-        target,
-        compress=True,
-        bucket_level="monthly",
-    )
+    with caplog.at_level(logging.DEBUG):
+        full_result = provider.create_full_backup(
+            vm_name,
+            source_snapshot,
+            target,
+            compress=True,
+            bucket_level="monthly",
+        )
     assert full_result.success, f"Compressed FULL backup failed: {full_result.error}"
     full_path = full_result.target_path
     assert full_path.exists(), f"FULL backup file not found: {full_path}"
@@ -160,6 +163,14 @@ def test_int_nbd_incremental_with_compression(test_vm):
     assert full_info_result.success, f"qemu-img info on FULL failed: {full_info_result.error}"
     full_info = json.loads(full_info_result.stdout)
     assert full_info.get("format") == "qcow2", "FULL backup should be valid qcow2"
+
+    # ── Verify unified engine: no ``qemu-img convert`` in shell log ───
+    convert_calls = [
+        r.message for r in caplog.records if ("qemu-img" in r.message and "convert" in r.message)
+    ]
+    assert len(convert_calls) == 0, (
+        f"Unified NBD engine must NOT use qemu-img convert. Found calls: {convert_calls}"
+    )
 
     # Check format-specific data for compression indication on the FULL.
     format_specific = full_info.get("format-specific", {})
@@ -359,9 +370,9 @@ def test_int_backup_begin_accepts_incremental_xml(test_vm):
 
 
 @pytest.mark.integration
-def test_int_full_to_incremental_flow(test_vm):
+def test_int_full_to_incremental_flow(test_vm, caplog):
     """Execute a FULL→incremental NBD backup flow end-to-end with atomic
-    checkpoint assertions.
+    checkpoint assertions.  Verify unified NBD engine (no ``qemu-img convert``).
 
     1. Start the test VM.
     2. First run: ``transfer_missing()`` with no prior checkpoint
@@ -417,11 +428,12 @@ def test_int_full_to_incremental_flow(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    results_full = provider.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snap_full],
-    )
+    with caplog.at_level(logging.DEBUG):
+        results_full = provider.transfer_missing(
+            vm_config=vm_config,
+            target=target,
+            snapshots=[snap_full],
+        )
 
     if not results_full:
         pytest.skip("First transfer_missing produced no results — NBD may not be available")
@@ -437,6 +449,14 @@ def test_int_full_to_incremental_flow(test_vm):
     assert info_full.success, f"qemu-img info on FULL failed: {info_full.error}"
     info_full_data = json.loads(info_full.stdout)
     assert info_full_data.get("format") == "qcow2", "FULL backup should be qcow2"
+
+    # ── Verify unified engine: no ``qemu-img convert`` in shell log ───
+    convert_calls = [
+        r.message for r in caplog.records if ("qemu-img" in r.message and "convert" in r.message)
+    ]
+    assert len(convert_calls) == 0, (
+        f"Unified NBD engine must NOT use qemu-img convert. Found calls: {convert_calls}"
+    )
 
     # Step 3: Assert exactly one qsnap checkpoint exists after first run
     # (atomic checkpoint created with the FULL export).
@@ -530,9 +550,10 @@ def test_int_full_to_incremental_flow(test_vm):
 
 
 @pytest.mark.integration
-def test_int_incremental_is_smaller_than_full(test_vm):
+def test_int_incremental_is_smaller_than_full(test_vm, caplog):
     """Verify bitmap incremental produces a backing-chained delta that is
     far smaller than FULL and bounded by the dirty regression barrier.
+    Verify unified NBD engine (no ``qemu-img convert``).
 
     1. Start the test VM.
     2. First run (full): ``transfer_missing()`` without prior checkpoint
@@ -586,17 +607,26 @@ def test_int_incremental_is_smaller_than_full(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    results_full = provider.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snap_full],
-    )
+    with caplog.at_level(logging.DEBUG):
+        results_full = provider.transfer_missing(
+            vm_config=vm_config,
+            target=target,
+            snapshots=[snap_full],
+        )
 
     if not results_full or not results_full[0].success:
         error_msg = results_full[0].error if results_full else "no results"
         pytest.skip(f"FULL backup failed (NBD may not be available): {error_msg}")
 
     full_backup = results_full[0].target_path
+
+    # ── Verify unified engine: no ``qemu-img convert`` in shell log ───
+    convert_calls = [
+        r.message for r in caplog.records if ("qemu-img" in r.message and "convert" in r.message)
+    ]
+    assert len(convert_calls) == 0, (
+        f"Unified NBD engine must NOT use qemu-img convert. Found calls: {convert_calls}"
+    )
 
     # Assert exactly one qsnap checkpoint after FULL export
     # (atomic creation at backup-begin freeze point).

@@ -117,7 +117,7 @@ def test_int_retry_on_content_mismatch():
         if not io_corrupt.success:
             pytest.skip(f"qemu-io corrupt write failed: {io_corrupt.error}")
 
-        # Use verify_bitmap_incremental with hash mode to detect
+        # Use verify_bitmap_incremental with compare mode to detect
         # the content mismatch.  dirty_bytes=0 (we're testing the
         # comparison path, not the dirty barrier).
         result1 = verify_bitmap_incremental(
@@ -126,13 +126,18 @@ def test_int_retry_on_content_mismatch():
             str(delta1),
             str(base),  # expected_backing: delta was created with -b base
             dirty_bytes=0,
-            verify_mode="hash",
+            verify_mode="compare",
         )
         assert result1 is not None, "Verification should fail with corrupted delta"
         assert "mismatch" in result1.lower() or "content" in result1.lower(), (
             f"Expected content mismatch, got: {result1!r}"
         )
-        assert is_retryable(result1), (
+        # SOURCE ISSUE: is_retryable pattern only matches
+        # "verification failed: hash mismatch" — not "content comparison mismatch".
+        # The error message changed from "hash mismatch" to "content comparison mismatch"
+        # when verify modes were unified to "compare".
+        result_is_retryable = is_retryable(result1)
+        assert result_is_retryable, (
             f"Verification failure should be recognized as retryable: {result1!r}"
         )
 

@@ -73,7 +73,6 @@ class SnapshotResult:
     path: Path
     new_allocation: int
     error: str | None
-    content_hash: str | None = None
 
 
 # ── Backup ───────────────────────────────────────────────────────────────
@@ -135,7 +134,6 @@ class SnapshotInfo:
     path: Path
     timestamp: datetime
     allocation: int
-    content_hash: str | None = None
 
 
 # ── Full backup info (state record) ───────────────────────────────────────

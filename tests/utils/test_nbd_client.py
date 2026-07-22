@@ -15,6 +15,7 @@ import sys
 import types
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -65,6 +66,7 @@ def _make_fake_nbd_module() -> tuple[types.ModuleType, list[Any]]:
         _pread_raises: str | None = None
         _pwrite_raises: str | None = None
         _block_status_entries: list[tuple[str, list[int]]] | None = None
+        _flush_raises: str | None = None
 
         def __init__(self) -> None:
             self.meta_contexts: list[str] = []
@@ -114,6 +116,14 @@ def _make_fake_nbd_module() -> tuple[types.ModuleType, list[Any]]:
 
         def shutdown(self) -> None:
             self.shutdown_called = True
+
+        def can_flush(self) -> bool:
+            return True
+
+        def flush(self) -> None:
+            self._flush_called: bool = getattr(self, "_flush_called", False) or True
+            if self._flush_raises is not None:
+                raise _Error(errno="EIO", errnum=5, string=self._flush_raises)
 
     mod = types.ModuleType("nbd")
     mod.NBD = _NBD  # type: ignore[reportAttributeAccessIssue]
@@ -174,16 +184,17 @@ class TestConnect:
         self, monkeypatch: pytest.MonkeyPatch, errno_name: str
     ) -> None:
         """When the fake ``connect_uri`` raises ``nbd.Error`` with
-        errno=ENOENT or ECONNREFUSED, ``connect()`` returns
-        ``NbdResult(success=False)`` whose error contains
+        errno=ENOENT or ECONNREFUSED, ``connect()`` retries 20 times and
+        returns ``NbdResult(success=False)`` whose error contains
         ``"connection refused"`` (case‑insensitive).  The exception
         never propagates."""
-        mod, _ = _make_fake_nbd_module()
+        mod, handles = _make_fake_nbd_module()
         mod.NBD._connect_raises = (errno_name, "server unreachable")  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "nbd", mod)
 
         client = LibnbdClient()
-        result = client.connect("nbd://localhost", "", [])
+        with patch("time.sleep", return_value=None):
+            result = client.connect("nbd://localhost", "", [])
 
         assert result.success is False
         assert result.payload is None
@@ -191,6 +202,8 @@ class TestConnect:
         assert "connection refused" in result.error.lower(), (
             f"Expected 'connection refused' in error, got: {result.error!r}"
         )
+        # 20 fresh NBD handles should have been created (one per retry attempt).
+        assert len(handles) == 20, f"Expected 20 NBD handles (one per retry), got {len(handles)}"
 
     def test_connect_requests_exact_meta_contexts(
         self,
@@ -291,9 +304,14 @@ class TestConnect:
         """With the real ``nbd`` module installed, connecting to a
         closed TCP port returns ``NbdResult(success=False)`` whose error
         contains ``"connection refused"`` — the exception never
-        propagates to the caller."""
+        propagates to the caller.
+
+        ``time.sleep`` is mocked to avoid a 20-second wait from the
+        retry loop.
+        """
         client = LibnbdClient()
-        result = client.connect("nbd://127.0.0.1:19999", "", [])
+        with patch("time.sleep", return_value=None):
+            result = client.connect("nbd://127.0.0.1:19999", "", [])
         assert result.success is False
         assert result.payload is None
         assert result.error is not None
@@ -665,3 +683,124 @@ class TestIsLibnbdAvailable:
 
         monkeypatch.setattr("importlib.util.find_spec", _fake_find_spec)
         assert is_libnbd_available() is True
+
+
+# ── connect retry (design D8) ──────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestConnectRetry:
+    """``connect()`` retry loop: 20 attempts, fresh handle, sleep between."""
+
+    def test_connect_retry_20_attempts_fresh_handle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When every connect attempt fails, ``connect()`` creates a fresh
+        ``nbd.NBD()`` handle on each of the 20 attempts (handles are never
+        reused), calls ``time.sleep(1)`` between attempts 1–19, and
+        returns ``NbdResult(success=False)``."""
+        mod, handles = _make_fake_nbd_module()
+        mod.NBD._connect_raises = ("ECONNREFUSED", "connection refused")  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nbd", mod)
+
+        client = LibnbdClient()
+        with patch("time.sleep", return_value=None) as sleep_mock:
+            result = client.connect("nbd://localhost", "", [])
+
+        assert result.success is False
+        assert result.error is not None
+        assert "connection refused" in result.error.lower()
+
+        # 20 fresh handles, one per attempt.
+        assert len(handles) == 20, f"Expected 20 fresh NBD handles, got {len(handles)}"
+
+        # sleep called between each failed attempt: 19 calls for attempts 1–19.
+        assert sleep_mock.call_count == 19, (
+            f"Expected 19 sleep calls (between 20 attempts), got {sleep_mock.call_count}"
+        )
+        for call in sleep_mock.call_args_list:
+            assert call.args == (1,) or call.args == (1,), f"Expected sleep(1), got {call.args}"
+
+    def test_connect_retry_exhausted_returns_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After 20 consecutive connect failures, ``connect()`` returns
+        ``NbdResult(success=False)`` with the last error message and
+        ``payload=None``."""
+        mod, handles = _make_fake_nbd_module()
+        mod.NBD._connect_raises = ("EPIPE", "broken pipe on last attempt")  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nbd", mod)
+
+        client = LibnbdClient()
+        with patch("time.sleep", return_value=None):
+            result = client.connect("nbd://localhost", "vda", [])
+
+        assert result.success is False
+        assert result.payload is None
+        assert result.error is not None
+        assert "broken pipe" in result.error.lower(), (
+            f"Expected 'broken pipe' in error, got: {result.error!r}"
+        )
+
+
+# ── can_flush ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestCanFlush:
+    """``can_flush()`` delegates to the NBD handle and is safe when
+    unconnected."""
+
+    def test_can_flush_delegates_to_nbd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After ``connect()``, ``can_flush()`` returns the value of
+        ``nbd.can_flush()``.  ``flush()`` is a no‑op in the fake."""
+        mod, _ = _make_fake_nbd_module()
+        monkeypatch.setitem(sys.modules, "nbd", mod)
+
+        client = LibnbdClient()
+        client.connect("nbd://localhost", "", [])
+        assert client.can_flush() is True
+
+
+# ── flush ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestFlush:
+    """``flush()`` delegates to the NBD handle and is safe when
+    unconnected."""
+
+    def test_flush_delegates_to_nbd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After ``connect()``, ``flush()`` calls ``nbd.flush()`` and
+        returns ``NbdResult(success=True)``."""
+        mod, _ = _make_fake_nbd_module()
+        monkeypatch.setitem(sys.modules, "nbd", mod)
+
+        client = LibnbdClient()
+        client.connect("nbd://localhost", "", [])
+        result = client.flush()
+
+        assert result.success is True
+        assert result.payload is None
+        assert result.error is None
+
+    def test_flush_safe_when_can_flush_false(
+        self,
+    ) -> None:
+        """``flush()`` called without ``connect()`` returns
+        ``NbdResult(success=False, error="not connected")`` — caller is
+        safe to invoke ``flush()`` on an uninitialized client."""
+        client = LibnbdClient()
+        result = client.flush()
+
+        assert result.success is False
+        assert result.payload is None
+        assert result.error == "not connected"

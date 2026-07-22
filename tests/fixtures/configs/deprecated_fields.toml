@@ -20,6 +20,7 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_deprecated"
   [[vm.target]]
   path = "/mnt/backup/vm_deprecated"
   incremental = true
+  verify = "hash"
   full_every = "7d"
   full_compress = true
   incremental_mode = "file-copy"

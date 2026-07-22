@@ -8,13 +8,13 @@ Provides the `ISnapshotProvider` interface — the primary mechanism for creatin
 ## Requirements
 
 ### Requirement: External disk-only snapshot creation
-The system SHALL create external disk-only snapshots via `virsh snapshot-create-as` with flags `--disk-only --atomic --no-metadata`. After snapshot creation, the system SHALL determine the allocation-size of the new image via `qemu-img info --force-share --output=json`. The `--force-share` flag is REQUIRED because the newly created snapshot file IS the active layer — the running VM holds an exclusive write lock on it. Without `--force-share`, `qemu-img info` fails with a lock error. The method SHALL accept an optional `quiesce: bool = False` parameter to request guest-agent filesystem freeze. The system SHALL compute a content hash of the new snapshot via `file_sha256()` imported from `qsnap.utils.hash` — NOT from any `qsnap.modules` package.
+The system SHALL create external disk-only snapshots via `virsh snapshot-create-as` with flags `--disk-only --atomic --no-metadata`. After snapshot creation, the system SHALL determine the allocation-size of the new image via `qemu-img info --force-share --output=json`. The `--force-share` flag is REQUIRED because the newly created snapshot file IS the active layer — the running VM holds an exclusive write lock on it. Without `--force-share`, `qemu-img info` fails with a lock error. The method SHALL accept an optional `quiesce: bool = False` parameter to request guest-agent filesystem freeze. The method SHALL NOT compute a `content_hash` — the SHA-256 hash of the raw qcow2 file is semantically incorrect for NBD-created backups and has no consumers. The `content_hash` field is removed from `SnapshotResult`.
 
 #### Scenario: Successful snapshot creation
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
 - **THEN** the module returns `SnapshotResult(success=True, new_allocation=<parsed actual-size>)`
 - **AND** `new_allocation` equals the `actual-size` value from `qemu-img info --force-share --output=json`
-- **AND** `content_hash` is set to the SHA-256 hash computed by `qsnap.utils.hash.file_sha256()`
+- **AND** no SHA-256 hash is computed
 
 #### Scenario: virsh command fails
 - **WHEN** `virsh snapshot-create-as` returns a non-zero exit code
@@ -64,12 +64,6 @@ The system SHALL delete a snapshot `.qcow2` file via `rm -f`. The method accepts
 - **WHEN** the snapshot file does not exist
 - **THEN** `rm -f` returns success (idempotent operation)
 - **AND** the module returns `ShellResult(success=True)`
-
-#### Scenario: Content hash computed via qsnap.utils.hash
-- **WHEN** a snapshot is created successfully
-- **THEN** the content hash is computed by calling `file_sha256(snapshot_path)` from `qsnap.utils.hash`
-- **AND** the import in `external.py` reads `from qsnap.utils.hash import file_sha256`
-- **AND** there is NO import from `qsnap.modules.backup` in `external.py`
 
 ### Requirement: Quiesce support in snapshot creation
 `ExternalSnapshotProvider.create()` SHALL accept an optional `quiesce: bool = False` parameter. When `True`, SHALL pass `--quiesce` to `virsh snapshot-create-as`. Timeout SHALL be extended to 180 seconds for quiesce operations.

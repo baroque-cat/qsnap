@@ -58,11 +58,11 @@ def verify_full_backup(
         shell: :class:`IShell` instance for running qemu-img commands.
         target_path: Path to the FULL backup qcow2 file to verify.
         verify_mode: One of ``"off"``, ``"metadata"``, ``"check"``,
-            ``"hash"``.
-        source_path: Path to the source snapshot for ``"hash"`` mode
+            ``"compare"``.
+        source_path: Path to the source snapshot for ``"compare"`` mode
             (M3 — ``qemu-img compare`` content verification).  The
             compare traverses the backing chain automatically.  If
-            ``None`` in ``"hash"`` mode, M3 is skipped.
+            ``None`` in ``"compare"`` mode, M3 is skipped.
         expected_virtual_size: When provided, verify the FULL's
             virtual-size matches this value (M1).
 
@@ -73,7 +73,15 @@ def verify_full_backup(
     if verify_mode == "off":
         return None
 
-    # ── M1: Metadata verification (always runs for metadata/check/hash) ──
+    # Deprecation: "hash" was replaced by "compare" (unify-nbd-transfer).
+    if verify_mode == "hash":
+        logger.warning(
+            "verify_mode=%r is deprecated — treating as 'compare'",
+            verify_mode,
+        )
+        verify_mode = "compare"
+
+    # ── M1: Metadata verification (always runs for metadata/check/compare) ──
 
     info_cmd = [
         "qemu-img",
@@ -123,9 +131,9 @@ def verify_full_backup(
                 f"(expected={expected_virtual_size}, got={target_vsize})"
             )
 
-    # ── M2: Structural verification (check/hash modes only) ────────────
+    # ── M2: Structural verification (check/compare modes only) ────────
 
-    if verify_mode in ("check", "hash"):
+    if verify_mode in ("check", "compare"):
         check_cmd = [
             "qemu-img",
             "check",
@@ -150,14 +158,9 @@ def verify_full_backup(
         if leaks > 0:
             return f"verification failed: qemu-img check found {leaks} leaks"
 
-    # ── M3: Content comparison via qemu-img compare (hash mode only) ──
-    # NOTE: This replaces the previous SHA-256 hash comparison which was
-    # broken — SHA-256 of a snapshot delta file (with backing chain)
-    # never matches SHA-256 of a standalone NBD-converted FULL file.
-    # qemu-img compare traverses the backing chain automatically and
-    # compares virtual-disk content visible to the guest OS.
+    # ── M3: Content comparison via qemu-img compare (compare mode only)
 
-    if verify_mode == "hash" and source_path is not None:
+    if verify_mode == "compare" and source_path is not None:
         compare_cmd = [
             "qemu-img",
             "compare",
@@ -201,7 +204,7 @@ def verify_bitmap_incremental(
        extent lengths measured by the copy loop before transfer.  A
        breach means the engine regressed to copying the full disk.
 
-    For ``verify_mode`` ``"hash"`` or ``"full"``,
+    For ``verify_mode`` ``"compare"``,
     ``qemu-img compare -q --force-share <source> <delta>`` additionally
     compares virtual disk content across both backing chains
     (chain-traversing; a live-source WARNING is logged).
@@ -216,7 +219,7 @@ def verify_bitmap_incremental(
         dirty_bytes: Sum of dirty extent lengths measured by the copy
             loop before transfer (regression barrier input).
         verify_mode: One of ``"off"``, ``"metadata"``, ``"check"``,
-            ``"hash"``, ``"full"``.
+            ``"compare"``.
 
     Returns:
         ``None`` on success, or an error string starting with
@@ -224,6 +227,15 @@ def verify_bitmap_incremental(
     """
     if verify_mode == "off":
         return None
+
+    # Deprecation: "hash"/"full" were replaced by "compare"
+    # (unify-nbd-transfer).
+    if verify_mode in ("hash", "full"):
+        logger.warning(
+            "verify_mode=%r is deprecated — treating as 'compare'",
+            verify_mode,
+        )
+        verify_mode = "compare"
 
     # ── Source info (for virtual-size match) ─────────────────────────
     # --force-share: the source may be the active layer of a running
@@ -297,8 +309,8 @@ def verify_bitmap_incremental(
             "engine regressed to full copy"
         )
 
-    # ── Content comparison across chains (hash/full tiers) ───────────
-    if verify_mode in ("hash", "full"):
+    # ── Content comparison across chains (compare tier) ──────────────
+    if verify_mode == "compare":
         # Live-source caveat: the source may be a running VM's active
         # layer; --force-share avoids hard lock errors, but writes
         # during the comparison may produce false mismatches (design

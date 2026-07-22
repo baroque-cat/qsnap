@@ -1,9 +1,12 @@
 """Integration tests for ConfigFacade parsing of TOML configurations.
-
 All tests in this module are marked ``@pytest.mark.integration``.
 They parse real TOML files with ``ConfigFacade`` and verify that
 configuration warnings, downgrades, and option inheritance work
 correctly.
+
+NOTE: The ``"hash"`` and ``"full"`` verify modes have been unified into
+``"compare"``.  ``ConfigFacade`` translates ``"hash"`` → ``"compare"``
+with a deprecation warning.
 
 Run only when explicitly requested::
 
@@ -21,18 +24,19 @@ import pytest
 from qsnap.config.facade import ConfigFacade
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 1: Bitmap + hash is preserved (no downgrade)
+# Test 1: Bitmap + hash is translated to compare (deprecated, dignified)
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 def test_int_bitmap_hash_preserved(caplog: pytest.LogCaptureFixture):
-    """Verify that ConfigFacade preserves ``verify="hash"`` for targets.
+    """Verify that ConfigFacade translates ``verify="hash"`` → ``"compare"``
+    with a deprecation warning.
 
-    Now ``verify_bitmap_incremental()`` supports chain-traversing
-    ``qemu-img compare`` in hash/full tiers (with a live-source
-    reliability caveat), so the explicit verify value is preserved
-    and no downgrade warning is emitted.
+    The ``"hash"`` and ``"full"`` verify modes have been unified into
+    ``"compare"`` (chain-traversing ``qemu-img compare``).  ConfigFacade
+    accepts ``"hash"`` as valid input and translates it to ``"compare"``
+    with a WARNING.
     """
     toml_content = """\
 [[vm]]
@@ -55,20 +59,21 @@ compress = true
         with caplog.at_level(logging.WARNING, logger="qsnap.config.facade"):
             facade = ConfigFacade(str(config_path))
 
-        # Verify NO downgrade warning was emitted.
+        # Verify a deprecation/dignified translation warning was emitted.
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        downgrade_warnings = [
+        deprecation_warnings = [
             r
             for r in warnings
-            if "downgrading" in (r.getMessage() or "").lower()
-            or "downgrade" in (r.getMessage() or "").lower()
+            if "deprecated" in (r.getMessage() or "").lower()
+            or "treating as" in (r.getMessage() or "").lower()
         ]
-        assert len(downgrade_warnings) == 0, (
-            f"Expected no downgrade warnings for bitmap+hash (now supported). "
-            f"Got: {[r.getMessage() for r in downgrade_warnings]}"
+        # At least one deprecation warning for hash→compare translation.
+        assert len(deprecation_warnings) >= 1, (
+            f"Expected deprecation warning for verify='hash' → 'compare' translation. "
+            f"Got: {[r.getMessage() for r in warnings]}"
         )
 
-        # Verify the target's verify mode was preserved as configured.
+        # Verify the target's verify mode was translated to "compare".
         vms = facade.get_vms()
         assert len(vms) == 1, f"Expected 1 VM, got {len(vms)}"
 
@@ -77,8 +82,9 @@ compress = true
         assert len(vm.targets) == 1, f"Expected 1 target, got {len(vm.targets)}"
 
         target = vm.targets[0]
-        assert target.verify == "hash", (
-            f"Expected verify='hash' preserved, got verify={target.verify!r}"
+        # "hash" is translated to "compare" by the facade.
+        assert target.verify == "compare", (
+            f"Expected verify='hash' translated to 'compare', got verify={target.verify!r}"
         )
 
     finally:

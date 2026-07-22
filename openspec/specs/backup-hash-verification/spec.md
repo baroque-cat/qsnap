@@ -26,10 +26,4 @@ SHA-256 hash verification tier for backup integrity checks. At snapshot creation
 - **WHEN** a `SnapshotInfo` with `content_hash="abc123..."` is recorded via `IStateManager.record_snapshot()`
 - **THEN** subsequent `IStateManager.get_snapshots()` SHALL return a `SnapshotInfo` with the same `content_hash`
 
-### Requirement: _file_sha256 computes binary hash efficiently
 
-A module-level function `_file_sha256(path)` SHALL read the file in 8MB chunks and return the hex-encoded SHA-256 digest.
-
-#### Scenario: Hash computed for a file
-- **WHEN** `_file_sha256("/tmp/test.qcow2")` is called
-- **THEN** it SHALL return a 64-character hex string

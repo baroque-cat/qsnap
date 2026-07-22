@@ -51,6 +51,8 @@ class MockNbdClient(INbdClient):
         self.connected_uri: str | None = None
         self.connected_export: str | None = None
         self.disconnect_count = 0
+        self.flush_count = 0
+        self.connect_attempts = 0
 
         self.block_status_payload: dict[str, list[NbdExtent]] = {}
         self.block_status_handler: Callable[[int, int], NbdResult] | None = None
@@ -71,6 +73,7 @@ class MockNbdClient(INbdClient):
     def connect(self, uri: str, export_name: str, meta_contexts: list[str]) -> NbdResult:
         self.calls.append(("connect", uri, export_name))
         self.requested_contexts = list(meta_contexts)
+        self.connect_attempts += 1
         if self.fail_connect is not None:
             return NbdResult(success=False, payload=None, error=self.fail_connect)
         self.connected_uri = uri
@@ -108,6 +111,15 @@ class MockNbdClient(INbdClient):
             return NbdResult(success=False, payload=None, error=self.fail_pwrite)
         self.writes.append((offset, data))
         self.bytes_written += len(data)
+        return NbdResult(success=True, payload=None, error=None)
+
+    def can_flush(self) -> bool:
+        self.calls.append(("can_flush", None, None))
+        return True
+
+    def flush(self) -> NbdResult:
+        self.calls.append(("flush", None, None))
+        self.flush_count += 1
         return NbdResult(success=True, payload=None, error=None)
 
     def disconnect(self) -> None:

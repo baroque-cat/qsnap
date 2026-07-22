@@ -168,19 +168,20 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **THEN** only `vda` and `vdb` are snapshotted
 
 ### Requirement: TargetConfig verify field
-`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The default SHALL be `"metadata"` (NBD bitmap is the only backup strategy). When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (qemu-img info consistency check), `"hash"` (qemu-img compare chain-traversing content verification), and `"full"` (same as `"hash"` for bitmap chains — chain-traversing content compare). The field SHALL be immutable (`frozen=True`).
+`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The default SHALL be `"metadata"`. When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (structural checks), `"compare"` (qemu-img compare chain-traversing content verification). The `"hash"` and `"full"` values are deprecated and treated as `"compare"`. Deprecated values SHALL log a WARNING naming the value. The field SHALL be immutable (`frozen=True`).
 
 #### Scenario: Dataclass-level verify default is metadata
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and no `verify`
 - **THEN** `target.verify` is `"metadata"`
 
-#### Scenario: Explicit full verification
-- **WHEN** a TargetConfig is created with `verify="full"`
-- **THEN** `target.verify` is `"full"`
+#### Scenario: Explicit compare verification
+- **WHEN** a TargetConfig is created with `verify="compare"`
+- **THEN** `target.verify` is `"compare"`
 
-#### Scenario: Explicit verify overrides default
-- **WHEN** a TargetConfig is created with explicit `verify="hash"`
-- **THEN** `target.verify` is `"hash"` (explicit value takes precedence)
+#### Scenario: Deprecated hash treated as compare
+- **WHEN** `verify = "hash"` is set
+- **THEN** a WARNING is logged
+- **AND** the effective value is `"compare"`
 
 ### Requirement: VMConfig snapshot_quiesce field
 `VMConfig` SHALL gain a `snapshot_quiesce: bool` field with default `False`. When `True`, snapshot creation SHALL request guest-agent filesystem freeze via `--quiesce`.
@@ -283,7 +284,16 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 
 ### Requirement: GlobalConfig full_verify_after_create field
 
-`GlobalConfig` SHALL include a `full_verify_after_create: str` field with default `"check"`. Accepted values: `"metadata"` (M1 only), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare), `"off"` (no verification). Controls FULL backup verification immediately after creation.
+`GlobalConfig` SHALL include a `full_verify_after_create: str` field with default `"check"`. Accepted values: `"metadata"` (M1 only), `"check"` (M1+M2), `"compare"` (M1+M2+M3 via qemu-img compare), `"off"` (no verification). The `"hash"` value is deprecated and treated as `"compare"`. Controls FULL backup verification immediately after creation.
+
+#### Scenario: Default is check
+- **WHEN** `full_verify_after_create` is not set
+- **THEN** the value is `"check"`
+
+#### Scenario: Deprecated hash treated as compare
+- **WHEN** `full_verify_after_create = "hash"` is set
+- **THEN** a WARNING is logged
+- **AND** the effective value is `"compare"`
 
 ### Requirement: GlobalConfig full_verify_before_rebase field
 

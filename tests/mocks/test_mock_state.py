@@ -104,26 +104,6 @@ def test_inmemory_state_manager_full_backup_methods():
     assert info.path == Path("/mnt/backup/testvm") / "testvm.FULL.qcow2"
 
 
-def test_inmemory_state_manager_content_hash_persists():
-    """record_snapshot with SnapshotInfo(content_hash=...) persists the
-    content_hash so that get_snapshots() returns the snapshot with the
-    same content_hash value."""
-    state_manager = InMemoryStateManager()
-
-    info = SnapshotInfo(
-        name="test",
-        path=Path("/tmp/test"),
-        timestamp=datetime.now(),
-        allocation=65536,
-        content_hash="abc123",
-    )
-    state_manager.record_snapshot("testvm", info)
-
-    snapshots = state_manager.get_snapshots("testvm")
-    assert len(snapshots) == 1
-    assert snapshots[0].content_hash == "abc123"
-
-
 def test_in_memory_state_manager_deferred_last_warned_at_defaults_none():
     """add_deferred_blockcommit creates entries with last_warned_at=None."""
     state_manager = InMemoryStateManager()

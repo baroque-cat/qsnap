@@ -190,7 +190,7 @@ def test_full_backup_toml_parses_compress() -> None:
     vm = facade.get_vm("vm_with_full")
     target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
     assert target.compress is True
-    assert target.verify == "hash"
+    assert target.verify == "compare"
 
     # vm_no_full: no compress set → defaults.
     vm2 = facade.get_vm("vm_no_full")
@@ -241,7 +241,7 @@ def test_safety_fields_toml_parses_correctly() -> None:
     assert len(critical.targets) == 1
     assert critical.targets[0].backup_retry_max == 5
     assert critical.targets[0].backup_retry_base == "5s"
-    assert critical.targets[0].verify == "full"
+    assert critical.targets[0].verify == "compare"
     assert critical.targets[0].compress is True
 
     # standard-vm with default deep verify and standard retry.

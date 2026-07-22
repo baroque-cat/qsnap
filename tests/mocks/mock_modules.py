@@ -46,7 +46,6 @@ class MockSnapshotProvider(ISnapshotProvider):
             path=snapshot_path,
             new_allocation=65536,
             error=None,
-            content_hash="a" * 64,
         )
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
@@ -71,7 +70,6 @@ class MockBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         *,
-        full_verify_before_rebase: str = "metadata",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> list[BackupResult]:
@@ -137,7 +135,6 @@ class MockBitmapBackupProvider(IBackupProvider):
         target: TargetConfig,
         snapshots: list[SnapshotInfo],
         *,
-        full_verify_before_rebase: str = "metadata",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
     ) -> list[BackupResult]:

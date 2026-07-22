@@ -2,7 +2,7 @@
 (``verify_full_backup``).
 
 Tests cover the four verification levels (``off``, ``metadata``,
-``check``, ``hash``) using ``MockShell`` to simulate ``qemu-img info``,
+``check``, ``compare``) using ``MockShell`` to simulate ``qemu-img info``,
 ``qemu-img check``, and ``qemu-img compare`` commands.  No real I/O
 occurs for shell commands — all calls are intercepted by ``MockShell``.
 
@@ -12,9 +12,14 @@ Verification levels:
   detection, optional virtual-size match.
 - ``"check"``: metadata + ``qemu-img check`` structural scan
   (errors, leaks).
-- ``"hash"``: metadata + structural scan + ``qemu-img compare``
+- ``"compare"``: metadata + structural scan + ``qemu-img compare``
   content comparison against a source snapshot (M3 requires
   ``source_path``).
+
+Deprecated modes:
+- ``"hash"`` and ``"full"`` are deprecated aliases for ``"compare"``.
+  When used, a WARNING is logged and they behave identically to
+  ``"compare"``.
 """
 
 from __future__ import annotations
@@ -182,12 +187,12 @@ def test_verify_full_backup_check_no_errors(mock_shell):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Content comparison (M3 via qemu-img compare) — hash mode (M1 + M2 + M3)
+# Content comparison (M3 via qemu-img compare) — compare mode (M1 + M2 + M3)
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_verify_full_backup_hash_match(mock_shell):
-    """When ``verify_mode="hash"`` and ``qemu-img compare`` succeeds
+def test_verify_full_backup_compare_match(mock_shell):
+    """When ``verify_mode="compare"`` and ``qemu-img compare`` succeeds
     (exit=0), ``verify_full_backup`` returns ``None``.
 
     M1 and M2 are mocked to pass; M3 is simulated via
@@ -203,15 +208,15 @@ def test_verify_full_backup_hash_match(mock_shell):
     result = verify_full_backup(
         mock_shell,
         Path("/backup/full.qcow2"),
-        "hash",
+        "compare",
         source_path=source,
     )
 
     assert result is None
 
 
-def test_verify_full_backup_hash_mismatch(mock_shell):
-    """When ``verify_mode="hash"`` and ``qemu-img compare`` returns a
+def test_verify_full_backup_compare_mismatch(mock_shell):
+    """When ``verify_mode="compare"`` and ``qemu-img compare`` returns a
     non-zero exit, ``verify_full_backup`` returns an error containing
     ``"content comparison mismatch"``.
 
@@ -228,7 +233,7 @@ def test_verify_full_backup_hash_mismatch(mock_shell):
     result = verify_full_backup(
         mock_shell,
         Path("/backup/full.qcow2"),
-        "hash",
+        "compare",
         source_path=source,
     )
 
@@ -236,8 +241,8 @@ def test_verify_full_backup_hash_mismatch(mock_shell):
     assert "content comparison mismatch" in result
 
 
-def test_verify_full_backup_hash_none_skips_m3(mock_shell):
-    """When ``verify_mode="hash"`` but ``source_path`` is ``None``,
+def test_verify_full_backup_compare_none_skips_m3(mock_shell):
+    """When ``verify_mode="compare"`` but ``source_path`` is ``None``,
     M3 (content comparison via ``qemu-img compare``) is skipped.  Only
     M1 and M2 run, and ``verify_full_backup`` returns ``None`` after
     they pass.
@@ -250,10 +255,33 @@ def test_verify_full_backup_hash_none_skips_m3(mock_shell):
     result = verify_full_backup(
         mock_shell,
         Path("/backup/full.qcow2"),
-        "hash",
+        "compare",
         source_path=None,
     )
 
+    assert result is None
+
+
+def test_verify_full_backup_hash_deprecated_triggers_compare(mock_shell, caplog):
+    """When ``verify_mode="hash"`` (deprecated), a WARNING is logged and the
+    mode behaves identically to ``"compare"`` — M1, M2, and M3 all run.
+
+    This test verifies that qemu-img compare IS called with verify_mode="hash".
+    """
+    source = Path("/backup/source_snapshot.qcow2")
+
+    mock_shell.expect("qemu-img info").returns(_ok_result(stdout=json.dumps(_VALID_QCOW2_INFO)))
+    mock_shell.expect("qemu-img check").returns(_ok_result(stdout=json.dumps(_VALID_CHECK)))
+    mock_shell.expect("qemu-img compare").returns(_ok_result(stdout="Images are identical."))
+
+    result = verify_full_backup(
+        mock_shell,
+        Path("/backup/full.qcow2"),
+        "hash",
+        source_path=source,
+    )
+
+    # M3 must pass (identical to "compare" behavior)
     assert result is None
 
 

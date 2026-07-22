@@ -1,9 +1,9 @@
 """Unit tests for BitmapBackupProvider incremental dirty-block copy loop.
 
-Tests cover the new INbdClient-driven copy loop (design D2/D4) that replaces
-the former bare ``qemu-img convert`` pull on the incremental path.  All shell
-calls go through ``MockShell``; all NBD operations through ``MockNbdClient`` —
-zero real I/O.
+Tests cover the unified NBD engine (design D1/D2/D4) that replaces
+the former bare ``qemu-img convert`` pull on ALL paths (FULL and incremental).
+All shell calls go through ``MockShell``; all NBD operations through
+``MockNbdClient`` — zero real I/O.
 """
 
 from __future__ import annotations
@@ -84,7 +84,6 @@ def _setup_full_copy_loop_expectations(
     write_socket = f"/tmp/qsnap-write-{pid}.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
-    # domblklist for disk target (use expect_first to beat conftest)
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
@@ -98,7 +97,6 @@ def _setup_full_copy_loop_expectations(
             error=None,
         )
     )
-    # qemu-img info for listing previous backup (use expect_first)
     mock_shell.expect_first("qemu-img info.*" + str(prev_path.name)).returns(
         ShellResult(
             success=True,
@@ -108,20 +106,13 @@ def _setup_full_copy_loop_expectations(
             error=None,
         )
     )
-    # test -f for re-check existence (expect_first to beat conftest generic)
     mock_shell.expect_first(f"test -f {prev_path}").returns(_ok_result())
-    # qemu-img create -f qcow2 -b <prev> -F qcow2 <tmp>
     mock_shell.expect("qemu-img create").returns(_ok_result())
-    # rm -f write socket + pidfile (stale cleanup before qemu-nbd)
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    # qemu-nbd --fork --pid-file --socket
     mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
-    # kill (terminate qemu-nbd) — pre-create pidfile so _terminate_qemu_nbd finds it
     Path(pid_file).write_text("99999")
     mock_shell.expect("kill 99999").returns(_ok_result())
-    # rm -f write socket + pidfile (post-kill cleanup)
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    # mv tmp -> final
     mock_shell.expect("^mv ").returns(_ok_result())
 
     return nbd
@@ -157,7 +148,6 @@ def _setup_verify_bitmap_incremental_expectations(
         "backing-filename": delta_backing,
     }
 
-    # Use expect_first so these beat any generic qemu-img info patterns
     mock_shell.expect_first(rf"qemu-img info.*--force-share.*{source_path}").returns(
         ShellResult(
             success=True, stdout=json.dumps(source_info), stderr="", returncode=0, error=None
@@ -169,7 +159,7 @@ def _setup_verify_bitmap_incremental_expectations(
         )
     )
 
-    if verify_mode in ("hash", "full"):
+    if verify_mode == "compare":
         mock_shell.expect("qemu-img compare").returns(_ok_result())
 
 
@@ -190,16 +180,13 @@ def test_copy_loop_reads_only_dirty_extents(
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
     prior_checkpoint = f"qsnap-{target_hash}-old_snap"
 
-    # Create the previous backup file so list() finds it
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
-    # Override block_status to return dirty AND clean extents
     nbd.block_status_payload = {
         "base:allocation": [
             NbdExtent(offset=0, length=65536, data=True),
-            # no unallocated tail since disk is exactly 65536
         ],
         "qemu:dirty-bitmap:backup-vda": [
             NbdExtent(offset=0, length=65536, data=True),
@@ -227,9 +214,6 @@ def test_copy_loop_reads_only_dirty_extents(
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
-        patch.object(
-            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
-        ) as stall_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
     ):
@@ -241,19 +225,16 @@ def test_copy_loop_reads_only_dirty_extents(
     assert len(results) == 1
     assert results[0].success is True
 
-    # Assert pread calls cover exactly the dirty∩allocated range
     pread_calls = [c for c in nbd.calls if c[0] == "pread"]
     assert len(pread_calls) > 0, "Expected at least one pread call"
     total_read = sum(c[2] for c in pread_calls)
     assert total_read == 65536, f"Expected 65536 bytes read (dirty total), got {total_read}"
     assert nbd.bytes_read == 65536
 
-    # No convert commands in the incremental path
+    # No convert commands — unified engine for ALL paths
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
-    all_stall_cmds = [" ".join(c.args[0]) for c in stall_spy.call_args_list]
-    all_cmds = all_run_cmds + all_stall_cmds
-    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
-    assert len(convert_cmds) == 0, "No qemu-img convert on the incremental path"
+    convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, "No qemu-img convert — unified NBD engine for ALL paths"
 
 
 def test_first_incremental_backing_is_full(
@@ -270,7 +251,6 @@ def test_first_incremental_backing_is_full(
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
     prior_checkpoint = f"qsnap-{target_hash}-old_snap"
 
-    # This is the "FULL" anchor — the previous backup
     prev_backup = target_path / "testvm.FULL.20241230.qcow2"
     prev_backup.write_bytes(b"")
 
@@ -316,7 +296,6 @@ def test_first_incremental_backing_is_full(
     assert len(results) == 1
     assert results[0].success is True
 
-    # Assert create -b references the FULL backup
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     create_cmds = [cmd for cmd in all_run_cmds if "qemu-img create" in cmd]
     assert len(create_cmds) == 1
@@ -338,11 +317,9 @@ def test_previous_backup_vanished_retryable_failure(
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
     prior_checkpoint = f"qsnap-{target_hash}-old_snap"
 
-    # Create the previous backup file so list() finds it
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
 
-    # domblklist for disk target (expect_first to beat conftest)
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
@@ -352,7 +329,6 @@ def test_previous_backup_vanished_retryable_failure(
             error=None,
         )
     )
-    # qemu-img info for listing previous backup (success — list finds it)
     mock_shell.expect_first("qemu-img info.*" + str(prev_backup.name)).returns(
         ShellResult(
             success=True,
@@ -362,13 +338,10 @@ def test_previous_backup_vanished_retryable_failure(
             error=None,
         )
     )
-    # test -f FAILS — vanished between listing and delta creation
-    # (expect_first to beat conftest's generic success)
     mock_shell.expect_first(f"test -f {prev_backup}").returns(
         ShellResult(success=False, stdout="", stderr="", returncode=1, error="test -f failed")
     )
 
-    # Source socket + checkpoint setup
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
@@ -383,10 +356,8 @@ def test_previous_backup_vanished_retryable_failure(
         )
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
-    # Successor checkpoint deleted best-effort (failure path)
     mock_shell.expect("checkpoint-delete").returns(_ok_result())
     mock_shell.expect("domjobabort").returns(_ok_result())
-    # cleanup in finally: rm -f write socket+pidfile, rm -f .tmp, source socket
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
@@ -412,13 +383,10 @@ def test_previous_backup_vanished_retryable_failure(
         f"Vanished error should be retryable, got is_retryable={is_retryable(results[0].error)}"
     )
 
-    # Successor checkpoint deleted
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
-    # prior checkpoint preserved (not in delete command)
     assert prior_checkpoint not in delete_cmds[0]
-    # No convert / no create calls beyond list()
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 0
 
@@ -474,7 +442,6 @@ def test_previous_existence_rechecked_before_create(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
-    # Find positions of test -f and qemu-img create
     test_f_idx = None
     create_idx = None
     for i, cmd in enumerate(all_run_cmds):
@@ -516,10 +483,8 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
         "base:allocation": [NbdExtent(offset=0, length=65536, data=True)],
         "qemu:dirty-bitmap:backup-vda": [NbdExtent(offset=0, length=65536, data=True)],
     }
-    # Fail on pread
     nbd.fail_pread = "pread I/O error"
 
-    # domblklist for disk target
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
@@ -542,12 +507,9 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
     mock_shell.expect("qemu-img create").returns(_ok_result())
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
-    # Pre-create pidfile for _terminate_qemu_nbd
     Path(pid_file).write_text("99999")
     mock_shell.expect("kill 99999").returns(_ok_result())
-    # rm -f write socket + pidfile (post-kill cleanup)
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    # .tmp removal in finally
     mock_shell.expect("rm -f").returns(_ok_result())
 
     mock_shell.expect("virsh --version").returns(
@@ -564,9 +526,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
         )
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
-    # successor checkpoint deleted best-effort
     mock_shell.expect("checkpoint-delete").returns(_ok_result())
-    # _cleanup_partial_file: rm -f <delta_file>
     mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
@@ -587,23 +547,18 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
-    # .tmp removal in finally block
     tmp_rm_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("rm -f") and tmp_suffix in cmd]
     assert len(tmp_rm_cmds) >= 1, "Expected rm -f of .tmp file, got none"
 
-    # write socket removal
     write_socket_rm = [cmd for cmd in all_run_cmds if write_socket in cmd]
     assert len(write_socket_rm) >= 1, "Write socket not cleaned up"
 
-    # qemu-nbd kill issued
     kill_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("kill")]
     assert len(kill_cmds) >= 1, "qemu-nbd kill not issued"
 
-    # domjobabort
     abort_cmds = [cmd for cmd in all_run_cmds if "domjobabort" in cmd]
     assert len(abort_cmds) >= 1, "domjobabort not issued"
 
-    # successor checkpoint deleted
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint not in delete_cmds[0]
@@ -665,17 +620,14 @@ def test_successful_transfer_no_tmp_or_socket_remain(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
-    # mv tmp→final issued
     mv_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("mv ")]
     assert len(mv_cmds) == 1, "mv tmp→final must be issued"
     assert tmp_suffix in mv_cmds[0], f"mv should involve the .tmp file, got: {mv_cmds[0]}"
     assert ".qcow2" in mv_cmds[0]
 
-    # rm -f of .tmp issued (from finally block — no-op after rename but present)
     tmp_rm_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("rm -f") and tmp_suffix in cmd]
     assert len(tmp_rm_cmds) >= 1, "rm -f <tmp> must appear in finally cleanup"
 
-    # write socket cleanup (at least twice: pre-nbd rm + post-kill rm)
     write_socket_cmds = [cmd for cmd in all_run_cmds if write_socket in cmd]
     assert len(write_socket_cmds) >= 2, "Write socket should be in both pre-nbd rm and post-kill rm"
 
@@ -707,7 +659,6 @@ def test_stall_watchdog_aborts_with_correct_error_string(
         "base:allocation": [NbdExtent(offset=0, length=65536, data=True)],
         "qemu:dirty-bitmap:backup-vda": [NbdExtent(offset=0, length=65536, data=True)],
     }
-    # pread_handler sleeps enough to trigger the 1-second stall watchdog
     stall_timeout = 1
 
     def sleeping_pread(offset: int, length: int) -> NbdResult:
@@ -781,7 +732,6 @@ def test_stall_watchdog_aborts_with_correct_error_string(
         f"Expected exact error '{expected_error}', got '{results[0].error}'"
     )
 
-    # Failure path ran
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
@@ -969,11 +919,12 @@ def test_zero_stall_timeout_disables_watchdog(
     assert results[0].success is True
 
 
-def test_incremental_uses_inbd_client_copy_loop(
+def test_incremental_uses_unified_engine_no_convert(
     mock_shell, make_vm_config, make_target, tmp_path
 ) -> None:
     """No 'qemu-img convert' in shell history when prior checkpoint exists;
-    mock connect called with both contexts."""
+    unified NBD engine (pread/pwrite) used instead.  mock connect called
+    with both contexts."""
     vm_config = make_vm_config()
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -1008,9 +959,6 @@ def test_incremental_uses_inbd_client_copy_loop(
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
-        patch.object(
-            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
-        ) as stall_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
     ):
@@ -1023,15 +971,12 @@ def test_incremental_uses_inbd_client_copy_loop(
     assert results[0].success is True
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
-    all_stall_cmds = [" ".join(c.args[0]) for c in stall_spy.call_args_list]
-    all_cmds = all_run_cmds + all_stall_cmds
 
-    convert_cmds = [cmd for cmd in all_cmds if "qemu-img convert" in cmd]
+    convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 0, (
-        "No qemu-img convert on the incremental path — copy loop must be used"
+        "No qemu-img convert — unified NBD engine (pread/pwrite) for ALL paths"
     )
 
-    # Assert source nbd connect was called with both contexts
     src_connect = [c for c in nbd.calls if c[0] == "connect"]
     assert len(src_connect) >= 1, "Source NBD connect not called"
     contexts = nbd.requested_contexts
@@ -1094,7 +1039,6 @@ def test_qemu_img_info_shows_backing_filename(
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     mock_shell.expect("^mv ").returns(_ok_result())
 
-    # Verification: source info passes, but delta has WRONG backing-filename
     source_info = json.dumps(
         {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 1048576}
     )
@@ -1132,7 +1076,6 @@ def test_qemu_img_info_shows_backing_filename(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # successor
     mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())  # _cleanup_partial_file
     mock_shell.expect("domjobabort").returns(_ok_result())
-    # finally: rm -f write socket+pidfile, .tmp, source socket
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
@@ -1219,7 +1162,6 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
     assert len(create_cmds) == 1
     assert f"-b {prev_backup}" in create_cmds[0]
 
-    # check there's no bitmap-specific restore logic in the provider (list, delete only)
     assert hasattr(provider, "list")
     assert hasattr(provider, "delete")
     assert hasattr(provider, "transfer_missing")
@@ -1265,9 +1207,6 @@ def test_bitmap_incremental_ignores_compress_setting(
     caplog.set_level("INFO")
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
-        patch.object(
-            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
-        ) as stall_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
     ):
@@ -1280,19 +1219,15 @@ def test_bitmap_incremental_ignores_compress_setting(
     assert results[0].success is True
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
-    all_stall_cmds = [" ".join(c.args[0]) for c in stall_spy.call_args_list]
-    all_cmds = all_run_cmds + all_stall_cmds
 
     # No -c compression flag anywhere in the incremental path
-    # Use word-boundary check — avoid false hits on qsnap-chec*kpoint-test.xml
-    for cmd in all_cmds:
+    for cmd in all_run_cmds:
         tokens = cmd.split()
         assert "-c" not in tokens, f"Command '{cmd}' should not contain -c flag"
         assert "-o" not in tokens or "compression_type" not in cmd, (
             f"Command '{cmd}' should not contain -o compression_type"
         )
 
-    # INFO log about compress being ignored
     compress_logs = [
         rec
         for rec in caplog.records
@@ -1308,7 +1243,6 @@ def test_missing_libnbd_fails_factory_construction(make_target, tmp_path) -> Non
     from qsnap.factory.default import DefaultFactory
     from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR
 
-    # Create a mock shell that reports libvirt 8.0 (>= 7.2)
     mock_shell = Mock()
     mock_shell.run.return_value = ShellResult(
         success=True, stdout="virsh 8.0.0\n", stderr="", returncode=0, error=None
@@ -1323,7 +1257,7 @@ def test_missing_libnbd_fails_factory_construction(make_target, tmp_path) -> Non
         with pytest.raises(RuntimeError) as exc_info:
             factory.create_backup_provider(
                 Mock(),
-                target,  # Mock VMConfig
+                target,
             )
 
     assert "python3-libnbd" in str(exc_info.value)
@@ -1387,12 +1321,9 @@ def test_full_size_verify_failure_triggers_cleanup(
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     mock_shell.expect("^mv ").returns(_ok_result())
 
-    # Verification: huge actual-size triggers regression barrier
     source_info = json.dumps(
         {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 1048576}
     )
-    # dirty_bytes = 65536, barrier = 65536*2 + 64MiB = 65536*2 + 67108864 = 67239936
-    # Make actual-size larger than barrier
     huge_actual = 70000000
     delta_info = json.dumps(
         {
@@ -1424,12 +1355,9 @@ def test_full_size_verify_failure_triggers_cleanup(
         )
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
-    # successor checkpoint deleted
     mock_shell.expect("checkpoint-delete").returns(_ok_result())
-    # _cleanup_partial_file deletes the final file
     mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())
     mock_shell.expect("domjobabort").returns(_ok_result())
-    # finally: rm -f write socket+pidfile, .tmp, source socket
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
@@ -1454,11 +1382,9 @@ def test_full_size_verify_failure_triggers_cleanup(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
-    # Final file deleted
     delta_rm = [cmd for cmd in all_run_cmds if cmd.startswith("rm -f") and str(delta_file) in cmd]
     assert len(delta_rm) >= 1, "Delta file should be cleaned up"
 
-    # Successor checkpoint deleted
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint not in delete_cmds[0], "Prior checkpoint must be preserved"

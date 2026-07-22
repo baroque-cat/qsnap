@@ -217,10 +217,10 @@ def test_target_config_default_verify_metadata():
     assert target.verify == "metadata"
 
 
-def test_target_config_explicit_verify_full():
-    """TargetConfig(verify='full') stores 'full'."""
-    target = TargetConfig(path=Path("/tmp"), verify="full")
-    assert target.verify == "full"
+def test_target_config_verify_explicit_compare():
+    """TargetConfig(verify='compare') stores 'compare'."""
+    target = TargetConfig(path=Path("/tmp"), verify="compare")
+    assert target.verify == "compare"
 
 
 def test_target_config_verify_off():
@@ -536,10 +536,10 @@ def test_global_config_full_verify_after_create_metadata():
     assert cfg.full_verify_after_create == "metadata"
 
 
-def test_global_config_full_verify_after_create_hash():
-    """GlobalConfig(full_verify_after_create='hash') stores 'hash' (M1+M2+M3)."""
-    cfg = GlobalConfig(full_verify_after_create="hash")
-    assert cfg.full_verify_after_create == "hash"
+def test_global_config_full_verify_after_create_compare():
+    """GlobalConfig(full_verify_after_create='compare') stores 'compare' (M1+M2+M3)."""
+    cfg = GlobalConfig(full_verify_after_create="compare")
+    assert cfg.full_verify_after_create == "compare"
 
 
 def test_global_config_full_verify_after_create_off():

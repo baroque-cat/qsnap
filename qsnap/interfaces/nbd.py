@@ -93,6 +93,26 @@ class INbdClient(ABC):
         ...
 
     @abstractmethod
+    def can_flush(self) -> bool:
+        """Return ``True`` when the server supports ``flush()``.
+
+        Valid after connect.  When ``False``, callers skip the
+        ``flush()`` call and rely on ``disconnect()`` to drain
+        pending writes.
+        """
+        ...
+
+    @abstractmethod
+    def flush(self) -> NbdResult:
+        """Flush pending writes to stable storage.
+
+        Returns a failure :class:`NbdResult` when the server rejects
+        the flush or the connection is lost.  Callers should call
+        :meth:`can_flush` first to skip when unsupported.
+        """
+        ...
+
+    @abstractmethod
     def disconnect(self) -> None:
         """Disconnect from the server.  Safe to call when unconnected."""
         ...

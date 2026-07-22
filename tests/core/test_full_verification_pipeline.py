@@ -37,7 +37,6 @@ def _record_snap(target, vm, mock_state):
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-        content_hash="a" * 64,
     )
     mock_state.record_snapshot(vm.name, snap)
     return snap
@@ -101,9 +100,9 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     mock_state,
     mock_shell,
 ):
-    """When full_verify_after_create="hash", verify_full_backup is called
-    with expected_hash from the source snapshot's content_hash."""
-    global_cfg = make_global_config(full_verify_after_create="hash")
+    """When full_verify_after_create="compare", verify_full_backup is called
+    with source_path for comparison."""
+    global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -119,7 +118,6 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-        content_hash="abcdef1234567890",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -130,8 +128,8 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called, "verify_full_backup should be called"
-    assert verify_spy.call_args[0][2] == "hash", "verify_mode should be 'hash'"
-    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for hash mode"
+    assert verify_spy.call_args[0][2] == "compare", "verify_mode should be 'compare'"
+    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for compare mode"
     assert verify_spy.call_args[1]["source_path"] == snap.path, (
         "source_path should be the source snapshot's path"
     )
@@ -556,8 +554,8 @@ def test_full_verify_hash_match_success(
     mock_state,
     mock_shell,
 ):
-    """Hash mode, hash matches, record_full_backup called."""
-    global_cfg = make_global_config(full_verify_after_create="hash")
+    """Compare mode, compare matches, record_full_backup called."""
+    global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -573,7 +571,6 @@ def test_full_verify_hash_match_success(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-        content_hash="match_me_hash_12345",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -584,8 +581,8 @@ def test_full_verify_hash_match_success(
         core._backup_target(vm, target, [snap])
 
     assert verify_spy.called
-    assert verify_spy.call_args[0][2] == "hash", "verify_mode should be 'hash'"
-    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for hash mode"
+    assert verify_spy.call_args[0][2] == "compare", "verify_mode should be 'compare'"
+    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for compare mode"
     assert verify_spy.call_args[1]["source_path"] == snap.path, (
         "source_path should be the source snapshot's path"
     )
@@ -605,8 +602,8 @@ def test_full_verify_hash_mismatch_fails(
     mock_state,
     mock_shell,
 ):
-    """Hash mode, hash mismatch, FULL deleted, NOT recorded."""
-    global_cfg = make_global_config(full_verify_after_create="hash")
+    """Compare mode, compare mismatch, FULL deleted, NOT recorded."""
+    global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -622,7 +619,6 @@ def test_full_verify_hash_mismatch_fails(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-        content_hash="expected_hash_value",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1352,8 +1348,8 @@ def test_hash_mode_passes_source_path_to_verify(
     mock_state,
     mock_shell,
 ):
-    """Hash mode passes source_path=most_recent.path to verify_full_backup."""
-    global_cfg = make_global_config(full_verify_after_create="hash")
+    """Compare mode passes source_path=most_recent.path to verify_full_backup."""
+    global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -1369,7 +1365,6 @@ def test_hash_mode_passes_source_path_to_verify(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-        content_hash="some_hash",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1386,164 +1381,4 @@ def test_hash_mode_passes_source_path_to_verify(
     )
     assert kwargs["source_path"] == snap.path, (
         f"source_path should be {snap.path}, got {kwargs['source_path']}"
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# full_verify_before_rebase threading tests
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_rebase_verify_metadata_mode(
-    make_vm_config,
-    make_target,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core passes full_verify_before_rebase="metadata" from GlobalConfig to rebase path."""
-    global_cfg = make_global_config(full_verify_before_rebase="metadata")
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = _record_snap(target, vm, mock_state)
-
-    with patch.object(
-        mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("full_verify_before_rebase") == "metadata", (
-        f"full_verify_before_rebase should be 'metadata', "
-        f"got {transfer_spy.call_args.kwargs.get('full_verify_before_rebase')}"
-    )
-
-
-def test_rebase_verify_off_mode(
-    make_vm_config,
-    make_target,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core passes full_verify_before_rebase="off" from GlobalConfig to rebase path."""
-    global_cfg = make_global_config(full_verify_before_rebase="off")
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = _record_snap(target, vm, mock_state)
-
-    with patch.object(
-        mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("full_verify_before_rebase") == "off", (
-        f"full_verify_before_rebase should be 'off', "
-        f"got {transfer_spy.call_args.kwargs.get('full_verify_before_rebase')}"
-    )
-
-
-def test_rebase_verify_check_mode(
-    make_vm_config,
-    make_target,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core passes full_verify_before_rebase="check" from GlobalConfig to rebase path."""
-    global_cfg = make_global_config(full_verify_before_rebase="check")
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = _record_snap(target, vm, mock_state)
-
-    with patch.object(
-        mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("full_verify_before_rebase") == "check", (
-        f"full_verify_before_rebase should be 'check', "
-        f"got {transfer_spy.call_args.kwargs.get('full_verify_before_rebase')}"
-    )
-
-
-def test_rebase_verify_mode_passed_as_parameter(
-    make_vm_config,
-    make_target,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Verification mode is threaded through to the provider method call.
-
-    Verifies that the ``full_verify_before_rebase`` value from global_config
-    is passed as a keyword argument to the backup provider's ``transfer_missing()``.
-    """
-    global_cfg = make_global_config(full_verify_before_rebase="metadata")
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = _record_snap(target, vm, mock_state)
-
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
-
-    with patch.object(
-        mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, "transfer_missing should be called"
-    call_kwargs = transfer_spy.call_args.kwargs
-    assert "full_verify_before_rebase" in call_kwargs, (
-        "full_verify_before_rebase should be in transfer_missing kwargs, "
-        f"got: {list(call_kwargs.keys())}"
-    )
-    assert call_kwargs["full_verify_before_rebase"] == "metadata", (
-        f"full_verify_before_rebase should be 'metadata', "
-        f"got: {call_kwargs['full_verify_before_rebase']}"
     )

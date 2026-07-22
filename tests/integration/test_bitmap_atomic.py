@@ -48,44 +48,46 @@ if _HAS_LIBNBD:
     from qsnap.models.results import NbdExtent, NbdResult
     from qsnap.utils.nbd_client import LibnbdClient
 
-    class _FailingPwriteClient(LibnbdClient):
-        """A LibnbdClient whose ``pwrite`` fails on the first call.
 
-        Also injects synthetic dirty+allocated extents in ``block_status``
-        so the copy loop always has extents to pwrite.
+class _FailingPwriteClient(LibnbdClient):
+    """A LibnbdClient whose ``pwrite`` fails on the first call.
 
-        Deterministic failure injection for the export-failure test.
-        """
+    Also injects synthetic dirty+allocated extents in ``block_status``
+    so the copy loop always has extents to pwrite.
 
-        def __init__(self) -> None:
-            super().__init__()
-            self._pwrite_count = 0
+    Deterministic failure injection for the export-failure test.
+    """
 
-        def block_status(self, offset: int, length: int) -> NbdResult:
-            real = super().block_status(offset, length)
-            if not real.success:
-                return real
-            payload = dict(real.payload) if isinstance(real.payload, dict) else {}
-            # Inject dirty+allocated extents so the copy loop fires pwrite.
-            if offset == 0:
-                chunk = min(length, 1024 * 1024)
-                payload.setdefault("qemu:dirty-bitmap:backup-vda", []).append(
-                    NbdExtent(offset=0, length=chunk, data=True)
-                )
-                payload.setdefault("base:allocation", []).append(
-                    NbdExtent(offset=0, length=chunk, data=True)
-                )
-            return NbdResult(success=True, payload=payload, error=None)
+    def __init__(self) -> None:
+        super().__init__()
+        self._pwrite_count = 0
 
-        def pwrite(self, offset: int, data: bytes) -> NbdResult:
-            self._pwrite_count += 1
-            if self._pwrite_count == 1:
-                return NbdResult(
-                    success=False,
-                    payload=None,
-                    error="broken pipe: pwrite failed (injected failure)",
-                )
-            return super().pwrite(offset, data)
+    def block_status(self, offset: int, length: int) -> NbdResult:
+        real = super().block_status(offset, length)
+        if not real.success:
+            return real
+        payload = dict(real.payload) if isinstance(real.payload, dict) else {}
+        # Inject dirty+allocated extents so the copy loop fires pwrite.
+        if offset == 0:
+            chunk = min(length, 1024 * 1024)
+            payload.setdefault("qemu:dirty-bitmap:backup-vda", []).append(
+                NbdExtent(offset=0, length=chunk, data=True)
+            )
+            payload.setdefault("base:allocation", []).append(
+                NbdExtent(offset=0, length=chunk, data=True)
+            )
+        return NbdResult(success=True, payload=payload, error=None)
+
+    def pwrite(self, offset: int, data: bytes) -> NbdResult:
+        self._pwrite_count += 1
+        if self._pwrite_count == 1:
+            return NbdResult(
+                success=False,
+                payload=None,
+                error="broken pipe: pwrite failed (injected failure)",
+            )
+        return super().pwrite(offset, data)
+
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -184,7 +186,7 @@ def test_int_writes_during_full_appear_in_incremental(test_vm):
     4. Write more data (dirty blocks since FULL's freeze point).
     5. Run atomic incremental (``transfer_missing()``).
     6. Verify the incremental file is non-empty, passes qemu-img info,
-       and checkpoint rotation has occurred (only one checkpoint remains).
+        and checkpoint rotation has occurred (only one checkpoint remains).
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -892,7 +894,7 @@ def test_int_export_failure_deletes_successor_preserves_prior(test_vm):
        causing subsequent pwrites to fail.
     5. Verify the prior checkpoint still exists.
     6. Verify no orphaned qemu-nbd processes, no write sockets,
-       no .tmp file.
+        no .tmp file.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]

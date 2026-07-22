@@ -144,7 +144,7 @@ def test_bitmap_incremental_registers_dependency(
     )
 
     config = MockConfigFacade(
-        global_config=make_global_config(full_verify_before_rebase="metadata"),
+        global_config=make_global_config(),
         vms=[vm],
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
@@ -194,7 +194,6 @@ def test_failed_transfer_records_no_dependency(
         target,
         snapshots,
         *,
-        full_verify_before_rebase="metadata",
         compression_type="zstd",
         stall_timeout=1800,
     ):
@@ -216,7 +215,7 @@ def test_failed_transfer_records_no_dependency(
     shell = MockShell()
 
     config = MockConfigFacade(
-        global_config=make_global_config(full_verify_before_rebase="metadata"),
+        global_config=make_global_config(),
         vms=[vm],
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
@@ -279,7 +278,7 @@ def test_standalone_no_backing_records_no_dependency(
     )
 
     config = MockConfigFacade(
-        global_config=make_global_config(full_verify_before_rebase="metadata"),
+        global_config=make_global_config(),
         vms=[vm],
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)

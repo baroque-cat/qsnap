@@ -183,16 +183,30 @@ def _make_shell_nbd_expectations(shell) -> None:
     shell.expect("mkdir").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    # NBD: rm stale socket (called in nbd_full_export before and after)
-    shell.expect(r"rm.*-f.*qsnap-backup").returns(
+    # NBD: rm stale socket (restore path uses qsnap-restore prefix)
+    shell.expect(r"rm.*-f.*qsnap-restore").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # NBD: virsh domblklist (for get_first_disk_target)
+    shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target  Source\n--------------------------------------\nvda    /var/lib/libvirt/images/sourcevm.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
     # NBD: virsh backup-begin
     shell.expect("virsh backup-begin").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    # NBD: qemu-img convert -n nbd:unix:<socket>
+    # NBD: qemu-img convert nbd:unix:<socket>
     shell.expect(r"nbd:unix:").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # NBD: virsh domjobabort (called in finally block)
+    shell.expect("virsh domjobabort").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     # virsh dumpxml
@@ -262,8 +276,8 @@ def test_fork_nbd_running_vm(
         "direct qemu-img convert (non-NBD) should NOT be used for running VM"
     )
 
-    # rm -f socket cleanup should be called
-    socket_cleanup_calls = [c for c in call_cmds if "rm" in c and "qsnap-backup" in c]
+    # rm -f socket cleanup should be called (restore path uses qsnap-restore prefix)
+    socket_cleanup_calls = [c for c in call_cmds if "rm" in c and "qsnap-restore" in c]
     assert len(socket_cleanup_calls) >= 1, "socket cleanup (rm -f) should be called"
 
 

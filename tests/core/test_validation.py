@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core, VMRunResult
 from qsnap.models.results import CheckResult, ShellResult
 from tests.mocks import MockConfigFacade, MockShell
@@ -955,3 +957,94 @@ def test_dry_run_runs_validation_non_fatal_warnings(
 
     # Pipeline succeeds (dry-run failures do not cause pipeline failure).
     assert result.success is True
+
+
+# ── Compress Driver Validation ───────────────────────────────────────────
+
+
+@pytest.mark.skip(
+    reason="Compress driver validation not yet implemented in Core._validate_environment"
+)
+def test_validate_compress_driver_available(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When the qemu-nbd compress driver is available, validation passes.
+
+    Mock ``qemu-nbd --image-opts driver=compress`` returning success.
+    Core._validate_environment should include a compress driver check
+    when any target has ``compress=True`` (which is the default).
+    """
+    # Override qemu-nbd check to simulate compress driver availability
+    mock_shell.expect("qemu-nbd --image-opts").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core._validate_environment(vm)
+
+    assert isinstance(result, CheckResult)
+    assert result.status == "ok", (
+        f"Validation should pass when compress driver is available, got: {result.status}"
+    )
+
+
+@pytest.mark.skip(
+    reason="Compress driver validation not yet implemented in Core._validate_environment"
+)
+def test_validate_compress_driver_missing_fails_hard(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When the qemu-nbd compress driver is missing, validation fails with
+    an actionable error message.
+
+    Mock ``qemu-nbd --image-opts driver=compress`` returning failure.
+    Core._validate_environment should return ``validation_failed`` with
+    an error message that guides the user to install the compress driver.
+    """
+    # Override the default qemu-nbd check expectation — we expect failure.
+    # Remove any existing qemu-nbd expectation first.
+    mock_shell._expectations = [e for e in mock_shell._expectations if "qemu-nbd" not in e.pattern]
+    mock_shell.expect("qemu-nbd --image-opts").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="Unknown driver 'compress'",
+            returncode=1,
+            error="Unknown driver 'compress'",
+        )
+    )
+
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core._validate_environment(vm)
+
+    assert isinstance(result, CheckResult)
+    assert result.status == "validation_failed", (
+        f"Validation should fail when compress driver is missing, got: {result.status}"
+    )
+    # The error should mention the compress driver or nbd
+    error_text = " ".join(result.broken_snapshots).lower()
+    assert "compress" in error_text or "qemu-nbd" in error_text or "nbd" in error_text, (
+        f"Error should be actionable about the compress driver, got: {result.broken_snapshots}"
+    )

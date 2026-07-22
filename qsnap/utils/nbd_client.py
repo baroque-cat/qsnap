@@ -15,9 +15,11 @@ conditions contain Core's retryable patterns ("eof", "timed out",
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import importlib.util
 import logging
+import time
 from typing import Any, cast
 
 from qsnap.interfaces.nbd import INbdClient
@@ -80,6 +82,11 @@ class LibnbdClient(INbdClient):
         actionable error naming ``python3-libnbd``.  After connecting,
         reads the server-advertised maximum request size and applies the
         32 MiB cap.
+
+        Connect-retry (design D8): up to 20 attempts with a 1-second
+        sleep between failures.  A fresh ``nbd.NBD()`` handle is created
+        on each attempt — a half-open handle from a failed attempt is
+        never reused.
         """
         try:
             import nbd
@@ -90,35 +97,66 @@ class LibnbdClient(INbdClient):
         # (pyright strict would otherwise flag every attribute access).
         nbd_any = cast(Any, nbd)
 
-        try:
-            handle = nbd_any.NBD()
-            for context in meta_contexts:
-                handle.add_meta_context(context)
-            if export_name:
-                handle.set_export_name(export_name)
-            # An nbd+unix URI with an EMPTY path (nbd+unix:///?socket=...)
-            # overrides set_export_name with the empty export name "" —
-            # servers that only offer named exports (libvirt's pull-mode
-            # backup server exports disks by target name, e.g. "vda")
-            # then reject the connect with "no export named ''".
-            # Embed the export name in the URI path instead (URI takes
-            # precedence over set_export_name in libnbd).
-            if export_name and uri.startswith("nbd+unix:///"):
-                scheme_rest, _, query = uri.partition("?")
-                if scheme_rest == "nbd+unix:///":
-                    uri = f"nbd+unix:///{export_name}" + (f"?{query}" if query else "")
-            handle.connect_uri(uri)
-            server_max = int(handle.get_block_size(nbd_any.SIZE_MAXIMUM))
-        except nbd_any.Error as exc:
-            return NbdResult(success=False, payload=None, error=self._normalize_error(exc))
-        except OSError as exc:
-            return NbdResult(success=False, payload=None, error=self._normalize_error(exc))
+        # Build the URI with the export name embedded (see comment below).
+        effective_uri = uri
+        if export_name and uri.startswith("nbd+unix:///"):
+            scheme_rest, _, query = uri.partition("?")
+            if scheme_rest == "nbd+unix:///":
+                effective_uri = f"nbd+unix:///{export_name}" + (f"?{query}" if query else "")
 
-        self._nbd = handle
-        self._nbd_mod = nbd_any
-        if server_max > 0:
-            self._max_request_size = min(server_max, _MAX_REQUEST_CAP)
-        return NbdResult(success=True, payload=None, error=None)
+        max_attempts = 20
+        last_error: str = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                handle = nbd_any.NBD()
+                for context in meta_contexts:
+                    handle.add_meta_context(context)
+                if export_name:
+                    handle.set_export_name(export_name)
+                # An nbd+unix URI with an EMPTY path (nbd+unix:///?socket=...)
+                # overrides set_export_name with the empty export name "" —
+                # servers that only offer named exports (libvirt's pull-mode
+                # backup server exports disks by target name, e.g. "vda")
+                # then reject the connect with "no export named ''".
+                # Embed the export name in the URI path instead (URI takes
+                # precedence over set_export_name in libnbd).
+                handle.connect_uri(effective_uri)
+                server_max = int(handle.get_block_size(nbd_any.SIZE_MAXIMUM))
+            except nbd_any.Error as exc:
+                last_error = self._normalize_error(exc)
+                logger.debug(
+                    "NBD connect attempt %d/%d failed: %s",
+                    attempt,
+                    max_attempts,
+                    last_error,
+                )
+                # Best-effort cleanup of the failed handle.
+                with contextlib.suppress(Exception):
+                    handle.shutdown()
+                if attempt < max_attempts:
+                    time.sleep(1)
+                continue
+            except OSError as exc:
+                last_error = self._normalize_error(exc)
+                logger.debug(
+                    "NBD connect attempt %d/%d failed: %s",
+                    attempt,
+                    max_attempts,
+                    last_error,
+                )
+                with contextlib.suppress(Exception):
+                    handle.shutdown()
+                if attempt < max_attempts:
+                    time.sleep(1)
+                continue
+
+            self._nbd = handle
+            self._nbd_mod = nbd_any
+            if server_max > 0:
+                self._max_request_size = min(server_max, _MAX_REQUEST_CAP)
+            return NbdResult(success=True, payload=None, error=None)
+
+        return NbdResult(success=False, payload=None, error=last_error)
 
     def get_size(self) -> int:
         """Return the export size in bytes (0 when not connected)."""
@@ -199,6 +237,29 @@ class LibnbdClient(INbdClient):
                 self._nbd.pwrite(data[pos - offset : pos - offset + chunk], pos)
                 pos += chunk
                 remaining -= chunk
+        except self._nbd_mod.Error as exc:
+            return NbdResult(success=False, payload=None, error=self._normalize_error(exc))
+        return NbdResult(success=True, payload=None, error=None)
+
+    def can_flush(self) -> bool:
+        """Return ``True`` when the server supports ``flush()``.
+
+        When not connected, returns ``False`` (caller should not call
+        ``flush()`` on an unconnected handle).
+        """
+        if self._nbd is None or self._nbd_mod is None:
+            return False
+        try:
+            return bool(self._nbd.can_flush())
+        except Exception:  # noqa: BLE001 — server may not support the query
+            return False
+
+    def flush(self) -> NbdResult:
+        """Flush pending writes to stable storage."""
+        if self._nbd is None or self._nbd_mod is None:
+            return NbdResult(success=False, payload=None, error="not connected")
+        try:
+            self._nbd.flush()
         except self._nbd_mod.Error as exc:
             return NbdResult(success=False, payload=None, error=self._normalize_error(exc))
         return NbdResult(success=True, payload=None, error=None)
