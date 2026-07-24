@@ -5,7 +5,7 @@
 # The version is read dynamically at runtime via importlib.metadata.
 
 pkgname=qsnap
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="QEMU/KVM snapshot and backup orchestration tool for qcow2 images (btrbk-inspired)"
 arch=('any')
@@ -13,11 +13,13 @@ url="https://github.com/baroque-cat/qsnap"
 license=('MIT')
 depends=('python>=3.11' 'libnbd' 'libvirt' 'qemu-full')
 makedepends=('python-poetry' 'python-installer' 'git')
-# Pin to a specific commit so makepkg can compute a real sha256 checksum
-# (VCS sources without a #commit= or #tag= fragment always yield 'SKIP').
-# Update this hash when bumping pkgver after a new release commit.
-source=("${pkgname}-${pkgver}::git+file://${startdir}#commit=10a5e373d01650272106383d12948ed7d8e3eb6a")
-sha256sums=('36da01b96afd0ab75045241bb3991b93dfe151b005580a6aa0b8b020e57f9f61')
+# Pin to a git tag so makepkg always checks out the exact release commit.
+# Using #tag= instead of #commit= avoids the chicken-and-egg problem:
+# a commit hash would change every time we commit the PKGBUILD update itself.
+# sha256 is SKIP because the PKGBUILD lives inside the source repo and is
+# therefore self-referential (changing the checksum changes the source).
+source=("${pkgname}-${pkgver}::git+file://${startdir}#tag=v${pkgver}")
+sha256sums=('SKIP')
 
 build() {
   cd "${srcdir}/${pkgname}-${pkgver}"
