@@ -152,6 +152,7 @@ class BitmapBackupProvider(IBackupProvider):
         info_result = self._shell.run(
             ["qemu-img", "info", "--force-share", "--output=json", str(source_path)],
             timeout=60,
+            check=True,
         )
         if not info_result.success:
             return None
@@ -174,7 +175,7 @@ class BitmapBackupProvider(IBackupProvider):
         in a failure path.
         """
         try:
-            result = self._shell.run(["rm", "-f", str(target_file)], timeout=10)
+            result = self._shell.run(["rm", "-f", str(target_file)], timeout=10, check=True)
             if not result.success:
                 logger.warning(
                     "Failed to delete partial backup file %s: %s",
@@ -230,7 +231,7 @@ class BitmapBackupProvider(IBackupProvider):
             # Stale-state detection: if the source snapshot file
             # doesn't exist on disk, skip it and clean up the stale
             # state entry (self-healing — design D3).
-            exists = self._shell.run(["test", "-f", str(snapshot.path)], timeout=10)
+            exists = self._shell.run(["test", "-f", str(snapshot.path)], timeout=10, check=True)
             if not exists.success:
                 logger.warning(
                     "Source snapshot %s no longer exists on disk — "
@@ -290,7 +291,7 @@ class BitmapBackupProvider(IBackupProvider):
                     str(checkpoint_xml_path),
                 ]
 
-                backup_result = self._shell.run(backup_cmd, timeout=120)
+                backup_result = self._shell.run(backup_cmd, timeout=120, check=True)
                 if not backup_result.success:
                     # backup-begin is atomic: the successor checkpoint
                     # was NOT created — the prior checkpoint remains the
@@ -488,7 +489,7 @@ class BitmapBackupProvider(IBackupProvider):
                     "--domain",
                     vm_config.name,
                 ]
-                abort_result = self._shell.run(abort_cmd, timeout=30)
+                abort_result = self._shell.run(abort_cmd, timeout=30, check=True)
                 if not abort_result.success:
                     logger.warning(
                         "virsh domjobabort failed for VM %s (job may have already terminated): %s",
@@ -557,7 +558,7 @@ class BitmapBackupProvider(IBackupProvider):
             create_cmd.append(str(tmp_file))
             if virtual_size is not None:
                 create_cmd.append(str(virtual_size))
-            create_result = self._shell.run(create_cmd, timeout=60)
+            create_result = self._shell.run(create_cmd, timeout=60, check=True)
             if not create_result.success:
                 return f"qemu-img create failed: {create_result.error}", 0
 
@@ -590,7 +591,7 @@ class BitmapBackupProvider(IBackupProvider):
 
             # (5) Atomic rename: mv .tmp to final name.
             if transfer_error is None:
-                mv_result = self._shell.run(["mv", str(tmp_file), str(final_file)], timeout=30)
+                mv_result = self._shell.run(["mv", str(tmp_file), str(final_file)], timeout=30, check=True)
                 if not mv_result.success:
                     transfer_error = f"atomic rename failed: {mv_result.error}"
 
@@ -607,6 +608,7 @@ class BitmapBackupProvider(IBackupProvider):
             abort_result = self._shell.run(
                 ["virsh", "domjobabort", "--domain", vm_name],
                 timeout=30,
+                check=True,
             )
             if not abort_result.success:
                 logger.warning(
@@ -914,7 +916,7 @@ class BitmapBackupProvider(IBackupProvider):
         # listing and create.  Routed through IShell so the race is
         # observable/testable like every other external call.  The error
         # is retryable-class — the next run re-discovers the newest.
-        exists = self._shell.run(["test", "-f", str(previous.path)], timeout=10)
+        exists = self._shell.run(["test", "-f", str(previous.path)], timeout=10, check=True)
         if not exists.success:
             return _CopyResult(
                 error=(
@@ -939,6 +941,7 @@ class BitmapBackupProvider(IBackupProvider):
                 str(tmp_file),
             ],
             timeout=60,
+            check=True,
         )
         if not create_result.success:
             return _CopyResult(
@@ -988,7 +991,7 @@ class BitmapBackupProvider(IBackupProvider):
 
         # (6) Atomic rename: mv .tmp to final name (same discipline as
         # the FULL path).
-        mv_result = self._shell.run(["mv", str(tmp_file), str(target_file)], timeout=30)
+        mv_result = self._shell.run(["mv", str(tmp_file), str(target_file)], timeout=30, check=True)
         if not mv_result.success:
             return _CopyResult(
                 error=f"atomic rename failed: {mv_result.error}",
@@ -1011,7 +1014,7 @@ class BitmapBackupProvider(IBackupProvider):
             pid = int(pid_file.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             return
-        kill_result = self._shell.run(["kill", str(pid)], timeout=10)
+        kill_result = self._shell.run(["kill", str(pid)], timeout=10, check=True)
         if not kill_result.success:
             logger.warning(
                 "Failed to terminate qemu-nbd (pid %d): %s",
@@ -1108,7 +1111,7 @@ class BitmapBackupProvider(IBackupProvider):
             str(backup_xml_path),
             str(checkpoint_xml_path),
         ]
-        backup_result = self._shell.run(backup_cmd, timeout=120)
+        backup_result = self._shell.run(backup_cmd, timeout=120, check=True)
         if not backup_result.success:
             # backup-begin is atomic: the successor checkpoint was
             # NOT created, so there is nothing to roll back.
@@ -1199,7 +1202,7 @@ class BitmapBackupProvider(IBackupProvider):
                 "--output=json",
                 str(file),
             ]
-            info_result = self._shell.run(info_cmd, timeout=60)
+            info_result = self._shell.run(info_cmd, timeout=60, check=True)
             if not info_result.success:
                 continue
 
@@ -1246,7 +1249,7 @@ class BitmapBackupProvider(IBackupProvider):
             "--domain",
             vm_name,
         ]
-        result = self._shell.run(cmd, timeout=30)
+        result = self._shell.run(cmd, timeout=30, check=True)
         if not result.success:
             logger.warning(
                 "Failed to list checkpoints for VM %s: %s",
@@ -1406,7 +1409,7 @@ class BitmapBackupProvider(IBackupProvider):
             checkpoint_name,
             "--metadata",
         ]
-        del_result = self._shell.run(del_cmd, timeout=30)
+        del_result = self._shell.run(del_cmd, timeout=30, check=True)
         if not del_result.success:
             logger.warning(
                 "Failed to delete checkpoint %s for VM %s: %s",

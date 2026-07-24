@@ -622,7 +622,7 @@ def test_create_full_backup_unified_engine_succeeds(mock_shell, make_target, tmp
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -707,7 +707,7 @@ def test_create_full_backup_with_compression(mock_shell, make_target, tmp_path, 
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -796,7 +796,7 @@ def test_create_full_backup_no_compress_driver_when_compress_false(
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -833,7 +833,7 @@ def test_bitmap_full_backup_does_not_raise_not_implemented(mock_shell, make_targ
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -868,7 +868,7 @@ def test_create_full_backup_atomic_rename_tmp_to_final(mock_shell, make_target, 
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -969,7 +969,7 @@ def test_bitmap_full_socket_cleanup(mock_shell, make_target, tmp_path):
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1080,7 +1080,7 @@ def test_bitmap_bucket_driven_full_no_longer_crashes(mock_shell, make_target, tm
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1112,7 +1112,7 @@ def test_create_full_backup_returns_standalone_qcow2(mock_shell, make_target, tm
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1159,7 +1159,7 @@ def test_create_full_backup_dotted_vm_name_passed_untruncated(mock_shell, make_t
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1309,7 +1309,7 @@ def test_bitmap_nbd_job_terminated_after_transfer(mock_shell, make_target, tmp_p
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1364,7 +1364,7 @@ def test_bitmap_socket_cleanup_after_job_abort(mock_shell, make_target, tmp_path
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1427,7 +1427,7 @@ def test_bitmap_first_full_pull_via_unified_engine(mock_shell, make_target, tmp_
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1636,7 +1636,7 @@ def test_create_full_backup_does_not_self_record(mock_shell, mock_state, make_ta
     ) as state_spy:
         original_run = mock_shell.run
 
-        def spied_run(cmd, timeout):
+        def spied_run(cmd, timeout, **kwargs):
             cmd_str = " ".join(cmd)
             if cmd_str.startswith("mv "):
                 Path(cmd[-1]).write_bytes(b"\x00" * 65536)
@@ -1666,7 +1666,7 @@ def test_create_full_backup_skips_state_when_none(mock_shell, make_target, tmp_p
 
     original_run = mock_shell.run
 
-    def spied_run(cmd, timeout):
+    def spied_run(cmd, timeout, **kwargs):
         cmd_str = " ".join(cmd)
         if cmd_str.startswith("mv "):
             Path(cmd[-1]).write_bytes(b"\x00" * 65536)

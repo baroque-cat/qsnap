@@ -171,3 +171,73 @@ def test_json_state_manager_passes_isinstance_after_corruption_recovery(
     assert isinstance(manager, IStateManager), (
         "JsonStateManager should still be an IStateManager after corruption recovery"
     )
+
+
+# ── per-target backup allocation contract ──────────────────────────────────
+
+
+def test_istate_manager_backup_allocation_methods_abstract():
+    """get_last_backup_allocation and set_last_backup_allocation are abstract on IStateManager.
+
+    A subclass missing only these two new methods must fail to instantiate
+    with TypeError because the ABC enforces all abstract methods.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_last_backup_allocation" in abstract_methods
+    assert "set_last_backup_allocation" in abstract_methods
+
+    # A subclass that implements everything EXCEPT the two backup allocation
+    # methods must fail to instantiate.
+    class _MissingBackupAlloc(IStateManager):
+        def get_last_allocation(self, vm_name): ...
+        def set_last_allocation(self, vm_name, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, bucket_level): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+
+    with pytest.raises(TypeError):
+        _MissingBackupAlloc()
+
+
+def test_inmemory_manager_implements_backup_allocation():
+    """InMemoryStateManager implements get_last_backup_allocation and set_last_backup_allocation."""
+    mgr = InMemoryStateManager()
+
+    # Verify methods exist and are callable.
+    assert callable(mgr.get_last_backup_allocation)
+    assert callable(mgr.set_last_backup_allocation)
+
+    # Verify they work correctly.
+    mgr.set_last_backup_allocation("/mnt/backup/test", 5000)
+    assert mgr.get_last_backup_allocation("/mnt/backup/test") == 5000
+
+    # Missing target returns None.
+    assert mgr.get_last_backup_allocation("/nonexistent") is None
+
+
+def test_json_manager_implements_backup_allocation(tmp_path):
+    """JsonStateManager implements get_last_backup_allocation and set_last_backup_allocation."""
+    mgr = JsonStateManager(state_dir=tmp_path)
+
+    # Verify methods exist and are callable.
+    assert callable(mgr.get_last_backup_allocation)
+    assert callable(mgr.set_last_backup_allocation)
+
+    # Verify they work correctly.
+    mgr.set_last_backup_allocation("/mnt/backup/test", 5000)
+    assert mgr.get_last_backup_allocation("/mnt/backup/test") == 5000
+
+    # Missing target returns None.
+    assert mgr.get_last_backup_allocation("/nonexistent") is None

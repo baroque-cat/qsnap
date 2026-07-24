@@ -57,7 +57,7 @@ class MapChangeDetector(IChangeDetector):
 
         # Step 2: Get active disk paths via domblklist (design D3)
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        domblklist_result = self._shell.run(domblklist_cmd, timeout=30)
+        domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
             return ChangeResult(
                 changed=True,
@@ -96,7 +96,7 @@ class MapChangeDetector(IChangeDetector):
             "--output=json",
             active_disk,
         ]
-        map_result = self._shell.run(map_cmd, timeout=60)
+        map_result = self._shell.run(map_cmd, timeout=60, check=True)
         if not map_result.success:
             return ChangeResult(
                 changed=True,

@@ -558,19 +558,6 @@ def test_global_config_full_verify_after_create_off():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.full_verify_before_rebase — pre-rebase re-verification
-# ---------------------------------------------------------------------------
-
-
-def test_global_config_no_full_verify_before_rebase():
-    """full_verify_before_rebase is no longer a field on GlobalConfig;
-    accessing it raises AttributeError."""
-    cfg = GlobalConfig()
-    with pytest.raises(AttributeError):
-        _ = cfg.full_verify_before_rebase  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
 # GlobalConfig.full_verify_before_delete — pre-deletion verification
 # ---------------------------------------------------------------------------
 
@@ -720,3 +707,62 @@ def test_target_config_backup_stall_timeout_overrides():
     """TargetConfig(backup_stall_timeout='1h') overrides the default '30m'."""
     target = TargetConfig(path=Path("/backup/testvm"), backup_stall_timeout="1h")
     assert target.backup_stall_timeout == "1h"
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.backup_create — per-target backup gating mode
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_backup_create_default_always():
+    """TargetConfig(path='/tmp') has backup_create == 'always' by default."""
+    target = TargetConfig(path=Path("/tmp"))
+    assert target.backup_create == "always"
+
+
+def test_target_config_backup_create_explicit_onchange():
+    """TargetConfig(path='/tmp', backup_create='onchange') has backup_create == 'onchange'."""
+    target = TargetConfig(path=Path("/tmp"), backup_create="onchange")
+    assert target.backup_create == "onchange"
+
+
+def test_target_config_backup_create_inherits_from_global():
+    """backup_create field exists on TargetConfig and GlobalConfig.
+    The dataclass-level default is 'always'; ConfigFacade resolves
+    inheritance at a higher layer."""
+    global_cfg = GlobalConfig(backup_create="onchange")
+    assert global_cfg.backup_create == "onchange"
+
+    target = TargetConfig(path=Path("/backup/testvm"), backup_create="onchange")
+    assert target.backup_create == "onchange"
+
+    # Default target has dataclass-level default "always".
+    target_default = TargetConfig(path=Path("/backup/testvm"))
+    assert target_default.backup_create == "always"
+
+
+def test_target_config_backup_create_overrides_global():
+    """TargetConfig(backup_create='always') overrides the global default 'onchange'.
+    Resolution is by ConfigFacade; we verify the dataclass fields accept the values."""
+    global_cfg = GlobalConfig(backup_create="onchange")
+    assert global_cfg.backup_create == "onchange"
+
+    target = TargetConfig(path=Path("/backup/testvm"), backup_create="always")
+    assert target.backup_create == "always"
+    assert target.backup_create != global_cfg.backup_create
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.backup_create — global default for backup gating
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_backup_create_default_always():
+    """GlobalConfig() has backup_create == 'always' by default."""
+    assert GlobalConfig().backup_create == "always"
+
+
+def test_global_config_backup_create_explicit_onchange():
+    """GlobalConfig(backup_create='onchange') has backup_create == 'onchange'."""
+    cfg = GlobalConfig(backup_create="onchange")
+    assert cfg.backup_create == "onchange"

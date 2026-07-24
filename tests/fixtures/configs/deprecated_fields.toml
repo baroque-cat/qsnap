@@ -1,13 +1,10 @@
 # deprecated_fields config — tests deprecation warnings for old field names.
 # full_every is ignored with a WARNING.
 # full_compress is mapped to compress with a WARNING (when compress not set).
-# incremental_mode, rate_limit, copy_base are the rsync/file-copy removed fields
-# — each triggers a deprecation WARNING and is otherwise ignored.
 
 timestamp_format = "long"
 preserve_day_of_week = "monday"
 state_dir = "/var/lib/qsnap/state"
-rate_limit = "100M"
 
 snapshot_preserve = "24h 7d 4w 12m 1y"
 target_preserve = "48h 14d 8w 12m 1y"
@@ -23,9 +20,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_deprecated"
   verify = "hash"
   full_every = "7d"
   full_compress = true
-  incremental_mode = "file-copy"
-  rate_limit = "100M"
-  copy_base = true
 
 [[vm]]
 name = "vm_full_every_only"

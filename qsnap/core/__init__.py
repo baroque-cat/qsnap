@@ -328,7 +328,7 @@ class Core:
                 "--output=json",
                 str(vm.base_image),
             ]
-            info_result = self._shell.run(info_cmd, timeout=60)
+            info_result = self._shell.run(info_cmd, timeout=60, check=True)
             if info_result.success:
                 try:
                     info = json.loads(info_result.stdout)
@@ -427,7 +427,7 @@ class Core:
                 "--output=json",
                 str(vm.base_image),
             ]
-            info_result = self._shell.run(info_cmd, timeout=60)
+            info_result = self._shell.run(info_cmd, timeout=60, check=True)
             if info_result.success:
                 try:
                     info = json.loads(info_result.stdout)
@@ -554,6 +554,7 @@ class Core:
                     result = self._shell.run(
                         ["qemu-img", "info", "--force-share", "--backing-chain", str(snap.path)],
                         timeout=30,
+                        check=True,
                     )
                     if not result.success:
                         broken.append(snap.name)
@@ -641,6 +642,7 @@ class Core:
         chk = self._shell.run(
             ["qemu-img", "check", "--force-share", "--output=json", str(path)],
             timeout=60,
+            check=True,
         )
         if not chk.success:
             broken.append(name)
@@ -779,6 +781,7 @@ class Core:
         result = self._shell.run(
             ["qemu-img", "info", "--backing-chain", "--output=json", str(source_path)],
             timeout=30,
+            check=True,
         )
         if not result.success:
             return RestoreResult(
@@ -826,6 +829,7 @@ class Core:
             cp_result = self._shell.run(
                 ["cp", str(src), str(dst)],
                 timeout=60,
+                check=True,
             )
             if not cp_result.success:
                 return RestoreResult(
@@ -843,6 +847,7 @@ class Core:
             rebase_result = self._shell.run(
                 ["qemu-img", "rebase", "-u", "-b", f"./{backing_name}", str(chain_files[i])],
                 timeout=30,
+                check=True,
             )
             if not rebase_result.success:
                 return RestoreResult(
@@ -913,6 +918,7 @@ class Core:
                 str(source_path),
             ],
             timeout=30,
+            check=True,
         )
         if info_result.success:
             try:
@@ -935,6 +941,7 @@ class Core:
         mkdir_result = self._shell.run(
             ["mkdir", "-p", str(vm_dir)],
             timeout=30,
+            check=True,
         )
         if not mkdir_result.success:
             return RestoreResult(
@@ -975,6 +982,7 @@ class Core:
                         str(_fork_xml),
                     ],
                     timeout=120,
+                    check=True,
                 )
                 if not _begin_result.success:
                     convert_result = _begin_result
@@ -992,11 +1000,13 @@ class Core:
                             str(target_qcow2),
                         ],
                         timeout=7200,
+                        check=True,
                     )
             finally:
                 _abort_result = self._shell.run(
                     ["virsh", "domjobabort", "--domain", source_vm.name],
                     timeout=30,
+                    check=True,
                 )
                 if not _abort_result.success:
                     logger.warning(
@@ -1020,6 +1030,7 @@ class Core:
                     str(target_qcow2),
                 ],
                 timeout=7200,
+                check=True,
             )
         if not convert_result.success:
             return RestoreResult(
@@ -1034,6 +1045,7 @@ class Core:
         dumpxml_result = self._shell.run(
             ["virsh", "dumpxml", "--domain", source_vm.name],
             timeout=30,
+            check=True,
         )
         if not dumpxml_result.success:
             return RestoreResult(
@@ -1098,6 +1110,7 @@ class Core:
         define_result = self._shell.run(
             ["virsh", "define", str(xml_path)],
             timeout=30,
+            check=True,
         )
         if not define_result.success:
             return RestoreResult(
@@ -1164,6 +1177,7 @@ class Core:
             mkdir_result = self._shell.run(
                 ["mkdir", "-p", str(snapshot_dir)],
                 timeout=10,
+                check=True,
             )
             if not mkdir_result.success:
                 logger.warning(
@@ -1712,7 +1726,7 @@ class Core:
             compress_result = self._shell.run(
                 ["qemu-nbd", "--image-opts", "driver=compress"],
                 timeout=10,
-                check=False,
+                check=True,
             )
             err_text = (compress_result.stderr or compress_result.error or "").lower()
             if "unknown driver" in err_text or "command not found" in err_text:
@@ -2017,7 +2031,7 @@ class Core:
             return vm_config.disks
 
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        result = self._shell.run(domblklist_cmd, timeout=30)
+        result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not result.success:
             logger.warning(
                 "domblklist failed for VM %s: %s",
@@ -2078,6 +2092,7 @@ class Core:
                 str(active_path),
             ],
             timeout=30,
+            check=True,
         )
         if not result.success:
             return ChainVerifyResult(
@@ -2207,6 +2222,7 @@ class Core:
                 str(active_path),
             ],
             timeout=30,
+            check=True,
         )
         if not result.success:
             return None
@@ -2232,6 +2248,7 @@ class Core:
         domblklist_result = self._shell.run(
             ["virsh", "domblklist", "--domain", vm_config.name],
             timeout=30,
+            check=True,
         )
         if domblklist_result.success:
             try:
@@ -2279,6 +2296,7 @@ class Core:
         domstate_result = self._shell.run(
             ["virsh", "domstate", "--domain", vm_config.name],
             timeout=30,
+            check=True,
         )
         if not domstate_result.success:
             return None  # legacy fallback — non-fatal by design
@@ -2334,6 +2352,7 @@ class Core:
         dumpxml = self._shell.run(
             ["virsh", "dumpxml", "--domain", vm_config.name],
             timeout=30,
+            check=True,
         )
         if not dumpxml.success:
             logger.warning(
@@ -2382,7 +2401,7 @@ class Core:
             )
             return
         try:
-            define = self._shell.run(["virsh", "define", tmp_path], timeout=30)
+            define = self._shell.run(["virsh", "define", tmp_path], timeout=30, check=True)
             if define.success:
                 logger.info(
                     "Refreshed domain XML for VM %s after offline commit "
@@ -2512,6 +2531,7 @@ class Core:
             recheck = self._shell.run(
                 ["virsh", "domstate", "--domain", vm_config.name],
                 timeout=30,
+                check=True,
             )
             if recheck.success and "shut off" not in recheck.stdout.strip().lower():
                 self._state.add_deferred_blockcommit(
@@ -2737,6 +2757,30 @@ class Core:
 
         return results
 
+    def _should_backup_onchange(
+        self,
+        vm_config: VMConfig,
+        target: TargetConfig,
+        snapshots: list[SnapshotInfo],
+    ) -> bool:
+        """Return True if backup should proceed under ``onchange`` mode.
+
+        Compares the latest snapshot's allocation against the last backup
+        allocation recorded for this target (design D3).  Returns True
+        when the allocation has changed or no baseline exists yet (first
+        run).  Returns False when the allocation is unchanged — the VM
+        disk has not grown since the last backup to this target.
+        """
+        if not snapshots:
+            return False  # nothing to transfer
+        last_backup_alloc = self._state.get_last_backup_allocation(str(target.path))
+        if last_backup_alloc is None:
+            return True  # first backup to this target
+        current_alloc = snapshots[-1].allocation
+        if current_alloc != last_backup_alloc:
+            return True  # allocation changed
+        return False
+
     def _backup_target(
         self,
         vm_config: VMConfig,
@@ -2747,6 +2791,19 @@ class Core:
 
         Returns True if any backup transfer failed.
         """
+        # Per-target onchange gate (design D3): skip backup when the VM
+        # disk has not changed since the last backup to this target.
+        if target.backup_create == "onchange":
+            if not self._should_backup_onchange(vm_config, target, snapshots):
+                logger.info(
+                    "[backup] %s: target %s unchanged "
+                    "(allocation %d == last backup) — skipping",
+                    vm_config.name,
+                    target.path,
+                    snapshots[-1].allocation if snapshots else 0,
+                )
+                return False  # no failure, just skipped
+
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
 
@@ -2929,6 +2986,20 @@ class Core:
                         anchor,
                     )
 
+        # Update per-target backup allocation baseline after successful
+        # transfer (design D3 — onchange gate uses this on the next run).
+        # Only update when not in dry-run mode, no failures occurred,
+        # and the target is in onchange mode (spec: core-orchestrator).
+        if (
+            not self._dry_run
+            and not backup_failed
+            and snapshots
+            and target.backup_create == "onchange"
+        ):
+            self._state.set_last_backup_allocation(
+                str(target.path), snapshots[-1].allocation
+            )
+
         # Backup retention + cleanup
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)
         self._cleanup_backups(vm_config, target, backups, retention_result)
@@ -2953,6 +3024,7 @@ class Core:
             info_result = self._shell.run(
                 ["qemu-img", "info", "--output=json", str(current)],
                 timeout=60,
+                check=True,
             )
             if not info_result.success:
                 return None

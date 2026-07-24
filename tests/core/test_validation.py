@@ -1101,3 +1101,54 @@ def test_validate_compress_driver_missing_dry_run_warning(
         "Environment validation failed" in msg and "dry-run" in msg
         for msg in warning_messages
     ), f"Expected dry-run validation WARNING, got: {warning_messages}"
+
+
+# ── Compress Driver Probe Uses check=True ────────────────────────────────
+
+
+def test_compress_probe_uses_check_true(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Compress driver probe ``qemu-nbd --image-opts driver=compress`` uses
+    ``check=True`` so that probe failures don't raise subprocess exceptions.
+
+    Verify via ``patch.object`` on ``mock_shell.run`` that the call for
+    the compress probe command was made with ``check=True``.
+    """
+    target = make_target(compress=True)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        core._validate_environment(vm)
+
+    # Find the compress probe call — it must use check=True
+    compress_probe_calls = [
+        c
+        for c in run_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "qemu-nbd" in c.args[0][0]
+        and "driver=compress" in c.args[0]
+    ]
+    assert len(compress_probe_calls) >= 1, (
+        f"Expected at least one compress probe call to mock_shell.run, "
+        f"got {len(compress_probe_calls)}. All calls: {[c.args for c in run_spy.call_args_list]}"
+    )
+
+    # Verify check=True was passed on every compress probe call
+    for call in compress_probe_calls:
+        assert call.kwargs.get("check") is True, (
+            f"Compress probe call must use check=True, got check={call.kwargs.get('check')}. "
+            f"Call args: {call.args}"
+        )

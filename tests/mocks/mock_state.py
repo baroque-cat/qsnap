@@ -18,6 +18,7 @@ class InMemoryStateManager(IStateManager):
         self._state: dict[str, dict[str, object]] = {}
         self._full_backups: dict[str, list[FullBackupInfo]] = {}
         self._dependencies: dict[str, dict[str, list[str]]] = {}
+        self._target_state: dict[str, int] = {}
 
     def get_last_allocation(self, vm_name: str) -> int | None:
         vm_state = self._state.get(vm_name)
@@ -165,3 +166,13 @@ class InMemoryStateManager(IStateManager):
             deps.remove(incremental_name)
             return True
         return False
+
+    # ── Per-target backup allocation tracking ─────────────────────────
+
+    def get_last_backup_allocation(self, target_path: str) -> int | None:
+        """Return the last backup allocation for *target_path*, or None."""
+        return self._target_state.get(target_path)
+
+    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
+        """Record the last backup allocation for *target_path*."""
+        self._target_state[target_path] = alloc

@@ -52,6 +52,7 @@ def is_vm_running(shell: IShell, vm_name: str) -> bool:
     result = shell.run(
         ["virsh", "dominfo", "--domain", vm_name],
         timeout=30,
+        check=True,
     )
     if not result.success:
         logger.warning(
@@ -89,7 +90,7 @@ def is_libvirt_new_enough(
     fall back to direct convert (design D-risk: NBD export fails on old
     libvirt).
     """
-    result = shell.run(["virsh", "--version"], timeout=30)
+    result = shell.run(["virsh", "--version"], timeout=30, check=True)
     if not result.success:
         return False
 
@@ -111,6 +112,7 @@ def get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
     result = shell.run(
         ["virsh", "domblklist", "--domain", vm_name],
         timeout=30,
+        check=True,
     )
     if not result.success:
         return None

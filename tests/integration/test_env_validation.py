@@ -169,3 +169,73 @@ def test_libnbd_missing_hard_failure(test_vm) -> None:
         pytest.raises(RuntimeError, match="python3-libnbd"),
     ):
         core._execute_pipeline(vm_config)
+
+
+# ── Test 3: Real compress driver probe (NEW — integration-nbd-hardening) ──
+
+
+@pytest.mark.integration
+def test_real_compress_driver_probe():
+    """Verify the real ``qemu-nbd --image-opts driver=compress`` probe
+    succeeds (i.e. the compress driver IS available and is detected).
+
+    The compress driver probe command always exits non-zero because
+    ``driver=compress`` requires a ``file`` parameter.  However, the
+    error message distinguishes two cases:
+
+    - ``"Unknown driver 'compress'"`` → driver NOT installed (FAIL).
+    - Any other error (e.g. ``"A block device must be specified for
+      'file'"``) → driver IS available (PASS).
+
+    This test calls the real ``qemu-nbd`` binary via
+    ``SubprocessShell`` with ``check=True`` and asserts that the
+    stderr does NOT contain ``"Unknown driver"``.
+
+    If ``qemu-nbd`` is not available, the test is skipped.
+    """
+    import shutil
+
+    if not shutil.which("qemu-nbd"):
+        pytest.skip("qemu-nbd binary not found in PATH")
+
+    from qsnap.shell.subprocess_shell import SubprocessShell
+
+    shell = SubprocessShell()
+
+    result = shell.run(
+        ["qemu-nbd", "--image-opts", "driver=compress"],
+        timeout=10,
+        check=True,
+    )
+
+    # The command always fails — that is expected.
+    assert not result.success, (
+        f"Compress driver probe should fail (needs file= parameter), "
+        f"got success={result.success!r}"
+    )
+
+    # Combine stderr and error into one error text for analysis.
+    err_text = (result.stderr or result.error or "").lower()
+
+    # The critical check: "Unknown driver" means the driver is NOT
+    # available.  If we see this, the test fails.
+    assert "unknown driver" not in err_text, (
+        f"Compress driver NOT available — 'Unknown driver' found in stderr. "
+        f"Install qemu-utils >= 6.0 or set compress=false in config. "
+        f"stderr: {result.stderr!r}"
+    )
+
+    # We should see evidence that the driver was recognized.
+    # Acceptable patterns include: "block device must be specified",
+    # "Failed to blk_new_open", or similar QEMU messages.
+    driver_recognized = (
+        "block device" in err_text
+        or "blk_new_open" in err_text
+        or "driver=compress" in err_text
+        or "file" in err_text
+    )
+    assert driver_recognized, (
+        f"Compress driver probe produced unexpected output. "
+        f"Expected QEMU to recognize driver=compress. "
+        f"stderr: {result.stderr!r}"
+    )

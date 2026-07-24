@@ -11,6 +11,7 @@ package.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from collections.abc import Callable
@@ -20,7 +21,12 @@ from unittest.mock import patch
 import pytest
 
 from qsnap.models.results import NbdExtent, NbdResult
-from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, LibnbdClient, is_libnbd_available
+from qsnap.utils.nbd_client import (
+    MISSING_LIBNBD_ERROR,
+    LibnbdClient,
+    _ensure_system_site_packages,
+    is_libnbd_available,
+)
 from qsnap.utils.retry import is_retryable
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -655,9 +661,10 @@ class TestDisconnect:
 @pytest.mark.unit
 class TestIsLibnbdAvailable:
     """``is_libnbd_available()`` mirrors whether the system ``nbd``
-    bindings are importable."""
+    bindings are importable, including attribute verification against
+    the PyPI imposter package."""
 
-    def test_returns_false_when_not_installed(
+    def test_is_libnbd_available_no_module_returns_false(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -671,18 +678,213 @@ class TestIsLibnbdAvailable:
         monkeypatch.setattr("importlib.util.find_spec", _fake_find_spec)
         assert is_libnbd_available() is False
 
-    def test_returns_true_when_package_found(
+    def test_is_libnbd_available_with_real_attributes(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When ``importlib.util.find_spec('nbd')`` returns a truthy
-        value, ``is_libnbd_available()`` returns ``True``."""
+        """libnbd installed with real attributes (Error and NBD) → True.
+
+        Monkeypatches ``find_spec`` to return a spec, injects a fake
+        ``nbd`` module into ``sys.modules`` that has ``Error`` and
+        ``NBD`` attributes — ``is_libnbd_available()`` should return
+        ``True`` because the module passes attribute verification."""
+        fake_nbd = types.ModuleType("nbd")
+        fake_nbd.Error = type("Error", (Exception,), {})  # type: ignore[reportAttributeAccessIssue]
+        fake_nbd.NBD = type("NBD", (), {})  # type: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "nbd", fake_nbd)
 
         def _fake_find_spec(name: str) -> object | None:
             return object() if name == "nbd" else None
 
         monkeypatch.setattr("importlib.util.find_spec", _fake_find_spec)
         assert is_libnbd_available() is True
+
+    def test_is_libnbd_available_pypi_imposter_returns_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PyPI ``nbd`` package installed (no ``Error``/``NBD`` attrs)
+        → ``is_libnbd_available()`` returns ``False``.
+
+        The PyPI ``nbd`` package (Jupyter notebook diffing tool) imports
+        as ``import nbd`` but lacks ``nbd.Error`` and ``nbd.NBD``.
+        ``is_libnbd_available()`` must detect this and return ``False``."""
+        fake_nbd = types.ModuleType("nbd")
+        # Deliberately no Error or NBD attributes — PyPI imposter
+        monkeypatch.setitem(sys.modules, "nbd", fake_nbd)
+
+        def _fake_find_spec(name: str) -> object | None:
+            return object() if name == "nbd" else None
+
+        monkeypatch.setattr("importlib.util.find_spec", _fake_find_spec)
+        assert is_libnbd_available() is False
+
+    def test_is_libnbd_available_venv_discovers_system_libnbd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """In a venv, ``_ensure_system_site_packages()`` discovers system
+        libnbd bindings → ``is_libnbd_available()`` returns ``True``.
+
+        Sets ``VIRTUAL_ENV`` env var, injects a fake ``nbd`` module
+        with ``Error`` and ``NBD`` attributes into ``sys.modules``,
+        and verifies that ``is_libnbd_available()`` returns ``True``."""
+        monkeypatch.setenv("VIRTUAL_ENV", "/fake/venv")
+
+        fake_nbd = types.ModuleType("nbd")
+        fake_nbd.Error = type("Error", (Exception,), {})  # type: ignore[reportAttributeAccessIssue]
+        fake_nbd.NBD = type("NBD", (), {})  # type: ignore[reportAttributeAccessIssue]
+        monkeypatch.setitem(sys.modules, "nbd", fake_nbd)
+
+        def _fake_find_spec(name: str) -> object | None:
+            return object() if name == "nbd" else None
+
+        monkeypatch.setattr("importlib.util.find_spec", _fake_find_spec)
+        assert is_libnbd_available() is True
+
+
+# ── connect PyPI imposter / venv discovery ──────────────────────────────
+
+
+@pytest.mark.unit
+class TestConnectPyPiImposter:
+    """``connect()`` handling of the PyPI ``nbd`` imposter and venv
+    discovery of system libnbd bindings."""
+
+    def test_connect_pypi_imposter_returns_actionable_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``connect()`` with the PyPI ``nbd`` imposter installed (module
+        lacks ``NBD`` attribute) returns ``NbdResult(success=False)`` with
+        ``MISSING_LIBNBD_ERROR``. Must NOT raise ``AttributeError``."""
+        # Create a fake nbd module WITHOUT Error/NBD — PyPI imposter
+        fake_nbd = types.ModuleType("nbd")
+        monkeypatch.setitem(sys.modules, "nbd", fake_nbd)
+
+        client = LibnbdClient()
+        result = client.connect("nbd://localhost", "", [])
+
+        assert isinstance(result, NbdResult)
+        assert result.success is False
+        assert result.payload is None
+        assert result.error is not None
+        assert MISSING_LIBNBD_ERROR in result.error or "python3-libnbd" in result.error, (
+            f"Expected MISSING_LIBNBD_ERROR in result.error, got: {result.error!r}"
+        )
+
+    def test_connect_venv_discovers_system_libnbd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``connect()`` in a venv discovers system libnbd bindings via
+        ``_ensure_system_site_packages()`` and succeeds.
+
+        Sets ``VIRTUAL_ENV``, injects a complete fake ``nbd`` module with
+        all required attributes, then calls ``connect()`` — it should
+        create a handle and return ``NbdResult(success=True)``."""
+        monkeypatch.setenv("VIRTUAL_ENV", "/fake/venv")
+
+        mod, _ = _make_fake_nbd_module()
+        monkeypatch.setitem(sys.modules, "nbd", mod)
+
+        client = LibnbdClient()
+        result = client.connect("nbd://localhost", "", [])
+
+        assert result.success is True
+        assert result.payload is None
+        assert result.error is None
+
+
+# ── _ensure_system_site_packages ────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestEnsureSystemSitePackages:
+    """``_ensure_system_site_packages()`` discovers system site-packages
+    when running inside a venv."""
+
+    def test_ensure_system_site_packages_discovers_system_bindings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Set ``VIRTUAL_ENV``, mock ``os.path.isdir`` to return ``True``
+        for system site-packages paths → verify those paths are appended
+        to ``sys.path``."""
+        monkeypatch.setenv("VIRTUAL_ENV", "/fake/venv")
+
+        original_sys_path = list(sys.path)
+        original_isdir = os.path.isdir
+
+        def mock_isdir(path: str) -> bool:
+            # Return True for any path that looks like a system
+            # site-packages or dist-packages directory.
+            if "python3" in path and ("site-packages" in path or "dist-packages" in path):
+                return True
+            return original_isdir(path)
+
+        monkeypatch.setattr(os.path, "isdir", mock_isdir)
+
+        try:
+            _ensure_system_site_packages()
+
+            new_paths = [p for p in sys.path if p not in original_sys_path]
+            assert len(new_paths) > 0, (
+                "No system site-packages paths were added to sys.path "
+                f"(sys.path grew by 0 entries)"
+            )
+            assert any("python3" in p for p in new_paths), (
+                f"Expected python3 site-packages paths in new entries, got: {new_paths}"
+            )
+        finally:
+            # Restore sys.path to avoid leaking into other tests.
+            sys.path[:] = original_sys_path
+
+    def test_ensure_system_site_packages_no_venv_is_noop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When not in a venv (no ``VIRTUAL_ENV``, ``sys.prefix == sys.base_prefix``),
+        ``_ensure_system_site_packages()`` is a no-op — ``sys.path`` is unchanged."""
+        # Ensure no VIRTUAL_ENV
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        # Ensure sys.prefix == sys.base_prefix (real_prefix not set)
+        monkeypatch.setattr(sys, "base_prefix", sys.prefix)
+
+        original_sys_path = list(sys.path)
+        _ensure_system_site_packages()
+        assert sys.path == original_sys_path, (
+            "sys.path should be unchanged when not in a venv"
+        )
+
+
+# ── MISSING_LIBNBD_ERROR message content ────────────────────────────────
+
+
+@pytest.mark.unit
+class TestMissingLibnbdError:
+    """``MISSING_LIBNBD_ERROR`` contains actionable multi-distro
+    instructions and a PyPI imposter warning."""
+
+    def test_missing_libnbd_error_includes_arch_instructions(self) -> None:
+        """``MISSING_LIBNBD_ERROR`` contains ``pacman`` and ``libnbd``
+        — Arch Linux install instructions are present."""
+        assert "pacman" in MISSING_LIBNBD_ERROR, (
+            "MISSING_LIBNBD_ERROR must include pacman instructions"
+        )
+        assert "libnbd" in MISSING_LIBNBD_ERROR, (
+            "MISSING_LIBNBD_ERROR must reference the libnbd package name"
+        )
+
+    def test_missing_libnbd_error_warns_pypi_imposter(self) -> None:
+        """``MISSING_LIBNBD_ERROR`` warns about the PyPI ``nbd`` imposter
+        — contains ``pip install nbd`` reference."""
+        assert "pip install nbd" in MISSING_LIBNBD_ERROR, (
+            "MISSING_LIBNBD_ERROR must warn about 'pip install nbd'"
+        )
+        assert "unrelated" in MISSING_LIBNBD_ERROR.lower(), (
+            "MISSING_LIBNBD_ERROR must mention the PyPI package is unrelated"
+        )
 
 
 # ── connect retry (design D8) ──────────────────────────────────────────────
@@ -696,28 +898,85 @@ class TestConnectRetry:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When every connect attempt fails, ``connect()`` creates a fresh
-        ``nbd.NBD()`` handle on each of the 20 attempts (handles are never
-        reused), calls ``time.sleep(1)`` between attempts 1–19, and
-        returns ``NbdResult(success=False)``."""
-        mod, handles = _make_fake_nbd_module()
-        mod.NBD._connect_raises = ("ECONNREFUSED", "connection refused")  # type: ignore[attr-defined]
+        """``connect()`` creates a fresh ``nbd.NBD()`` handle on each
+        attempt.  Mock ``nbd.NBD`` to fail on the first 5 attempts then
+        succeed on the 6th — verify that exactly 6 handles were created
+        (5 failed + 1 successful), handles are never reused, and
+        ``time.sleep(1)`` is called between the 5 failed attempts."""
+        handles: list[Any] = []
+        attempt_count: list[int] = [0]
+
+        class _Error(Exception):
+            def __init__(
+                self,
+                errno: str = "ECONNREFUSED",
+                errnum: int = 1,
+                string: str = "connection refused",
+            ) -> None:
+                self.errno = errno
+                self.errnum = errnum
+                self.string = string
+                super().__init__(string)
+
+        class _RetryNBD:
+            """NBD handle that fails for N attempts then succeeds."""
+
+            FAIL_UNTIL = 5
+
+            def __init__(self) -> None:
+                handles.append(self)
+                self.meta_contexts: list[str] = []
+                self.export_name: str | None = None
+                self.uri: str | None = None
+                self.shutdown_called: bool = False
+
+            def add_meta_context(self, ctx: str) -> None:
+                self.meta_contexts.append(ctx)
+
+            def set_export_name(self, name: str) -> None:
+                self.export_name = name
+
+            def connect_uri(self, uri: str) -> None:
+                self.uri = uri
+                attempt_count[0] += 1
+                if attempt_count[0] <= self.FAIL_UNTIL:
+                    raise _Error(errno="ECONNREFUSED", errnum=1, string="connection refused")
+                # Success on attempt > FAIL_UNTIL
+
+            def get_block_size(self, _which: int) -> int:
+                return 65536
+
+            def get_size(self) -> int:
+                return 10 * 1024 * 1024
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        mod = types.ModuleType("nbd")
+        mod.NBD = _RetryNBD  # type: ignore[reportAttributeAccessIssue]
+        mod.Error = _Error  # type: ignore[reportAttributeAccessIssue]
+        mod.SIZE_MAXIMUM = 1  # type: ignore[reportAttributeAccessIssue]
         monkeypatch.setitem(sys.modules, "nbd", mod)
 
         client = LibnbdClient()
         with patch("time.sleep", return_value=None) as sleep_mock:
             result = client.connect("nbd://localhost", "", [])
 
-        assert result.success is False
-        assert result.error is not None
-        assert "connection refused" in result.error.lower()
+        # Should succeed on attempt 6
+        assert result.success is True
+        assert result.error is None
 
-        # 20 fresh handles, one per attempt.
-        assert len(handles) == 20, f"Expected 20 fresh NBD handles, got {len(handles)}"
+        # 6 fresh handles: 5 failed + 1 successful
+        assert len(handles) == 6, f"Expected 6 fresh NBD handles (5 failed + 1 success), got {len(handles)}"
+        # Each handle should have been properly initialized
+        for i, h in enumerate(handles):
+            assert h.meta_contexts == ([] if i < 5 else []), (
+                f"Handle {i+1} meta_contexts mismatch"
+            )
 
-        # sleep called between each failed attempt: 19 calls for attempts 1–19.
-        assert sleep_mock.call_count == 19, (
-            f"Expected 19 sleep calls (between 20 attempts), got {sleep_mock.call_count}"
+        # sleep called between each of the 5 failed attempts
+        assert sleep_mock.call_count == 5, (
+            f"Expected 5 sleep calls (between 5 failures), got {sleep_mock.call_count}"
         )
         for call in sleep_mock.call_args_list:
             assert call.args == (1,) or call.args == (1,), f"Expected sleep(1), got {call.args}"

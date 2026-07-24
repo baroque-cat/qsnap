@@ -111,28 +111,3 @@ def test_snapshot_provider_delete_returns_shellresult(cls, init_kwargs):
     assert isinstance(result, ShellResult)
 
 
-@pytest.mark.parametrize(
-    "cls,init_kwargs",
-    [
-        (ExternalSnapshotProvider, {"shell": MockShell()}),
-        (MockSnapshotProvider, {}),
-    ],
-    ids=["external", "mock"],
-)
-def test_snapshot_provider_create_returns_no_content_hash(cls, init_kwargs):
-    """create() returns a SnapshotResult — content_hash field has been removed.
-
-    ``SnapshotResult`` no longer carries ``content_hash``.  Accessing
-    ``result.content_hash`` raises ``AttributeError``.
-    """
-    provider = cls(**init_kwargs)
-    vm_config = VMConfig(
-        name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
-        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
-    )
-    result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False)
-    assert isinstance(result, SnapshotResult)
-    # content_hash field was removed — accessing it must raise AttributeError.
-    with pytest.raises(AttributeError):
-        _ = result.content_hash  # type: ignore[reportAttributeAccessIssue]

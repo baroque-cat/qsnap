@@ -55,7 +55,7 @@ class AllocationSizeDetector(IChangeDetector):
 
         # Step 2: Get active disk paths via domblklist (design D3)
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        domblklist_result = self._shell.run(domblklist_cmd, timeout=30)
+        domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
             return ChangeResult(
                 changed=True,
@@ -91,7 +91,7 @@ class AllocationSizeDetector(IChangeDetector):
             "--output=json",
             active_disk,
         ]
-        info_result = self._shell.run(info_cmd, timeout=60)
+        info_result = self._shell.run(info_cmd, timeout=60, check=True)
         if not info_result.success:
             return ChangeResult(
                 changed=True,

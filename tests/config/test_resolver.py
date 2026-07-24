@@ -72,3 +72,59 @@ def test_target_overrides_vm_retention() -> None:
     assert vm.target_preserve == "20d 10w"
     assert override_target.target_preserve == "10d 5w"
     assert override_target.target_preserve != vm.target_preserve
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# backup_create inheritance — global → VM → target
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_backup_create_global_inherited_by_target() -> None:
+    """Global backup_create='onchange' → target inherits 'onchange' (no override)."""
+    facade = ConfigFacade(FIXTURES / "backup_create.toml")
+    assert facade.get_global().backup_create == "onchange"
+
+    vm = facade.get_vm("vm_inherit")
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_inherit"))
+    assert target.backup_create == "onchange"
+
+
+@pytest.mark.unit
+def test_backup_create_vm_overrides_global() -> None:
+    """VM-level backup_create='always' overrides global 'onchange'.
+
+    NOTE: This test exercises VM-level backup_create override.  As of the
+    current implementation, ``_build_vm()`` passes ``global_cfg.backup_create``
+    directly to ``_build_target()`` without resolving a VM-level override
+    first — so this test may fail until VM-level resolution is implemented.
+    See the ``_build_vm()`` method in ``qsnap/config/facade.py``.
+    """
+    facade = ConfigFacade(FIXTURES / "backup_create.toml")
+    assert facade.get_global().backup_create == "onchange"
+
+    vm = facade.get_vm("vm_override")
+    # The VM overrides global backup_create to "always".
+    # Target vm_override_inherit should inherit "always" from the VM.
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_override_inherit"))
+    assert target.backup_create == "always"
+
+
+@pytest.mark.unit
+def test_backup_create_target_overrides_vm() -> None:
+    """Target-level backup_create='onchange' overrides VM-level 'always'.
+
+    NOTE: This test exercises target-level overriding VM-level backup_create.
+    The target-level override via ``tgt_raw.get("backup_create", ...)`` works,
+    but the VM-level override from ``_build_vm()`` is not yet implemented.
+    When VM-level resolution is added, this test verifies that target
+    overrides take precedence over VM overrides.
+    """
+    facade = ConfigFacade(FIXTURES / "backup_create.toml")
+    assert facade.get_global().backup_create == "onchange"
+
+    vm = facade.get_vm("vm_override")
+    # The VM overrides global to "always".
+    # Target vm_override_override explicitly sets "onchange" → overrides VM.
+    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_override_override"))
+    assert target.backup_create == "onchange"

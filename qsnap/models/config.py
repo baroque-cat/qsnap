@@ -99,6 +99,11 @@ class GlobalConfig:
     #   appended in ``localtime type status target_url source_url parent_url``
     #   format.  Skipped in dry-run mode.
     transaction_log: str | None = None
+    # When to create backups (global default): ``"always"`` (default —
+    # always transfer backups) or ``"onchange"`` (skip backup transfer
+    # when the VM disk has not changed since the last backup to that
+    # target).  Inherited by VM and target levels.
+    backup_create: str = "always"
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,11 @@ class TargetConfig:
     # per target).
     backup_retry_max: int = 3
     backup_retry_base: str = "2s"
+    # When to create backups for this target: ``"always"`` (default —
+    # always transfer backups) or ``"onchange"`` (skip backup transfer
+    # when the VM disk has not changed since the last backup to this
+    # target).  Inherited from global → VM → target.
+    backup_create: str = "always"
 
 
 @dataclass(frozen=True)

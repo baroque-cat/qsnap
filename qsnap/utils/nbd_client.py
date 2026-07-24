@@ -19,6 +19,8 @@ import contextlib
 import errno
 import importlib.util
 import logging
+import os
+import sys
 import time
 from typing import Any, cast
 
@@ -35,8 +37,17 @@ _BASE_ALLOCATION_CONTEXT = "base:allocation"
 
 # Actionable error naming the distro package (design R4: no silent
 # fallback — libnbd is the transport for all backup transfers).
+# Includes multi-distro install instructions and a warning about the
+# unrelated PyPI ``nbd`` package (Jupyter notebook diffing tool).
 MISSING_LIBNBD_ERROR = (
-    "python3-libnbd is required for NBD bitmap backups — install via: apt install python3-libnbd"
+    "python3-libnbd is required for NBD bitmap backups.\n"
+    "Install the system package:\n"
+    "  Arch Linux:   sudo pacman -S libnbd\n"
+    "  Debian/Ubuntu: sudo apt install python3-libnbd\n"
+    "  Fedora:        sudo dnf install libnbd\n"
+    "WARNING: 'pip install nbd' installs an unrelated Jupyter notebook "
+    "diffing tool, NOT the libnbd bindings. Uninstall it with "
+    "'pip uninstall nbd' and install the system package instead."
 )
 
 # libnbd errno names mapped to Core's retryable error patterns.
@@ -50,15 +61,83 @@ _ERRNO_TO_RETRYABLE = {
 }
 
 
+def _ensure_system_site_packages() -> None:
+    """Append system site-packages to ``sys.path`` when running in a venv.
+
+    When qsnap is installed in a venv (PEP 668 compliant), ``sys.path``
+    excludes ``/usr/lib/python3.x/site-packages/``, making the system
+    ``libnbd`` bindings invisible to ``find_spec``.  This function
+    appends standard system site-packages paths to ``sys.path`` so that
+    the system ``libnbd`` bindings become discoverable.
+
+    Detection: ``VIRTUAL_ENV`` env var is set **or**
+    ``sys.prefix != sys.base_prefix``.
+
+    Safe: venv packages take precedence (they appear earlier in
+    ``sys.path``).  Only existing directories are appended.
+    """
+    in_venv = os.environ.get("VIRTUAL_ENV") is not None or sys.prefix != sys.base_prefix
+    if not in_venv:
+        return
+
+    # Standard system site-packages paths to check.
+    # Use sys.version_info to generate the correct path for the current
+    # Python version (e.g. python3.11, python3.14) instead of hardcoding.
+    candidate_paths: list[str] = []
+    py_ver = f"python3.{sys.version_info.minor}"
+    # /usr/lib/python3.x/site-packages/ (Arch Linux, Fedora)
+    candidate_paths.append(f"/usr/lib/{py_ver}/site-packages")
+    # /usr/local/lib/python3.x/site-packages/ (manual builds)
+    candidate_paths.append(f"/usr/local/lib/{py_ver}/site-packages")
+    # Also check adjacent minor versions for robustness (e.g. libnbd
+    # compiled for 3.12 but running on 3.13).
+    for minor in range(sys.version_info.minor - 2, sys.version_info.minor + 3):
+        if minor < 0:
+            continue
+        v = f"python3.{minor}"
+        p1 = f"/usr/lib/{v}/site-packages"
+        p2 = f"/usr/local/lib/{v}/site-packages"
+        if p1 not in candidate_paths:
+            candidate_paths.append(p1)
+        if p2 not in candidate_paths:
+            candidate_paths.append(p2)
+    # Debian/Ubuntu dist-packages (glob pattern — check common versions)
+    import glob
+
+    candidate_paths.extend(glob.glob("/usr/lib/python3.*/dist-packages"))
+    candidate_paths.extend(glob.glob("/usr/local/lib/python3.*/dist-packages"))
+
+    for path in candidate_paths:
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.append(path)
+
+
 def is_libnbd_available() -> bool:
     """Return ``True`` when the system ``python3-libnbd`` bindings are importable.
 
-    Uses :func:`importlib.util.find_spec` so the check performs no import
-    side effects.  Used by env-validation and ``DefaultFactory`` to fail
-    fast with :data:`MISSING_LIBNBD_ERROR` when bitmap mode is configured
-    but the package is missing (design R4 — no silent fallback).
+    Calls :func:`_ensure_system_site_packages` before the import attempt
+    to make system bindings discoverable in venv environments.  After
+    importing, verifies that the module has the required libnbd
+    attributes (``nbd.Error`` and ``nbd.NBD``).  This prevents false
+    positives from the unrelated PyPI ``nbd`` package (Jupyter notebook
+    diffing tool) which imports as ``import nbd`` but lacks those
+    attributes.
+
+    Used by env-validation and ``DefaultFactory`` to fail fast with
+    :data:`MISSING_LIBNBD_ERROR` when bitmap mode is configured but the
+    package is missing or wrong (design R4 — no silent fallback).
     """
-    return importlib.util.find_spec("nbd") is not None
+    _ensure_system_site_packages()
+    if importlib.util.find_spec("nbd") is None:
+        return False
+    try:
+        import nbd
+    except ImportError:
+        return False
+    # Verify the module has the required libnbd attributes — the PyPI
+    # ``nbd`` package (Jupyter notebook diffing tool) imports as
+    # ``import nbd`` but lacks ``nbd.Error`` and ``nbd.NBD``.
+    return hasattr(nbd, "Error") and hasattr(nbd, "NBD")
 
 
 class LibnbdClient(INbdClient):
@@ -78,16 +157,22 @@ class LibnbdClient(INbdClient):
     def connect(self, uri: str, export_name: str, meta_contexts: list[str]) -> NbdResult:
         """Connect to *uri* requesting exactly *meta_contexts*.
 
-        Lazy-imports the ``nbd`` package; when it is missing, returns an
-        actionable error naming ``python3-libnbd``.  After connecting,
-        reads the server-advertised maximum request size and applies the
-        32 MiB cap.
+        Calls :func:`_ensure_system_site_packages` before the import
+        attempt to make system-installed libnbd bindings discoverable
+        when running inside a venv.  After importing ``nbd``, verifies
+        that the module has ``Error`` and ``NBD`` attributes — if not,
+        returns :class:`NbdResult` with an actionable error message
+        indicating the wrong package is installed.  Catches
+        ``AttributeError`` raised by missing attributes on the imported
+        module and returns :class:`NbdResult` instead of propagating the
+        exception.
 
         Connect-retry (design D8): up to 20 attempts with a 1-second
         sleep between failures.  A fresh ``nbd.NBD()`` handle is created
         on each attempt — a half-open handle from a failed attempt is
         never reused.
         """
+        _ensure_system_site_packages()
         try:
             import nbd
         except ImportError:
@@ -96,6 +181,16 @@ class LibnbdClient(INbdClient):
         # untyped surface to this method by treating the module as Any
         # (pyright strict would otherwise flag every attribute access).
         nbd_any = cast(Any, nbd)
+
+        # Verify the module has the required libnbd attributes — the
+        # PyPI ``nbd`` package (Jupyter notebook diffing tool) imports
+        # as ``import nbd`` but lacks ``nbd.Error`` and ``nbd.NBD``.
+        if not hasattr(nbd_any, "Error") or not hasattr(nbd_any, "NBD"):
+            return NbdResult(
+                success=False,
+                payload=None,
+                error=MISSING_LIBNBD_ERROR,
+            )
 
         # Build the URI with the export name embedded (see comment below).
         effective_uri = uri
@@ -136,6 +231,16 @@ class LibnbdClient(INbdClient):
                 if attempt < max_attempts:
                     time.sleep(1)
                 continue
+            except AttributeError as exc:
+                # The PyPI ``nbd`` imposter was installed instead of
+                # system ``python3-libnbd`` — the module lacks
+                # ``nbd.NBD()`` or ``nbd.Error``.  Return an actionable
+                # error instead of crashing.
+                return NbdResult(
+                    success=False,
+                    payload=None,
+                    error=MISSING_LIBNBD_ERROR,
+                )
             except OSError as exc:
                 last_error = self._normalize_error(exc)
                 logger.debug(

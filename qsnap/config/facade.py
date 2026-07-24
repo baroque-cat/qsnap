@@ -115,6 +115,10 @@ class ConfigFacade(IConfigFacade):
         if "transaction_log" in raw:
             global_kwargs["transaction_log"] = str(raw["transaction_log"])
 
+        # When to create backups (global default).
+        if "backup_create" in raw:
+            global_kwargs["backup_create"] = str(raw["backup_create"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # rate_limit is deprecated (removed backup strategy) — log a
@@ -158,6 +162,14 @@ class ConfigFacade(IConfigFacade):
                 f"Invalid backup_stall_timeout: {self._global.backup_stall_timeout!r}. "
                 f"Must be a duration string like '30m', '1h', '0s'."
             ) from exc
+
+        # Validate backup_create (global default for per-target gating).
+        valid_backup_create = {"always", "onchange"}
+        if self._global.backup_create not in valid_backup_create:
+            raise ConfigError(
+                f"Invalid backup_create: {self._global.backup_create!r}. "
+                f"Must be one of: {', '.join(sorted(valid_backup_create))}"
+            )
 
         # Validate FULL verification tiers.
         valid_after_create = {"metadata", "check", "compare", "off"}
@@ -261,6 +273,19 @@ class ConfigFacade(IConfigFacade):
         else:
             target_preserve_min = global_cfg.target_preserve_min
 
+        # backup_create: VM overrides global (target may override VM).
+        vm_backup_create: str
+        if "backup_create" in vm_raw:
+            vm_backup_create = str(vm_raw["backup_create"])
+            valid = {"always", "onchange"}
+            if vm_backup_create not in valid:
+                raise ConfigError(
+                    f"Invalid backup_create: {vm_backup_create!r}. "
+                    f"Must be one of: {', '.join(sorted(valid))}"
+                )
+        else:
+            vm_backup_create = global_cfg.backup_create
+
         # disks: optional explicit list of disk targets.
         disks_raw = vm_raw.get("disks")
         if disks_raw is not None:
@@ -285,6 +310,7 @@ class ConfigFacade(IConfigFacade):
                     global_cfg.compress,
                     global_cfg.compression_type,
                     global_cfg.backup_stall_timeout,
+                    vm_backup_create,
                 )
             )
 
@@ -313,6 +339,7 @@ class ConfigFacade(IConfigFacade):
         global_compress: bool = True,
         global_compression_type: str = "zstd",
         global_backup_stall_timeout: str = "30m",
+        global_backup_create: str = "always",
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -464,6 +491,15 @@ class ConfigFacade(IConfigFacade):
                 "Must be a duration string like '1s', '5s', '10s'."
             )
 
+        # backup_create: target overrides global default.
+        backup_create = str(tgt_raw.get("backup_create", global_backup_create))
+        valid_backup_create = {"always", "onchange"}
+        if backup_create not in valid_backup_create:
+            raise ConfigError(
+                f"Invalid backup_create: {backup_create!r}. "
+                f"Must be one of: {', '.join(sorted(valid_backup_create))}"
+            )
+
         return TargetConfig(
             path=path,
             incremental=incremental,
@@ -475,6 +511,7 @@ class ConfigFacade(IConfigFacade):
             backup_stall_timeout=backup_stall_timeout,
             backup_retry_max=backup_retry_max,
             backup_retry_base=backup_retry_base,
+            backup_create=backup_create,
         )
 
     # ── IConfigFacade implementation ──────────────────────────────────

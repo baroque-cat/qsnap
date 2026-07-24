@@ -481,28 +481,6 @@ def test_full_verify_after_create_hash_deprecated_maps_to_compare(
 
 
 @pytest.mark.unit
-def test_facade_unknown_key_full_verify_before_rebase_ignored(tmp_path: Path) -> None:
-    """TOML with full_verify_before_rebase is silently ignored — no ConfigError
-    and the field is not on GlobalConfig."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        'preserve_day_of_week = "monday"\n'
-        'full_verify_before_rebase = "metadata"\n'
-        "\n"
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-    )
-    # Should NOT raise ConfigError — field is silently ignored.
-    facade = ConfigFacade(config_file)
-    global_cfg = facade.get_global()
-    # Field is NOT on GlobalConfig.
-    with pytest.raises(AttributeError):
-        _ = global_cfg.full_verify_before_rebase  # type: ignore[attr-defined]
-
-
-@pytest.mark.unit
 def test_facade_parses_full_verify_before_delete_metadata(tmp_path: Path) -> None:
     """ConfigFacade parses full_verify_before_delete='metadata' from the global section."""
     config_file = tmp_path / "config.toml"
@@ -1047,23 +1025,37 @@ def test_facade_unknown_key_snapshot_deep_verify_ignored(tmp_path: Path) -> None
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Removed rsync/file-copy fields — deprecation WARNING, no ConfigError
+# backup_create option resolution — ConfigFacade integration
 # ──────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_removed_fields_trigger_deprecation_warnings(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """TOML containing removed fields (incremental_mode, rate_limit, copy_base
-    at target-level and rate_limit at global-level) triggers a deprecation
-    WARNING for each field, does NOT raise ConfigError, and produces valid
-    default values for surviving fields."""
+def test_backup_create_valid_onchange(tmp_path: Path) -> None:
+    """TOML with backup_create='onchange' parses successfully."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
-        'rate_limit = "100M"\n'
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'backup_create = "onchange"\n'
         "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  backup_create = "onchange"\n'
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_create == "always"
+    vm = facade.get_vm("testvm")
+    assert len(vm.targets) == 1
+    assert vm.targets[0].backup_create == "onchange"
+
+
+@pytest.mark.unit
+def test_backup_create_invalid_raises_config_error(tmp_path: Path) -> None:
+    """TOML with backup_create='invalid' raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
         'base_image = "/tmp/test.qcow2"\n'
@@ -1071,36 +1063,27 @@ def test_removed_fields_trigger_deprecation_warnings(
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
-        "  incremental = true\n"
-        '  incremental_mode = "file-copy"\n'
-        '  rate_limit = "500K"\n'
-        "  copy_base = true\n"
+        '  backup_create = "invalid"\n'
     )
+    with pytest.raises(ConfigError, match="Invalid backup_create"):
+        ConfigFacade(config_file)
 
-    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
-        facade = ConfigFacade(config_file)
 
-    # Each removed field triggers a deprecation WARNING naming the field.
-    warnings_text = " ".join(caplog.messages)
-    assert "incremental_mode" in warnings_text, "Expected deprecation warning for incremental_mode"
-    assert "rate_limit" in warnings_text, "Expected deprecation warning for rate_limit"
-    assert "copy_base" in warnings_text, "Expected deprecation warning for copy_base"
-
-    # Verify the global rate_limit warning was emitted (global-level).
-    assert any("rate_limit" in msg for msg in caplog.messages), (
-        "Expected deprecation warning for global rate_limit"
+@pytest.mark.unit
+def test_backup_create_default_always(tmp_path: Path) -> None:
+    """TOML without backup_create field defaults to 'always'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
     )
-
-    # No ConfigError should have been raised — the config parses fine.
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().backup_create == "always"
     vm = facade.get_vm("testvm")
-    assert vm.name == "testvm"
-    target = vm.targets[0]
-    # TargetConfig carries valid defaults for surviving fields.
-    assert isinstance(target.incremental, bool)
-    assert target.incremental is True
-    assert target.verify == "metadata"
-    assert target.compress is True
-    assert target.compression_type == "zstd"
-    # GlobalConfig carries valid defaults.
-    global_cfg = facade.get_global()
-    assert global_cfg.compress is True
+    assert len(vm.targets) == 1
+    assert vm.targets[0].backup_create == "always"

@@ -189,6 +189,7 @@ def make_target():
         compress: bool = True,
         compression_type: str = "zstd",
         backup_stall_timeout: str = "30m",
+        backup_create: str = "always",
         **kwargs: object,
     ) -> TargetConfig:
         defaults: dict[str, object] = {
@@ -197,6 +198,7 @@ def make_target():
             "compress": compress,
             "compression_type": compression_type,
             "backup_stall_timeout": backup_stall_timeout,
+            "backup_create": backup_create,
         }
         defaults.update(kwargs)
         return TargetConfig(**defaults)  # type: ignore[arg-type]
@@ -233,6 +235,7 @@ def make_global_config():
         full_verify_before_delete: str = "check",
         deep_check_targets: bool = False,
         transaction_log: str | None = None,
+        backup_create: str = "always",
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
@@ -259,6 +262,7 @@ def make_global_config():
             full_verify_before_delete=full_verify_before_delete,
             deep_check_targets=deep_check_targets,
             transaction_log=transaction_log,
+            backup_create=backup_create,
         )
 
     return _make

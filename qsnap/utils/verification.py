@@ -89,7 +89,7 @@ def verify_full_backup(
         "--output=json",
         str(target_path),
     ]
-    info_result = shell.run(info_cmd, timeout=60)
+    info_result = shell.run(info_cmd, timeout=60, check=True)
     if not info_result.success:
         error_detail = info_result.stderr or info_result.error or "unknown"
         return f"verification failed: qemu-img info returned {error_detail}"
@@ -140,7 +140,7 @@ def verify_full_backup(
             "--output=json",
             str(target_path),
         ]
-        check_result = shell.run(check_cmd, timeout=7200)
+        check_result = shell.run(check_cmd, timeout=7200, check=True)
         if not check_result.success:
             error_detail = check_result.stderr or check_result.error or "unknown"
             return f"verification failed: qemu-img check returned {error_detail}"
@@ -173,7 +173,7 @@ def verify_full_backup(
             str(source_path),
             str(target_path),
         ]
-        compare_result = shell.run(compare_cmd, timeout=7200)
+        compare_result = shell.run(compare_cmd, timeout=7200, check=True)
         if not compare_result.success:
             error_detail = compare_result.stderr or compare_result.error or "unknown"
             if "lock" in error_detail.lower() or "shared" in error_detail.lower():
@@ -251,7 +251,7 @@ def verify_bitmap_incremental(
         "--output=json",
         str(source_path),
     ]
-    source_result = shell.run(source_info_cmd, timeout=60)
+    source_result = shell.run(source_info_cmd, timeout=60, check=True)
     if not source_result.success:
         return f"verification failed: cannot get source info: {source_result.error}"
 
@@ -262,7 +262,7 @@ def verify_bitmap_incremental(
         "--output=json",
         str(delta_path),
     ]
-    delta_result = shell.run(delta_info_cmd, timeout=60)
+    delta_result = shell.run(delta_info_cmd, timeout=60, check=True)
     if not delta_result.success:
         return f"verification failed: cannot get delta info: {delta_result.error}"
 
@@ -336,6 +336,7 @@ def verify_bitmap_incremental(
         compare_result = shell.run(
             compare_cmd,
             timeout=_VERIFY_COMPARE_TIMEOUT,
+            check=True,
         )
         if not compare_result.success:
             error_detail = compare_result.error or compare_result.stderr or ""

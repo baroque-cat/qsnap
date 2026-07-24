@@ -469,3 +469,71 @@ class JsonStateManager(IStateManager):
         data[target_path] = target_deps
         self._save_dependencies(data)
         return True
+
+    # ── Per-target backup allocation tracking ─────────────────────────
+
+    def _target_state_path(self) -> Path:
+        return self._state_dir / "_target_state.json"
+
+    def _load_target_state(self) -> dict[str, dict[str, int]]:
+        """Load per-target state data.
+
+        Format: ``{target_path: {"last_backup_allocation": int}}``
+
+        On ``json.JSONDecodeError`` (corrupt file), the file is renamed
+        to ``_target_state.json.broken.{timestamp}`` and an empty dict
+        is returned (same recovery pattern as ``_load``).
+        """
+        path = self._target_state_path()
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data: dict[str, dict[str, int]] = json.load(fh)
+            return data
+        except json.JSONDecodeError:
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            broken_path = self._state_dir / f"_target_state.json.broken.{timestamp}"
+            try:
+                shutil.move(str(path), str(broken_path))
+            except OSError as exc:
+                logger.critical(
+                    "_target_state.json is corrupt and could not be renamed: %s",
+                    exc,
+                )
+                return {}
+            logger.critical(
+                "_target_state.json was corrupt — renamed to %s. Starting with empty state.",
+                broken_path,
+            )
+            return {}
+
+    def _save_target_state(self, data: dict[str, dict[str, int]]) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_dir / "_target_state.json.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+        os.replace(tmp, self._target_state_path())
+
+    def get_last_backup_allocation(self, target_path: str) -> int | None:
+        """Return the last backup allocation recorded for *target_path*.
+
+        Returns ``None`` when no baseline exists (first-run behaviour —
+        backup always proceeds).
+        """
+        data = self._load_target_state()
+        entry = data.get(target_path)
+        if entry is None:
+            return None
+        value = entry.get("last_backup_allocation")
+        if value is None:
+            return None
+        return int(value)
+
+    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
+        """Record the last backup allocation for *target_path*."""
+        data = self._load_target_state()
+        entry = data.get(target_path, {})
+        entry["last_backup_allocation"] = alloc
+        data[target_path] = entry
+        self._save_target_state(data)

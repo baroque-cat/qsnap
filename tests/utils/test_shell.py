@@ -153,6 +153,60 @@ def test_check_mode_returns_shellresult() -> None:
     assert result.error is not None
 
 
+def test_probing_call_with_check_true_logs_debug(caplog) -> None:
+    """Probing call (check=True) logs at DEBUG; default (check=False) at ERROR.
+
+    When ``check=True``, a failing command is an expected, non-error
+    condition (e.g. probing whether a compress driver is available).
+    The failure must be logged at DEBUG level — not ERROR — so it does
+    not pollute the error stream.
+
+    Conversely, when ``check`` is omitted (defaults to ``False``), a
+    failure is unexpected and must be logged at ERROR level.
+    """
+    shell = SubprocessShell()
+
+    # ── check=True: probing call, failure must log at DEBUG ────────────
+    with caplog.at_level(logging.DEBUG, logger=SHELL_LOGGER):
+        result_check_true = shell.run(["false"], timeout=30, check=True)
+
+    assert isinstance(result_check_true, ShellResult)
+    assert result_check_true.success is False
+
+    true_records = [r for r in caplog.records if r.name == SHELL_LOGGER]
+    true_error = [r for r in true_records if r.levelno == logging.ERROR]
+    true_debug = [r for r in true_records if r.levelno == logging.DEBUG]
+
+    assert len(true_error) == 0, (
+        "check=True probing failure must NOT log at ERROR level"
+    )
+    assert len(true_debug) >= 1, (
+        "check=True probing failure must log at DEBUG level for traceability"
+    )
+
+    caplog.clear()
+
+    # ── default (check=False): failure must log at ERROR ───────────────
+    with caplog.at_level(logging.DEBUG, logger=SHELL_LOGGER):
+        result_default = shell.run(["false"], timeout=30)
+
+    assert isinstance(result_default, ShellResult)
+    assert result_default.success is False
+
+    default_records = [r for r in caplog.records if r.name == SHELL_LOGGER]
+    default_error = [r for r in default_records if r.levelno == logging.ERROR]
+    default_debug = [r for r in default_records if r.levelno == logging.DEBUG]
+
+    assert len(default_error) >= 1, (
+        "default-mode (check=False) failure must log at ERROR level"
+    )
+    msg = default_error[0].getMessage()
+    assert "false" in msg
+    assert "returncode=" in msg
+    # Verify the ERROR message carries diagnostic fields.
+    assert "error=" in msg or "timeout=" in msg
+
+
 def test_ishell_run_accepts_check_parameter() -> None:
     """The IShell.run ABC signature declares check: bool = False.
 

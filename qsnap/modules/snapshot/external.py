@@ -72,7 +72,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         # backoff (2s, 4s).  Non-lock errors fail immediately.
         create_result = None
         for attempt in range(_LOCK_RETRY_MAX):
-            create_result = self._shell.run(create_cmd, timeout=timeout)
+            create_result = self._shell.run(create_cmd, timeout=timeout, check=True)
             if create_result.success:
                 break
             if (
@@ -105,7 +105,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
 
         # Step 2: chmod g+rw,o+r
         chmod_cmd = ["chmod", "g+rw,o+r", str(snapshot_path)]
-        chmod_result = self._shell.run(chmod_cmd, timeout=30)
+        chmod_result = self._shell.run(chmod_cmd, timeout=30, check=True)
         if not chmod_result.success:
             return SnapshotResult(
                 success=False,
@@ -126,7 +126,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             "--output=json",
             str(snapshot_path),
         ]
-        info_result = self._shell.run(info_cmd, timeout=60)
+        info_result = self._shell.run(info_cmd, timeout=60, check=True)
         if not info_result.success:
             return SnapshotResult(
                 success=False,
@@ -166,7 +166,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         """
         # Step 1: Get active disk path via domblklist
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        domblklist_result = self._shell.run(domblklist_cmd, timeout=30)
+        domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
             return []
 
@@ -184,7 +184,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             "--output=json",
             active_disk,
         ]
-        chain_result = self._shell.run(chain_cmd, timeout=60)
+        chain_result = self._shell.run(chain_cmd, timeout=60, check=True)
         if not chain_result.success:
             return []
 

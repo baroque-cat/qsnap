@@ -3,7 +3,7 @@ schema: qa-driven
 context: |
   Tech stack: Python >=3.11, <4.0, zero runtime PyPI dependencies (pure stdlib)
   Package manager: Poetry (primary) / uv (secondary), build-backend poetry-core
-  Runtime deps: tomllib (stdlib), argparse (stdlib), subprocess (stdlib)
+  Runtime deps: tomllib (stdlib), argparse (stdlib), subprocess (stdlib), libnbd (python3-libnbd system package — hard requirement, no PyPI fallback)
   External binaries: virsh, qemu-img (QEMU/KVM management stack)
   CLI framework: argparse with subcommands (run, snapshot, backup, prune, list, stats, check, restore, estimate, fork, deploy)
   Linting: ruff (E, F, W, I, B, C4, SIM, TID, UP, YTT), ignore E501
@@ -15,7 +15,7 @@ context: |
   Config: IConfigFacade (root of truth) → ConfigFacade parses TOML, resolves inheritance, produces frozen dataclasses (VMConfig, TargetConfig, RetentionPolicy, GlobalConfig)
   Orchestrator: Core receives IConfigFacade, IVMModuleFactory, IStateManager, IShell via constructor DI; runs pipeline in fixed order
   Factory: IVMModuleFactory / DefaultFactory creates all module instances per VM+target; injected into Core
-  Domain modules: ISnapshotProvider (ExternalSnapshotProvider), IBackupProvider (FileCopyBackupProvider, BitmapBackupProvider), IChangeDetector (AllocationSizeDetector, MapChangeDetector), ILifecycleManager (BlockCommitManager, QemuImgCommitManager), IRetentionEngine (TimeBasedRetention — pure function, no I/O)
+  Domain modules: ISnapshotProvider (ExternalSnapshotProvider), IBackupProvider (BitmapBackupProvider), IChangeDetector (AllocationSizeDetector, MapChangeDetector), ILifecycleManager (BlockCommitManager, QemuImgCommitManager), IRetentionEngine (TimeBasedRetention — pure function, no I/O)
   Patterns: Result monads (*Result frozen dataclasses, never exceptions for expected failures), Immutable Config (frozen=True), Pipeline (template method in Core), Abstract Factory, Ports & Adapters
   State: IStateManager / JsonStateManager persists cross-run data as JSON under /var/lib/qsnap/state/; tests use InMemoryStateManager
   Shell: IShell / SubprocessShell wraps all virsh, qemu-img, filesystem calls; enables timeout enforcement and full mockability
@@ -29,7 +29,7 @@ context: |
   Contract tests: parametrized over ALL concrete implementations (production + mock) in tests/interfaces/
   Fixtures: mock_shell, mock_state, mock_config, mock_factory, make_vm_config (factory function), make_target (factory function), frozen_clock, cli_app
   Coverage: pytest --cov=qsnap --cov-report=html, no hard thresholds configured
-  Domain concepts: VM (qcow2 base image + snapshot dir), snapshot (external disk-only overlay), backing chain (linked qcow2 images), target (backup destination), retention policy (24h 7d 4w 12m 1y), preserve_min (safety floor), FULL backup (standalone qcow2 anchor via qemu-img convert), incremental backup (rebased qcow2 chain), blockcommit (merge deltas into base), deferred operations (AppArmor/SELinux blocked blockcommits queued in state), change detection (allocation-size or allocation-map mode), backup verification (off/metadata/hash/full)
+  Domain concepts: VM (qcow2 base image + snapshot dir), snapshot (external disk-only overlay), backing chain (linked qcow2 images), target (backup destination), retention policy (24h 7d 4w 12m 1y), preserve_min (safety floor), FULL backup (standalone qcow2 anchor via NBD pull-model for running VMs or qemu-img convert for stopped VMs), incremental backup (rebased qcow2 chain via NBD dirty-block transfer), blockcommit (merge deltas into base), deferred operations (AppArmor/SELinux blocked blockcommits queued in state), change detection (allocation-size or allocation-map mode), backup_create (always or onchange — per-target gate skipping transfer when disk allocation unchanged), backup verification (off/metadata/hash/full)
   Active specs: 43 specs in openspec/specs/ covering all modules, CLI, config, locking, systemd
   Archived changes: 5 completed changes in openspec/changes/archive/
   All code, comments, and documentation MUST be in English

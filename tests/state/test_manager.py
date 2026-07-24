@@ -329,67 +329,6 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
     ops = manager.get_deferred_operations("vm1")
     assert ops[0].last_warned_at == warned
 
-
-def test_new_state_file_excludes_content_hash(tmp_path: Path) -> None:
-    """Recording a SnapshotInfo does NOT write a 'content_hash' key to the JSON.
-
-    The ``content_hash`` field has been removed from ``SnapshotInfo``
-    (unify-nbd-transfer change).  State files created by the current
-    version must not contain the key.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-
-    snap = _make_snapshot("snap_no_hash", datetime(2024, 1, 1, 12, 0, 0), allocation=65536)
-    manager.record_snapshot("testvm", snap)
-
-    state_file = tmp_path / "testvm.json"
-    assert state_file.exists()
-
-    with open(state_file, encoding="utf-8") as fh:
-        data = json.load(fh)
-
-    snapshots = data.get("snapshots", [])
-    assert len(snapshots) == 1
-    assert "content_hash" not in snapshots[0], "New state files must NOT contain 'content_hash' key"
-
-
-def test_old_state_content_hash_ignored_on_load(tmp_path: Path) -> None:
-    """State files with a legacy 'content_hash' key load without error.
-
-    The key is silently ignored — the snapshot is loaded, and accessing
-    ``content_hash`` on the loaded ``SnapshotInfo`` raises ``AttributeError``
-    because the field no longer exists.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-
-    # Manually write a state file with a legacy "content_hash" key.
-    state_data = {
-        "last_allocation": 65536,
-        "snapshots": [
-            {
-                "name": "snap_legacy",
-                "path": "/tmp/snap_legacy.qcow2",
-                "timestamp": "2024-01-01T12:00:00",
-                "allocation": 1024,
-                "content_hash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            }
-        ],
-    }
-    state_file = tmp_path / "testvm.json"
-    state_file.write_text(json.dumps(state_data), encoding="utf-8")
-
-    # Load via JsonStateManager — must not raise.
-    snapshots = manager.get_snapshots("testvm")
-    assert len(snapshots) == 1
-    snap = snapshots[0]
-    assert snap.name == "snap_legacy"
-    assert snap.allocation == 1024
-
-    # content_hash field no longer exists on SnapshotInfo.
-    with pytest.raises(AttributeError):
-        _ = snap.content_hash  # type: ignore[reportAttributeAccessIssue]
-
-
 # ── full backup tracking tests ───────────────────────────────────────────
 
 
@@ -1000,3 +939,83 @@ def test_deduplicate_is_idempotent(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
     # No deduplication log on the second load.
     assert "Deduplicated FULL backup entry:" not in caplog.text
+
+
+# ── per-target backup allocation tracking ─────────────────────────────────
+
+
+def test_per_target_backup_allocation_write_read(tmp_path: Path) -> None:
+    """set_last_backup_allocation then get_last_backup_allocation round-trips the value."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_backup_allocation("/path/to/target", 12345)
+    assert manager.get_last_backup_allocation("/path/to/target") == 12345
+
+
+def test_per_target_backup_allocation_missing_returns_none(tmp_path: Path) -> None:
+    """get_last_backup_allocation on a target with no recorded state returns None."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    result = manager.get_last_backup_allocation("/nonexistent")
+    assert result is None
+
+
+def test_per_target_backup_allocation_independent(tmp_path: Path) -> None:
+    """Per-target backup allocation state is independent — target A and B don't interfere."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_backup_allocation("/mnt/backup/target_a", 1000)
+    manager.set_last_backup_allocation("/mnt/backup/target_b", 2000)
+
+    assert manager.get_last_backup_allocation("/mnt/backup/target_a") == 1000
+    assert manager.get_last_backup_allocation("/mnt/backup/target_b") == 2000
+
+
+def test_target_state_json_atomic_write(tmp_path: Path) -> None:
+    """After set_last_backup_allocation, _target_state.json exists with correct JSON and no .tmp file lingers."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_backup_allocation("/path/to/target", 12345)
+
+    target_state_file = tmp_path / "_target_state.json"
+    tmp_file = tmp_path / "_target_state.json.tmp"
+
+    assert target_state_file.exists(), "_target_state.json must exist after write"
+    assert not tmp_file.exists(), ".tmp file must NOT be left behind (atomic write via os.replace)"
+
+    with open(target_state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data == {"/path/to/target": {"last_backup_allocation": 12345}}
+
+
+def test_target_state_json_missing_returns_none(tmp_path: Path) -> None:
+    """Fresh state directory with no _target_state.json — get_last_backup_allocation returns None."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Verify the state directory has no _target_state.json.
+    assert not (tmp_path / "_target_state.json").exists()
+
+    result = manager.get_last_backup_allocation("/some/target")
+    assert result is None
+
+
+def test_target_state_json_corrupted_renamed(tmp_path: Path) -> None:
+    """Corrupted _target_state.json is renamed to .broken.{timestamp} and get_last_backup_allocation returns None."""
+    target_state_file = tmp_path / "_target_state.json"
+    target_state_file.write_text("{ this is invalid json", encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    result = manager.get_last_backup_allocation("/any/target")
+    assert result is None, "Corrupted state must return None (graceful recovery)"
+
+    # Original file must be gone.
+    assert not target_state_file.exists(), "Corrupt _target_state.json must be renamed away"
+
+    # A .broken.* file must exist.
+    broken_files = list(tmp_path.glob("_target_state.json.broken.*"))
+    assert len(broken_files) == 1, (
+        f"Expected exactly one broken file, got {len(broken_files)}: "
+        f"{[f.name for f in broken_files]}"
+    )
+    assert broken_files[0].name.startswith("_target_state.json.broken.")

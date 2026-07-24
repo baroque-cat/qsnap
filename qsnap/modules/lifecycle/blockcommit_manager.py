@@ -54,7 +54,7 @@ class BlockCommitManager(ILifecycleManager):
 
         # Step 2: Get disk target via domblklist
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        domblklist_result = self._shell.run(domblklist_cmd, timeout=30)
+        domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
             return CommitResult(
                 success=False,
@@ -89,7 +89,7 @@ class BlockCommitManager(ILifecycleManager):
                 "--verbose",
                 "--wait",
             ]
-            result = self._shell.run(cmd, timeout=3600)
+            result = self._shell.run(cmd, timeout=3600, check=True)
             if not result.success:
                 # Check for MAC denial (AppArmor/SELinux)
                 mac_reason = detect_mac_denial(result.stderr)
@@ -114,6 +114,7 @@ class BlockCommitManager(ILifecycleManager):
             chk = self._shell.run(
                 ["qemu-img", "check", "--output=json", str(vm_config.base_image)],
                 timeout=3600,
+                check=True,
             )
             if not chk.success:
                 return CommitResult(

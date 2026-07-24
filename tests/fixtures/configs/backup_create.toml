@@ -1,0 +1,45 @@
+# backup_create config — tests option inheritance for the backup_create
+# field (global → VM → target).  Supports three test scenarios:
+#   1. vm_inherit          → inherits global "onchange"
+#      target_inherit      → inherits "onchange"
+#   2. vm_override         → overrides global with "always"
+#      target_inherit      → inherits VM's "always"
+#      target_override     → overrides VM with "onchange"
+#   3. vm_no_override       → inherits global "onchange"
+#      target_explicit      → explicitly sets "always"
+
+backup_create = "onchange"
+
+[[vm]]
+name = "vm_inherit"
+base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_inherit"
+  # Target inherits global backup_create="onchange" (no override)
+
+[[vm]]
+name = "vm_override"
+base_image = "/var/lib/libvirt/images/vm_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+backup_create = "always"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_inherit"
+  # Target inherits VM's backup_create="always" (no target-level override)
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_override"
+  backup_create = "onchange"
+  # Target overrides VM's "always" with "onchange"
+
+[[vm]]
+name = "vm_no_override"
+base_image = "/var/lib/libvirt/images/vm_no_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_override"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_no_override"
+  backup_create = "always"
+  # Target explicitly overrides global "onchange" with "always"

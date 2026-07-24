@@ -27,6 +27,18 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 
 ## Installation
 
+### Arch Linux (PKGBUILD)
+
+```bash
+git clone https://github.com/baroque-cat/qsnap.git
+cd qsnap
+makepkg -si
+```
+
+This installs qsnap to the system Python site-packages, the `qsnap` CLI to `/usr/bin/qsnap`, systemd units to `/usr/lib/systemd/system/`, and the config example to `/etc/qsnap/qsnap.toml.example`. System dependencies (`libnbd`, `libvirt`, `qemu-utils`) are pulled in automatically.
+
+### pip / Poetry
+
 ```bash
 pip install git+https://github.com/baroque-cat/qsnap.git
 ```
@@ -38,6 +50,8 @@ git clone https://github.com/baroque-cat/qsnap.git
 cd qsnap
 poetry install
 ```
+
+> **Note:** When installing via pip/Poetry in a venv, qsnap automatically appends system site-packages to `sys.path` at runtime so that the system `libnbd` bindings are discoverable. For best results, create the venv with `--system-site-packages` or install via the PKGBUILD (which uses system Python directly).
 
 ## Quick Start
 
@@ -150,6 +164,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `compress` | bool | `true` | Compress full backups (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when the VM disk allocation hasn't changed since the last backup to this target). Inherits from global → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
 | `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
 | `full_verify_before_delete` | string | `"check"` | FULL verification before cascade-deletion: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
@@ -184,6 +199,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `compress` | bool | `true` | Compress backups. Applies to FULL backups only (`qemu-img convert -c`). Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when disk allocation unchanged). Inherits from global → target |
 
 ## Retention Policy Guide
 

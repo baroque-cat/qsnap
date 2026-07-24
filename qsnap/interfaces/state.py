@@ -117,3 +117,19 @@ class IStateManager(ABC):
         ``False`` if no matching dependency existed.
         """
         ...
+
+    @abstractmethod
+    def get_last_backup_allocation(self, target_path: str) -> int | None:
+        """Return the last recorded backup allocation for *target_path*, or None.
+
+        Used by the ``backup_create="onchange"`` gate in
+        :meth:`Core._backup_target` to decide whether to skip the
+        backup transfer for a target whose VM disk has not changed since
+        the last successful backup to that target.
+        """
+        ...
+
+    @abstractmethod
+    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
+        """Record the backup allocation baseline for *target_path*."""
+        ...

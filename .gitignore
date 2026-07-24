@@ -27,6 +27,12 @@ dist/
 *.egg-info/
 build/
 
+# makepkg artifacts
+src/
+pkg/
+*.pkg.tar.*
+qsnap-*/
+
 # Linters & type checkers
 .ruff_cache/
 .mypy_cache/
