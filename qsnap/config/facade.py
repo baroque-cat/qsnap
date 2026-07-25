@@ -59,6 +59,17 @@ class ConfigFacade(IConfigFacade):
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"Invalid TOML in {self._config_path}: {exc}") from exc
 
+        # Unwrap [global] section into top-level keys (design D4).
+        # When a [global] section is present, its keys are merged into the
+        # top-level dict so they are found by the ``if key in raw`` lookups
+        # below.  Top-level keys take precedence over [global] section keys
+        # (explicit top-level overrides [global]).
+        if "global" in raw:
+            global_section = raw.pop("global")
+            if not isinstance(global_section, dict):
+                raise ConfigError("[global] section must be a table")
+            raw = {**global_section, **raw}
+
         # Build global config from top-level keys.
         global_kwargs: dict[str, str | int | bool | None] = {}
         for key in (

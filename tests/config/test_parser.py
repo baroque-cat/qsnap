@@ -8,7 +8,6 @@ Covers the ``config-parsing`` spec requirements:
 - Target compress parsed.
 - full_every deprecation warning.
 - full_compress mapped to compress with warning.
-- Removed rsync/file-copy fields trigger deprecation WARNINGs.
 """
 
 from __future__ import annotations
@@ -159,3 +158,47 @@ def test_full_compress_mapped_to_compress_with_warning(
 
     assert "full_compress is deprecated" in caplog.text
     assert "compress" in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# fast-compressed-full-backup: [global] section parsing (design D4)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_parse_global_section() -> None:
+    """Load global_section.toml fixture; assert [global] section keys are parsed."""
+    facade = ConfigFacade(FIXTURES / "global_section.toml")
+    global_cfg = facade.get_global()
+
+    # compress = false (set inside [global]).
+    assert global_cfg.compress is False
+    # lockfile set inside [global].
+    assert global_cfg.lockfile == "/run/qsnap.lock"
+
+
+@pytest.mark.unit
+def test_top_level_overrides_global_section() -> None:
+    """Load global_section_override.toml; top-level compress=True overrides [global] compress=False."""
+    facade = ConfigFacade(FIXTURES / "global_section_override.toml")
+
+    # Top-level compress=True must take precedence over [global] compress=False.
+    assert facade.get_global().compress is True
+
+
+@pytest.mark.unit
+def test_no_global_section_backward_compatible() -> None:
+    """Existing global_fields.toml (top-level keys only, no [global]) parses correctly; no regression."""
+    facade = ConfigFacade(FIXTURES / "global_fields.toml")
+    global_cfg = facade.get_global()
+
+    # Core fields from the fixture must parse as before.
+    assert global_cfg.lockfile == "/var/lock/qsnap.lock"
+    assert global_cfg.timestamp_format == "short"
+    # compress is not present in global_fields.toml → defaults to True.
+    assert global_cfg.compress is True
+
+    # VMs are still parsed (end-to-end confidence).
+    vms = facade.get_vms()
+    assert len(vms) == 1
+    assert vms[0].name == "testvm"

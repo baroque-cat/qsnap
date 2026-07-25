@@ -21,6 +21,8 @@ Functions:
 - :func:`write_checkpoint_xml` — write the checkpoint XML for atomic
   checkpoint creation via ``virsh backup-begin``.
 - :func:`get_first_disk_target` — get the first disk target device name.
+- :func:`get_first_disk_path` — get the first disk file path (for
+  stopped-VM direct ``qemu-img convert``).
 """
 
 from __future__ import annotations
@@ -127,6 +129,42 @@ def get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
             return parts[0]
 
     return None
+
+
+def get_first_disk_path(shell: IShell, vm_name: str) -> str:
+    """Get the file path of the first disk via ``virsh domblklist --details``.
+
+    Parses the ``virsh domblklist --domain <vm> --details`` output, which
+    has four columns: *Type*, *Device*, *Target*, *Source*.  Returns the
+    *Source* (file path) of the first row with Device ``"disk"``.
+
+    This is analogous to :func:`get_first_disk_target` but returns the
+    file path instead of the target device name.  Used by
+    :meth:`BitmapBackupProvider.create_full_backup` to resolve the
+    source qcow2 path for stopped-VM direct ``qemu-img convert``.
+
+    Returns an empty string if the command fails or no disk is found.
+    """
+    result = shell.run(
+        ["virsh", "domblklist", "--domain", vm_name, "--details"],
+        timeout=30,
+        check=True,
+    )
+    if not result.success:
+        return ""
+
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        # Skip header lines and separator lines.
+        if not stripped or stripped.startswith("Type") or stripped.startswith("-"):
+            continue
+        # split(None, 3) splits into at most 4 parts, preserving
+        # spaces in the Source path (fourth column).
+        parts = stripped.split(None, 3)
+        if len(parts) >= 4 and parts[1] == "disk":
+            return parts[3]
+
+    return ""
 
 
 def write_backup_xml(socket_path: str, incremental: str | None = None) -> Path:

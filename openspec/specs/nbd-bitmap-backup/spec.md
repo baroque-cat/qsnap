@@ -14,21 +14,22 @@ The incremental checkpoint SHALL be passed via an `<incremental>` element in the
 
 The successor checkpoint SHALL be passed as a separate checkpoint XML file given as the third positional argument to `virsh backup-begin`. Both XML temp files SHALL be removed after the run regardless of outcome.
 
-**No `qemu-img convert` SHALL be used in the data path.** FULL and incremental transfers both use the unified `pread`/`pwrite` engine. The only qemu-utilities used are `qemu-img create` (to initialize the target qcow2), `qemu-img info` (for verification), and `qemu-nbd` (as the write-side server).
+**FULL backups SHALL use `qemu-img convert` as the transfer engine** (see the `qemu-img-convert-full-backup` capability), NOT the unified `pread`/`pwrite` engine. The `pread`/`pwrite` engine is retained for incremental transfers only. The only qemu-utilities used for FULLs are `qemu-img create` (to initialize the target qcow2, when needed) and `qemu-img convert` (the data transfer). For incrementals, `qemu-img create -b` (backing-chained delta), `qemu-nbd` (write-side server, uncompressed), and `qemu-img info` (verification) are used.
 
-The `_start_write_server()` method SHALL NOT accept a `compression_type` parameter — the compress driver auto-detects the compression algorithm from the qcow2 header (set by `qemu-img create -o compression_type=...`). The `compress: bool` parameter is sufficient to select between the compress driver (`--image-opts driver=compress,...`) and plain qcow2 (`--format=qcow2`).
+The `_start_write_server()` method SHALL NOT accept a `compression_type` parameter — the compress driver auto-detects the compression algorithm from the qcow2 header (set by `qemu-img create -o compression_type=...`). The `compress: bool` parameter is sufficient to select between the compress driver (`--image-opts driver=compress,...`) and plain qcow2 (`--format=qcow2`). For incremental transfers, `compress` SHALL always be `False` (design D6).
 
-The FULL-pull scaffolding (qemu-img create, _start_write_server, _transfer, _terminate_qemu_nbd, mv .tmp → final, finally cleanup) SHALL be shared between `transfer_missing()` full-pull and `create_full_backup()` via a private `_full_pull_lifecycle()` helper method.
+The FULL-pull scaffolding (qemu-img convert, mv .tmp → final, finally cleanup) SHALL be shared between `transfer_missing()` full-pull and `create_full_backup()` via a private `_full_pull_lifecycle()` helper method. **For FULL backups, `_full_pull_lifecycle()` SHALL use `qemu-img convert` instead of `_start_write_server()` + `_transfer()`.** For incremental full-pulls (when `transfer_missing()` needs to create a FULL for a snapshot that has no prior backup), the same `qemu-img convert` path SHALL be used.
 
-#### Scenario: First backup — full pull via NBD with atomic checkpoint
+#### Scenario: First backup — full via qemu-img convert with atomic checkpoint
 
 - **WHEN** no prior qsnap checkpoint exists for this VM+target combination
 - **THEN** `write_backup_xml(socket_path, incremental=None)` is called
 - **THEN** the backup XML does NOT contain an `<incremental>` element
 - **THEN** `virsh backup-begin --domain VM backup.xml checkpoint.xml` starts a full NBD export
 - **AND** the successor checkpoint is created atomically at the export's freeze point
-- **THEN** the unified engine connects with `["base:allocation"]` only and transfers allocated extents via `pread`/`pwrite` with `zero_skip=True`
-- **AND** no `qemu-img convert` is executed
+- **THEN** `qemu-img convert` reads from `nbd:unix:<socket>` and writes to the target qcow2
+- **AND** no Python `pread`/`pwrite` loop runs
+- **AND** no write-side `qemu-nbd` is started
 
 #### Scenario: Incremental backup — dirty blocks via NBD checkpoint
 
@@ -39,6 +40,7 @@ The FULL-pull scaffolding (qemu-img create, _start_write_server, _transfer, _ter
 - **AND** a new successor checkpoint is created atomically at this export's freeze point
 - **THEN** the unified engine connects with `["base:allocation", "qemu:dirty-bitmap:backup-<disk>"]` and transfers dirty∩allocated extents via `pread`/`pwrite` with `zero_skip=False`
 - **AND** no `--incremental` CLI flag is passed to `virsh backup-begin`
+- **AND** no `qemu-img convert` is executed for the incremental transfer
 
 #### Scenario: _start_write_server does not accept compression_type
 
@@ -50,20 +52,20 @@ The FULL-pull scaffolding (qemu-img create, _start_write_server, _transfer, _ter
 
 - **WHEN** `transfer_missing()` full-pull or `create_full_backup()` executes a FULL backup
 - **THEN** both SHALL call the private `_full_pull_lifecycle()` helper
-- **AND** the helper handles: qemu-img create, _start_write_server, _transfer, _terminate_qemu_nbd, mv .tmp → final, finally cleanup
+- **AND** the helper handles: qemu-img create (if needed), qemu-img convert via run_with_stall_detection, mv .tmp → final, finally cleanup
+- **AND** the helper does NOT call `_start_write_server()` or `_transfer()` for FULL backups
 
 #### Scenario: Socket cleanup on success
 
 - **WHEN** the transfer completes successfully
 - **THEN** the Unix socket is removed via `rm -f`
-- **THEN** the forked `qemu-nbd` process is terminated via its pidfile
+- **THEN** the forked `qemu-nbd` process is terminated via its pidfile (if started — not applicable for FULL via qemu-img convert)
 - **THEN** the successor checkpoint is preserved as the baseline for the next incremental run
 
 #### Scenario: Socket cleanup on failure
 
-- **WHEN** the transfer fails (NBD error or stall)
+- **WHEN** the transfer fails (qemu-img convert error or stall)
 - **THEN** the Unix socket is still removed via `rm -f` in a finally block
-- **THEN** the forked `qemu-nbd` process is terminated
 - **THEN** `BackupResult(success=False, ...)` is returned
 - **AND** the prior checkpoint is preserved
 - **AND** the successor checkpoint created by this failed run is deleted best-effort
@@ -77,24 +79,22 @@ The FULL-pull scaffolding (qemu-img create, _start_write_server, _transfer, _ter
 - **WHEN** a previous qsnap process crashed leaving `/tmp/qsnap-backup-12345.sock`
 - **THEN** the new process (different PID) removes the stale socket before starting
 
-### Requirement: BitmapBackupProvider.create_full_backup via unified NBD engine
+### Requirement: BitmapBackupProvider.create_full_backup via qemu-img convert
 
-`BitmapBackupProvider` SHALL implement `create_full_backup()` using the unified NBD transfer engine (not `nbd_full_export()` or `qemu-img convert`). The method SHALL: (1) generate the FULL target name `vm.FULL.YYYYMMDD.qcow2`, (2) create a standalone qcow2 via `qemu-img create -f qcow2 [-o compression_type=zstd] target.tmp`, (3) fork `qemu-nbd` on the target (with compress driver when `compress=True`), (4) `virsh backup-begin` with checkpoint XML (atomic baseline), (5) run the unified engine with `meta_contexts=["base:allocation"]`, `zero_skip=True`, (6) `flush()` the write-side, (7) terminate qemu-nbd, (8) atomic rename `.tmp` → final. The method SHALL NOT call `nbd_full_export()` or `qemu-img convert`.
+`BitmapBackupProvider` SHALL implement `create_full_backup()` using `qemu-img convert` (NOT the unified NBD `pread`/`pwrite` engine, NOT `nbd_full_export()`). The method SHALL: (1) detect VM state via `is_vm_running()`, (2) for running VMs: start NBD export via `virsh backup-begin` with atomic checkpoint XML, then `qemu-img convert nbd:unix:<socket> <target>.tmp`, (3) for stopped VMs: direct `qemu-img convert <source_path> <target>.tmp`, (4) atomic rename `.tmp` → final on success, (5) delete `.tmp` and cleanup socket on failure. The method SHALL NOT call `_start_write_server()` or `_transfer()` for FULL backups.
 
-When `compress=True` and `compression_type="zstd"`, the target qcow2 SHALL be created with `-o compression_type=zstd` and the write-side qemu-nbd SHALL use `--image-opts "driver=compress,file.driver=qcow2,..."`. When `compress=True` and `compression_type="zlib"`, only `-c` is used at qcow2 creation and the compress driver still wraps the write side. When `compress=False`, the write-side qemu-nbd uses `--format=qcow2` (no compress driver).
+When `compress=True` and `compression_type="zstd"`, the `qemu-img convert` command SHALL include `-c -O qcow2 -o compression_type=zstd -m 4 -W -p`. When `compress=True` and `compression_type="zlib"`, `-o compression_type=zlib` SHALL be used. When `compress=False`, neither `-c` nor `-o compression_type=` SHALL be present.
 
-#### Scenario: Bitmap FULL with zstd compression
+#### Scenario: Bitmap FULL with zstd compression via qemu-img convert
 - **WHEN** `create_full_backup(vm_name, snapshot, target, compress=True, compression_type="zstd")` is called
-- **THEN** `qemu-img create -f qcow2 -o compression_type=zstd target.tmp` creates the target
-- **THEN** `qemu-nbd` is started with `--image-opts "driver=compress,file.driver=qcow2,..."`
-- **THEN** the unified engine transfers allocated extents via `pread`/`pwrite` with `zero_skip=True`
-- **AND** no `qemu-img convert` is executed
+- **THEN** `qemu-img convert -c -O qcow2 -o compression_type=zstd -m 4 -W -p <source> <target>.tmp` is executed via `run_with_stall_detection()`
+- **AND** no write-side `qemu-nbd` is started
+- **AND** no Python `pread`/`pwrite` loop runs
 
-#### Scenario: Bitmap FULL without compression
+#### Scenario: Bitmap FULL without compression via qemu-img convert
 - **WHEN** `create_full_backup(vm_name, snapshot, target, compress=False)` is called
-- **THEN** `qemu-img create -f qcow2 target.tmp` creates the target
-- **THEN** `qemu-nbd` is started with `--format=qcow2`
-- **THEN** the unified engine transfers allocated extents via `pread`/`pwrite` with `zero_skip=True`
+- **THEN** `qemu-img convert -O qcow2 -m 4 -W -p <source> <target>.tmp` is executed
+- **AND** no `-c` flag is present
 
 #### Scenario: Bitmap FULL leaves an atomic checkpoint baseline
 - **WHEN** `create_full_backup()` is called for a running VM

@@ -338,7 +338,7 @@ def test_factory_old_libvirt_raises_runtime_error(
 
     When ``is_libvirt_new_enough`` returns False, the factory raises
     ``RuntimeError`` naming "libvirt" and "7.2" in the message.  No
-    provider is returned — there is no file-copy fallback (design R4).
+    provider is returned — no bitmap provider when prerequisites are unmet.
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target()

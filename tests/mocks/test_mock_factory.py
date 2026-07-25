@@ -68,8 +68,7 @@ def test_mock_retention_engine_accepts_preserve_day_of_week(make_vm_config):
 
 def test_mock_factory_always_returns_bitmap_provider(make_vm_config, make_target):
     """create_backup_provider() always returns MockBitmapBackupProvider
-    regardless of target configuration — bitmap is the sole backup provider
-    after rsync/file-copy removal."""
+    regardless of target configuration — bitmap is the sole backup provider."""
     factory = MockVMModuleFactory()
     target = make_target()
     provider = factory.create_backup_provider(make_vm_config(), target)

@@ -161,7 +161,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_preserve_min` | string | `"all"` | Minimum retention floor for snapshots, e.g. `"2h"`. Keeps recent snapshots regardless of bucket counts |
 | `target_preserve` | string | none | Retention policy for backups on targets, e.g. `"48h 14d 8w 12m 1y"` |
 | `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
-| `compress` | bool | `true` | Compress full backups (`-c` flag on `qemu-img convert`). Overridden per-VM/target |
+| `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Overridden per-VM/target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
 | `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when the VM disk allocation hasn't changed since the last backup to this target). Inherits from global → target |
@@ -196,7 +196,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
 | `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
 | `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Default is `"metadata"`; `"hash"`/`"full"` run chain-traversing `qemu-img compare`. Explicit value takes precedence |
-| `compress` | bool | `true` | Compress backups. Applies to FULL backups only (`qemu-img convert -c`). Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
+| `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
 | `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when disk allocation unchanged). Inherits from global → target |
@@ -363,7 +363,7 @@ Non-F buckets still participate in retention — `"24h 7d 4Fw"` retains 24 hourl
 3. For each checked bucket: find the most recent FULL with matching `bucket_level`, compare period keys. If the period changed (or no prior FULL exists), create a new FULL.
 4. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
 5. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
-6. The conversion is atomic: the FULL is written to a `.tmp` file, which is renamed to the final name only on success. For running VMs, the NBD pull-model is used (see [NBD-Based FULL Backups](#nbd-based-full-backups-for-running-vms) below); for stopped VMs, direct `qemu-img convert` is used.
+6. The conversion is atomic: the FULL is written to a `.tmp` file, which is renamed to the final name only on success. For running VMs, the NBD pull-model is used (see [NBD-Based FULL Backups](#nbd-based-full-backups-for-running-vms) below); for stopped VMs, direct `qemu-img convert` from the source qcow2 file is used (no `virsh backup-begin`, no NBD socket — the source path is resolved via `get_first_disk_path`).
 7. After creation, the FULL is recorded in state with its `bucket_level` for cascade deletion tracking.
 
 ### NBD-Based FULL Backups for Running VMs
@@ -373,14 +373,14 @@ When a VM is **running**, `qemu-img convert` cannot read the active layer direct
 1. **Detect VM state** — `virsh dominfo --domain <vm>` is called; the `State:` line is parsed. If the VM is running, the NBD path is selected.
 2. **Check libvirt version** — `virsh --version` must report major version >= 6. If older, qsnap logs a WARNING and falls back to direct convert (which will fail on a running VM's active layer).
 3. **Start NBD export** — `virsh backup-begin --domain <vm> <xml>` is called with a `<domainbackup mode='pull'>` XML that specifies a Unix socket path (`/tmp/qsnap-backup-{pid}.sock`). No `--incremental` flag is used — this is a full export, not an incremental checkpoint.
-4. **Pull data via NBD** — `qemu-img convert -n nbd:unix:<socket> <target>.tmp` reads the entire disk through the NBD server, which coordinates with the running QEMU process to provide a consistent view without lock conflicts.
+4. **Pull data via NBD** — `qemu-img convert -O qcow2 -m 4 -W -p nbd:unix:<socket> <target>.tmp` reads the entire disk through the NBD server, which coordinates with the running QEMU process to provide a consistent view without lock conflicts. When `compress = true`, the command includes `-c -o compression_type=<type>` for optimized C-level zstd compression (~850 MB/s).
 5. **Clean up** — the socket file is removed in a `finally` block, and the `.tmp` file is atomically renamed to `vm.FULL.YYYYMMDD.qcow2` on success (or deleted on failure).
 
 This mechanism is used by the backup provider:
 
 | Provider | FULL Backup Method | Notes |
 |---|---|---|
-| `BitmapBackupProvider` | NBD full export with atomic checkpoint | FULL backups require a running VM. A baseline checkpoint is created **atomically** with the FULL's `backup-begin` (checkpoint XML as third positional argument), so its dirty-bitmap baseline coincides with the FULL's freeze point. When `compression_type = "zstd"`, adds `-o compression_type=zstd` for 11x faster compression than zlib |
+| `BitmapBackupProvider` | `qemu-img convert` (NBD source for running VMs, direct file for stopped VMs) | FULL backups use `qemu-img convert -m 4 -W -p` with optional `-c` compression via `run_with_stall_detection()`. For running VMs, `virsh backup-begin` starts the NBD export and a checkpoint is created atomically. For stopped VMs, direct `qemu-img convert <source_path>` is used (no NBD). Incremental backups use the Python `libnbd` `pread`/`pwrite` loop with dirty-bitmap intersection. |
 
 The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
 
@@ -448,14 +448,13 @@ The default `verify` tier is `"metadata"` (cheap structural check; `"hash"`/`"fu
 - **Server with network target** — `"hash"` provides integrity without the overhead of `qemu-img compare`
 - **Compliance/audit** — `"full"` gives maximum assurance at the cost of reading both files
 
-### BREAKING: NBD bitmap is the only backup strategy
+### NBD bitmap backup architecture
 
-The rsync/file-copy backup provider has been removed. `BitmapBackupProvider` (NBD dirty-block transfer) is now the single backup provider:
+`BitmapBackupProvider` (NBD dirty-block transfer) is the single backup provider:
 
-- **libvirt >= 7.2 and python3-libnbd are hard requirements** — older libvirt or a missing libnbd package is a hard error, with no file-copy fallback.
-- **Incremental backups require a running VM** — the NBD pull-model reads through the running QEMU process. FULL backups of a stopped VM return an error.
+- **libvirt >= 7.2 and python3-libnbd are hard requirements** — older libvirt or a missing libnbd package is a hard error.
+- **Incremental backups require a running VM** — the NBD pull-model reads through the running QEMU process. FULL backups support both running and stopped VMs: running VMs use `virsh backup-begin` + `qemu-img convert nbd:unix:<socket>`; stopped VMs use direct `qemu-img convert <source_path>`.
 - **Removed TOML keys are warned-and-ignored** — `incremental_mode`, `rate_limit`, and `copy_base` in existing configs log a deprecation WARNING naming the field and are otherwise ignored.
-- **Existing backups remain valid and restorable** — backups created by the former file-copy provider stay on the target, are managed by retention, and can be restored with `qsnap deploy`/`qsnap fork`.
 
 ## FULL Backup Verification
 
@@ -769,7 +768,7 @@ The `--dry-run` / `-n` flag prints planned actions without executing any mutatio
   ```
   [dry-run] Would create FULL backup (bucket=weekly, method=NBD, VM=running)
   ```
-  The `method` field is always `NBD` (the single backup path — FULL backups require a running VM), and `VM` shows the detected running state. No FULL backup is actually created.
+  The `method` field is `NBD` for running VMs or `direct` for stopped VMs, and `VM` shows the detected running state. No FULL backup is actually created.
 - **Does NOT create snapshots** — `snapshot_provider.create()` is never called.
 - **Does NOT transfer backups** — no `qemu-img convert` or NBD data-copying commands are executed.
 - **Does NOT delete anything** — retention is evaluated but no snapshots or backups are removed.

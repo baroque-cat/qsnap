@@ -1,0 +1,12 @@
+# Config using [global] section format
+[global]
+compress = false
+lockfile = "/run/qsnap.lock"
+
+[[vm]]
+name = "testvm"
+base_image = "/var/lib/libvirt/images/testvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"

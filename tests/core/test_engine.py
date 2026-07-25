@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.cli.commands import _format_pipeline_result
 from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
@@ -33,6 +35,8 @@ from qsnap.models.results import (
     SnapshotInfo,
 )
 from tests.mocks import MockBucketFullStrategy, MockConfigFacade
+
+pytestmark = pytest.mark.unit
 
 # ── test_core_init_stores_dependencies ───────────────────────────────────
 
@@ -1019,15 +1023,25 @@ def test_action_appended_on_backup_transfer(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Need to mock transfer_missing to produce a result with duration for the
-    # ActionRecord.  Default mock already returns success results.
-    result = core.backup()
+    # Spy on transfer_missing to verify new kwargs are passed by Core.
+    bitmap_provider = mock_factory._bitmap_backup_provider
+    with patch.object(
+        bitmap_provider,
+        "transfer_missing",
+        wraps=bitmap_provider.transfer_missing,
+    ) as transfer_spy:
+        result = core.backup()
 
     transfer_actions = [a for a in result.actions if a.action == "backup_transfer"]
     assert len(transfer_actions) == 1, "Should contain one backup_transfer action"
     assert transfer_actions[0].vm_name == "testvm"
     assert transfer_actions[0].name == "snap1"
     assert transfer_actions[0].size == 1048576  # MockBackupProvider default
+
+    # Verify Core passes compression_type and stall_timeout to transfer_missing.
+    assert transfer_spy.called
+    assert transfer_spy.call_args.kwargs["compression_type"] == "zstd"
+    assert transfer_spy.call_args.kwargs["stall_timeout"] == 1800
 
 
 # ── test_action_appended_on_full_backup ────────────────────────────────────
@@ -1062,13 +1076,29 @@ def test_action_appended_on_full_backup(
     # Configure MockBucketFullStrategy to trigger FULL creation.
     mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
 
-    with patch("qsnap.core.verify_full_backup", return_value=None):
+    # Spy on create_full_backup to verify new kwargs are passed by Core.
+    bitmap_provider = mock_factory._bitmap_backup_provider
+    with (
+        patch.object(
+            bitmap_provider,
+            "create_full_backup",
+            wraps=bitmap_provider.create_full_backup,
+        ) as full_spy,
+        patch("qsnap.core.verify_full_backup", return_value=None),
+    ):
         result = core.run()
 
     full_actions = [a for a in result.actions if a.action == "backup_full"]
     assert len(full_actions) == 1, "Should contain one backup_full action"
     assert full_actions[0].vm_name == "testvm"
     assert full_actions[0].size == 1048576  # MockBackupProvider default
+
+    # Verify Core passes compression_type and stall_timeout to create_full_backup.
+    assert full_spy.called
+    assert full_spy.call_args.kwargs["compression_type"] == "zstd"
+    assert full_spy.call_args.kwargs["stall_timeout"] == 1800
+    assert full_spy.call_args.kwargs["bucket_level"] == "monthly"
+    assert full_spy.call_args.kwargs["compress"] is True
 
 
 # ── test_action_appended_on_backup_delete ──────────────────────────────────

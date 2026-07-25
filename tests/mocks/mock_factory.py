@@ -30,9 +30,9 @@ class MockVMModuleFactory(IVMModuleFactory):
     def __init__(self) -> None:
         self._snapshot_provider = MockSnapshotProvider()
         self._bitmap_backup_provider = MockBitmapBackupProvider()
-        # After rsync/file-copy removal, the factory always returns the
-        # bitmap backup provider.  Alias _backup_provider so existing
-        # tests that spy on it continue to work.
+        # The factory always returns the bitmap backup provider.
+        # Alias _backup_provider so existing tests that spy on it
+        # continue to work.
         self._backup_provider = self._bitmap_backup_provider
         self._retention_engine = MockRetentionEngine()
         self._change_detector = MockChangeDetector()
@@ -48,8 +48,7 @@ class MockVMModuleFactory(IVMModuleFactory):
         target: TargetConfig,
     ) -> IBackupProvider:
         # Bitmap is the only backup strategy now — always return the
-        # bitmap backup provider mock (matches DefaultFactory behaviour
-        # after rsync/file-copy removal).
+        # bitmap backup provider mock (matches DefaultFactory behaviour).
         return self._bitmap_backup_provider
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:

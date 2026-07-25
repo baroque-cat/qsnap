@@ -1,10 +1,4 @@
-# Live VM Full Backup via NBD
-
-## Purpose
-
-Full backup creation for live (running) and stopped VMs. Running VMs use the NBD pull-model (`virsh backup-begin` without `--incremental` + `qemu-img convert nbd:unix:<socket>`). Stopped VMs use direct `qemu-img convert <source_path> <target>`. The Python `pread`/`pwrite` loop is no longer used for FULLs — `qemu-img convert` (C code, parallel coroutines) provides ~30-60x faster compression. Atomic `.tmp` → final rename matches the project-wide pattern. Backup timestamp is recorded as the snapshot's timestamp for retention bucket alignment.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: FULL backup requires a running VM or stopped-VM fallback
 

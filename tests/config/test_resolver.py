@@ -11,7 +11,7 @@ which defines:
   - target ``vm_override_override``: ``target_preserve = "10d 5w"``
 - ``vm_inherit``: inherits both globals
 
-With rsync/file-copy removed, verify always defaults to ``"metadata"``
+Verify always defaults to ``"metadata"``
 (there is no mode-dependent default)."""
 
 from __future__ import annotations
@@ -128,3 +128,22 @@ def test_backup_create_target_overrides_vm() -> None:
     # Target vm_override_override explicitly sets "onchange" → overrides VM.
     target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_override_override"))
     assert target.backup_create == "onchange"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# fast-compressed-full-backup: [global] section inheritance to target
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_global_section_inheritance_to_target() -> None:
+    """[global] compress=False in global_section.toml propagates to a target
+    that does not override compress.
+    """
+    facade = ConfigFacade(FIXTURES / "global_section.toml")
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+
+    assert target.path == Path("/mnt/backup/testvm")
+    # compress is not set on the target → inherits [global] compress=False.
+    assert target.compress is False

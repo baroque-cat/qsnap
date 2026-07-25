@@ -2,6 +2,21 @@
 # Place at /etc/qsnap/qsnap.toml
 
 # ── Global options ──────────────────────────────────────────────────────
+#
+# Global options can be placed at the top level (as shown below) or
+# grouped under a [global] section.  Both formats are accepted:
+#
+#   # Top-level format (default):
+#   compress = true
+#   compression_type = "zstd"
+#
+#   # [global] section format (alternative):
+#   [global]
+#   compress = true
+#   compression_type = "zstd"
+#
+# When both are present, top-level keys take precedence over [global]
+# section keys.
 
 # Timestamp format for snapshot names.
 #   short    → 20250713

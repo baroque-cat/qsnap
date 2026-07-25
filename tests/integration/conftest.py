@@ -3,6 +3,15 @@
 Integration tests require a running libvirt daemon and are marked with
 ``@pytest.mark.integration``.  They are excluded from normal test runs
 via ``-m "not integration"``.
+
+Temp directories are created under ``/var/tmp`` (on-disk, ~47 GB free)
+rather than ``/tmp`` (tmpfs, ~3.7 GB) so that performance tests can use
+large disk images without exhausting RAM.  Unix-domain NBD sockets are
+still placed in ``/tmp`` by the source code (see ``bitmap.py``) — they
+are tiny and benefit from tmpfs latency.
+
+A session-scoped autouse fixture cleans up stale
+``qsnap-integration-*`` directories left behind by crashed tests.
 """
 
 from __future__ import annotations
@@ -10,23 +19,73 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 from qsnap.shell.subprocess_shell import SubprocessShell
 
+#: Base directory for integration-test working dirs.  ``/var/tmp`` is
+#: on disk (not tmpfs) and typically has tens of GB free — enough for
+#: 2+ GB qcow2 images and their backups.
+_INTEGRATION_TMP = "/var/tmp"
+
+#: Stale-dir cleanup threshold (seconds).  Directories older than this
+#: are removed at session start to clean up after crashed tests.
+_STALE_DIR_AGE_SEC = 24 * 3600  # 24 hours
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _cleanup_stale_integration_dirs():
+    """Remove stale ``qsnap-integration-*`` dirs from ``/var/tmp``.
+
+    If a test process is killed (OOM, SIGKILL, timeout), the ``finally``
+    block in :func:`test_vm` never runs and the temp directory is
+    orphaned.  This fixture runs once at session start and removes
+    directories older than :data:`_STALE_DIR_AGE_SEC` so they don't
+    accumulate indefinitely.
+
+    Directories younger than the threshold are left alone — they may
+    belong to a concurrently running test session.
+    """
+    now = time.time()
+    try:
+        entries = os.listdir(_INTEGRATION_TMP)
+    except OSError:
+        return
+    for name in entries:
+        if not name.startswith("qsnap-integration-"):
+            continue
+        path = os.path.join(_INTEGRATION_TMP, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if now - mtime > _STALE_DIR_AGE_SEC:
+            shutil.rmtree(path, ignore_errors=True)
+
 
 @pytest.fixture
-def test_vm():
+def test_vm(request):
     """Create and manage a disposable test VM for integration tests.
 
-    Creates a minimal VM with a tiny qcow2 disk.  The VM is defined in
+    Creates a minimal VM with a qcow2 disk.  The VM is defined in
     libvirt but NOT started — individual tests decide whether to start
     it.  Uses ``type='qemu'`` to avoid KVM hardware dependency.
 
     The VM has no bootable media, so starting it creates a running QEMU
     process (enough for NBD tests) that won't boot an OS.
+
+    Disk size is configurable via indirect parametrisation::
+
+        @pytest.mark.parametrize("test_vm", ["2G"], indirect=True)
+        def test_something(test_vm):
+            ...
+
+    The default is ``"256M"`` (sufficient for functional tests).
+    Performance tests should request ``"2G"`` or larger for reliable
+    throughput measurement.
 
     Yields a dict with:
         shell
@@ -40,13 +99,16 @@ def test_vm():
         target_dir : Path
             Directory for backup target storage.
         tmpdir : Path
-            Root of the temporary working directory.
+            Root of the temporary working directory (under ``/var/tmp``).
+        disk_size : str
+            The virtual disk size string (e.g. ``"256M"``, ``"2G"``).
 
     Teardown: destroys the VM, undefines it, cleans up the NBD socket,
     and removes all temporary files.
     """
+    disk_size = getattr(request, "param", "256M")
     shell = SubprocessShell()
-    tmpdir = Path(tempfile.mkdtemp(prefix="qsnap-integration-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="qsnap-integration-", dir=_INTEGRATION_TMP))
     vm_name = "qsnap-int-test-vm"
     base_image = tmpdir / f"{vm_name}.qcow2"
     snapshot_dir = tmpdir / "snapshots"
@@ -56,18 +118,24 @@ def test_vm():
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create a minimal qcow2 disk image (256M)
+    # Create a qcow2 disk image (size configurable via request.param).
     create_result = shell.run(
-        ["qemu-img", "create", "-f", "qcow2", str(base_image), "256M"],
+        ["qemu-img", "create", "-f", "qcow2", str(base_image), disk_size],
         timeout=30,
     )
     if not create_result.success:
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
         pytest.skip(f"qemu-img create failed (qemu-img not available?): {create_result.error}")
 
     # Build minimal VM XML — no bootable media so QEMU starts but
     # doesn't boot an OS (sufficient for NBD export tests).
+    # Auto-detect KVM acceleration: uses ``type="kvm"`` when
+    # ``/dev/kvm`` is accessible (near-native performance for NBD
+    # backup-begin exports), falls back to ``type="qemu"`` (TCG
+    # full emulation, ~100× slower but works everywhere).
+    domain_type = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "qemu"
     xml = (
-        f'<domain type="qemu">\n'
+        f'<domain type="{domain_type}">\n'
         f"  <name>{vm_name}</name>\n"
         f"  <memory unit='KiB'>262144</memory>\n"
         f"  <vcpu placement='static'>1</vcpu>\n"
@@ -104,6 +172,7 @@ def test_vm():
             "snapshot_dir": snapshot_dir,
             "target_dir": target_dir,
             "tmpdir": tmpdir,
+            "disk_size": disk_size,
         }
     finally:
         # Teardown: destroy, undefine, and clean up all files.
@@ -111,6 +180,7 @@ def test_vm():
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         _cleanup_checkpoints(shell, vm_name)
         shell.run(["virsh", "undefine", vm_name], timeout=30)
+        # NBD sockets are created in /tmp by the source code (bitmap.py).
         shell.run(
             ["rm", "-f", f"/tmp/qsnap-backup-{os.getpid()}.sock"],
             timeout=10,
