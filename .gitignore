@@ -5,6 +5,7 @@ examples/*
 plan*
 problem*
 bug.txt
+benchmark*
 
 # Python
 __pycache__/
@@ -46,3 +47,4 @@ qsnap-*/
 # OS
 .DS_Store
 Thumbs.db
+

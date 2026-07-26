@@ -17,7 +17,7 @@ Coverage:
 - Stopped-VM direct convert (no NBD, no virsh backup-begin)
 - Running-VM NBD convert (virsh backup-begin + qemu-img convert)
 - libnbd engine: compression modes (none, zstd, zlib) + speed
-  comparison on a 4 GB disk with 50 MB of data
+  comparison on a 4 GB disk with 3 GB of data
 
 The temp directory is under ``/var/tmp`` (on-disk, ~47 GB free) via
 the ``test_vm`` fixture — see ``conftest.py`` for details.
@@ -54,13 +54,27 @@ def _write_data(shell: SubprocessShell, disk_path: Path, size_mb: int) -> bool:
 
     Must only be called when the VM is stopped (no exclusive lock conflict).
     Uses pattern ``0xAA`` so the data is non-zero and allocated.
+
+    Splits writes larger than 2000 MB into chunks because ``qemu-io``
+    limits a single write to ~2 GB without the ``-n`` flag.
     """
-    size_bytes = size_mb * 1024 * 1024
-    result = shell.run(
-        ["qemu-io", "-c", f"write -P 0xAA 0 {size_bytes}", str(disk_path)],
-        timeout=max(120, size_mb // 10 + 30),
-        check=True,
-    )
+    chunk_mb = min(size_mb, 2000)
+    remaining = size_mb
+    offset_mb = 0
+    while remaining > 0:
+        write_mb = min(remaining, chunk_mb)
+        size_bytes = write_mb * 1024 * 1024
+        offset_bytes = offset_mb * 1024 * 1024
+        result = shell.run(
+            ["qemu-io", "-c", f"write -P 0xAA {offset_bytes} {size_bytes}", str(disk_path)],
+            timeout=max(120, write_mb // 10 + 30),
+            check=True,
+        )
+        if not result.success:
+            return False
+        remaining -= write_mb
+        offset_mb += write_mb
+    return True
     return result.success
 
 
@@ -634,12 +648,10 @@ def test_full_backup_libnbd_engine(test_vm, caplog):
     1. Start the VM.
     2. Call ``create_full_backup()`` with ``full_transfer_engine="libnbd"``,
        wiring an actual ``LibnbdClient`` via the provider constructor.
-    3. Verify the libnbd performance warning (``full_transfer_engine=libnbd``)
-       is logged by ``_full_pull_lifecycle()``.
-    4. Verify NO ``qemu-img convert`` with ``nbd:unix:`` appears (the libnbd
+    3. Verify NO ``qemu-img convert`` with ``nbd:unix:`` appears (the libnbd
        engine uses ``qemu-img create`` for the empty qcow2, not ``convert``).
-    5. Verify checkpoint was created atomically.
-    6. Verify the result is a standalone qcow2 with no backing file.
+    4. Verify checkpoint was created atomically.
+    5. Verify the result is a standalone qcow2 with no backing file.
     """
     if not _HAS_LIBNBD:
         pytest.skip("libnbd Python bindings not available")
@@ -680,12 +692,6 @@ def test_full_backup_libnbd_engine(test_vm, caplog):
     )
 
     assert result.success, f"libnbd engine FULL must succeed, got: {result.error}"
-
-    # libnbd engine warning must appear (from _full_pull_lifecycle).
-    libnbd_warnings = [
-        r.message for r in caplog.records if "full_transfer_engine=libnbd" in r.message
-    ]
-    assert len(libnbd_warnings) >= 1, "libnbd engine performance warning must be logged"
 
     # qemu-img convert with nbd:unix: must NOT appear for data transfer.
     # (qemu-img info/create may still appear for setup; those are fine.)
@@ -814,8 +820,9 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
     produces a compressed qcow2 via the ``qemu-nbd --image-opts
     driver=compress`` write-side server.
 
-    1. Write 50 MB of patterned data (VM stopped) — small amount
-       because libnbd pread/pwrite is ~570x slower than qemu-img convert.
+    1. Write 3 GB of patterned data (VM stopped) — libnbd pread/pwrite
+       is slower than qemu-img convert, but 3 GB gives meaningful
+       compression and speed measurements.
     2. Start the VM.
     3. For each compression mode (none, zstd, zlib):
        a. Create a FULL backup via ``full_transfer_engine="libnbd"``.
@@ -836,12 +843,12 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
 
     from qsnap.utils.nbd_client import LibnbdClient
 
-    # Step 1: Write 50 MB data (VM stopped).
+    # Step 1: Write 3 GB data (VM stopped).
     if is_vm_running(shell, vm_name):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
-    if not _write_data(shell, base_image, 50):
-        pytest.skip("Failed to write 50 MB test data")
+    if not _write_data(shell, base_image, 3000):
+        pytest.skip("Failed to write 3 GB test data")
 
     # Step 2: Start the VM.
     shell.run(["virsh", "start", vm_name], timeout=30)
@@ -877,11 +884,6 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         f"libnbd uncompressed: expected compression-type 'zlib' (default), got {ct_none!r}"
     )
     actual_none = _get_actual_size(shell, r_none.target_path)
-    # Verify libnbd WARNING was logged.
-    libnbd_warnings = [
-        r.message for r in caplog.records if "full_transfer_engine=libnbd" in r.message
-    ]
-    assert len(libnbd_warnings) >= 1, "libnbd engine performance warning must be logged"
     timings.append(("none", t_none, actual_none))
 
     # --- zstd ---
@@ -942,9 +944,9 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
 
     # Step 5: Log summary table.
     logger = logging.getLogger(__name__)
-    logger.info("=== libnbd FULL backup speed comparison (50 MB data) ===")
+    logger.info("=== libnbd FULL backup speed comparison (3 GB data) ===")
     for mode, elapsed, actual in timings:
-        throughput = (50 / elapsed) if elapsed > 0 else 0
+        throughput = (3000 / elapsed) if elapsed > 0 else 0
         logger.info(
             "  %-6s  time=%6.1fs  actual=%8d B  throughput=%5.1f MB/s",
             mode,

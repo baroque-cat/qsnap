@@ -804,12 +804,6 @@ class BitmapBackupProvider(IBackupProvider):
             # Otherwise, qemu-img convert (default — C code, parallel
             # coroutines, ~850 MB/s zstd).
             if full_transfer_engine == "libnbd":
-                logger.warning(
-                    "full_transfer_engine=libnbd selected for FULL backup "
-                    "of VM %s — Python pread/pwrite loop is ~570x slower "
-                    "than qemu-img convert",
-                    vm_name,
-                )
                 transfer_error, bytes_transferred = self._full_transfer_via_libnbd(
                     socket_path=socket_path,
                     source_path=source_path,

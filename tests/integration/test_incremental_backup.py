@@ -52,14 +52,28 @@ if _HAS_LIBNBD:
 
 
 def _write_data(shell: SubprocessShell, disk_path: Path, size_mb: int) -> bool:
-    """Write *size_mb* MB of patterned data via ``qemu-io`` (VM stopped)."""
-    size_bytes = size_mb * 1024 * 1024
-    result = shell.run(
-        ["qemu-io", "-c", f"write -P 0xAA 0 {size_bytes}", str(disk_path)],
-        timeout=max(120, size_mb // 10 + 30),
-        check=True,
-    )
-    return result.success
+    """Write *size_mb* MB of patterned data via ``qemu-io`` (VM stopped).
+
+    Splits writes larger than 2000 MB into chunks because ``qemu-io``
+    limits a single write to ~2 GB without the ``-n`` flag.
+    """
+    chunk_mb = min(size_mb, 2000)
+    remaining = size_mb
+    offset_mb = 0
+    while remaining > 0:
+        write_mb = min(remaining, chunk_mb)
+        size_bytes = write_mb * 1024 * 1024
+        offset_bytes = offset_mb * 1024 * 1024
+        result = shell.run(
+            ["qemu-io", "-c", f"write -P 0xAA {offset_bytes} {size_bytes}", str(disk_path)],
+            timeout=max(120, write_mb // 10 + 30),
+            check=True,
+        )
+        if not result.success:
+            return False
+        remaining -= write_mb
+        offset_mb += write_mb
+    return True
 
 
 def _write_data_running(
@@ -646,6 +660,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
+@pytest.mark.parametrize("test_vm", ["4G"], indirect=True)
 def test_incremental_after_libnbd_full(test_vm):
     """Verify incremental backup works after a FULL created via libnbd engine.
 
@@ -654,7 +669,7 @@ def test_incremental_after_libnbd_full(test_vm):
     + ``_start_write_server`` + ``_transfer(zero_skip=True)``) correctly
     serves as a backing file for a subsequent incremental.
 
-    1. Write 50 MB of initial data (VM stopped), then start VM.
+    1. Write 3 GB of initial data (VM stopped), then start VM.
     2. Create FULL backup via ``full_transfer_engine="libnbd"``.
     3. Write 10 MB of new dirty data.
     4. Create an external disk-only snapshot to freeze the dirty state.
@@ -676,12 +691,12 @@ def test_incremental_after_libnbd_full(test_vm):
     if not _HAS_LIBNBD:
         pytest.skip("python3-libnbd not installed — required for libnbd engine")
 
-    # Step 1: Write 50 MB initial data (VM stopped), then start.
+    # Step 1: Write 3 GB initial data (VM stopped), then start.
     if is_vm_running(shell, vm_name):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
-    if not _write_data(shell, base_image, 50):
-        pytest.skip("Failed to write 50 MB initial data")
+    if not _write_data(shell, base_image, 3000):
+        pytest.skip("Failed to write 3 GB initial data")
 
     shell.run(["virsh", "start", vm_name], timeout=30)
     time.sleep(2)
@@ -718,7 +733,7 @@ def test_incremental_after_libnbd_full(test_vm):
     shell.run(["virsh", "destroy", vm_name], timeout=30)
     time.sleep(1)
     inc_write = shell.run(
-        ["qemu-io", "-c", "write -P 0xCC 50M 10M", str(base_image)],
+        ["qemu-io", "-c", "write -P 0xCC 3000M 10M", str(base_image)],
         timeout=60,
         check=False,
     )
@@ -797,12 +812,12 @@ def test_incremental_after_libnbd_full(test_vm):
         or str(result_full.target_path.name) in backing
     ), f"Incremental backing {backing!r} must reference the libnbd FULL backup"
 
-    # Step 8: Dirty bytes proportional to 10 MB, not 50 MB disk.
+    # Step 8: Dirty bytes proportional to 10 MB, not 3 GB disk.
     transferred = inc_result.bytes_transferred
     max_expected = 10 * 1024 * 1024 * 10  # 10 MB * 10x overhead ≈ 100 MB
     assert transferred < max_expected, (
         f"Incremental delta ({transferred / (1024 * 1024):.1f} MB) "
-        f"must be proportional to 10 MB dirty data, not 50 MB disk. "
+        f"must be proportional to 10 MB dirty data, not 3 GB disk. "
         f"Max expected: {max_expected / (1024 * 1024):.0f} MB"
     )
     assert transferred < full_actual, (
