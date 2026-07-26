@@ -39,6 +39,7 @@ from qsnap.models.results import (
     DeferredBlockcommit,
     DeferredSummary,
     FullBackupInfo,
+    ReconcileResult,
     RestoreResult,
     RetentionItem,
     RetentionResult,
@@ -1282,14 +1283,23 @@ class Core:
             )
         return results
 
-    def _detect_orphan_checkpoints(self, vm: VMConfig) -> list[str]:
-        """Detect libvirt checkpoints that no longer match any target.
+    def _detect_orphan_checkpoints(
+        self,
+        vm: VMConfig,
+        *,
+        auto_cleanup: bool = False,
+    ) -> list[str]:
+        """Detect (and optionally delete) orphaned libvirt checkpoints.
 
         Checkpoints are named ``qsnap-{target_hash}-{snapshot}`` where
         ``target_hash`` is an 8-char MD5 hash of the target path.  A
         checkpoint is orphaned when its hash does not match
         ``target_hash(str(target.path))`` for any target configured for
         this VM.
+
+        When ``auto_cleanup=True``, deletes orphaned checkpoints via
+        ``virsh checkpoint-delete --metadata`` through ``IShell.run()``.
+        Returns the list of orphan checkpoint names (deleted or not).
 
         Uses the backup provider obtained via
         :meth:`IVMModuleFactory.create_backup_provider` (which only
@@ -1329,7 +1339,326 @@ class Core:
                     cp_hash,
                 )
                 orphans.append(cp)
+
+        if auto_cleanup and orphans:
+            for cp in orphans:
+                cmd = [
+                    "virsh",
+                    "checkpoint-delete",
+                    "--metadata",
+                    "--domain",
+                    vm.name,
+                    cp,
+                ]
+                result = self._shell.run(cmd, timeout=30, check=True)
+                if result.success:
+                    logger.info(
+                        "[reconcile] %s: deleted orphan checkpoint %s",
+                        vm.name,
+                        cp,
+                    )
+                else:
+                    logger.warning(
+                        "[reconcile] %s: failed to delete orphan checkpoint %s: %s",
+                        vm.name,
+                        cp,
+                        result.error,
+                    )
         return orphans
+
+    def reconcile(
+        self,
+        vm_filter: str | None = None,
+    ) -> dict[str, ReconcileResult]:
+        """Actively repair state-vs-disk inconsistencies.
+
+        For each VM (filtered):
+        1. Remove phantom snapshots from state (file missing on disk)
+        2. Remove phantom FULLs from state + cascade-clean dependencies
+        3. Clear last_backup_allocation if no FULLs remain on target
+        4. Remove stale incremental dependencies (incremental file missing)
+        5. Delete orphaned libvirt checkpoints (auto-cleanup)
+
+        Returns per-VM ``ReconcileResult`` with counts of items fixed.
+
+        When ``self._dry_run`` is True, reports what would be fixed
+        without making any changes to state files or checkpoints.
+        """
+        vms = self._filter_vms(vm_filter)
+        results: dict[str, ReconcileResult] = {}
+        for vm in vms:
+            phantom_snapshots = 0
+            phantom_fulls = 0
+            stale_deps = 0
+            baselines_cleared = 0
+            orphan_ckpts = 0
+            orphan_files = 0
+            errors: list[str] = []
+
+            # 1. Phantom snapshots (file missing on disk)
+            try:
+                snapshots = self._state.get_snapshots(vm.name)
+                for sn in snapshots:
+                    if not os.path.exists(str(sn.path)):
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would remove phantom snapshot %s",
+                                vm.name,
+                                sn.name,
+                            )
+                            phantom_snapshots += 1
+                        else:
+                            self._state.remove_snapshot(vm.name, sn.name)
+                            logger.warning(
+                                "[reconcile] %s: removed phantom snapshot %s "
+                                "(file not found: %s)",
+                                vm.name,
+                                sn.name,
+                                sn.path,
+                            )
+                            phantom_snapshots += 1
+            except Exception as exc:
+                errors.append(f"phantom snapshots: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking phantom snapshots: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 2-4. Per-target: phantom FULLs, stale deps, stale baselines
+            for target in vm.targets:
+                target_path = str(target.path)
+                try:
+                    all_fulls = self._state.get_full_backups(target_path)
+                except Exception as exc:
+                    errors.append(f"full backups for {target_path}: {exc}")
+                    logger.warning(
+                        "[reconcile] %s: error loading FULLs for target %s: %s",
+                        vm.name,
+                        target_path,
+                        exc,
+                    )
+                    continue
+
+                # 2. Phantom FULLs with cascade cleanup
+                for full in all_fulls:
+                    if not os.path.exists(str(full.path)):
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would remove phantom FULL %s "
+                                "(cascade deps)",
+                                vm.name,
+                                full.name,
+                            )
+                            phantom_fulls += 1
+                        else:
+                            self._state.remove_full_backup(target_path, full.name)
+                            removed = self._state.remove_all_incremental_dependencies(
+                                target_path, full.name
+                            )
+                            logger.warning(
+                                "[reconcile] %s: removed phantom FULL %s "
+                                "(cascade: %d deps cleaned)",
+                                vm.name,
+                                full.name,
+                                removed,
+                            )
+                            phantom_fulls += 1
+
+                # 3. Clear stale baseline if no FULLs remain
+                try:
+                    remaining = self._state.get_full_backups(target_path)
+                    if not remaining:
+                        if self._state.get_last_backup_allocation(target_path) is not None:
+                            if self._dry_run:
+                                logger.info(
+                                    "[dry-run reconcile] %s: would clear "
+                                    "last_backup_allocation for target %s",
+                                    vm.name,
+                                    target_path,
+                                )
+                                baselines_cleared += 1
+                            else:
+                                self._state.clear_last_backup_allocation(target_path)
+                                logger.info(
+                                    "[reconcile] %s: cleared last_backup_allocation "
+                                    "for target %s (no FULLs remain)",
+                                    vm.name,
+                                    target_path,
+                                )
+                                baselines_cleared += 1
+                except Exception as exc:
+                    errors.append(f"baseline check for {target_path}: {exc}")
+                    logger.warning(
+                        "[reconcile] %s: error checking baseline for target %s: %s",
+                        vm.name,
+                        target_path,
+                        exc,
+                    )
+
+                # 4. Stale incremental dependencies (incremental file missing)
+                try:
+                    fulls_after = self._state.get_full_backups(target_path)
+                    for full in fulls_after:
+                        deps = self._state.get_incremental_dependencies(
+                            target_path, full.name
+                        )
+                        for dep_name in deps:
+                            dep_path = target.path / f"{dep_name}.qcow2"
+                            if not os.path.exists(str(dep_path)):
+                                if self._dry_run:
+                                    logger.info(
+                                        "[dry-run reconcile] %s: would remove stale "
+                                        "dep %s → %s",
+                                        vm.name,
+                                        dep_name,
+                                        full.name,
+                                    )
+                                    stale_deps += 1
+                                else:
+                                    self._state.remove_incremental_dependency(
+                                        target_path, dep_name, full.name
+                                    )
+                                    logger.warning(
+                                        "[reconcile] %s: removed stale dependency "
+                                        "%s → %s (file not found: %s)",
+                                        vm.name,
+                                        dep_name,
+                                        full.name,
+                                        dep_path,
+                                    )
+                                    stale_deps += 1
+                except Exception as exc:
+                    errors.append(f"stale deps for {target_path}: {exc}")
+                    logger.warning(
+                        "[reconcile] %s: error checking stale deps for target %s: %s",
+                        vm.name,
+                        target_path,
+                        exc,
+                    )
+
+            # 5. Orphan checkpoint auto-cleanup
+            try:
+                orphans = self._detect_orphan_checkpoints(
+                    vm, auto_cleanup=not self._dry_run
+                )
+                orphan_ckpts = len(orphans)
+            except Exception as exc:
+                errors.append(f"orphan checkpoints: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error detecting orphan checkpoints: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 6. Orphan files on target directories (files on disk
+            # not tracked in state — bidirectional cleanup).
+            for target in vm.targets:
+                target_path = str(target.path)
+                try:
+                    provider = self._factory.create_backup_provider(vm, target)
+                    backups_on_disk = provider.list(target)
+
+                    # Build known set from state (stems, no .qcow2 ext).
+                    known_stems: set[str] = set()
+                    fulls = self._state.get_full_backups(target_path)
+                    for full in fulls:
+                        known_stems.add(Path(full.name).stem)
+                        deps = self._state.get_incremental_dependencies(
+                            target_path, full.name
+                        )
+                        known_stems.update(deps)
+
+                    for backup in backups_on_disk:
+                        if backup.name in known_stems:
+                            continue
+                        # Only delete files matching qsnap naming pattern.
+                        if not backup.name.startswith(f"{vm.name}."):
+                            logger.warning(
+                                "[reconcile] %s: untracked .qcow2 on target %s "
+                                "(not qsnap pattern, skipping): %s",
+                                vm.name,
+                                target_path,
+                                backup.name,
+                            )
+                            continue
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would remove orphan "
+                                "file %s on target %s",
+                                vm.name,
+                                backup.name,
+                                target_path,
+                            )
+                            orphan_files += 1
+                        else:
+                            provider.delete(backup)
+                            logger.warning(
+                                "[reconcile] %s: removed orphan file %s from "
+                                "target %s (not tracked in state)",
+                                vm.name,
+                                backup.name,
+                                target_path,
+                            )
+                            orphan_files += 1
+                except Exception as exc:
+                    errors.append(f"orphan files for {target_path}: {exc}")
+                    logger.warning(
+                        "[reconcile] %s: error checking orphan files for "
+                        "target %s: %s",
+                        vm.name,
+                        target_path,
+                        exc,
+                    )
+
+            # 7. Orphan snapshot files in snapshot_dir (files on disk
+            # not tracked in state).
+            try:
+                recorded = {
+                    sn.path.name for sn in self._state.get_snapshots(vm.name)
+                }
+                for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
+                    if qcow2_file.name not in recorded:
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would remove orphan "
+                                "snapshot file %s",
+                                vm.name,
+                                qcow2_file,
+                            )
+                            orphan_files += 1
+                        else:
+                            self._shell.run(
+                                ["rm", "-f", str(qcow2_file)],
+                                timeout=10,
+                                check=True,
+                            )
+                            logger.warning(
+                                "[reconcile] %s: removed orphan snapshot file "
+                                "%s (not tracked in state)",
+                                vm.name,
+                                qcow2_file,
+                            )
+                            orphan_files += 1
+            except Exception as exc:
+                errors.append(f"orphan snapshot files: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking orphan snapshot files: %s",
+                    vm.name,
+                    exc,
+                )
+
+            results[vm.name] = ReconcileResult(
+                vm_name=vm.name,
+                phantom_snapshots_removed=phantom_snapshots,
+                phantom_fulls_removed=phantom_fulls,
+                stale_deps_removed=stale_deps,
+                baselines_cleared=baselines_cleared,
+                orphan_checkpoints_deleted=orphan_ckpts,
+                orphan_files_removed=orphan_files,
+                errors=errors,
+            )
+        return results
 
     # ── pipeline runner ────────────────────────────────────────────────
 
@@ -1748,6 +2077,92 @@ class Core:
             status="ok",
         )
 
+    def _validate_state_at_startup(self, vm_config: VMConfig) -> None:
+        """Lightweight state-vs-disk check at pipeline start.
+
+        Runs phantom FULL detection + stale baseline cleanup BEFORE
+        the onchange gate, so the gate sees correct state.  Non-fatal:
+        logs warnings, never raises.
+
+        This does NOT auto-delete orphan checkpoints — only
+        ``qsnap reconcile`` does that (spec: state-consistency-check).
+        """
+        for target in vm_config.targets:
+            try:
+                all_fulls = self._state.get_full_backups(str(target.path))
+            except Exception as exc:
+                logger.warning(
+                    "[startup] %s: failed to load FULL backups for target %s: %s",
+                    vm_config.name,
+                    target.path,
+                    exc,
+                )
+                continue
+
+            if not all_fulls:
+                # No FULLs in state — clear baseline if it exists
+                try:
+                    if self._state.get_last_backup_allocation(str(target.path)) is not None:
+                        self._state.clear_last_backup_allocation(str(target.path))
+                        logger.info(
+                            "[startup] %s: cleared stale last_backup_allocation "
+                            "for target %s (no FULLs in state)",
+                            vm_config.name,
+                            target.path,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[startup] %s: failed to clear baseline for target %s: %s",
+                        vm_config.name,
+                        target.path,
+                        exc,
+                    )
+                continue
+
+            # Check for phantom FULLs
+            has_phantom = False
+            for full in all_fulls:
+                if not os.path.exists(str(full.path)):
+                    try:
+                        self._state.remove_full_backup(str(target.path), full.name)
+                        removed = self._state.remove_all_incremental_dependencies(
+                            str(target.path), full.name
+                        )
+                        logger.warning(
+                            "[startup] %s: phantom FULL %s removed "
+                            "(cascade: %d deps cleaned)",
+                            vm_config.name,
+                            full.name,
+                            removed,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[startup] %s: failed to remove phantom FULL %s: %s",
+                            vm_config.name,
+                            full.name,
+                            exc,
+                        )
+                    has_phantom = True
+            if has_phantom:
+                # Re-check: if no FULLs remain, clear baseline
+                try:
+                    remaining = self._state.get_full_backups(str(target.path))
+                    if not remaining:
+                        self._state.clear_last_backup_allocation(str(target.path))
+                        logger.info(
+                            "[startup] %s: cleared last_backup_allocation "
+                            "for target %s (no FULLs remain after phantom cleanup)",
+                            vm_config.name,
+                            target.path,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[startup] %s: failed to re-check FULLs for target %s: %s",
+                        vm_config.name,
+                        target.path,
+                        exc,
+                    )
+
     def _execute_pipeline(self, vm_config: VMConfig) -> bool:
         """Execute the full pipeline for a single VM.
 
@@ -1783,6 +2198,8 @@ class Core:
                 )
                 raise RuntimeError(error_msg)
 
+        # Step 1b: State-vs-disk validation (non-fatal, before onchange gate)
+        self._validate_state_at_startup(vm_config)
         self._execute_snapshot_steps(vm_config)
         return self._execute_backup_steps(vm_config)
 
@@ -2661,6 +3078,9 @@ class Core:
 
         Returns True if any backup transfer failed.
         """
+        # State-vs-disk validation (non-fatal, before onchange gate).
+        # Ensures standalone ``qsnap backup`` also gets self-healing.
+        self._validate_state_at_startup(vm_config)
         snapshots = self._state.get_snapshots(vm_config.name)
         backup_failed = False
         for target in vm_config.targets:
@@ -2774,19 +3194,19 @@ class Core:
     ) -> bool:
         """Return True if backup should proceed under ``onchange`` mode.
 
-        Compares the latest snapshot's allocation against the last backup
-        allocation recorded for this target (design D3).  Returns True
-        when the allocation has changed or no baseline exists yet (first
-        run).  Returns False when the allocation is unchanged — the VM
-        disk has not grown since the last backup to this target.
+        Approach B: checks whether any snapshot in state is not yet
+        backed up to this target by calling ``provider.list(target)``
+        and comparing snapshot names.  This is independent of
+        ``snapshot_create`` mode and works for ``always``/``onchange``/
+        ``ondemand``.
         """
         if not snapshots:
             return False  # nothing to transfer
-        last_backup_alloc = self._state.get_last_backup_allocation(str(target.path))
-        if last_backup_alloc is None:
-            return True  # first backup to this target
-        current_alloc = snapshots[-1].allocation
-        return current_alloc != last_backup_alloc
+        provider = self._factory.create_backup_provider(vm_config, target)
+        existing = provider.list(target)
+        existing_names = {s.name for s in existing}
+        has_new = any(s.name not in existing_names for s in snapshots)
+        return has_new
 
     def _backup_target(
         self,
@@ -2798,18 +3218,19 @@ class Core:
 
         Returns True if any backup transfer failed.
         """
-        # Per-target onchange gate (design D3): skip backup when the VM
-        # disk has not changed since the last backup to this target.
+        # Per-target onchange gate: skip transfer when there are no new
+        # snapshots to back up to this target (Approach B).  Retention
+        # + cleanup still run even when transfer is skipped.
+        skip_transfer = False
         if target.backup_create == "onchange" and not self._should_backup_onchange(
             vm_config, target, snapshots
         ):
             logger.info(
-                "[backup] %s: target %s unchanged (allocation %d == last backup) — skipping",
+                "[backup] %s: target %s no new snapshots — skipping transfer",
                 vm_config.name,
                 target.path,
-                snapshots[-1].allocation if snapshots else 0,
             )
-            return False  # no failure, just skipped
+            skip_transfer = True
 
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
@@ -2819,199 +3240,204 @@ class Core:
         # back to fixed-timeout shell.run().
         stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
-        # Check for bucket-driven FULL backup necessity (design D1)
-        if snapshots:
-            all_fulls = self._state.get_full_backups(str(target.path))
-            # Filter out phantom FULLs — entries in state whose files
-            # no longer exist (deleted externally, disk failure, etc.).
-            # Phantom FULLs block bucket-driven FULL creation because
-            # the bucket strategy sees an existing FULL for the
-            # period and skips creation.
-            filtered_fulls: list[FullBackupInfo] = []
-            for full in all_fulls:
-                if os.path.exists(str(full.path)):
-                    filtered_fulls.append(full)
-                else:
-                    self._state.remove_full_backup(str(target.path), full.name)
-                    logger.warning(
-                        "Phantom FULL entry: %s file not found on disk — removed from state",
-                        full.name,
-                    )
-            all_fulls = filtered_fulls
-            policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
-            strategy = self._factory.create_bucket_full_strategy()
-            should_full, bucket_level = strategy.should_create_full(
-                target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
-            )
-            if should_full:
-                if self._dry_run:
-                    # Log FULL-would-be-created without executing (design D7).
-                    # Single NBD path — no direct-convert fallback, so no
-                    # method selection (live-vm-full-backup delta).
-                    vm_state = (
-                        "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
-                    )
-                    logger.info(
-                        "[dry-run] Would create FULL backup (bucket=%s, method=NBD, VM=%s)",
-                        bucket_level,
-                        vm_state,
-                    )
-                else:
-                    most_recent = max(snapshots, key=lambda s: s.timestamp)
-                    full_result = provider.create_full_backup(
-                        vm_config.name,
-                        most_recent,
-                        target,
-                        compress=target.compress,
-                        bucket_level=bucket_level,
-                        compression_type=target.compression_type,
-                        stall_timeout=stall_timeout,
-                        full_transfer_engine=target.full_transfer_engine,
-                        convert_parallel=target.convert_parallel,
-                        convert_out_of_order=target.convert_out_of_order,
-                    )
-                    if full_result.success:
-                        # ── Post-create FULL backup verification ────
-                        global_cfg = self._config.get_global()
-                        verify_error = verify_full_backup(
-                            self._shell,
-                            full_result.target_path,
-                            global_cfg.full_verify_after_create,
-                            source_path=most_recent.path,
+        if not skip_transfer:
+            # Check for bucket-driven FULL backup necessity (design D1)
+            if snapshots:
+                all_fulls = self._state.get_full_backups(str(target.path))
+                # Filter out phantom FULLs — entries in state whose files
+                # no longer exist (deleted externally, disk failure, etc.).
+                # Phantom FULLs block bucket-driven FULL creation because
+                # the bucket strategy sees an existing FULL for the
+                # period and skips creation.
+                filtered_fulls: list[FullBackupInfo] = []
+                for full in all_fulls:
+                    if os.path.exists(str(full.path)):
+                        filtered_fulls.append(full)
+                    else:
+                        # Cascade cleanup: remove FULL + all linked
+                        # dependencies (design D2 — phantom cascade).
+                        self._state.remove_full_backup(str(target.path), full.name)
+                        removed = self._state.remove_all_incremental_dependencies(
+                            str(target.path), full.name
                         )
-                        if verify_error is not None:
-                            self._shell.run(
-                                ["rm", "-f", str(full_result.target_path)],
-                                timeout=10,
+                        logger.warning(
+                            "Phantom FULL entry: %s file not found — removed from state "
+                            "(cascade: %d dependency record(s) cleaned)",
+                            full.name,
+                            removed,
+                        )
+                # Clear last_backup_allocation if no FULLs remain (target is empty)
+                if not filtered_fulls and all_fulls:
+                    self._state.clear_last_backup_allocation(str(target.path))
+                    logger.info(
+                        "Cleared last_backup_allocation for target %s — no FULLs remain",
+                        target.path,
+                    )
+                all_fulls = filtered_fulls
+                policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
+                strategy = self._factory.create_bucket_full_strategy()
+                should_full, bucket_level = strategy.should_create_full(
+                    target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
+                )
+                if should_full:
+                    if self._dry_run:
+                        # Log FULL-would-be-created without executing (design D7).
+                        # Single NBD path — no direct-convert fallback, so no
+                        # method selection (live-vm-full-backup delta).
+                        vm_state = (
+                            "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
+                        )
+                        logger.info(
+                            "[dry-run] Would create FULL backup (bucket=%s, method=NBD, VM=%s)",
+                            bucket_level,
+                            vm_state,
+                        )
+                    else:
+                        most_recent = max(snapshots, key=lambda s: s.timestamp)
+                        full_result = provider.create_full_backup(
+                            vm_config.name,
+                            most_recent,
+                            target,
+                            compress=target.compress,
+                            bucket_level=bucket_level,
+                            compression_type=target.compression_type,
+                            stall_timeout=stall_timeout,
+                            full_transfer_engine=target.full_transfer_engine,
+                            convert_parallel=target.convert_parallel,
+                            convert_out_of_order=target.convert_out_of_order,
+                        )
+                        if full_result.success:
+                            # ── Post-create FULL backup verification ────
+                            global_cfg = self._config.get_global()
+                            verify_error = verify_full_backup(
+                                self._shell,
+                                full_result.target_path,
+                                global_cfg.full_verify_after_create,
+                                source_path=most_recent.path,
                             )
-                            backup_failed = True
+                            if verify_error is not None:
+                                self._shell.run(
+                                    ["rm", "-f", str(full_result.target_path)],
+                                    timeout=10,
+                                )
+                                backup_failed = True
+                                logger.warning(
+                                    "FULL backup verification failed for VM %s "
+                                    "target %s — file deleted: %s",
+                                    vm_config.name,
+                                    target.path,
+                                    verify_error,
+                                )
+                            else:
+                                full_name = full_result.target_path.stem
+                                # Record FULL in state (caller's responsibility
+                                # after verification — per core-orchestrator spec).
+                                self._state.record_full_backup(
+                                    str(target.path),
+                                    f"{full_name}.qcow2",
+                                    most_recent.timestamp,
+                                    bucket_level,
+                                )
+                                # Audit trail + btrbk-style INFO log (design D4, D5).
+                                self._actions.append(
+                                    ActionRecord(
+                                        action="backup_full",
+                                        vm_name=vm_config.name,
+                                        name=full_name,
+                                        path=full_result.target_path,
+                                        size=full_result.bytes_transferred,
+                                    )
+                                )
+                                logger.info(
+                                    "[backup] %s: created FULL %s (%d B)",
+                                    vm_config.name,
+                                    full_name,
+                                    full_result.bytes_transferred,
+                                )
+                        else:
                             logger.warning(
-                                "FULL backup verification failed for VM %s "
-                                "target %s — file deleted: %s",
+                                "Full backup failed for VM %s target %s: %s",
                                 vm_config.name,
                                 target.path,
-                                verify_error,
+                                full_result.error,
                             )
-                        else:
-                            full_name = full_result.target_path.stem
-                            # Record FULL in state (caller's responsibility
-                            # after verification — per core-orchestrator spec).
-                            self._state.record_full_backup(
-                                str(target.path),
-                                f"{full_name}.qcow2",
-                                most_recent.timestamp,
-                                bucket_level,
-                            )
-                            # Audit trail + btrbk-style INFO log (design D4, D5).
-                            self._actions.append(
-                                ActionRecord(
-                                    action="backup_full",
-                                    vm_name=vm_config.name,
-                                    name=full_name,
-                                    path=full_result.target_path,
-                                    size=full_result.bytes_transferred,
-                                )
-                            )
-                            logger.info(
-                                "[backup] %s: created FULL %s (%d B)",
-                                vm_config.name,
-                                full_name,
-                                full_result.bytes_transferred,
-                            )
-                    else:
-                        logger.warning(
-                            "Full backup failed for VM %s target %s: %s",
-                            vm_config.name,
-                            target.path,
-                            full_result.error,
-                        )
-                        backup_failed = True
+                            backup_failed = True
 
-        # Transfer missing snapshots (with retry when configured)
-        if not self._dry_run:
-            results = self._transfer_with_retry(
-                provider,
-                vm_config,
-                target,
-                snapshots,
-                compression_type=target.compression_type,
-                stall_timeout=stall_timeout,
-                full_transfer_engine=target.full_transfer_engine,
-                convert_parallel=target.convert_parallel,
-                convert_out_of_order=target.convert_out_of_order,
-            )
-            failed = [r for r in results if not r.success]
-            if failed:
-                backup_failed = True
-                failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
-                logger.warning(
-                    "Backup transfer failed for VM %s target %s: %d snapshot(s) failed — %s",
-                    vm_config.name,
-                    target.path,
-                    len(failed),
-                    failure_details,
+            # Transfer missing snapshots (with retry when configured)
+            if not self._dry_run:
+                results = self._transfer_with_retry(
+                    provider,
+                    vm_config,
+                    target,
+                    snapshots,
+                    compression_type=target.compression_type,
+                    stall_timeout=stall_timeout,
+                    full_transfer_engine=target.full_transfer_engine,
+                    convert_parallel=target.convert_parallel,
+                    convert_out_of_order=target.convert_out_of_order,
                 )
-
-            # Audit trail + btrbk-style INFO log for successful transfers
-            # (design D4, D5).
-            for r in results:
-                if r.success:
-                    speed = (
-                        r.bytes_transferred / (1024 * 1024) / r.duration if r.duration > 0 else 0.0
-                    )
-                    self._actions.append(
-                        ActionRecord(
-                            action="backup_transfer",
-                            vm_name=vm_config.name,
-                            name=r.snapshot_name,
-                            path=r.target_path,
-                            size=r.bytes_transferred,
-                            duration=r.duration,
-                        )
-                    )
-                    logger.info(
-                        "[backup] %s: transferred %s → %s (%d B in %.1fs, %.1f MiB/s)",
+                failed = [r for r in results if not r.success]
+                if failed:
+                    backup_failed = True
+                    failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
+                    logger.warning(
+                        "Backup transfer failed for VM %s target %s: %d snapshot(s) failed — %s",
                         vm_config.name,
-                        r.snapshot_name,
                         target.path,
-                        r.bytes_transferred,
-                        r.duration,
-                        speed,
+                        len(failed),
+                        failure_details,
                     )
 
-            # Record incremental→FULL dependency for bitmap transfers
-            # (spec: Core records dependency; design D4 — state
-            # recording is Core's responsibility).  Bitmap incrementals
-            # are backing-chained deltas; the provider verified them,
-            # and Core now registers each as a dependent of its chain's
-            # FULL anchor so retention cascade-deletion and ``check``
-            # see the whole chain.  Failed transfers record nothing;
-            # standalone full pulls (no backing file) have no anchor
-            # and are skipped.
-            for r in results:
-                if not r.success:
-                    continue
-                anchor = self._resolve_chain_full_anchor(r.target_path)
-                if anchor is not None:
-                    self._state.record_incremental_dependency(
-                        str(target.path),
-                        r.snapshot_name,
-                        anchor,
-                    )
+                # Audit trail + btrbk-style INFO log for successful transfers
+                # (design D4, D5).
+                for r in results:
+                    if r.success:
+                        speed = (
+                            r.bytes_transferred / (1024 * 1024) / r.duration if r.duration > 0 else 0.0
+                        )
+                        self._actions.append(
+                            ActionRecord(
+                                action="backup_transfer",
+                                vm_name=vm_config.name,
+                                name=r.snapshot_name,
+                                path=r.target_path,
+                                size=r.bytes_transferred,
+                                duration=r.duration,
+                            )
+                        )
+                        logger.info(
+                            "[backup] %s: transferred %s → %s (%d B in %.1fs, %.1f MiB/s)",
+                            vm_config.name,
+                            r.snapshot_name,
+                            target.path,
+                            r.bytes_transferred,
+                            r.duration,
+                            speed,
+                        )
 
-        # Update per-target backup allocation baseline after successful
-        # transfer (design D3 — onchange gate uses this on the next run).
-        # Only update when not in dry-run mode, no failures occurred,
-        # and the target is in onchange mode (spec: core-orchestrator).
-        if (
-            not self._dry_run
-            and not backup_failed
-            and snapshots
-            and target.backup_create == "onchange"
-        ):
-            self._state.set_last_backup_allocation(str(target.path), snapshots[-1].allocation)
+                # Record incremental→FULL dependency for bitmap transfers
+                # (spec: Core records dependency; design D4 — state
+                # recording is Core's responsibility).  Bitmap incrementals
+                # are backing-chained deltas; the provider verified them,
+                # and Core now registers each as a dependent of its chain's
+                # FULL anchor so retention cascade-deletion and ``check``
+                # see the whole chain.  Failed transfers record nothing;
+                # standalone full pulls (no backing file) have no anchor
+                # and are skipped.
+                for r in results:
+                    if not r.success:
+                        continue
+                    anchor = self._resolve_chain_full_anchor(r.target_path)
+                    if anchor is not None:
+                        self._state.record_incremental_dependency(
+                            str(target.path),
+                            r.snapshot_name,
+                            anchor,
+                        )
 
-        # Backup retention + cleanup
+        # Backup retention + cleanup — always runs, even when transfer
+        # is skipped (gate/retention separation: expired backups must be
+        # cleaned regardless of new data availability).
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)
         self._cleanup_backups(vm_config, target, backups, retention_result)
 

@@ -23,7 +23,7 @@ from qsnap.cli.format import (
 from qsnap.cli.summary import format_summary
 from qsnap.core import Core, PipelineResult
 from qsnap.models.config import VMConfig
-from qsnap.models.results import CheckResult, SnapshotInfo, StateCheckResult
+from qsnap.models.results import CheckResult, ReconcileResult, SnapshotInfo, StateCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +456,54 @@ def handle_fork(core: Core, args: Namespace) -> int:
     else:
         print(f"Error: {result.error}", file=sys.stderr)
         return EXIT_GENERIC
+
+
+def _reconcile_to_rows(
+    data: dict[str, ReconcileResult],
+) -> list[dict[str, str]]:
+    """Convert reconcile results to display rows."""
+    rows: list[dict[str, str]] = []
+    for result in data.values():
+        errors = ", ".join(result.errors) if result.errors else "-"
+        rows.append(
+            {
+                "vm": result.vm_name,
+                "phantom_snaps": str(result.phantom_snapshots_removed),
+                "phantom_fulls": str(result.phantom_fulls_removed),
+                "stale_deps": str(result.stale_deps_removed),
+                "baselines": str(result.baselines_cleared),
+                "orphan_ckpts": str(result.orphan_checkpoints_deleted),
+                "errors": errors,
+            }
+        )
+    return rows
+
+
+def handle_reconcile(core: Core, args: Namespace) -> int:
+    """Repair state-vs-disk inconsistencies.
+
+    Calls ``Core.reconcile()`` and formats the results as a table.
+    Returns 0 if no errors, 1 if any VM had errors.
+    """
+    vm_filter = _get_vm_filter(args)
+    if getattr(args, "dry_run", False):
+        core.dry_run = True
+    results = core.reconcile(vm_filter)
+    fmt: str = getattr(args, "format", "table")
+    rows = _reconcile_to_rows(results)
+    columns = [
+        "vm",
+        "phantom_snaps",
+        "phantom_fulls",
+        "stale_deps",
+        "baselines",
+        "orphan_ckpts",
+        "errors",
+    ]
+    output = format_output(rows, columns, fmt)
+    print(output or "State is consistent — nothing to reconcile.")
+    has_errors = any(r.errors for r in results.values())
+    return 1 if has_errors else 0
 
 
 def handle_deploy(core: Core, args: Namespace) -> int:

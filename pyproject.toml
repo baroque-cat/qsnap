@@ -1,6 +1,6 @@
 [project]
 name = "qsnap"
-version = "0.4.0"
+version = "0.5.0"
 description = "QEMU/KVM snapshot and backup orchestration for qcow2 images"
 authors = [
     {name = "Baroque Cat",email = "baroque-cat@proton.me"}

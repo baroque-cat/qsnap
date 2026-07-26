@@ -20,10 +20,12 @@ from unittest.mock import patch
 import pytest
 
 from qsnap.core import Core, PipelineResult
-from qsnap.models.config import VMConfig
+from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
+    FullBackupInfo,
+    ReconcileResult,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
@@ -4267,11 +4269,12 @@ def test_onchange_backup_first_run_proceeds(
     mock_state,
     mock_shell,
 ):
-    """backup_create="onchange" with no prior state → gate returns True.
+    """backup_create="onchange" with no prior backups → gate returns True.
 
-    When ``get_last_backup_allocation()`` returns ``None`` (no prior
-    backup to this target), ``_should_backup_onchange()`` returns
-    ``True``, so the gate passes and backup proceeds.
+    Approach B: ``_should_backup_onchange()`` calls ``provider.list(target)``
+    and compares snapshot names against backup names on target.  When
+    ``provider.list(target)`` returns an empty list (no backups on target),
+    the gate returns True (first backup proceeds).
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4289,10 +4292,15 @@ def test_onchange_backup_first_run_proceeds(
         timestamp=datetime.now(),
         allocation=1000,
     )
-    # No prior state — get_last_backup_allocation returns None.
-
-    # Verify _should_backup_onchange returns True (first backup).
-    assert core._should_backup_onchange(vm, target, [snap]) is True
+    # Mock provider.list() to return empty list — no backups yet on target.
+    with patch.object(
+        mock_factory._backup_provider,
+        "list",
+        return_value=[],
+    ) as list_spy:
+        # Verify _should_backup_onchange returns True (first backup).
+        assert core._should_backup_onchange(vm, target, [snap]) is True
+        assert list_spy.called, "provider.list() should be called by the onchange gate"
 
 
 def test_onchange_backup_no_change_skipped(
@@ -4301,13 +4309,14 @@ def test_onchange_backup_no_change_skipped(
     mock_factory,
     mock_state,
     mock_shell,
+    caplog,
 ):
-    """backup_create="onchange" with unchanged allocation → gate blocks backup.
+    """backup_create="onchange" with all snapshots backed up → gate blocks backup.
 
-    When ``get_last_backup_allocation()`` returns the same value as
-    ``snapshots[-1].allocation``, ``_should_backup_onchange()`` returns
-    ``False``, so ``_backup_target`` returns early with ``False`` and
-    ``transfer_missing`` is never called.
+    Approach B: ``_should_backup_onchange()`` calls ``provider.list(target)``.
+    When all snapshots in state already have corresponding backups on target,
+    the gate returns False.  ``_backup_target`` sets ``skip_transfer=True``
+    but retention + cleanup still run.
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4325,22 +4334,44 @@ def test_onchange_backup_no_change_skipped(
         timestamp=datetime.now(),
         allocation=1000,
     )
-    # Set prior backup allocation to the same value — no change.
-    mock_state.set_last_backup_allocation(str(target.path), 1000)
 
+    # Mock provider.list() to return the snapshot — already backed up.
     backup_provider = mock_factory._backup_provider
     with patch.object(
         backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
+        "list",
+        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
+                                    timestamp=datetime.now(), allocation=1000)],
+    ):
+        # Gate returns False because snap1 is already on target.
+        assert core._should_backup_onchange(vm, target, [snap]) is False
+
+    caplog.set_level(logging.INFO)
+    with (
+        patch.object(
+            backup_provider,
+            "list",
+            return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
+                                        timestamp=datetime.now(), allocation=1000)],
+        ),
+        patch.object(
+            backup_provider,
+            "transfer_missing",
+            wraps=backup_provider.transfer_missing,
+        ) as transfer_spy,
+    ):
         result = core._backup_target(vm, target, [snap])
 
     # Gate blocked → _backup_target returns False (no failure, just skipped).
     assert result is False, "_backup_target should return False when onchange gate blocks backup"
-    # transfer_missing was NOT called.
+    # transfer_missing was NOT called (skip_transfer flag).
     assert not transfer_spy.called, (
         "transfer_missing should NOT be called when onchange gate blocks"
+    )
+    # Log "no new snapshots — skipping" message was emitted.
+    log_messages = [r.message for r in caplog.records]
+    assert any("no new snapshots" in msg for msg in log_messages), (
+        f"Expected 'no new snapshots' log message, got: {log_messages}"
     )
 
 
@@ -4351,11 +4382,11 @@ def test_onchange_backup_allocation_grew_proceeds(
     mock_state,
     mock_shell,
 ):
-    """backup_create="onchange" with allocation growth → gate returns True.
+    """backup_create="onchange" with missing backup → gate returns True.
 
-    When ``get_last_backup_allocation()`` returns a smaller value than
-    ``snapshots[-1].allocation``, ``_should_backup_onchange()`` returns
-    ``True``, so the gate passes and backup proceeds.
+    Approach B: when ``provider.list(target)`` returns fewer backups than
+    snapshots in state (one snapshot not yet on target), the gate returns
+    True and backup proceeds.
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4373,15 +4404,23 @@ def test_onchange_backup_allocation_grew_proceeds(
         timestamp=datetime.now(),
         allocation=2000,
     )
-    # Prior backup allocation is smaller — allocation grew.
-    mock_state.set_last_backup_allocation(str(target.path), 1000)
 
-    # Gate passes because allocation changed.
-    assert core._should_backup_onchange(vm, target, [snap]) is True
-
-    # Verify through _backup_target that backup proceeds.
+    # Mock provider.list() to return NO backups — snap1 not on target.
+    # Gate passes because snap1 is not yet on target.
     backup_provider = mock_factory._backup_provider
     with patch.object(
+        backup_provider,
+        "list",
+        return_value=[],
+    ):
+        assert core._should_backup_onchange(vm, target, [snap]) is True
+
+    # Verify through _backup_target that backup proceeds.
+    with patch.object(
+        backup_provider,
+        "list",
+        return_value=[],
+    ), patch.object(
         backup_provider,
         "transfer_missing",
         wraps=backup_provider.transfer_missing,
@@ -4389,7 +4428,7 @@ def test_onchange_backup_allocation_grew_proceeds(
         core._backup_target(vm, target, [snap])
 
     assert transfer_spy.called, (
-        "transfer_missing should be called when onchange gate passes (allocation grew)"
+        "transfer_missing should be called when onchange gate passes (snapshot not yet on target)"
     )
 
 
@@ -4402,7 +4441,7 @@ def test_always_mode_backup_gate_bypassed(
 ):
     """backup_create="always" → gate is bypassed entirely.
 
-    Even when the allocation hasn't changed, ``_backup_target`` must NOT
+    Even when all snapshots are already on target, ``_backup_target`` must NOT
     call ``_should_backup_onchange()``.  The ``if target.backup_create ==
     "onchange"`` check is ``False``, so the gate code is skipped.
     """
@@ -4422,9 +4461,6 @@ def test_always_mode_backup_gate_bypassed(
         timestamp=datetime.now(),
         allocation=1000,
     )
-    # Set prior backup allocation to same value — if the gate were active,
-    # it would block.  Since we are in always mode, it is bypassed.
-    mock_state.set_last_backup_allocation(str(target.path), 1000)
 
     with patch.object(
         core,
@@ -4448,7 +4484,8 @@ def test_onchange_no_snapshots_skipped(
     When ``snapshots`` is an empty list, ``_should_backup_onchange()``
     returns ``False`` immediately (``if not snapshots: return False``).
     The gate in ``_backup_target`` then returns ``False``, skipping the
-    backup entirely — there is nothing to transfer.
+    backup entirely — there is nothing to transfer.  ``provider.list()``
+    is never called because the gate returns early on empty snapshots.
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4460,11 +4497,21 @@ def test_onchange_no_snapshots_skipped(
         shell=mock_shell,
     )
 
-    # _should_backup_onchange returns False with empty snapshots.
-    assert core._should_backup_onchange(vm, target, []) is False
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider,
+        "list",
+        wraps=backup_provider.list,
+    ) as list_spy:
+        # _should_backup_onchange returns False with empty snapshots.
+        assert core._should_backup_onchange(vm, target, []) is False
+
+    # provider.list() was NOT called (gate returns early on empty snapshots).
+    assert not list_spy.called, (
+        "provider.list() should NOT be called when snapshots list is empty"
+    )
 
     # Verify _backup_target returns early with False when gate blocks.
-    backup_provider = mock_factory._backup_provider
     with patch.object(
         backup_provider,
         "transfer_missing",
@@ -4483,12 +4530,13 @@ def test_onchange_baseline_updated_after_successful_transfer(
     mock_state,
     mock_shell,
 ):
-    """After a successful backup transfer, set_last_backup_allocation is called.
+    """Under Approach B, set_last_backup_allocation is NOT called after backup.
 
-    When ``backup_create="onchange"`` and transfers succeed,
-    ``_backup_target`` must call ``set_last_backup_allocation()`` with
-    ``snapshots[-1].allocation`` so the next run can compare against the
-    new baseline.
+    The onchange gate now uses ``provider.list()`` (Approach B) instead of
+    ``get_last_backup_allocation()``.  The gate no longer reads or writes
+    ``last_backup_allocation`` — it compares snapshot names against backup
+    names on target.  This test verifies that ``set_last_backup_allocation``
+    is NOT called after a successful backup transfer under Approach B.
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4515,8 +4563,8 @@ def test_onchange_baseline_updated_after_successful_transfer(
     ) as baseline_spy:
         core._backup_target(vm, target, [snap])
 
-    # Baseline was updated with the latest snapshot's allocation.
-    baseline_spy.assert_called_once_with(str(target.path), 1000)
+    # Under Approach B, set_last_backup_allocation is NOT called.
+    baseline_spy.assert_not_called()
 
 
 def test_onchange_baseline_not_updated_on_failure(
@@ -4526,13 +4574,13 @@ def test_onchange_baseline_not_updated_on_failure(
     mock_state,
     mock_shell,
 ):
-    """When backup transfer fails, set_last_backup_allocation is NOT called.
+    """Under Approach B, set_last_backup_allocation is NOT called on failure.
 
-    The baseline update (``set_last_backup_allocation``) must only happen
-    when ``backup_failed`` is ``False``.  When any transfer fails,
-    ``backup_failed`` is set to ``True`` and the baseline is left
-    unchanged, preserving the last-known-good allocation for the next
-    onchange comparison.
+    The onchange gate now uses ``provider.list()`` (Approach B) instead of
+    ``get_last_backup_allocation()``.  Set_last_backup_allocation is never
+    called by the onchange path — neither on success nor on failure.  This
+    test verifies that even a failing transfer does not trigger a call to
+    ``set_last_backup_allocation``.
     """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
@@ -4867,3 +4915,1426 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
         f"convert_out_of_order should be False, got: "
         f"{transfer_spy.call_args.kwargs.get('convert_out_of_order')!r}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GATE TESTS — Approach B (onchange gate via provider.list())
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_onchange_approach_b_new_snapshot_on_target(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate returns True when snap2 is on state but not yet on target."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1 = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+    snap2 = SnapshotInfo(
+        name="snap2", path=Path("/tmp/snap2.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+    snapshots = [snap1, snap2]
+
+    # provider.list() returns only snap1_backup — snap2 is not yet on target.
+    with patch.object(
+        mock_factory._backup_provider, "list",
+        return_value=[SnapshotInfo(name="snap1_backup", path=target.path / "snap1_backup.qcow2",
+                                    timestamp=datetime.now(), allocation=0)],
+    ):
+        assert core._should_backup_onchange(vm, target, snapshots) is True
+
+
+def test_onchange_approach_b_all_backed_up(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate returns False when all snapshots are already on target."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    # provider.list() returns snap1 — already backed up.
+    with patch.object(
+        mock_factory._backup_provider, "list",
+        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
+                                    timestamp=datetime.now(), allocation=0)],
+    ):
+        assert core._should_backup_onchange(vm, target, [snap]) is False
+
+
+def test_onchange_approach_b_first_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate returns True when provider.list() returns empty (first backup ever)."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=[],
+    ):
+        assert core._should_backup_onchange(vm, target, [snap]) is True
+
+
+def test_onchange_approach_b_always_snapshot_mode(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate works correctly with snapshot_create='always' mode."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", snapshot_create="always")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    # provider.list() returns empty — no backups on target yet.
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=[],
+    ):
+        assert core._should_backup_onchange(vm, target, [snap]) is True
+
+
+def test_onchange_approach_b_standalone_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate works for standalone qsnap backup (backup_create='onchange')."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    # Simulate standalone backup run — just the backup step.
+    with patch.object(
+        mock_factory._backup_provider, "list",
+        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
+                                    timestamp=datetime.now(), allocation=0)],
+    ):
+        # Gate returns False because snap1 is already on target.
+        assert core._should_backup_onchange(vm, target, [snap]) is False
+
+
+def test_onchange_approach_b_no_allocation_access(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Approach B gate does NOT read get_last_backup_allocation."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=[]),
+        patch.object(mock_state, "get_last_backup_allocation",
+                     wraps=mock_state.get_last_backup_allocation) as alloc_spy,
+    ):
+        core._should_backup_onchange(vm, target, [snap])
+
+    # get_last_backup_allocation was NOT called under Approach B.
+    alloc_spy.assert_not_called()
+
+
+def test_onchange_skip_runs_retention(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When gate skips transfer, _evaluate_backup_retention is still called."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    # All snapshots already backed up — gate will skip transfer.
+    with (
+        patch.object(mock_factory._backup_provider, "list",
+                     return_value=[SnapshotInfo(
+                         name="snap1", path=target.path / "snap1.qcow2",
+                         timestamp=datetime.now(), allocation=0)]),
+        patch.object(core, "_evaluate_backup_retention",
+                     wraps=core._evaluate_backup_retention) as retention_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Retention evaluation ran even though transfer was skipped.
+    assert retention_spy.called, (
+        "_evaluate_backup_retention should be called even when transfer is skipped"
+    )
+
+
+def test_gate_skip_retention_still_runs(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When skip_transfer=True, retention evaluation + cleanup still execute.
+
+    The _backup_target method places retention evaluation and cleanup OUTSIDE
+    the ``if not skip_transfer:`` block.  This test verifies both
+    _evaluate_backup_retention and _cleanup_backups are called.
+    """
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list",
+                     return_value=[SnapshotInfo(
+                         name="snap1", path=target.path / "snap1.qcow2",
+                         timestamp=datetime.now(), allocation=0)]),
+        patch.object(core, "_evaluate_backup_retention",
+                     wraps=core._evaluate_backup_retention) as retention_spy,
+        patch.object(core, "_cleanup_backups",
+                     wraps=core._cleanup_backups) as cleanup_spy,
+    ):
+        result = core._backup_target(vm, target, [snap])
+
+    assert result is False  # no backup failure
+    assert retention_spy.called, "retention evaluation should run even when skip_transfer=True"
+    assert cleanup_spy.called, "cleanup should run even when skip_transfer=True"
+
+
+def test_onchange_skip_cleans_expired_backups(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When gate skips transfer, retention still runs and deletes expired backups."""
+    target = make_target(backup_create="onchange", target_preserve="1h")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+
+    # Set up an expired backup on target — retention engine should mark it
+    # for removal.
+    old_backup = SnapshotInfo(
+        name="old_backup", path=target.path / "old_backup.qcow2",
+        timestamp=datetime(2020, 1, 1), allocation=0)
+
+    # Mock provider.list() to show all backed up (gate skips) but also
+    # show the old backup so retention evaluates it.
+    with patch.object(
+        mock_factory._backup_provider, "list",
+        return_value=[
+            SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
+                         timestamp=datetime.now(), allocation=0),
+            old_backup,
+        ],
+    ):
+        # Use a retention engine that removes old_backup.
+        mock_factory._retention_engine.evaluate = lambda items, policy, now, **kw: RetentionResult(
+            keep=[i.name for i in items if i.name != "old_backup"],
+            remove=["old_backup"],
+        )
+
+        with patch.object(
+            mock_factory._backup_provider, "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy:
+            core._backup_target(vm, target, [snap])
+
+    # Expired backup was deleted even though transfer was skipped.
+    assert delete_spy.called, (
+        "Expired backup should be deleted even when transfer is skipped"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RUNTIME TESTS — _validate_state_at_startup + phantom cascade
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_startup_validation_cleans_phantom_fulls(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Phantom FULL (in state but not on disk) is removed by startup validation."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+
+    with patch.object(
+        mock_state, "remove_all_incremental_dependencies",
+        wraps=mock_state.remove_all_incremental_dependencies,
+    ) as cascade_spy:
+        core._validate_state_at_startup(vm)
+
+    # Phantom FULL removed from state.
+    remaining = mock_state.get_full_backups(str(target.path))
+    assert len(remaining) == 0, f"Phantom FULL should be removed, got {remaining}"
+    # remove_all_incremental_dependencies was called for cascade cleanup.
+    assert cascade_spy.called, "Cascade dep cleanup should be called for phantom FULL"
+
+
+def test_startup_validation_clears_baseline_after_phantom(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """After removing the only phantom FULL, stale baseline is cleared."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+    # Set a stale baseline.
+    mock_state.set_last_backup_allocation(str(target.path), 99999)
+
+    core._validate_state_at_startup(vm)
+
+    # Baseline cleared since no FULLs remain.
+    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+        "Stale baseline should be cleared after phantom FULL removal"
+    )
+
+
+def test_startup_validation_clears_baseline_no_fulls(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When there are no FULLs in state at all, stale baseline is cleared."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # No FULLs in state, but a stale baseline exists.
+    mock_state.set_last_backup_allocation(str(target.path), 99999)
+
+    core._validate_state_at_startup(vm)
+
+    # Baseline cleared.
+    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+        "Stale baseline should be cleared when no FULLs exist"
+    )
+
+
+def test_startup_validation_non_fatal_on_corrupt_state(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Corrupt state (exception from state manager) is non-fatal, logs warning."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Make get_full_backups raise an exception.
+    with patch.object(
+        mock_state, "get_full_backups",
+        side_effect=RuntimeError("corrupt state"),
+    ):
+        caplog.set_level(logging.WARNING)
+        # Should NOT raise.
+        core._validate_state_at_startup(vm)
+
+    # Warning was logged.
+    warning_messages = [r.message for r in caplog.records]
+    assert any("corrupt state" in msg for msg in warning_messages), (
+        f"Expected corrupt state warning, got: {warning_messages}"
+    )
+
+
+def test_startup_validation_runs_for_standalone_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_execute_backup_steps calls _validate_state_at_startup before target loop."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(
+        core, "_validate_state_at_startup",
+        wraps=core._validate_state_at_startup,
+    ) as validate_spy:
+        core._execute_backup_steps(vm)
+
+    assert validate_spy.called, (
+        "_validate_state_at_startup should be called by _execute_backup_steps"
+    )
+
+
+def test_startup_validation_no_checkpoint_deletion(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_validate_state_at_startup does NOT auto-delete orphan checkpoints."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(
+        core, "_detect_orphan_checkpoints",
+        wraps=core._detect_orphan_checkpoints,
+    ) as detect_spy:
+        core._validate_state_at_startup(vm)
+
+    # _detect_orphan_checkpoints was NOT called (startup validation does not
+    # auto-delete checkpoints — only qsnap reconcile does).
+    assert not detect_spy.called, (
+        "_detect_orphan_checkpoints should NOT be called during startup validation"
+    )
+
+
+def test_phantom_full_cascade_dep_cleanup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """In _backup_target, phantom FULL removal triggers cascade dep cleanup."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+    mock_state.record_snapshot("testvm", snap)
+
+    # Set up a phantom FULL in state (file doesn't exist on disk).
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+
+    with patch.object(
+        mock_state, "remove_all_incremental_dependencies",
+        wraps=mock_state.remove_all_incremental_dependencies,
+    ) as cascade_spy:
+        core._backup_target(vm, target, [snap])
+
+    # remove_all_incremental_dependencies was called after remove_full_backup.
+    assert cascade_spy.called, (
+        "remove_all_incremental_dependencies should be called after phantom FULL removal"
+    )
+
+
+def test_phantom_last_full_clears_baseline(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """When the last phantom FULL is removed, baseline is cleared."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+    mock_state.record_snapshot("testvm", snap)
+
+    # Set up a phantom FULL (file doesn't exist).
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+    # Set a stale baseline.
+    mock_state.set_last_backup_allocation(str(target.path), 99999)
+
+    core._backup_target(vm, target, [snap])
+
+    # Baseline cleared since no FULLs remain.
+    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+        "Baseline should be cleared when last phantom FULL is removed"
+    )
+
+
+def test_phantom_full_keeps_baseline_with_remaining(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """When a phantom FULL is removed but other valid FULLs remain, baseline is NOT cleared."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1", path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(), allocation=1000)
+    mock_state.record_snapshot("testvm", snap)
+
+    # Create a valid FULL file on disk.
+    valid_full_path = tmp_path / "valid.FULL.monthly.qcow2"
+    valid_full_path.write_text("")
+
+    valid_full = FullBackupInfo(
+        name="valid.FULL.monthly.qcow2",
+        path=valid_full_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+
+    # Phantom FULL (file doesn't exist).
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    phantom_full = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+
+    mock_state._full_backups[str(target.path)] = [valid_full, phantom_full]
+    mock_state.set_last_backup_allocation(str(target.path), 99999)
+
+    core._backup_target(vm, target, [snap])
+
+    # Phantom FULL removed but baseline is still set because valid FULL remains.
+    all_fulls = mock_state.get_full_backups(str(target.path))
+    assert len(all_fulls) == 1, "Phantom FULL should be removed"
+    assert all_fulls[0].name == "valid.FULL.monthly.qcow2"
+    assert mock_state.get_last_backup_allocation(str(target.path)) == 99999, (
+        "Baseline should NOT be cleared when valid FULLs remain"
+    )
+
+
+def test_pipeline_calls_startup_validation_before_steps(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_execute_pipeline calls _validate_state_at_startup before _execute_snapshot_steps."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    call_order = []
+    original_validate = core._validate_state_at_startup
+
+    def _track_validate(vm_config):
+        call_order.append("validate_state")
+        original_validate(vm_config)
+
+    def _track_snapshot(vm_config):
+        call_order.append("snapshot_steps")
+        return False
+
+    with (
+        patch.object(core, "_validate_state_at_startup", side_effect=_track_validate),
+        patch.object(core, "_execute_snapshot_steps", side_effect=_track_snapshot),
+        patch.object(core, "_execute_backup_steps", return_value=False),
+    ):
+        core._execute_pipeline(vm)
+
+    validate_idx = call_order.index("validate_state") if "validate_state" in call_order else -1
+    snapshot_idx = call_order.index("snapshot_steps") if "snapshot_steps" in call_order else -1
+    assert validate_idx != -1, "validate_state_at_startup not called"
+    assert snapshot_idx != -1, "execute_snapshot_steps not called"
+    assert validate_idx < snapshot_idx, (
+        f"validate_state_at_startup ({validate_idx}) must be called before "
+        f"execute_snapshot_steps ({snapshot_idx})"
+    )
+
+
+def test_standalone_backup_calls_startup_validation(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_execute_backup_steps calls _validate_state_at_startup."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(
+        core, "_validate_state_at_startup",
+        wraps=core._validate_state_at_startup,
+    ) as validate_spy:
+        core._execute_backup_steps(vm)
+
+    assert validate_spy.called, (
+        "_validate_state_at_startup should be called by _execute_backup_steps"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RECONCILE TESTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_reconcile_removes_phantom_fulls(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() removes phantom FULLs from state (file missing on disk)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+
+    result = core.reconcile()
+
+    # Phantom FULL removed.
+    remaining = mock_state.get_full_backups(str(target.path))
+    assert len(remaining) == 0, f"Phantom FULL should be removed, got {remaining}"
+    assert "testvm" in result
+    assert result["testvm"].phantom_fulls_removed > 0
+
+
+def test_reconcile_clears_stale_baseline(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() clears stale last_backup_allocation when no FULLs remain."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # No FULLs in state, but stale baseline exists.
+    mock_state.set_last_backup_allocation(str(target.path), 99999)
+
+    result = core.reconcile()
+
+    # Baseline cleared.
+    assert mock_state.get_last_backup_allocation(str(target.path)) is None
+    assert "testvm" in result
+    assert result["testvm"].baselines_cleared > 0
+
+
+def test_reconcile_removes_phantom_snapshots(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() removes phantom snapshots (file missing on disk)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record a snapshot pointing to a non-existent file.
+    phantom_snap = SnapshotInfo(
+        name="phantom_snap1",
+        path=Path("/nonexistent/phantom_snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    mock_state.record_snapshot("testvm", phantom_snap)
+
+    result = core.reconcile()
+
+    # Phantom snapshot removed from state.
+    remaining = mock_state.get_snapshots("testvm")
+    assert all(s.name != "phantom_snap1" for s in remaining), (
+        f"Phantom snapshot should be removed, got {remaining}"
+    )
+    assert result["testvm"].phantom_snapshots_removed > 0
+
+
+def test_reconcile_removes_stale_deps(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """reconcile() removes stale incremental dependencies (file missing)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Create a valid FULL file on disk.
+    full_path = tmp_path / "valid.FULL.monthly.qcow2"
+    full_path.write_text("")
+
+    full_info = FullBackupInfo(
+        name="valid.FULL.monthly.qcow2",
+        path=full_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+    # Record a stale incremental dependency (file doesn't exist on disk).
+    mock_state.record_incremental_dependency(
+        str(target.path), "stale_inc.qcow2", "valid.FULL.monthly.qcow2"
+    )
+
+    result = core.reconcile()
+
+    # Stale dep removed.
+    deps = mock_state.get_incremental_dependencies(str(target.path), "valid.FULL.monthly.qcow2")
+    assert "stale_inc.qcow2" not in deps
+    assert result["testvm"].stale_deps_removed > 0
+
+
+def test_reconcile_deletes_orphan_checkpoints(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() detects orphan checkpoints and calls _detect_orphan_checkpoints
+    with auto_cleanup=True (not in dry-run mode)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(
+        core, "_detect_orphan_checkpoints",
+        wraps=core._detect_orphan_checkpoints,
+    ) as detect_spy:
+        result = core.reconcile()
+
+    # _detect_orphan_checkpoints was called with auto_cleanup=True.
+    assert detect_spy.called
+    call_kwargs = detect_spy.call_args.kwargs
+    assert call_kwargs.get("auto_cleanup") is True, (
+        f"auto_cleanup should be True (not dry-run), got {call_kwargs}"
+    )
+    assert "testvm" in result
+
+
+def test_reconcile_dry_run_no_mutations(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() in dry-run mode reports what WOULD be fixed but does not mutate state."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    # Set up a phantom FULL.
+    phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
+    full_info = FullBackupInfo(
+        name="phantom.FULL.monthly.qcow2",
+        path=phantom_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+
+    # Set up a phantom snapshot.
+    phantom_snap = SnapshotInfo(
+        name="phantom_snap1",
+        path=Path("/nonexistent/phantom_snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    mock_state.record_snapshot("testvm", phantom_snap)
+
+    result = core.reconcile()
+
+    # State is NOT mutated — phantom FULL and snapshot still in state.
+    remaining_fulls = mock_state.get_full_backups(str(target.path))
+    assert len(remaining_fulls) == 1, "Phantom FULL should NOT be removed in dry-run"
+    remaining_snaps = mock_state.get_snapshots("testvm")
+    assert any(s.name == "phantom_snap1" for s in remaining_snaps), (
+        "Phantom snapshot should NOT be removed in dry-run"
+    )
+    # But ReconcileResult still reports what would be fixed.
+    assert result["testvm"].phantom_fulls_removed == 1
+    assert result["testvm"].phantom_snapshots_removed == 1
+    # Baseline is NOT counted as cleared because phantom FULL still exists
+    # in state (dry-run doesn't remove it, so get_full_backups still sees it).
+    assert result["testvm"].baselines_cleared == 0, (
+        "Baseline should NOT be cleared in dry-run because FULL still present"
+    )
+
+
+def test_reconcile_returns_structured_result(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() returns dict[str, ReconcileResult] with all fields populated."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.reconcile()
+
+    assert isinstance(result, dict), "reconcile() should return a dict"
+    assert "testvm" in result, "result should contain 'testvm' key"
+    assert isinstance(result["testvm"], ReconcileResult), (
+        "Each value should be a ReconcileResult"
+    )
+    rr = result["testvm"]
+    assert rr.vm_name == "testvm"
+    assert hasattr(rr, "phantom_snapshots_removed")
+    assert hasattr(rr, "phantom_fulls_removed")
+    assert hasattr(rr, "stale_deps_removed")
+    assert hasattr(rr, "baselines_cleared")
+    assert hasattr(rr, "orphan_checkpoints_deleted")
+    assert hasattr(rr, "orphan_files_removed")
+    assert hasattr(rr, "errors")
+
+
+def test_reconcile_vm_filter(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() with vm_filter only processes the specified VM."""
+    target = make_target()
+    vm1 = make_vm_config(name="vm1", targets=[target])
+    vm2 = make_vm_config(name="vm2", targets=[target])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.reconcile("vm1")
+
+    assert "vm1" in result, "vm1 should be in results"
+    assert "vm2" not in result, "vm2 should NOT be in results when filtered out"
+
+
+def test_reconcile_auto_deletes_orphan_checkpoints(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() auto-deletes orphan checkpoints via virsh checkpoint-delete."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Mock list_checkpoints to return orphan checkpoints.
+    orphan_cp = "qsnap-deadbeef-snap1"
+    with patch.object(
+        mock_factory._backup_provider, "list_checkpoints",
+        return_value=[orphan_cp],
+    ):
+        with patch.object(
+            mock_shell, "run",
+            wraps=mock_shell.run,
+        ) as shell_spy:
+            result = core.reconcile()
+
+    # Verify checkpoint-delete was issued for the orphan.
+    delete_calls = [
+        call for call in shell_spy.call_args_list
+        if "checkpoint-delete" in " ".join(call[0][0])
+    ]
+    assert len(delete_calls) > 0, (
+        "virsh checkpoint-delete should be called for orphan checkpoint"
+    )
+    assert result["testvm"].orphan_checkpoints_deleted > 0
+
+
+# ── Orphan file cleanup tests (bidirectional reconcile) ──────────────────
+
+
+def test_reconcile_removes_orphan_files_on_target(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() deletes .qcow2 files on target not tracked in state."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # An orphan file on the target (not in state).
+    orphan_backup = SnapshotInfo(
+        name="testvm.20250726T1531_vda",
+        path=target.path / "testvm.20250726T1531_vda.qcow2",
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
+    ):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "delete",
+            wraps=mock_factory._bitmap_backup_provider.delete,
+        ) as delete_spy:
+            result = core.reconcile()
+
+    assert delete_spy.called, "provider.delete() should be called for orphan file"
+    assert result["testvm"].orphan_files_removed == 1
+
+
+def test_reconcile_orphan_files_dry_run(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() in dry-run reports orphan files but does NOT delete them."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    orphan_backup = SnapshotInfo(
+        name="testvm.20250726T1531_vda",
+        path=target.path / "testvm.20250726T1531_vda.qcow2",
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
+    ):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "delete",
+            wraps=mock_factory._bitmap_backup_provider.delete,
+        ) as delete_spy:
+            result = core.reconcile()
+
+    assert not delete_spy.called, "provider.delete() should NOT be called in dry-run"
+    assert result["testvm"].orphan_files_removed == 1
+
+
+def test_reconcile_skips_non_qsnap_files_on_target(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """reconcile() does NOT delete .qcow2 files that don't match qsnap pattern."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # A non-qsnap file on the target.
+    non_qsnap = SnapshotInfo(
+        name="my-backup",
+        path=target.path / "my-backup.qcow2",
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=[non_qsnap]
+    ):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "delete",
+            wraps=mock_factory._bitmap_backup_provider.delete,
+        ) as delete_spy:
+            with caplog.at_level(logging.WARNING):
+                result = core.reconcile()
+
+    assert not delete_spy.called, "Non-qsnap file should NOT be deleted"
+    assert result["testvm"].orphan_files_removed == 0
+    assert any("not qsnap pattern" in r.message for r in caplog.records), (
+        "Should log WARNING about non-qsnap file"
+    )
+
+
+def test_reconcile_orphan_files_no_false_positives(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """reconcile() does NOT delete files that ARE tracked in state."""
+    target = make_target(path=str(tmp_path / "target"))
+    tmp_path.joinpath("target").mkdir()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # A FULL in state and on disk.
+    full_name = "testvm.FULL.20250725.qcow2"
+    full_path = tmp_path / "target" / full_name
+    full_path.write_text("")
+    full_info = FullBackupInfo(
+        name=full_name,
+        path=full_path,
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [full_info]
+
+    # An incremental tracked in state and on disk.
+    inc_name = "testvm.20250726T1531_vda"
+    inc_path = tmp_path / "target" / f"{inc_name}.qcow2"
+    inc_path.write_text("")
+    mock_state.record_incremental_dependency(
+        str(target.path), inc_name, full_name
+    )
+
+    # provider.list returns both — both are tracked, so no orphans.
+    tracked = [
+        SnapshotInfo(
+            name="testvm.FULL.20250725",
+            path=full_path,
+            timestamp=datetime.now(),
+            allocation=0,
+        ),
+        SnapshotInfo(
+            name=inc_name,
+            path=inc_path,
+            timestamp=datetime.now(),
+            allocation=0,
+        ),
+    ]
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=tracked
+    ):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "delete",
+            wraps=mock_factory._bitmap_backup_provider.delete,
+        ) as delete_spy:
+            result = core.reconcile()
+
+    assert not delete_spy.called, "Tracked files should NOT be deleted"
+    assert result["testvm"].orphan_files_removed == 0
+
+
+def test_reconcile_orphan_files_non_fatal_on_error(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() continues if provider.list() raises an exception."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list",
+        side_effect=OSError("target directory not accessible"),
+    ):
+        result = core.reconcile()
+
+    # Error recorded, no exception raised.
+    assert len(result["testvm"].errors) > 0
+    assert any("orphan files" in e for e in result["testvm"].errors)
+    assert result["testvm"].orphan_files_removed == 0
+
+
+def test_reconcile_removes_orphan_snapshot_files(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """reconcile() deletes .qcow2 files in snapshot_dir not tracked in state."""
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir()
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target], snapshot_dir=snapshot_dir)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Create an orphan snapshot file (not in state).
+    orphan_file = snapshot_dir / "testvm.20250726T1531_vda.qcow2"
+    orphan_file.write_text("")
+
+    # Ensure provider.list returns empty (no orphans on target).
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=[]
+    ):
+        with patch.object(
+            mock_shell, "run", wraps=mock_shell.run,
+        ) as shell_spy:
+            result = core.reconcile()
+
+    # rm -f was called for the orphan snapshot file.
+    rm_calls = [
+        call for call in shell_spy.call_args_list
+        if "rm" in " ".join(call[0][0]) and "testvm.20250726T1531_vda" in " ".join(call[0][0])
+    ]
+    assert len(rm_calls) > 0, "rm -f should be called for orphan snapshot file"
+    assert result["testvm"].orphan_files_removed >= 1
+
+
+def test_reconcile_orphan_files_after_phantom_cleanup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """reconcile() removes phantom FULL from state, then deletes orphan
+    incremental files left on disk (bidirectional cleanup)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Phantom FULL: in state but file doesn't exist on disk.
+    phantom_full = FullBackupInfo(
+        name="testvm.FULL.20250725.qcow2",
+        path=Path("/nonexistent/testvm.FULL.20250725.qcow2"),
+        timestamp=datetime.now(),
+        bucket_level="monthly",
+    )
+    mock_state._full_backups[str(target.path)] = [phantom_full]
+    # Record an incremental dependency for the phantom FULL.
+    mock_state.record_incremental_dependency(
+        str(target.path),
+        "testvm.20250726T1531_vda",
+        "testvm.FULL.20250725.qcow2",
+    )
+
+    # provider.list returns the orphan incremental file (FULL is gone).
+    orphan_inc = SnapshotInfo(
+        name="testvm.20250726T1531_vda",
+        path=target.path / "testvm.20250726T1531_vda.qcow2",
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    with patch.object(
+        mock_factory._bitmap_backup_provider, "list", return_value=[orphan_inc]
+    ):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "delete",
+            wraps=mock_factory._bitmap_backup_provider.delete,
+        ) as delete_spy:
+            result = core.reconcile()
+
+    # Phantom FULL removed from state.
+    remaining = mock_state.get_full_backups(str(target.path))
+    assert len(remaining) == 0, "Phantom FULL should be removed"
+    assert result["testvm"].phantom_fulls_removed == 1
+    # Orphan incremental file deleted from disk.
+    assert delete_spy.called, "Orphan incremental should be deleted"
+    assert result["testvm"].orphan_files_removed == 1

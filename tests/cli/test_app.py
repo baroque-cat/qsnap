@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from qsnap.cli.app import build_argparser, main
+from qsnap.cli import commands as cli_commands
+from qsnap.cli.app import _DISPATCH, build_argparser, main
 from qsnap.cli.errors import EXIT_LOCKFILE, EXIT_PARSE, EXIT_SUCCESS
 from qsnap.core import PipelineResult, VMRunResult
 from tests.mocks import MockConfigFacade
@@ -263,3 +264,12 @@ def test_estimate_subcommand_with_multiple_vms(cli_app):
     ns = cli_app.parse_args(["estimate", "vm1", "vm2"])
     assert ns.command == "estimate"
     assert ns.vm == ["vm1", "vm2"]
+
+
+# ── dispatch map entry tests ─────────────────────────────────────────────
+
+
+def test_reconcile_dispatch_map_entry():
+    """Verify 'reconcile' key exists in _DISPATCH and maps to commands.handle_reconcile."""
+    assert "reconcile" in _DISPATCH
+    assert _DISPATCH["reconcile"] is cli_commands.handle_reconcile

@@ -1680,9 +1680,10 @@ def test_ghost_retention_info_log(
     mock_state,
     mock_shell,
     caplog,
+    tmp_path,
 ):
     """Verify [delete] ghost-retained info log is emitted for ghost retention."""
-    target = make_target(target_preserve="0h")
+    target = make_target(target_preserve="0h", path=str(tmp_path))
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1707,6 +1708,12 @@ def test_ghost_retention_info_log(
     # Pre-populate state: FULL with dependent incremental.
     mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    # Create the FULL file on disk so startup validation does not
+    # remove it as a phantom before ghost retention can run.
+    full_path = tmp_path / full_name
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.touch()
 
     backups = [
         SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),

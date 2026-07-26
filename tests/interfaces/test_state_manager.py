@@ -185,9 +185,11 @@ def test_istate_manager_backup_allocation_methods_abstract():
     abstract_methods = IStateManager.__abstractmethods__
     assert "get_last_backup_allocation" in abstract_methods
     assert "set_last_backup_allocation" in abstract_methods
+    assert "clear_last_backup_allocation" in abstract_methods
+    assert "remove_all_incremental_dependencies" in abstract_methods
 
-    # A subclass that implements everything EXCEPT the two backup allocation
-    # methods must fail to instantiate.
+    # A subclass that implements everything EXCEPT the backup allocation
+    # methods and the bulk dependency removal method must fail to instantiate.
     class _MissingBackupAlloc(IStateManager):
         def get_last_allocation(self, vm_name): ...
         def set_last_allocation(self, vm_name, alloc): ...
@@ -241,3 +243,186 @@ def test_json_manager_implements_backup_allocation(tmp_path):
 
     # Missing target returns None.
     assert mgr.get_last_backup_allocation("/nonexistent") is None
+
+
+# ── clear_last_backup_allocation contract ───────────────────────────────
+
+
+def test_istate_manager_clear_allocation_abstract():
+    """clear_last_backup_allocation is abstract on IStateManager.
+
+    A subclass missing only this method must fail to instantiate with
+    TypeError because the ABC enforces all abstract methods.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "clear_last_backup_allocation" in abstract_methods
+
+    # A subclass that implements everything EXCEPT clear_last_backup_allocation
+    # must fail to instantiate.
+    class _MissingClearBackupAlloc(IStateManager):
+        def get_last_allocation(self, vm_name): ...
+        def set_last_allocation(self, vm_name, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, bucket_level): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path): ...
+        def set_last_backup_allocation(self, target_path, alloc): ...
+        def remove_all_incremental_dependencies(self, target_path, full_name): ...
+
+    with pytest.raises(TypeError):
+        _MissingClearBackupAlloc()
+
+
+def test_istate_manager_remove_all_deps_abstract():
+    """remove_all_incremental_dependencies is abstract on IStateManager.
+
+    A subclass missing only this method must fail to instantiate with
+    TypeError because the ABC enforces all abstract methods.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "remove_all_incremental_dependencies" in abstract_methods
+
+    # A subclass that implements everything EXCEPT
+    # remove_all_incremental_dependencies must fail to instantiate.
+    class _MissingRemoveAllDeps(IStateManager):
+        def get_last_allocation(self, vm_name): ...
+        def set_last_allocation(self, vm_name, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, bucket_level): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path): ...
+        def set_last_backup_allocation(self, target_path, alloc): ...
+        def clear_last_backup_allocation(self, target_path): ...
+
+    with pytest.raises(TypeError):
+        _MissingRemoveAllDeps()
+
+
+def test_inmemory_implements_clear_allocation():
+    """InMemoryStateManager implements clear_last_backup_allocation, returns bool."""
+    mgr = InMemoryStateManager()
+
+    # Verify method exists and is callable.
+    assert callable(mgr.clear_last_backup_allocation)
+
+    # Verify it works correctly — clearing an existing entry returns True.
+    mgr.set_last_backup_allocation("/mnt/backup/test", 5000)
+    result = mgr.clear_last_backup_allocation("/mnt/backup/test")
+    assert isinstance(result, bool)
+    assert result is True
+
+    # Verify the entry was actually removed.
+    assert mgr.get_last_backup_allocation("/mnt/backup/test") is None
+
+    # Clearing a non-existent entry returns False.
+    result2 = mgr.clear_last_backup_allocation("/nonexistent")
+    assert isinstance(result2, bool)
+    assert result2 is False
+
+
+def test_json_implements_clear_allocation(tmp_path):
+    """JsonStateManager implements clear_last_backup_allocation, returns bool."""
+    mgr = JsonStateManager(state_dir=tmp_path)
+
+    # Verify method exists and is callable.
+    assert callable(mgr.clear_last_backup_allocation)
+
+    # Verify it works correctly — clearing an existing entry returns True.
+    mgr.set_last_backup_allocation("/mnt/backup/test", 5000)
+    result = mgr.clear_last_backup_allocation("/mnt/backup/test")
+    assert isinstance(result, bool)
+    assert result is True
+
+    # Verify the entry was actually removed.
+    assert mgr.get_last_backup_allocation("/mnt/backup/test") is None
+
+    # Clearing a non-existent entry returns False.
+    result2 = mgr.clear_last_backup_allocation("/nonexistent")
+    assert isinstance(result2, bool)
+    assert result2 is False
+
+
+def test_inmemory_implements_remove_all_deps():
+    """InMemoryStateManager implements remove_all_incremental_dependencies, returns int."""
+    mgr = InMemoryStateManager()
+
+    # Verify method exists and is callable.
+    assert callable(mgr.remove_all_incremental_dependencies)
+
+    # Record some dependencies and verify remove_all returns the correct count.
+    mgr.record_incremental_dependency("/target", "inc1", "full1")
+    mgr.record_incremental_dependency("/target", "inc2", "full1")
+    mgr.record_incremental_dependency("/target", "inc3", "full1")
+
+    result = mgr.remove_all_incremental_dependencies("/target", "full1")
+    assert isinstance(result, int)
+    assert result == 3
+
+    # Verify dependencies were actually removed.
+    remaining = mgr.get_incremental_dependencies("/target", "full1")
+    assert remaining == []
+
+    # Removing all deps for a non-existent full backup returns 0.
+    result2 = mgr.remove_all_incremental_dependencies("/target", "nonexistent")
+    assert isinstance(result2, int)
+    assert result2 == 0
+
+    # Removing all deps for a non-existent target returns 0.
+    result3 = mgr.remove_all_incremental_dependencies("/nonexistent_tgt", "full1")
+    assert isinstance(result3, int)
+    assert result3 == 0
+
+
+def test_json_implements_remove_all_deps(tmp_path):
+    """JsonStateManager implements remove_all_incremental_dependencies, returns int."""
+    mgr = JsonStateManager(state_dir=tmp_path)
+
+    # Verify method exists and is callable.
+    assert callable(mgr.remove_all_incremental_dependencies)
+
+    # Record some dependencies and verify remove_all returns the correct count.
+    mgr.record_incremental_dependency("/target", "inc1", "full1")
+    mgr.record_incremental_dependency("/target", "inc2", "full1")
+    mgr.record_incremental_dependency("/target", "inc3", "full1")
+
+    result = mgr.remove_all_incremental_dependencies("/target", "full1")
+    assert isinstance(result, int)
+    assert result == 3
+
+    # Verify dependencies were actually removed.
+    remaining = mgr.get_incremental_dependencies("/target", "full1")
+    assert remaining == []
+
+    # Removing all deps for a non-existent full backup returns 0.
+    result2 = mgr.remove_all_incremental_dependencies("/target", "nonexistent")
+    assert isinstance(result2, int)
+    assert result2 == 0
+
+    # Removing all deps for a non-existent target returns 0.
+    result3 = mgr.remove_all_incremental_dependencies("/nonexistent_tgt", "full1")
+    assert isinstance(result3, int)
+    assert result3 == 0

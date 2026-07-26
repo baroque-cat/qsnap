@@ -34,6 +34,7 @@ _DISPATCH: dict[str, object] = {
     "list": commands.handle_list,
     "stats": commands.handle_stats,
     "check": commands.handle_check,
+    "reconcile": commands.handle_reconcile,
     "restore": commands.handle_restore,
     "estimate": commands.handle_estimate,
     "fork": commands.handle_fork,
@@ -162,6 +163,26 @@ def build_argparser() -> argparse.ArgumentParser:
         "--state",
         action="store_true",
         help="Verify consistency between persisted state and filesystem",
+    )
+
+    # reconcile subcommand
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Repair state-vs-disk inconsistencies",
+    )
+    reconcile_parser.add_argument("vm", nargs="*", help="VM name(s) to filter")
+    reconcile_parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show what would be fixed without making changes",
+    )
+    reconcile_parser.add_argument(
+        "--format",
+        default=argparse.SUPPRESS,
+        choices=["table", "long", "raw"],
+        help="Output format: table (default), long, raw",
     )
 
     # restore subcommand

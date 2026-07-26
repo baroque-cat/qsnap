@@ -537,3 +537,33 @@ class JsonStateManager(IStateManager):
         entry["last_backup_allocation"] = alloc
         data[target_path] = entry
         self._save_target_state(data)
+
+    def clear_last_backup_allocation(self, target_path: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+
+        Returns ``True`` if an entry was found and removed, ``False``
+        if no matching entry existed.
+        """
+        data = self._load_target_state()
+        if target_path not in data:
+            return False
+        del data[target_path]
+        self._save_target_state(data)
+        return True
+
+    def remove_all_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> int:
+        """Remove ALL incremental dependencies linked to *full_name*.
+
+        Returns the count of removed dependency entries.
+        """
+        data = self._load_dependencies()
+        target_deps = data.get(target_path, {})
+        if full_name not in target_deps:
+            return 0
+        count = len(target_deps[full_name])
+        del target_deps[full_name]
+        data[target_path] = target_deps
+        self._save_dependencies(data)
+        return count

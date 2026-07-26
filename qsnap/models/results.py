@@ -328,6 +328,29 @@ class StateCheckResult:
     orphan_checkpoints: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
 
+# ── State reconciliation ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Outcome of state reconciliation for a single VM.
+
+    Reports counts of items actively fixed by ``Core.reconcile()``.
+    Unlike :class:`StateCheckResult` (read-only), reconcile deletes
+    stale state entries, clears stale baselines, and deletes orphaned
+    checkpoints.
+    """
+
+    vm_name: str
+    phantom_snapshots_removed: int = 0
+    phantom_fulls_removed: int = 0
+    stale_deps_removed: int = 0
+    baselines_cleared: int = 0
+    orphan_checkpoints_deleted: int = 0
+    orphan_files_removed: int = 0
+    errors: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+
+
 # ── Action audit trail ───────────────────────────────────────────────────
 
 
