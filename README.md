@@ -17,7 +17,8 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 - **Config validation** — rejects all-zero retention buckets when backup targets are configured
 - **Schedule preview** — `--print-schedule` / `-S` simulates retention against synthetic timestamps
 - **Backing chain integrity** — automatic `blockcommit` or `qemu-img commit` to merge old snapshots
-- **Stale state self-healing** — automatically cleans up state entries for already-blockcommitted snapshots and externally-deleted FULL backups
+- **Stale state self-healing** — automatically cleans up state entries for already-blockcommitted snapshots and externally-deleted FULL backups (phantom entries). Runs at pipeline startup before the onchange gate
+- **State reconciliation** — `qsnap reconcile` actively repairs state-vs-disk inconsistencies in both directions: removes phantom state entries (file missing on disk) AND deletes orphan files on disk (not tracked in state). Supports `--dry-run` preview
 - **Lock-conflict retry** — snapshot creation retries up to 3 times with exponential backoff on libvirt lock conflicts
 - **NBD job cleanup** — `virsh domjobabort` ensures NBD backup jobs are terminated even on failure
 - **Deferred operations** — AppArmor/SELinux-blocked blockcommits queued and retried on VM shutdown
@@ -116,6 +117,7 @@ qsnap prune debiantest       # retention + cleanup only
 | `qsnap list config` | Show parsed VM configurations |
 | `qsnap stats [vm]` | Show snapshot/backup counts and sizes |
 | `qsnap check [vm]` | Verify backing-chain integrity (`--deep` for corruption check, `--state` for state consistency audit) |
+| `qsnap reconcile [vm]` | Actively repair state-vs-disk inconsistencies: remove phantom entries, delete orphan files, clean orphaned checkpoints (`--dry-run` to preview) |
 | `qsnap restore <name> <dir> [vm]` | Restore a backup chain to a directory |
 | `qsnap fork <snapshot> --as-vm <name>` | Create a standalone VM from a snapshot or backup |
 | `qsnap deploy <backup> --as-vm <name>` | Deploy a backup as a standalone VM |
@@ -167,7 +169,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
 | `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). `true` optimizes for HDDs; `false` for in-order writes. Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
-| `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when the VM disk allocation hasn't changed since the last backup to this target). Inherits from global → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when all snapshots are already backed up to this target — compares snapshot names in state against backup files on target via `provider.list()`). Inherits from global → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
 | `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
 | `full_verify_before_delete` | string | `"check"` | FULL verification before cascade-deletion: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
@@ -205,7 +207,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
 | `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
-| `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when disk allocation unchanged). Inherits from global → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when all snapshots are already backed up to this target). Inherits from global → target |
 
 ## Retention Policy Guide
 
@@ -437,7 +439,7 @@ Bitmap mode has several inherent constraints due to its NBD/checkpoint architect
 - **Single-disk only** — only the first disk target (via `get_first_disk_target`) is pulled through the NBD export. Multi-disk VMs are not fully covered by bitmap backups.
 - **Incrementals are uncompressed** — qcow2 compressed clusters can only be produced by `qemu-img convert`; the dirty-block copy loop writes via random-access `pwrite`. `compress` / `compression_type` still apply to FULL backups (where the bulk of the bytes are). Because an incremental is proportional to dirtied data, the capacity impact is minor.
 - **`verify="metadata"` recommended** — `verify="hash"` and `verify="full"` are supported: both run `qemu-img compare -q --force-share` to compare the source snapshot chain against the FULL+delta chain (chain-traversing, meaningful now that deltas are backing-chained). On a running VM the comparison carries a reliability caveat (the guest may write during the compare), so `"metadata"` remains the default.
-- **Checkpoints live in libvirt, not in state files** — bitmap mode creates libvirt checkpoints (atomically via the checkpoint XML argument of `virsh backup-begin`) that track dirty-bitmap boundaries. These are stored by libvirt, not in qsnap's JSON state. Use `qsnap check --state` to detect orphaned checkpoints (checkpoints whose target no longer matches any configured target path), and `virsh checkpoint-delete --metadata` to clean them up.
+- **Checkpoints live in libvirt, not in state files** — bitmap mode creates libvirt checkpoints (atomically via the checkpoint XML argument of `virsh backup-begin`) that track dirty-bitmap boundaries. These are stored by libvirt, not in qsnap's JSON state. Use `qsnap check --state` to detect orphaned checkpoints (checkpoints whose target no longer matches any configured target path), and `qsnap reconcile` to automatically delete them.
 
 ### `compress` and `compression_type`
 
@@ -517,6 +519,69 @@ Unlike incremental backups (which are verified against their source via `verify_
 ### Phantom FULL Detection
 
 Before making bucket-driven FULL creation decisions, qsnap verifies that every FULL in state actually exists on disk. Phantom FULLs (deleted externally but still recorded in state) are automatically removed from state with a WARNING. This prevents phantom entries from blocking legitimate FULL creation.
+
+## State Self-Healing
+
+qsnap provides three levels of state-vs-disk consistency management, from passive audit to active repair:
+
+### 1. Read-Only Audit: `qsnap check --state`
+
+Detects and reports inconsistencies **without fixing anything**:
+
+- Phantom snapshots (state has entry, file missing on disk)
+- Phantom FULLs (state has entry, file missing on disk)
+- Stale incremental dependencies (dep record exists, file missing)
+- Corrupt state JSON files
+- Orphaned libvirt checkpoints (checkpoint target hash matches no configured target)
+
+Output is a summary table with per-VM status flags. Use this to assess state health before making changes.
+
+### 2. Automatic Self-Healing (Pipeline Startup)
+
+Every `qsnap run`, `qsnap snapshot`, and `qsnap backup` invocation runs `_validate_state_at_startup()` **before** the onchange gate and backup transfer. This is non-fatal (logs warnings, never raises) and handles:
+
+| What | Direction | Action |
+|---|---|---|
+| Phantom FULLs | state → disk | Remove FULL record + cascade-clean all linked incremental dependencies |
+| Stale baselines | state → disk | Clear `last_backup_allocation` when no FULLs remain for a target |
+
+This ensures the onchange gate sees correct state — phantom entries don't block legitimate FULL creation, and stale baselines don't confuse future runs. Orphaned checkpoints and orphan files on disk are **not** cleaned at startup (only `reconcile` does that).
+
+### 3. Active Repair: `qsnap reconcile`
+
+The `reconcile` command actively repairs **both directions** of state-vs-disk inconsistency:
+
+| Step | Direction | What it does |
+|---|---|---|
+| 1. Phantom snapshots | state → disk | Remove snapshot records whose files are missing |
+| 2. Phantom FULLs | state → disk | Remove FULL records + cascade-clean incremental dependencies |
+| 3. Stale baselines | state → disk | Clear `last_backup_allocation` when no FULLs remain |
+| 4. Stale deps | state → disk | Remove incremental dependency records whose files are missing |
+| 5. Orphan checkpoints | disk → state | Delete libvirt checkpoints whose target hash matches no configured target (`virsh checkpoint-delete --metadata`) |
+| 6. Orphan files on target | disk → state | Delete `.qcow2` files on target not tracked in state (matching qsnap naming pattern only) |
+| 7. Orphan snapshot files | disk → state | Delete `.qcow2` files in snapshot_dir not tracked in state |
+
+```bash
+# Preview what would be fixed (no changes made)
+qsnap reconcile --dry-run
+
+# Repair all VMs
+qsnap reconcile
+
+# Repair a specific VM
+qsnap reconcile myvm
+
+# Long-format output
+qsnap reconcile --format long
+```
+
+**Non-qsnap files** (`.qcow2` files on target that don't match the `{vm_name}.*` pattern) are **not** deleted — a WARNING is logged and the file is skipped.
+
+**When to use reconcile:**
+- After manually deleting backup files from the target
+- After a crash between backup transfer and state recording (file on disk, not in state)
+- After removing a VM or target from the config (orphaned checkpoints)
+- Periodically as part of maintenance (e.g., weekly cron)
 
 ## `--force-share` Safety Classification
 
@@ -831,28 +896,27 @@ Bitmap mode creates libvirt checkpoints to track dirty-block boundaries. A check
 qsnap check --state
 ```
 
-The state consistency audit now includes an "Orphaned Checkpoints" section listing any checkpoints whose `qsnap-{hash}-` naming prefix does not match a configured target's hash. The `orphan_ckpts` column in the summary table shows the count per VM.
+The state consistency audit includes an "Orphaned Checkpoints" section listing any checkpoints whose `qsnap-{hash}-` naming prefix does not match a configured target's hash. The `orphan_ckpts` column in the summary table shows the count per VM.
 
 **Cleanup:**
 
-Orphaned checkpoints are not deleted automatically (detection only, to prevent accidental data loss). Remove them manually:
-
 ```bash
-# List all checkpoints for a VM
-virsh checkpoint-list --domain <vm> --name
+# Automatic cleanup via reconcile (recommended)
+qsnap reconcile [vm]
 
-# Delete a specific orphaned checkpoint (metadata-only — no data merge)
+# Or delete manually
+virsh checkpoint-list --domain <vm> --name
 virsh checkpoint-delete --domain <vm> <checkpoint-name> --metadata
 ```
 
-The `--metadata` flag removes the checkpoint definition without merging its dirty-bitmap data back into the active disk. This is safe for orphaned checkpoints because their data is no longer referenced by any qsnap-managed backup.
+`qsnap reconcile` detects and deletes orphaned checkpoints via `virsh checkpoint-delete --metadata` in a single pass. Use `--dry-run` to preview before making changes. The `--metadata` flag removes the checkpoint definition without merging its dirty-bitmap data back into the active disk — safe for orphaned checkpoints because their data is no longer referenced by any qsnap-managed backup.
 
 ### Broken Incremental Backups (Pre-Fix Runs)
 
 Before the `<incremental>` XML fix, bitmap mode incremental backups failed with `error: command 'backup-begin' doesn't support option --incremental`. If you have orphaned checkpoints or failed state entries from these runs:
 
-1. Run `qsnap check --state` to identify orphaned checkpoints.
-2. Delete orphaned checkpoints via `virsh checkpoint-delete --metadata` (see above).
+1. Run `qsnap check --state` to identify orphaned checkpoints and phantom entries.
+2. Run `qsnap reconcile` to automatically delete orphaned checkpoints and clean stale state entries.
 3. The next `qsnap run` will create a fresh checkpoint and resume normal incremental flow.
 
 ## Requirements

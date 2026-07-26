@@ -21,6 +21,7 @@ from qsnap.models.results import (
     CommitResult,
     DeferredBlockcommit,
     FullBackupInfo,
+    ReconcileResult,
     RestoreResult,
     RetentionResult,
     ShellResult,
@@ -314,3 +315,98 @@ def test_action_record_handles_unicode_error():
     assert isinstance(s, str)
     # Sanity: the unicode error text is present in the repr.
     assert "失败 — disk full 💾" in r
+
+
+# ── ReconcileResult ─────────────────────────────────────────────────────────
+
+
+def test_reconcile_result_is_frozen():
+    """ReconcileResult is a frozen dataclass with all required fields and defaults."""
+    result = ReconcileResult(
+        vm_name="testvm",
+        phantom_snapshots_removed=3,
+        phantom_fulls_removed=1,
+        stale_deps_removed=2,
+        baselines_cleared=1,
+        orphan_checkpoints_deleted=0,
+        orphan_files_removed=5,
+        errors=["state file corrupted", "permission denied"],
+    )
+
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.vm_name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.phantom_snapshots_removed = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.phantom_fulls_removed = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.stale_deps_removed = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.baselines_cleared = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.orphan_checkpoints_deleted = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.orphan_files_removed = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.errors = ["mutated"]
+
+    # Verify the exact set of field names.
+    field_names = {f.name for f in dataclasses.fields(ReconcileResult)}
+    assert field_names == {
+        "vm_name",
+        "phantom_snapshots_removed",
+        "phantom_fulls_removed",
+        "stale_deps_removed",
+        "baselines_cleared",
+        "orphan_checkpoints_deleted",
+        "orphan_files_removed",
+        "errors",
+    }
+
+    # Verify field values.
+    assert result.vm_name == "testvm"
+    assert result.phantom_snapshots_removed == 3
+    assert result.phantom_fulls_removed == 1
+    assert result.stale_deps_removed == 2
+    assert result.baselines_cleared == 1
+    assert result.orphan_checkpoints_deleted == 0
+    assert result.orphan_files_removed == 5
+    assert result.errors == ["state file corrupted", "permission denied"]
+
+    # Verify field types via isinstance on the actual values.
+    assert isinstance(result.vm_name, str)
+    assert isinstance(result.phantom_snapshots_removed, int)
+    assert isinstance(result.phantom_fulls_removed, int)
+    assert isinstance(result.stale_deps_removed, int)
+    assert isinstance(result.baselines_cleared, int)
+    assert isinstance(result.orphan_checkpoints_deleted, int)
+    assert isinstance(result.orphan_files_removed, int)
+    assert isinstance(result.errors, list)
+
+
+def test_reconcile_result_defaults_and_equality():
+    """ReconcileResult can be constructed with only vm_name; defaults are zero/empty."""
+    result = ReconcileResult(vm_name="defaults-test")
+
+    # Verify default values.
+    assert result.phantom_snapshots_removed == 0
+    assert result.phantom_fulls_removed == 0
+    assert result.stale_deps_removed == 0
+    assert result.baselines_cleared == 0
+    assert result.orphan_checkpoints_deleted == 0
+    assert result.orphan_files_removed == 0
+    assert result.errors == []  # empty list, not None
+
+    # Two instances with same args are equal.
+    a = ReconcileResult(vm_name="eq-test")
+    b = ReconcileResult(vm_name="eq-test")
+    assert a == b
+    assert not (a != b)  # __eq__ and __ne__ are consistent
+
+    # Two instances with different vm_name are not equal.
+    c = ReconcileResult(vm_name="other")
+    assert a != c

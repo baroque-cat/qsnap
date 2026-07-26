@@ -1121,7 +1121,7 @@ def test_phantom_full_detected_removed_from_state(
     mock_state,
     mock_shell,
 ):
-    """FULL in state but file doesn't exist on disk → remove_full_backup() called."""
+    """FULL in state but file doesn't exist on disk → cascaded cleanup (design D2)."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(target_preserve="7d")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -1144,12 +1144,29 @@ def test_phantom_full_detected_removed_from_state(
         "monthly",
     )
 
+    # Record incremental dependencies for cascade cleanup verification
+    mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", phantom_full_name)
+    mock_state.record_incremental_dependency(str(target.path), "inc2.qcow2", phantom_full_name)
+
+    # Set a last_backup_allocation to verify it gets cleared when no FULLs remain
+    mock_state.set_last_backup_allocation(str(target.path), 1048576)
+
     with (
         patch.object(
             mock_state,
             "remove_full_backup",
             wraps=mock_state.remove_full_backup,
         ) as remove_spy,
+        patch.object(
+            mock_state,
+            "remove_all_incremental_dependencies",
+            wraps=mock_state.remove_all_incremental_dependencies,
+        ) as cascade_spy,
+        patch.object(
+            mock_state,
+            "clear_last_backup_allocation",
+            wraps=mock_state.clear_last_backup_allocation,
+        ) as clear_baseline_spy,
         patch("qsnap.core.os.path.exists", return_value=False),
         patch("qsnap.core.verify_full_backup", return_value=None),
     ):
@@ -1158,6 +1175,22 @@ def test_phantom_full_detected_removed_from_state(
     assert remove_spy.called, "remove_full_backup should be called for phantom FULL"
     assert remove_spy.call_args[0] == (str(target.path), phantom_full_name), (
         f"remove_full_backup called incorrectly: {remove_spy.call_args[0]}"
+    )
+
+    # Cascade cleanup: remove_all_incremental_dependencies called for the phantom FULL
+    assert cascade_spy.called, (
+        "remove_all_incremental_dependencies should be called (cascade cleanup)"
+    )
+    assert cascade_spy.call_args[0] == (str(target.path), phantom_full_name), (
+        f"remove_all_incremental_dependencies called for wrong FULL: {cascade_spy.call_args[0]}"
+    )
+
+    # When the last/only FULL is removed, clear_last_backup_allocation is called
+    assert clear_baseline_spy.called, (
+        "clear_last_backup_allocation should be called when no FULLs remain"
+    )
+    assert clear_baseline_spy.call_args[0] == (str(target.path),), (
+        f"clear_last_backup_allocation called with wrong target: {clear_baseline_spy.call_args[0]}"
     )
 
 
@@ -1196,18 +1229,29 @@ def test_all_fulls_exist_no_phantom_cleanup(
         "daily",
     )
 
+    # Record incremental dependencies to verify they are NOT cascade-cleaned
+    mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", full_name)
+
     with (
         patch.object(
             mock_state,
             "remove_full_backup",
             wraps=mock_state.remove_full_backup,
         ) as remove_spy,
+        patch.object(
+            mock_state,
+            "remove_all_incremental_dependencies",
+            wraps=mock_state.remove_all_incremental_dependencies,
+        ) as cascade_spy,
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
     assert not remove_spy.called, (
         "remove_full_backup should NOT be called when all FULLs exist on disk"
+    )
+    assert not cascade_spy.called, (
+        "remove_all_incremental_dependencies should NOT be called when all FULLs exist on disk"
     )
 
 

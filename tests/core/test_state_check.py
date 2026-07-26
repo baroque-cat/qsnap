@@ -6,11 +6,13 @@ phantom FULLs, stale dependencies, and corrupt state files.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from qsnap.core import Core
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_check_state_all_snapshots_exist_clean ─────────────────────────
@@ -575,3 +577,218 @@ def test_check_state_result_empty_orphans():
     assert result.phantom_fulls == []
     assert result.stale_deps == []
     assert result.corrupt_files == []
+
+
+# ── test_detect_orphan_checkpoints_no_auto_cleanup_by_default ─────────────
+
+
+def test_detect_orphan_checkpoints_no_auto_cleanup_by_default(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Call _detect_orphan_checkpoints() without auto_cleanup parameter.
+
+    Orphan checkpoints are detected/reported but no virsh checkpoint-delete
+    commands are executed.
+    """
+    import hashlib
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup" / "existing"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Compute hash of a "deleted" target path (not in vm.targets)
+    orphan_hash = hashlib.md5(b"/nonexistent/deleted/target").hexdigest()[:8]
+    orphan_cp = f"qsnap-{orphan_hash}-snap1"
+
+    # Hash of the current target
+    current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [orphan_cp]
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: current_hash
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    # Spy on shell.run to verify no checkpoint-delete is called
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        orphans = core._detect_orphan_checkpoints(vm)
+
+    # Orphan is detected
+    assert orphan_cp in orphans
+
+    # Verify NO virsh checkpoint-delete commands were executed
+    checkpoint_delete_calls = [
+        c for c in run_spy.call_args_list
+        if "checkpoint-delete" in " ".join(c[0][0])
+    ]
+    assert len(checkpoint_delete_calls) == 0, (
+        f"No virsh checkpoint-delete should be called without auto_cleanup, "
+        f"got {len(checkpoint_delete_calls)} calls"
+    )
+
+
+# ── test_detect_orphan_checkpoints_auto_cleanup_deletes ───────────────────
+
+
+def test_detect_orphan_checkpoints_auto_cleanup_deletes(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Call _detect_orphan_checkpoints(auto_cleanup=True).
+
+    Orphan checkpoints are detected and virsh checkpoint-delete commands
+    are executed via mock_shell for each orphan. Success is logged.
+    """
+    import hashlib
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup" / "existing"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Two orphan checkpoints from a deleted target
+    orphan_hash = hashlib.md5(b"/nonexistent/deleted/target").hexdigest()[:8]
+    current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+    orphan_cp1 = f"qsnap-{orphan_hash}-snap1"
+    orphan_cp2 = f"qsnap-{orphan_hash}-snap2"
+
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [
+        orphan_cp1, orphan_cp2,
+    ]
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: current_hash
+
+    # Register expectation for checkpoint-delete to succeed
+    mock_shell.expect("checkpoint-delete").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    caplog.set_level(logging.INFO)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        orphans = core._detect_orphan_checkpoints(vm, auto_cleanup=True)
+
+    # Both orphans detected
+    assert orphan_cp1 in orphans
+    assert orphan_cp2 in orphans
+    assert len(orphans) == 2
+
+    # Verify virsh checkpoint-delete was called for each orphan
+    checkpoint_delete_calls = [
+        c for c in run_spy.call_args_list
+        if "checkpoint-delete" in " ".join(c[0][0])
+    ]
+    assert len(checkpoint_delete_calls) == 2, (
+        f"Should have 2 checkpoint-delete calls, got {len(checkpoint_delete_calls)}"
+    )
+
+    # Verify success was logged for each orphan
+    info_logs = [r for r in caplog.records if r.levelno == logging.INFO]
+    deleted_logs = [
+        r for r in info_logs if "deleted orphan checkpoint" in r.message
+    ]
+    assert len(deleted_logs) == 2, (
+        f"Should have 2 INFO logs about deleted orphan checkpoint, "
+        f"got {len(deleted_logs)}"
+    )
+
+
+# ── test_detect_orphan_checkpoints_auto_cleanup_non_fatal ─────────────────
+
+
+def test_detect_orphan_checkpoints_auto_cleanup_non_fatal(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Call _detect_orphan_checkpoints(auto_cleanup=True) with failing shell.
+
+    When virsh checkpoint-delete fails, the failure is logged as WARNING
+    but does not raise an exception. The method continues processing other
+    orphans.
+    """
+    import hashlib
+
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+
+    target_path = tmp_path / "backup" / "existing"
+    target_path.mkdir(parents=True)
+    target = make_target(path=str(target_path))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Two orphan checkpoints from a deleted target
+    orphan_hash = hashlib.md5(b"/nonexistent/deleted/target").hexdigest()[:8]
+    current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
+    orphan_cp1 = f"qsnap-{orphan_hash}-snap1"
+    orphan_cp2 = f"qsnap-{orphan_hash}-snap2"
+
+    mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [
+        orphan_cp1, orphan_cp2,
+    ]
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: current_hash
+
+    # Register expectation for checkpoint-delete to FAIL
+    mock_shell.expect("checkpoint-delete").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="checkpoint not found",
+            returncode=1,
+            error="Domain checkpoint not found",
+        )
+    )
+
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    caplog.set_level(logging.WARNING)
+
+    # Must NOT raise
+    orphans = core._detect_orphan_checkpoints(vm, auto_cleanup=True)
+
+    assert orphan_cp1 in orphans
+    assert orphan_cp2 in orphans
+    assert len(orphans) == 2
+
+    # Both deletion attempts should fail and log WARNING
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    failed_delete_logs = [
+        r for r in warnings if "failed to delete orphan checkpoint" in r.message
+    ]
+    assert len(failed_delete_logs) == 2, (
+        f"Should have 2 WARNING logs about failed deletion, "
+        f"got {len(failed_delete_logs)}"
+    )
+
+    # Verify no CRITICAL or ERROR logs (non-fatal)
+    critical_or_error = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR
+    ]
+    assert len(critical_or_error) == 0, (
+        f"Should not have CRITICAL/ERROR logs, got {len(critical_or_error)}"
+    )

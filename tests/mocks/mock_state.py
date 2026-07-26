@@ -176,3 +176,28 @@ class InMemoryStateManager(IStateManager):
     def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
         """Record the last backup allocation for *target_path*."""
         self._target_state[target_path] = alloc
+
+    def clear_last_backup_allocation(self, target_path: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+
+        Returns ``True`` if an entry was found and removed, ``False``
+        if no matching entry existed.
+        """
+        if target_path not in self._target_state:
+            return False
+        del self._target_state[target_path]
+        return True
+
+    def remove_all_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> int:
+        """Remove ALL incremental dependencies linked to *full_name*.
+
+        Returns the count of removed dependency entries.
+        """
+        deps = self._dependencies.get(target_path, {})
+        if full_name not in deps:
+            return 0
+        count = len(deps[full_name])
+        del deps[full_name]
+        return count

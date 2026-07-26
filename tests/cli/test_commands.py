@@ -24,6 +24,7 @@ from qsnap.cli.commands import (
     handle_list,
     handle_list_deferred,
     handle_prune,
+    handle_reconcile,
     handle_restore,
     handle_run,
     handle_snapshot,
@@ -36,6 +37,7 @@ from qsnap.models.results import (
     ActionRecord,
     CheckResult,
     DeferredSummary,
+    ReconcileResult,
     RestoreResult,
     SnapshotInfo,
 )
@@ -949,3 +951,53 @@ def test_deploy_command_storage_and_add_to_config_flags(cli_app):
         vm_filter=None,
     )
     assert result == EXIT_SUCCESS
+
+
+# ── reconcile subcommand dispatch tests ──────────────────────────────────
+
+
+def test_handle_reconcile_dispatches_to_core():
+    """handle_reconcile calls core.reconcile() with the vm filter."""
+    mock_core = _make_mock_core()
+    mock_core.reconcile.return_value = {}
+    args = Namespace(command="reconcile", vm=[])
+    handle_reconcile(mock_core, args)
+    mock_core.reconcile.assert_called_once_with(None)
+
+
+def test_handle_reconcile_dry_run():
+    """handle_reconcile sets core.dry_run to True before calling core.reconcile()."""
+    mock_core = _make_mock_core()
+    mock_core.reconcile.return_value = {}
+    args = Namespace(command="reconcile", vm=[], dry_run=True)
+    handle_reconcile(mock_core, args)
+    assert mock_core.dry_run is True
+    mock_core.reconcile.assert_called_once_with(None)
+
+
+def test_handle_reconcile_vm_filter():
+    """handle_reconcile passes the VM name filter to core.reconcile()."""
+    mock_core = _make_mock_core()
+    mock_core.reconcile.return_value = {}
+    args = Namespace(command="reconcile", vm=["myvm"])
+    handle_reconcile(mock_core, args)
+    mock_core.reconcile.assert_called_once_with("myvm")
+
+
+def test_handle_reconcile_exit_code():
+    """handle_reconcile returns 0 when no errors, 1 when any VM has errors."""
+    mock_core = _make_mock_core()
+    # (a) no errors → exit 0
+    mock_core.reconcile.return_value = {
+        "vm1": ReconcileResult(vm_name="vm1"),
+    }
+    args = Namespace(command="reconcile", vm=[])
+    result = handle_reconcile(mock_core, args)
+    assert result == 0
+
+    # (b) errors present → exit 1
+    mock_core.reconcile.return_value = {
+        "vm1": ReconcileResult(vm_name="vm1", errors=["disk full"]),
+    }
+    result = handle_reconcile(mock_core, args)
+    assert result == 1

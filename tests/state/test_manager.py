@@ -18,6 +18,7 @@ import pytest
 
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from qsnap.state.json_manager import JsonStateManager
+from tests.mocks.mock_state import InMemoryStateManager
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -1020,3 +1021,142 @@ def test_target_state_json_corrupted_renamed(tmp_path: Path) -> None:
         f"{[f.name for f in broken_files]}"
     )
     assert broken_files[0].name.startswith("_target_state.json.broken.")
+
+
+# ── clear_last_backup_allocation tests ────────────────────────────────
+
+
+def test_clear_backup_allocation_existing(tmp_path: Path) -> None:
+    """clear_last_backup_allocation removes an existing baseline and returns True."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Set a baseline first.
+    manager.set_last_backup_allocation("/path/to/target", 12345)
+    assert manager.get_last_backup_allocation("/path/to/target") == 12345
+
+    # Clear it.
+    result = manager.clear_last_backup_allocation("/path/to/target")
+    assert result is True
+
+    # Verify it's gone.
+    assert manager.get_last_backup_allocation("/path/to/target") is None
+
+
+def test_clear_backup_allocation_nonexistent(tmp_path: Path) -> None:
+    """clear_last_backup_allocation on a target with no baseline returns False."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    result = manager.clear_last_backup_allocation("/nonexistent/target")
+    assert result is False
+
+
+# ── remove_all_incremental_dependencies tests ─────────────────────────
+
+
+def test_remove_all_incremental_deps_existing(tmp_path: Path) -> None:
+    """remove_all_incremental_dependencies removes all deps for a FULL and returns count."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-002", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-003", "full-2024-01-01")
+
+    # Verify deps exist.
+    deps = manager.get_incremental_dependencies(target, "full-2024-01-01")
+    assert len(deps) == 3
+
+    # Remove all.
+    count = manager.remove_all_incremental_dependencies(target, "full-2024-01-01")
+    assert count == 3
+
+    # Verify deps are gone (get_incremental_dependencies returns empty list).
+    deps = manager.get_incremental_dependencies(target, "full-2024-01-01")
+    assert deps == []
+
+
+def test_remove_all_incremental_deps_nonexistent(tmp_path: Path) -> None:
+    """remove_all_incremental_dependencies for a FULL with no deps returns 0."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    count = manager.remove_all_incremental_dependencies(
+        "/mnt/backup/testvm", "full-orphan"
+    )
+    assert count == 0
+
+
+# ── atomic write test for clear_last_backup_allocation ────────────────
+
+
+def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
+    """clear_last_backup_allocation uses atomic writes — crash during os.replace preserves state.
+
+    The clear operation delegates to _save_target_state which writes to a
+    .tmp file then calls os.replace.  If os.replace raises (simulating a
+    crash), the original _target_state.json must remain intact with its
+    original data.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/path/to/target"
+    manager.set_last_backup_allocation(target, 12345)
+
+    # Verify baseline is set.
+    assert manager.get_last_backup_allocation(target) == 12345
+
+    target_state_file = tmp_path / "_target_state.json"
+    assert target_state_file.exists(), "_target_state.json must exist after set"
+
+    # Read original content before crash simulation.
+    with open(target_state_file, encoding="utf-8") as fh:
+        original_data = json.load(fh)
+
+    # Mock os.replace to simulate a crash during the rename step.
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError("simulated crash during rename"),
+        ),
+        pytest.raises(OSError, match="simulated crash"),
+    ):
+        manager.clear_last_backup_allocation(target)
+
+    # The original state file must still exist and contain the original data.
+    assert target_state_file.exists(), (
+        "_target_state.json must still exist after crash"
+    )
+    with open(target_state_file, encoding="utf-8") as fh:
+        data_after_crash = json.load(fh)
+    assert (
+        data_after_crash == original_data
+    ), "original data must be unchanged after simulated crash"
+
+    # Re-reading through the manager must yield the original value.
+    assert manager.get_last_backup_allocation(target) == 12345
+
+
+# ── InMemoryStateManager tests ────────────────────────────────────────
+
+
+def test_inmemory_clear_last_backup_allocation() -> None:
+    """InMemoryStateManager.clear_last_backup_allocation correctly removes a baseline from its dict.
+
+    Set a baseline, then clear it, verify True is returned and get returns None.
+    """
+    manager = InMemoryStateManager()
+
+    target = "/path/to/target"
+
+    # Set baseline.
+    manager.set_last_backup_allocation(target, 12345)
+    assert manager.get_last_backup_allocation(target) == 12345
+
+    # Clear it.
+    result = manager.clear_last_backup_allocation(target)
+    assert result is True
+
+    # Verify it's gone (get_last_backup_allocation returns None).
+    assert manager.get_last_backup_allocation(target) is None
+
+    # Verify the dict entry is truly removed, not just set to None.
+    assert target not in manager._target_state

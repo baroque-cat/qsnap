@@ -476,13 +476,48 @@ When executing deferred blockcommit operations and `vm_config.blockcommit_deep_v
 - **THEN** `core.fork("vm.FULL.20260701.monthly", "recovered-vm", Path("/var/lib/libvirt/images"))` is called internally
 - **THEN** returns the same `RestoreResult`
 
-### Requirement: Phantom FULL detection
+### Requirement: Phantom FULL detection with cascade cleanup
 
-Before using `get_full_backups()` for bucket-driven FULL creation decisions, Core SHALL verify each FULL file exists on disk via `os.path.exists()`. Entries whose files do not exist SHALL be removed from state via `remove_full_backup()` with a WARNING log. This prevents phantom FULLs (deleted externally but still in state) from blocking new FULL creation.
+The phantom FULL detection in `_backup_target()` SHALL, when a FULL backup file is missing on disk, remove the FULL record from `_full_backups.json` AND remove all linked incremental dependencies from `_dependencies.json` AND clear `last_backup_allocation` if no FULLs remain after cleanup.
 
-#### Scenario: Phantom FULL removed before bucket decision
-- **WHEN** state contains a FULL record whose file no longer exists on disk
-- **THEN** the record is removed via `remove_full_backup()` with a WARNING before `should_create_full()` is evaluated
+#### Scenario: Phantom FULL triggers cascade dependency cleanup
+
+- **WHEN** a FULL backup file does not exist on disk and the FULL record is removed from state
+- **THEN** the system SHALL also call `remove_all_incremental_dependencies(target_path, full_name)` and log the count of cleaned dependency records
+
+#### Scenario: Last phantom FULL clears baseline
+
+- **WHEN** all FULL records for a target are removed as phantoms and no FULLs remain
+- **THEN** the system SHALL call `clear_last_backup_allocation(target_path)` and log an INFO message
+
+#### Scenario: Phantom FULL with remaining valid FULLs does not clear baseline
+
+- **WHEN** a phantom FULL is removed but other valid FULL records remain for the target
+- **THEN** the system SHALL NOT clear `last_backup_allocation`
+
+### Requirement: Backup target pipeline with gate/retention separation
+
+The `_backup_target()` method SHALL separate the onchange gate from retention execution. When the gate skips transfer, retention evaluation and cleanup SHALL still run.
+
+#### Scenario: Gate skip does not block retention
+
+- **WHEN** `backup_create = "onchange"` and the gate returns False (no new snapshots)
+- **THEN** the system SHALL skip the bucket FULL check and `transfer_missing()` section
+- **AND** SHALL still execute `_evaluate_backup_retention()` and `_cleanup_backups()`
+
+### Requirement: Startup state validation in pipeline
+
+The `_execute_pipeline()` method SHALL call `_validate_state_at_startup()` before `_execute_snapshot_steps()` and `_execute_backup_steps()`. The `_execute_backup_steps()` method SHALL also call `_validate_state_at_startup()` for standalone `qsnap backup` invocations.
+
+#### Scenario: Pipeline calls startup validation
+
+- **WHEN** `_execute_pipeline(vm_config)` is called
+- **THEN** `_validate_state_at_startup(vm_config)` SHALL be called before `_execute_snapshot_steps(vm_config)`
+
+#### Scenario: Standalone backup calls startup validation
+
+- **WHEN** `_execute_backup_steps(vm_config)` is called (via `qsnap backup`)
+- **THEN** `_validate_state_at_startup(vm_config)` SHALL be called before the target iteration loop
 
 ### Requirement: Post-create FULL backup verification with source_path
 
@@ -544,23 +579,7 @@ Core SHALL emit `logger.info` messages in btrbk-style format for each pipeline o
 
 ### Requirement: Per-target backup onchange gate
 
-When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._backup_target()` SHALL call `_should_backup_onchange(vm_config, target, snapshots)` before proceeding with backup transfer. If `_should_backup_onchange()` returns `False`, the backup transfer SHALL be skipped entirely for this target — no `create_full_backup()`, no `transfer_missing()`, no NBD export. The skip SHALL be logged at INFO level. If `_should_backup_onchange()` returns `True`, the existing backup logic SHALL proceed unchanged.
-
-#### Scenario: First backup — always proceeds
-- **WHEN** `backup_create = "onchange"` and `get_last_backup_allocation(target_path)` returns `None`
-- **THEN** `_should_backup_onchange()` returns `True`
-- **AND** the backup transfer proceeds
-
-#### Scenario: No change — backup skipped
-- **WHEN** `backup_create = "onchange"` and the latest snapshot's allocation equals `get_last_backup_allocation(target_path)`
-- **THEN** `_should_backup_onchange()` returns `False`
-- **AND** the backup transfer is skipped
-- **AND** an INFO log message is emitted: "skipping target (no change since last backup)"
-
-#### Scenario: Allocation grew — backup proceeds
-- **WHEN** `backup_create = "onchange"` and the latest snapshot's allocation is greater than `get_last_backup_allocation(target_path)`
-- **THEN** `_should_backup_onchange()` returns `True`
-- **AND** the backup transfer proceeds
+When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._backup_target()` SHALL call `_should_backup_onchange(vm_config, target, snapshots)` before proceeding with backup transfer. If `_should_backup_onchange()` returns `False`, the backup transfer SHALL be skipped for this target. The skip SHALL be logged at INFO level. If `_should_backup_onchange()` returns `True`, the existing backup logic SHALL proceed unchanged. See `specs/change-detection/spec.md` for the gate's Approach B logic and retention separation behavior.
 
 #### Scenario: always mode — gate bypassed
 - **WHEN** `backup_create = "always"` (default)
@@ -572,17 +591,3 @@ When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._back
 - **THEN** `_should_backup_onchange()` returns `False` (nothing to transfer)
 - **AND** the backup transfer is skipped
 - **AND** an INFO log message is emitted
-
-### Requirement: backup_create baseline update after successful transfer
-
-After a successful backup transfer (`_transfer_with_retry()` returns results), when `TargetConfig.backup_create == "onchange"`, `Core._backup_target()` SHALL update the per-target baseline by calling `set_last_backup_allocation(str(target.path), latest_snapshot.allocation)` where `latest_snapshot` is the most recent snapshot by timestamp. The baseline SHALL NOT be updated on transfer failure.
-
-#### Scenario: Baseline updated after successful transfer
-- **WHEN** `backup_create = "onchange"` and the backup transfer succeeds
-- **THEN** `set_last_backup_allocation(target_path, latest.allocation)` is called
-- **AND** the next run's `_should_backup_onchange()` compares against the updated baseline
-
-#### Scenario: Baseline NOT updated on transfer failure
-- **WHEN** `backup_create = "onchange"` and the backup transfer fails
-- **THEN** `set_last_backup_allocation()` is NOT called
-- **AND** the baseline remains at the last successful backup's allocation

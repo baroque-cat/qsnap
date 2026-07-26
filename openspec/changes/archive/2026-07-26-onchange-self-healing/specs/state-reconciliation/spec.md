@@ -2,7 +2,7 @@
 
 ### Requirement: Reconcile command actively repairs state
 
-The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check --state` (read-only), `reconcile` SHALL delete stale state entries, clear stale baselines, and delete orphaned libvirt checkpoints.
+The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check --state` (read-only), `reconcile` SHALL delete stale state entries, clear stale baselines, delete orphaned libvirt checkpoints, and delete orphaned files on disk that are not tracked in state.
 
 #### Scenario: Reconcile removes phantom FULLs with cascade cleanup
 
@@ -38,13 +38,35 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 #### Scenario: Reconcile returns structured result
 
 - **WHEN** `qsnap reconcile` completes for a VM
-- **THEN** the system SHALL return a `ReconcileResult` with counts of: phantom_snapshots_removed, phantom_fulls_removed, stale_deps_removed, baselines_cleared, orphan_checkpoints_deleted, and a list of errors
+- **THEN** the system SHALL return a `ReconcileResult` with counts of: phantom_snapshots_removed, phantom_fulls_removed, stale_deps_removed, baselines_cleared, orphan_checkpoints_deleted, orphan_files_removed, and a list of errors
 
 #### Scenario: Reconcile with VM filter
 
 - **WHEN** `qsnap reconcile <vm_name>` is invoked with a VM name filter
 - **THEN** the system SHALL only reconcile state for VMs matching the filter
 - **AND** SHALL skip VMs that do not match
+
+#### Scenario: Reconcile removes orphan files on target
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory that is not tracked in `_full_backups.json` or `_dependencies.json` and matches the qsnap naming pattern (`{vm_name}.*`)
+- **THEN** the system SHALL delete the file from the target and log a WARNING
+- **AND** the count SHALL be recorded in `ReconcileResult.orphan_files_removed`
+
+#### Scenario: Reconcile skips non-qsnap files on target
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory that does not match the qsnap naming pattern (`{vm_name}.*`)
+- **THEN** the system SHALL NOT delete the file and SHALL log a WARNING
+
+#### Scenario: Reconcile removes orphan snapshot files
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists in the snapshot directory that is not tracked in `{vm_name}.json`
+- **THEN** the system SHALL delete the file and log a WARNING
+- **AND** the count SHALL be recorded in `ReconcileResult.orphan_files_removed`
+
+#### Scenario: Reconcile orphan file cleanup is non-fatal
+
+- **WHEN** an error occurs during orphan file detection (e.g., target directory not accessible)
+- **THEN** the system SHALL log a WARNING, record the error in `ReconcileResult.errors`, and continue with other reconciliation steps
 
 ### Requirement: ReconcileResult dataclass
 

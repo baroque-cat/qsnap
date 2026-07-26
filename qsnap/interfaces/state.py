@@ -133,3 +133,22 @@ class IStateManager(ABC):
     def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
         """Record the backup allocation baseline for *target_path*."""
         ...
+
+    @abstractmethod
+    def clear_last_backup_allocation(self, target_path: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+
+        Returns ``True`` if an entry was found and removed, ``False``
+        if no matching entry existed.
+        """
+        ...
+
+    @abstractmethod
+    def remove_all_incremental_dependencies(
+        self, target_path: str, full_name: str
+    ) -> int:
+        """Remove ALL incremental dependency records linked to *full_name*.
+
+        Returns the count of removed dependency entries.
+        """
+        ...
