@@ -177,9 +177,7 @@ def test_probing_call_with_check_true_logs_debug(caplog) -> None:
     true_error = [r for r in true_records if r.levelno == logging.ERROR]
     true_debug = [r for r in true_records if r.levelno == logging.DEBUG]
 
-    assert len(true_error) == 0, (
-        "check=True probing failure must NOT log at ERROR level"
-    )
+    assert len(true_error) == 0, "check=True probing failure must NOT log at ERROR level"
     assert len(true_debug) >= 1, (
         "check=True probing failure must log at DEBUG level for traceability"
     )
@@ -195,11 +193,9 @@ def test_probing_call_with_check_true_logs_debug(caplog) -> None:
 
     default_records = [r for r in caplog.records if r.name == SHELL_LOGGER]
     default_error = [r for r in default_records if r.levelno == logging.ERROR]
-    default_debug = [r for r in default_records if r.levelno == logging.DEBUG]
+    _default_debug = [r for r in default_records if r.levelno == logging.DEBUG]
 
-    assert len(default_error) >= 1, (
-        "default-mode (check=False) failure must log at ERROR level"
-    )
+    assert len(default_error) >= 1, "default-mode (check=False) failure must log at ERROR level"
     msg = default_error[0].getMessage()
     assert "false" in msg
     assert "returncode=" in msg

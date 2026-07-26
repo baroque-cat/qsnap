@@ -210,8 +210,7 @@ def test_real_compress_driver_probe():
 
     # The command always fails — that is expected.
     assert not result.success, (
-        f"Compress driver probe should fail (needs file= parameter), "
-        f"got success={result.success!r}"
+        f"Compress driver probe should fail (needs file= parameter), got success={result.success!r}"
     )
 
     # Combine stderr and error into one error text for analysis.

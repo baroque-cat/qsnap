@@ -1388,3 +1388,131 @@ def test_full_size_verify_failure_triggers_cleanup(
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint not in delete_cmds[0], "Prior checkpoint must be preserved"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# CONFIGURABLE FULL BACKUP ENGINE TESTS (configurable-full-backup-engine)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_incremental_unaffected_by_full_transfer_engine(
+    mock_shell, make_vm_config, make_target, tmp_path
+) -> None:
+    """Incremental transfers ignore full_transfer_engine — always use
+    pread/pwrite unified NBD engine regardless of engine setting."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        # Pass full_transfer_engine="libnbd" — incrementals should ignore this
+        results = provider.transfer_missing(
+            vm_config, target, [snapshot], full_transfer_engine="libnbd"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+
+    # No qemu-img convert — incrementals always use pread/pwrite unified engine
+    convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0, (
+        "Incremental should NEVER use qemu-img convert, regardless of full_transfer_engine"
+    )
+
+    # pread/pwrite was called (unified NBD engine)
+    pread_calls = [c for c in nbd.calls if c[0] == "pread"]
+    assert len(pread_calls) > 0, "pread should be called for incremental transfer"
+
+
+def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tmp_path) -> None:
+    """Incremental _transfer is called with zero_skip=False — copies only
+    dirty∩allocated extents, never performs zero-skip optimization."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    with (
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+        patch.object(BitmapBackupProvider, "_transfer") as transfer_mock,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        transfer_mock.return_value = (None, 65536)
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+
+    # Verify _transfer was called with zero_skip=False
+    assert transfer_mock.call_count == 1
+    call_kwargs = transfer_mock.call_args.kwargs
+    assert call_kwargs.get("zero_skip") is False, (
+        f"Incremental _transfer should have zero_skip=False, got: {call_kwargs}"
+    )

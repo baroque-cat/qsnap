@@ -1,10 +1,4 @@
-# qemu-img convert FULL Backup Transfer Engine
-
-## Purpose
-
-FULL backups use `qemu-img convert` (C code, parallel coroutines, ~850 MB/s zstd) instead of the Python `pread`/`pwrite` loop + write-side `qemu-nbd` with `driver=compress` (~1.5 MB/s). The `_start_write_server()` and `_transfer()` methods are retained for incremental backups only, which require dirty-bitmap meta-context intersection that `qemu-img convert` cannot perform.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: qemu-img convert as FULL backup transfer engine
 
@@ -99,19 +93,3 @@ The source path for stopped-VM conversion SHALL be resolved via `get_first_disk_
 - **WHEN** `create_full_backup("myvm", ...)` is called and `is_vm_running()` returns `False`
 - **THEN** `virsh backup-begin` is NOT called
 - **THEN** `qemu-img convert` reads directly from the source qcow2 file path (when engine is `qemu-img-convert`)
-
-### Requirement: get_first_disk_path helper
-
-A helper function `get_first_disk_path(shell: IShell, vm_name: str) -> str` SHALL be added to `qsnap/utils/nbd.py`. It SHALL parse `virsh domblklist --domain <vm_name> --details` output and return the file path of the first disk (the "Source" column for the first entry with Device "disk"). The output has four columns: Type, Device, Target, Source. The function SHALL split on whitespace into at most 4 parts, check `parts[1] == "disk"`, and return `parts[3]` (Source column).
-
-#### Scenario: Returns path for first disk
-
-- **WHEN** `get_first_disk_path(shell, "myvm")` is called
-- **AND** `virsh domblklist --domain myvm --details` returns a disk entry with Source `/path/to/disk.qcow2`
-- **THEN** the function returns `/path/to/disk.qcow2`
-
-#### Scenario: VM with no disks returns empty string
-
-- **WHEN** `get_first_disk_path(shell, "myvm")` is called
-- **AND** `virsh domblklist` returns no disk entries
-- **THEN** the function returns an empty string

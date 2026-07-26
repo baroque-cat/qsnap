@@ -85,8 +85,7 @@ def test_convert_cmd_running_vm_compressed(mock_shell, make_target, tmp_path):
 
     # Verify the convert command was passed to run_with_stall_detection
     convert_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_calls) == 1, "Expected exactly one qemu-img convert via stall detection"
     cmd = " ".join(convert_calls[0].args[0])
@@ -124,8 +123,7 @@ def test_convert_cmd_running_vm_uncompressed(mock_shell, make_target, tmp_path):
     assert result.success is True
 
     convert_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_calls) == 1
     cmd = " ".join(convert_calls[0].args[0])
@@ -165,8 +163,7 @@ def test_convert_cmd_stopped_vm_compressed(mock_shell, make_target, tmp_path):
     assert result.success is True
 
     convert_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_calls) == 1
     cmd = " ".join(convert_calls[0].args[0])
@@ -208,8 +205,7 @@ def test_convert_cmd_stopped_vm_uncompressed(mock_shell, make_target, tmp_path):
     assert result.success is True
 
     convert_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_calls) == 1
     cmd = " ".join(convert_calls[0].args[0])
@@ -236,7 +232,9 @@ def test_convert_failure_removes_tmp(mock_shell, make_target, tmp_path):
 
     convert_error = "qemu-img convert failed: I/O error"
     mock_shell.expect_first("qemu-img convert").returns(
-        ShellResult(success=False, stdout="", stderr=convert_error, returncode=1, error=convert_error)
+        ShellResult(
+            success=False, stdout="", stderr=convert_error, returncode=1, error=convert_error
+        )
     )
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
     # rm -f for stale socket, .tmp removal in finally, socket cleanup in finally
@@ -320,7 +318,10 @@ def test_running_vm_uses_nbd_convert(mock_shell, make_target, tmp_path):
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1, f"Expected virsh backup-begin, got: {all_run_cmds}"
     assert "testvm" in backup_cmds[0]
-    assert "qsnap-checkpoint-" in backup_cmds[0], "backup-begin should receive checkpoint XML 3rd arg"
+    assert "qsnap-checkpoint-" in backup_cmds[0], (
+        "backup-begin should receive checkpoint XML 3rd arg"
+    )
+
 
 @pytest.mark.unit
 def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
@@ -404,7 +405,11 @@ def test_convert_uses_stall_detection(mock_shell, make_target, tmp_path):
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
             stall_timeout=1800,
         )
 
@@ -412,8 +417,7 @@ def test_convert_uses_stall_detection(mock_shell, make_target, tmp_path):
 
     # Spied run_with_stall_detection should have been called
     convert_stall_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_stall_calls) >= 1, "qemu-img convert should use run_with_stall_detection"
 
@@ -421,9 +425,7 @@ def test_convert_uses_stall_detection(mock_shell, make_target, tmp_path):
     convert_call = convert_stall_calls[0]
     output_file = convert_call.kwargs.get("output_file")
     assert output_file is not None, "run_with_stall_detection should receive output_file"
-    assert str(output_file).endswith(".tmp"), (
-        f"output_file should be .tmp, got: {output_file}"
-    )
+    assert str(output_file).endswith(".tmp"), f"output_file should be .tmp, got: {output_file}"
 
 
 @pytest.mark.unit
@@ -441,32 +443,31 @@ def test_stall_detection_output_file_is_tmp(mock_shell, make_target, tmp_path):
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
             stall_timeout=1800,
         )
 
     assert result.success is True
 
     convert_stall_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_stall_calls) >= 1
 
     output_file = convert_stall_calls[0].kwargs.get("output_file")
     assert output_file is not None
     assert ".tmp" in str(output_file), f"output_file should be a .tmp file, got: {output_file}"
-    assert str(output_file).endswith(".tmp"), (
-        f"output_file should end in .tmp, got: {output_file}"
-    )
+    assert str(output_file).endswith(".tmp"), f"output_file should end in .tmp, got: {output_file}"
 
 
 @pytest.mark.unit
 def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp_path):
     """5e: TargetConfig.backup_stall_timeout='5m' → stall_timeout=300 passed to run_with_stall_detection."""
-    target = make_target(
-        path=str(tmp_path / "backups"), compress=False, backup_stall_timeout="5m"
-    )
+    target = make_target(path=str(tmp_path / "backups"), compress=False, backup_stall_timeout="5m")
     target.path.mkdir(parents=True, exist_ok=True)
     snapshot = _make_snapshot()
 
@@ -478,15 +479,18 @@ def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly",
+            "testvm",
+            snapshot,
+            target,
+            compress=False,
+            bucket_level="monthly",
             stall_timeout=300,  # 5m → 300s
         )
 
     assert result.success is True
 
     convert_stall_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_stall_calls) >= 1
 
@@ -542,8 +546,7 @@ def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, 
 
     # qemu-img convert was executed via run_with_stall_detection (not pread/pwrite)
     convert_stall_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_stall_calls) >= 1, "qemu-img convert should be used for FULL backup"
     convert_cmd = " ".join(convert_stall_calls[0].args[0])
@@ -690,9 +693,7 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path):
 
 
 @pytest.mark.unit
-def test_global_section_compress_false_affects_convert_cmd(
-    mock_shell, make_target, tmp_path
-):
+def test_global_section_compress_false_affects_convert_cmd(mock_shell, make_target, tmp_path):
     """2e: compress=False from [global] propagates → qemu-img convert has no -c flag."""
     # compress=False at global level, target inherits it
     target = make_target(path=str(tmp_path / "backups"), compress=False)
@@ -708,15 +709,17 @@ def test_global_section_compress_false_affects_convert_cmd(
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=target.compress,  # Respects target config
+            "testvm",
+            snapshot,
+            target,
+            compress=target.compress,  # Respects target config
             bucket_level="monthly",
         )
 
     assert result.success is True
 
     convert_stall_calls = [
-        call for call in stall_spy.call_args_list
-        if "qemu-img" in " ".join(call.args[0])
+        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_stall_calls) >= 1
 

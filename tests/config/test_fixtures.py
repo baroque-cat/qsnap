@@ -409,3 +409,113 @@ def test_zstd_config_toml_no_deprecated_fields() -> None:
             assert "full_compress" not in target, (
                 "zstd_config.toml should not contain deprecated full_compress"
             )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_global_config — full_transfer_engine
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_global_config_defaults_full_transfer_engine(
+    make_global_config,
+) -> None:
+    """make_global_config() defaults to full_transfer_engine='qemu-img-convert'."""
+    cfg = make_global_config()
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.full_transfer_engine == "qemu-img-convert"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_target — full_transfer_engine
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_target_defaults_full_transfer_engine(make_target) -> None:
+    """make_target() defaults to full_transfer_engine='qemu-img-convert'."""
+    target = make_target()
+    assert isinstance(target, TargetConfig)
+    assert target.full_transfer_engine == "qemu-img-convert"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_global_config — convert_parallel
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_global_config_defaults_convert_parallel(
+    make_global_config,
+) -> None:
+    """make_global_config() defaults to convert_parallel=4."""
+    cfg = make_global_config()
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.convert_parallel == 4
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_global_config — convert_out_of_order
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_global_config_defaults_convert_out_of_order(
+    make_global_config,
+) -> None:
+    """make_global_config() defaults to convert_out_of_order=True."""
+    cfg = make_global_config()
+    assert isinstance(cfg, GlobalConfig)
+    assert cfg.convert_out_of_order is True
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TOML fixture: engine_config.toml
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_engine_config_toml_parses_correctly() -> None:
+    """engine_config.toml parses correctly — full_transfer_engine / convert_parallel
+    / convert_out_of_order fields with inheritance cascade."""
+    facade = ConfigFacade(FIXTURES / "engine_config.toml")
+    vms = facade.get_vms()
+
+    assert len(vms) == 2
+
+    # Global: full_transfer_engine="libnbd", convert_parallel=2,
+    # convert_out_of_order=false.
+    global_cfg = facade.get_global()
+    assert global_cfg.full_transfer_engine == "libnbd"
+    assert global_cfg.convert_parallel == 2
+    assert global_cfg.convert_out_of_order is False
+
+    # vm_inherit: inherits all three from global.
+    vm_inherit = facade.get_vm("vm_inherit")
+    assert vm_inherit.name == "vm_inherit"
+    target_inherit = next(t for t in vm_inherit.targets if t.path == Path("/mnt/backup/vm_inherit"))
+    assert target_inherit.full_transfer_engine == "libnbd"
+    assert target_inherit.convert_parallel == 2
+    assert target_inherit.convert_out_of_order is False
+
+    # vm_override: one target overrides, another inherits.
+    vm_override = facade.get_vm("vm_override")
+    assert vm_override.name == "vm_override"
+
+    target_convert = next(
+        t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_convert")
+    )
+    # Overrides global "libnbd" → "qemu-img-convert", parallel 2→8,
+    # out_of_order false→true.
+    assert target_convert.full_transfer_engine == "qemu-img-convert"
+    assert target_convert.convert_parallel == 8
+    assert target_convert.convert_out_of_order is True
+
+    target_inh = next(
+        t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_inherit")
+    )
+    # Inherits full_transfer_engine="libnbd", convert_parallel=2,
+    # convert_out_of_order=false from global.
+    assert target_inh.full_transfer_engine == "libnbd"
+    assert target_inh.convert_parallel == 2
+    assert target_inh.convert_out_of_order is False

@@ -231,7 +231,7 @@ class LibnbdClient(INbdClient):
                 if attempt < max_attempts:
                     time.sleep(1)
                 continue
-            except AttributeError as exc:
+            except AttributeError:
                 # The PyPI ``nbd`` imposter was installed instead of
                 # system ``python3-libnbd`` — the module lacks
                 # ``nbd.NBD()`` or ``nbd.Error``.  Return an actionable

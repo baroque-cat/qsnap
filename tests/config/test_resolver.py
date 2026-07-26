@@ -147,3 +147,179 @@ def test_global_section_inheritance_to_target() -> None:
     assert target.path == Path("/mnt/backup/testvm")
     # compress is not set on the target → inherits [global] compress=False.
     assert target.compress is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# configurable-full-backup-engine: full_transfer_engine inheritance
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_target_full_transfer_engine_inherits_from_global(tmp_path: Path) -> None:
+    """Global full_transfer_engine='libnbd' → target inherits 'libnbd' (no override)."""
+    config_text = (
+        'full_transfer_engine = "libnbd"\n'
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "inherit_engine.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_transfer_engine == "libnbd"
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.full_transfer_engine == "libnbd"
+
+
+@pytest.mark.unit
+def test_target_full_transfer_engine_overrides_global(tmp_path: Path) -> None:
+    """Global full_transfer_engine='libnbd'; target overrides to 'qemu-img-convert'."""
+    config_text = (
+        'full_transfer_engine = "libnbd"\n'
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+        'full_transfer_engine = "qemu-img-convert"\n'
+    )
+    config_file = tmp_path / "override_engine.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_transfer_engine == "libnbd"
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.full_transfer_engine == "qemu-img-convert"
+
+
+@pytest.mark.unit
+def test_target_full_transfer_engine_default_is_qemu_img_convert(tmp_path: Path) -> None:
+    """When neither global nor target sets full_transfer_engine, defaults to 'qemu-img-convert'."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "default_engine.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.full_transfer_engine == "qemu-img-convert"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# configurable-full-backup-engine: convert_parallel inheritance
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_target_convert_parallel_inherits_from_global(tmp_path: Path) -> None:
+    """Global convert_parallel=2 → target inherits 2 (no override)."""
+    config_text = (
+        "convert_parallel = 2\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "inherit_parallel.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().convert_parallel == 2
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.convert_parallel == 2
+
+
+@pytest.mark.unit
+def test_target_convert_parallel_overrides_global(tmp_path: Path) -> None:
+    """Global convert_parallel=2; target overrides to 8."""
+    config_text = (
+        "convert_parallel = 2\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+        "convert_parallel = 8\n"
+    )
+    config_file = tmp_path / "override_parallel.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().convert_parallel == 2
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.convert_parallel == 8
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# configurable-full-backup-engine: convert_out_of_order inheritance
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_target_convert_out_of_order_inherits_from_global(tmp_path: Path) -> None:
+    """Global convert_out_of_order=false → target inherits false (no override)."""
+    config_text = (
+        "convert_out_of_order = false\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "inherit_order.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().convert_out_of_order is False
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.convert_out_of_order is False
+
+
+@pytest.mark.unit
+def test_target_convert_out_of_order_overrides_global(tmp_path: Path) -> None:
+    """Global convert_out_of_order=false; target overrides to true."""
+    config_text = (
+        "convert_out_of_order = false\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+        "convert_out_of_order = true\n"
+    )
+    config_file = tmp_path / "override_order.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().convert_out_of_order is False
+
+    vm = facade.get_vm("testvm")
+    target = vm.targets[0]
+    assert target.convert_out_of_order is True

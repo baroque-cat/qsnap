@@ -830,8 +830,7 @@ class TestEnsureSystemSitePackages:
 
             new_paths = [p for p in sys.path if p not in original_sys_path]
             assert len(new_paths) > 0, (
-                "No system site-packages paths were added to sys.path "
-                f"(sys.path grew by 0 entries)"
+                "No system site-packages paths were added to sys.path (sys.path grew by 0 entries)"
             )
             assert any("python3" in p for p in new_paths), (
                 f"Expected python3 site-packages paths in new entries, got: {new_paths}"
@@ -853,9 +852,7 @@ class TestEnsureSystemSitePackages:
 
         original_sys_path = list(sys.path)
         _ensure_system_site_packages()
-        assert sys.path == original_sys_path, (
-            "sys.path should be unchanged when not in a venv"
-        )
+        assert sys.path == original_sys_path, "sys.path should be unchanged when not in a venv"
 
 
 # ── MISSING_LIBNBD_ERROR message content ────────────────────────────────
@@ -967,11 +964,13 @@ class TestConnectRetry:
         assert result.error is None
 
         # 6 fresh handles: 5 failed + 1 successful
-        assert len(handles) == 6, f"Expected 6 fresh NBD handles (5 failed + 1 success), got {len(handles)}"
+        assert len(handles) == 6, (
+            f"Expected 6 fresh NBD handles (5 failed + 1 success), got {len(handles)}"
+        )
         # Each handle should have been properly initialized
         for i, h in enumerate(handles):
             assert h.meta_contexts == ([] if i < 5 else []), (
-                f"Handle {i+1} meta_contexts mismatch"
+                f"Handle {i + 1} meta_contexts mismatch"
             )
 
         # sleep called between each of the 5 failed attempts

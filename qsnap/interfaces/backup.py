@@ -20,6 +20,9 @@ class IBackupProvider(ABC):
         *,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
+        full_transfer_engine: str = "qemu-img-convert",
+        convert_parallel: int = 4,
+        convert_out_of_order: bool = True,
     ) -> list[BackupResult]:
         """Transfer snapshots not yet present at *target*.
 
@@ -30,6 +33,19 @@ class IBackupProvider(ABC):
         ``stall_timeout`` is the stall-detection timeout in seconds for
         data-transfer commands.  When ``0``, stall detection is
         disabled.
+
+        ``full_transfer_engine`` selects the FULL backup transfer
+        engine (``"qemu-img-convert"`` default, ``"libnbd"``
+        alternative).  Only affects FULL transfers — incrementals
+        always use the ``pread``/``pwrite`` engine.
+
+        ``convert_parallel`` maps to the ``qemu-img convert -m`` flag
+        (range 1-8).  Only consumed when
+        ``full_transfer_engine == "qemu-img-convert"``.
+
+        ``convert_out_of_order`` maps to the ``qemu-img convert -W``
+        flag.  Only consumed when
+        ``full_transfer_engine == "qemu-img-convert"``.
         """
         ...
 
@@ -52,6 +68,9 @@ class IBackupProvider(ABC):
         bucket_level: str = "monthly",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
+        full_transfer_engine: str = "qemu-img-convert",
+        convert_parallel: int = 4,
+        convert_out_of_order: bool = True,
     ) -> BackupResult:
         """Create a standalone full (anchor) backup via the NBD engine.
 
@@ -71,6 +90,20 @@ class IBackupProvider(ABC):
 
         ``stall_timeout`` is the stall-detection timeout in seconds
         for the transfer.  When ``0``, stall detection is disabled.
+
+        ``full_transfer_engine`` selects the FULL backup transfer
+        engine (``"qemu-img-convert"`` default, ``"libnbd"``
+        alternative).  When ``"qemu-img-convert"``, ``qemu-img
+        convert`` is used.  When ``"libnbd"``, the pread/pwrite engine
+        is used via ``_full_transfer_via_libnbd()``.
+
+        ``convert_parallel`` maps to the ``qemu-img convert -m`` flag
+        (range 1-8).  Only consumed when
+        ``full_transfer_engine == "qemu-img-convert"``.
+
+        ``convert_out_of_order`` maps to the ``qemu-img convert -W``
+        flag.  Only consumed when
+        ``full_transfer_engine == "qemu-img-convert"``.
 
         Default implementation raises ``NotImplementedError``.  Concrete
         providers that support full backups should override this.

@@ -202,3 +202,108 @@ def test_no_global_section_backward_compatible() -> None:
     vms = facade.get_vms()
     assert len(vms) == 1
     assert vms[0].name == "testvm"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# configurable-full-backup-engine: full_transfer_engine validation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_valid_full_transfer_engine_accepted(tmp_path: Path) -> None:
+    """Global full_transfer_engine='libnbd' parses successfully, value stored in GlobalConfig."""
+    config_text = (
+        'full_transfer_engine = "libnbd"\n'
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "valid_engine.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().full_transfer_engine == "libnbd"
+
+
+@pytest.mark.unit
+def test_invalid_full_transfer_engine_raises_config_error(tmp_path: Path) -> None:
+    """Global full_transfer_engine='invalid-engine' raises ConfigError."""
+    config_text = (
+        'full_transfer_engine = "invalid-engine"\n'
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "invalid_engine.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError, match="Invalid full_transfer_engine"):
+        ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# configurable-full-backup-engine: convert_parallel validation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_valid_convert_parallel_accepted(tmp_path: Path) -> None:
+    """Global convert_parallel=8 parses successfully (upper boundary of range 1-8)."""
+    config_text = (
+        "convert_parallel = 8\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "valid_parallel.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().convert_parallel == 8
+
+
+@pytest.mark.unit
+def test_convert_parallel_below_range_raises_config_error(tmp_path: Path) -> None:
+    """Global convert_parallel=0 (below valid range 1-8) raises ConfigError."""
+    config_text = (
+        "convert_parallel = 0\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "low_parallel.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError, match="Invalid convert_parallel"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_convert_parallel_above_range_raises_config_error(tmp_path: Path) -> None:
+    """Global convert_parallel=9 (above valid range 1-8) raises ConfigError."""
+    config_text = (
+        "convert_parallel = 9\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "high_parallel.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError, match="Invalid convert_parallel"):
+        ConfigFacade(config_file)

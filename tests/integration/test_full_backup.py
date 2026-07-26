@@ -1,4 +1,4 @@
-"""Integration tests for FULL backups via ``qemu-img convert``.
+"""Integration tests for FULL backups via ``qemu-img convert`` and ``libnbd``.
 
 All tests in this module require a running libvirt daemon and are
 marked ``@pytest.mark.integration``.  They use the ``test_vm`` fixture
@@ -12,9 +12,12 @@ pread/pwrite loop (design D6).
 
 Coverage:
 - Compression mode verification (none, zstd, zlib) via qcow2 metadata
-- Speed comparison across compression modes on a 10 GB disk
+  on a 4 GB disk with 2 GB of data (qemu-img-convert engine)
+- Speed comparison across compression modes on a 4 GB disk
 - Stopped-VM direct convert (no NBD, no virsh backup-begin)
 - Running-VM NBD convert (virsh backup-begin + qemu-img convert)
+- libnbd engine: compression modes (none, zstd, zlib) + speed
+  comparison on a 4 GB disk with 50 MB of data
 
 The temp directory is under ``/var/tmp`` (on-disk, ~47 GB free) via
 the ``test_vm`` fixture — see ``conftest.py`` for details.
@@ -120,7 +123,9 @@ def _assert_standalone_qcow2(shell: SubprocessShell, path: Path) -> None:
     assert info is not None, f"Cannot read qemu-img info for {path}"
     assert info.get("format") == "qcow2", f"Expected qcow2 format, got {info.get('format')}"
     backing = info.get("backing-filename")
-    assert backing is None or backing == "", f"FULL backup must be standalone, got backing: {backing!r}"
+    assert backing is None or backing == "", (
+        f"FULL backup must be standalone, got backing: {backing!r}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -130,11 +135,11 @@ def _assert_standalone_qcow2(shell: SubprocessShell, path: Path) -> None:
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
-@pytest.mark.parametrize("test_vm", ["10G"], indirect=True)
+@pytest.mark.parametrize("test_vm", ["4G"], indirect=True)
 def test_full_backup_compression_modes(test_vm):
     """Verify that compression modes are actually set in qcow2 metadata.
 
-    1. Fill the 10 GB disk with ~8 GB of patterned data (VM stopped).
+    1. Fill the 4 GB disk with ~2 GB of patterned data (VM stopped).
     2. Start the VM.
     3. Create a FULL backup with **no compression** — verify
        ``compression-type: "zlib"`` (default qcow2) in metadata.
@@ -150,14 +155,15 @@ def test_full_backup_compression_modes(test_vm):
     base_image: Path = test_vm["base_image"]
     target_dir: Path = test_vm["target_dir"]
 
-    # Step 1: Fill with 8 GB data (VM stopped).
+    # Step 1: Fill with 2 GB data (VM stopped).
     if is_vm_running(shell, vm_name):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
-    if not _write_data(shell, base_image, 500):
+    if not _write_data(shell, base_image, 2000):
         err = shell.run(
-            ["qemu-io", "-c", "write -P 0xAA 0 524288000", str(base_image)],
-            timeout=60, check=False,
+            ["qemu-io", "-c", "write -P 0xAA 0 2097152000", str(base_image)],
+            timeout=120,
+            check=False,
         )
         pytest.skip(
             f"Failed to write test data. qemu-io: success={err.success} "
@@ -178,7 +184,9 @@ def test_full_backup_compression_modes(test_vm):
     provider = BitmapBackupProvider(shell)
     result_none = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
         bucket_level="monthly",
@@ -196,7 +204,9 @@ def test_full_backup_compression_modes(test_vm):
     time.sleep(1.1)  # Ensure timestamp differs from previous checkpoint
     result_zstd = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
@@ -205,9 +215,7 @@ def test_full_backup_compression_modes(test_vm):
     assert result_zstd.success, f"zstd FULL failed: {result_zstd.error}"
     _assert_standalone_qcow2(shell, result_zstd.target_path)
     ct_zstd = _get_compression_type(shell, result_zstd.target_path)
-    assert ct_zstd == "zstd", (
-        f"zstd FULL: expected compression-type 'zstd', got {ct_zstd!r}"
-    )
+    assert ct_zstd == "zstd", f"zstd FULL: expected compression-type 'zstd', got {ct_zstd!r}"
     actual_zstd = _get_actual_size(shell, result_zstd.target_path)
 
     # Step 5: zlib compression.
@@ -215,7 +223,9 @@ def test_full_backup_compression_modes(test_vm):
     time.sleep(1.1)
     result_zlib = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
@@ -224,9 +234,7 @@ def test_full_backup_compression_modes(test_vm):
     assert result_zlib.success, f"zlib FULL failed: {result_zlib.error}"
     _assert_standalone_qcow2(shell, result_zlib.target_path)
     ct_zlib = _get_compression_type(shell, result_zlib.target_path)
-    assert ct_zlib == "zlib", (
-        f"zlib FULL: expected compression-type 'zlib', got {ct_zlib!r}"
-    )
+    assert ct_zlib == "zlib", f"zlib FULL: expected compression-type 'zlib', got {ct_zlib!r}"
     actual_zlib = _get_actual_size(shell, result_zlib.target_path)
 
     # Step 6: zstd must be smaller than uncompressed (compression worked).
@@ -248,11 +256,11 @@ def test_full_backup_compression_modes(test_vm):
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
-@pytest.mark.parametrize("test_vm", ["10G"], indirect=True)
+@pytest.mark.parametrize("test_vm", ["4G"], indirect=True)
 def test_full_backup_speed_comparison(test_vm):
     """Measure FULL backup throughput in three modes: none, zstd, zlib.
 
-    1. Fill the 10 GB disk with ~8 GB of patterned data (VM stopped).
+    1. Fill the 4 GB disk with ~2 GB of patterned data (VM stopped).
     2. Start the VM.
     3. Time an **uncompressed** FULL backup.  Assert > 50 MB/s.
     4. Time a **zstd** FULL backup.  Assert > 100 MB/s.
@@ -264,14 +272,15 @@ def test_full_backup_speed_comparison(test_vm):
     base_image: Path = test_vm["base_image"]
     target_dir: Path = test_vm["target_dir"]
 
-    # Fill with 8 GB data (VM stopped), then start.
+    # Fill with 2 GB data (VM stopped), then start.
     if is_vm_running(shell, vm_name):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
-    if not _write_data(shell, base_image, 500):
+    if not _write_data(shell, base_image, 2000):
         err = shell.run(
-            ["qemu-io", "-c", "write -P 0xAA 0 524288000", str(base_image)],
-            timeout=60, check=False,
+            ["qemu-io", "-c", "write -P 0xAA 0 2097152000", str(base_image)],
+            timeout=120,
+            check=False,
         )
         pytest.skip(
             f"Failed to write test data. qemu-io: success={err.success} "
@@ -292,7 +301,9 @@ def test_full_backup_speed_comparison(test_vm):
     t0 = time.monotonic()
     r_none = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.speed-none", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.speed-none", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
         bucket_level="monthly",
@@ -308,7 +319,9 @@ def test_full_backup_speed_comparison(test_vm):
     t0 = time.monotonic()
     r_zstd = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.speed-zstd", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.speed-zstd", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
@@ -326,7 +339,9 @@ def test_full_backup_speed_comparison(test_vm):
     t0 = time.monotonic()
     r_zlib = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.speed-zlib", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.speed-zlib", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
@@ -338,9 +353,7 @@ def test_full_backup_speed_comparison(test_vm):
 
     # zstd should not be meaningfully slower than zlib.
     ratio = t_zstd / t_zlib if t_zlib > 0 else float("inf")
-    assert ratio <= 2.0, (
-        f"zstd ({t_zstd:.1f}s) too slow vs zlib ({t_zlib:.1f}s), ratio={ratio:.2f}"
-    )
+    assert ratio <= 2.0, f"zstd ({t_zstd:.1f}s) too slow vs zlib ({t_zlib:.1f}s), ratio={ratio:.2f}"
 
     _cleanup_checkpoints(shell, vm_name)
 
@@ -380,7 +393,9 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     caplog.set_level(logging.DEBUG)
     result = provider.create_full_backup(
         vm_name,
-        SnapshotInfo(name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0),
+        SnapshotInfo(
+            name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
         bucket_level="monthly",
@@ -390,8 +405,7 @@ def test_full_backup_stopped_vm(test_vm, caplog):
 
     # qemu-img convert must appear in logs.
     convert_calls = [
-        r.message for r in caplog.records
-        if "qemu-img" in r.message and "convert" in r.message
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
     ]
     assert len(convert_calls) > 0, "qemu-img convert must be used for stopped-VM FULL"
 
@@ -405,8 +419,7 @@ def test_full_backup_stopped_vm(test_vm, caplog):
 
     # domblklist --details must have been called.
     domblk_calls = [
-        r.message for r in caplog.records
-        if "domblklist" in r.message and "--details" in r.message
+        r.message for r in caplog.records if "domblklist" in r.message and "--details" in r.message
     ]
     assert len(domblk_calls) > 0, "domblklist --details must be called for stopped-VM FULL"
 
@@ -468,19 +481,15 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
 
     # qemu-img convert must appear.
     convert_calls = [
-        r.message for r in caplog.records
-        if "qemu-img" in r.message and "convert" in r.message
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
     ]
     assert len(convert_calls) > 0, "qemu-img convert must be used for running-VM NBD FULL"
 
     # NBD socket must appear in convert command.
     nbd_calls = [
-        r.message for r in caplog.records
-        if "nbd:unix:" in r.message and "convert" in r.message
+        r.message for r in caplog.records if "nbd:unix:" in r.message and "convert" in r.message
     ]
-    assert len(nbd_calls) > 0, (
-        "qemu-img convert must read from nbd:unix:<socket> for running VM"
-    )
+    assert len(nbd_calls) > 0, "qemu-img convert must read from nbd:unix:<socket> for running VM"
 
     # virsh backup-begin must be called.
     bb_calls = [r.message for r in caplog.records if "backup-begin" in r.message]
@@ -496,7 +505,8 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
         timeout=30,
     )
     qsnap_cps = [
-        cp.strip() for cp in (cp_result.stdout or "").splitlines()
+        cp.strip()
+        for cp in (cp_result.stdout or "").splitlines()
         if cp.strip().startswith("qsnap-")
     ]
     assert len(qsnap_cps) >= 1, (
@@ -509,4 +519,438 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     assert not tmp_file.exists(), f"Temporary file {tmp_file} must have been renamed"
 
     _assert_standalone_qcow2(shell, result.target_path)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ── libnbd availability ──────────────────────────────────────────────
+# Required for the libnbd engine integration test.
+try:
+    import nbd  # noqa: F401
+
+    _HAS_LIBNBD = True
+except ImportError:
+    _HAS_LIBNBD = False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 5: qemu-img-convert engine (explicit, default)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
+    """Verify FULL backup with engine explicitly set to ``qemu-img-convert``.
+
+    1. Start the VM.
+    2. Call ``create_full_backup()`` with ``full_transfer_engine="qemu-img-convert"``
+       (the default — passed explicitly to verify the parameter flows through).
+    3. Verify ``qemu-img convert`` was used (log check for both ``qemu-img`` and
+       ``convert`` in the same message, and ``nbd:unix:`` presence for the NBD path).
+    4. Verify NO libnbd engine warning (``full_transfer_engine=libnbd``) appears.
+    5. Verify a checkpoint was created atomically.
+    6. Verify the result is a standalone qcow2 with no backing file.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Start the VM.
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    snapshot = SnapshotInfo(
+        name=f"{vm_name}.qemu-img-convert",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+
+    provider = BitmapBackupProvider(shell)
+    caplog.set_level(logging.DEBUG)
+    result = provider.create_full_backup(
+        vm_name,
+        snapshot,
+        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        compress=False,
+        bucket_level="monthly",
+        full_transfer_engine="qemu-img-convert",
+    )
+
+    assert result.success, f"qemu-img-convert FULL must succeed, got: {result.error}"
+
+    # qemu-img convert must appear AND nbd:unix: must appear (NBD path for running VM).
+    convert_calls = [
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
+    ]
+    assert len(convert_calls) > 0, "qemu-img convert must be used for qemu-img-convert engine"
+
+    nbd_calls = [
+        r.message for r in caplog.records if "nbd:unix:" in r.message and "convert" in r.message
+    ]
+    assert len(nbd_calls) > 0, "nbd:unix: must appear in the convert command for running VM"
+
+    # No libnbd warning about slower performance must appear.
+    libnbd_warnings = [
+        r.message for r in caplog.records if "full_transfer_engine=libnbd" in r.message
+    ]
+    assert len(libnbd_warnings) == 0, (
+        "libnbd engine warning must NOT appear for qemu-img-convert engine"
+    )
+
+    # Checkpoint must exist.
+    cp_result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    qsnap_cps = [
+        cp.strip()
+        for cp in (cp_result.stdout or "").splitlines()
+        if cp.strip().startswith("qsnap-")
+    ]
+    assert len(qsnap_cps) >= 1, (
+        f"At least one qsnap checkpoint expected after qemu-img-convert FULL, got: {qsnap_cps}"
+    )
+
+    _assert_standalone_qcow2(shell, result.target_path)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 6: libnbd engine (pread/pwrite)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_full_backup_libnbd_engine(test_vm, caplog):
+    """Verify FULL backup with engine ``libnbd`` (pread/pwrite loop).
+
+    1. Start the VM.
+    2. Call ``create_full_backup()`` with ``full_transfer_engine="libnbd"``,
+       wiring an actual ``LibnbdClient`` via the provider constructor.
+    3. Verify the libnbd performance warning (``full_transfer_engine=libnbd``)
+       is logged by ``_full_pull_lifecycle()``.
+    4. Verify NO ``qemu-img convert`` with ``nbd:unix:`` appears (the libnbd
+       engine uses ``qemu-img create`` for the empty qcow2, not ``convert``).
+    5. Verify checkpoint was created atomically.
+    6. Verify the result is a standalone qcow2 with no backing file.
+    """
+    if not _HAS_LIBNBD:
+        pytest.skip("libnbd Python bindings not available")
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Start the VM.
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    snapshot = SnapshotInfo(
+        name=f"{vm_name}.libnbd",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+
+    from qsnap.utils.nbd_client import LibnbdClient
+
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
+    caplog.set_level(logging.DEBUG)
+    result = provider.create_full_backup(
+        vm_name,
+        snapshot,
+        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        compress=False,
+        bucket_level="monthly",
+        full_transfer_engine="libnbd",
+    )
+
+    assert result.success, f"libnbd engine FULL must succeed, got: {result.error}"
+
+    # libnbd engine warning must appear (from _full_pull_lifecycle).
+    libnbd_warnings = [
+        r.message for r in caplog.records if "full_transfer_engine=libnbd" in r.message
+    ]
+    assert len(libnbd_warnings) >= 1, "libnbd engine performance warning must be logged"
+
+    # qemu-img convert with nbd:unix: must NOT appear for data transfer.
+    # (qemu-img info/create may still appear for setup; those are fine.)
+    convert_transfer_calls = [
+        r.message
+        for r in caplog.records
+        if "qemu-img" in r.message and "convert" in r.message and "nbd:unix:" in r.message
+    ]
+    assert len(convert_transfer_calls) == 0, (
+        "qemu-img convert with nbd:unix: must NOT be used for libnbd engine"
+    )
+
+    # Checkpoint must exist (libnbd engine still uses backup-begin atomically).
+    cp_result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    qsnap_cps = [
+        cp.strip()
+        for cp in (cp_result.stdout or "").splitlines()
+        if cp.strip().startswith("qsnap-")
+    ]
+    assert len(qsnap_cps) >= 1, (
+        f"At least one qsnap checkpoint expected after libnbd FULL, got: {qsnap_cps}"
+    )
+
+    _assert_standalone_qcow2(shell, result.target_path)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 7: Custom convert_parallel and convert_out_of_order flags
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
+    """Verify FULL backup with custom ``-m`` and in-order writes.
+
+    1. Start the VM.
+    2. Call ``create_full_backup()`` with ``full_transfer_engine="qemu-img-convert"``,
+       ``convert_parallel=2``, ``convert_out_of_order=False``.
+    3. Verify the convert command includes ``-m 2`` (parallel coroutines).
+    4. Verify the convert command does NOT include ``-W`` (out-of-order writes
+       disabled).
+    5. Verify the result is a standalone qcow2 with no backing file.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Start the VM.
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    snapshot = SnapshotInfo(
+        name=f"{vm_name}.custom-flags",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+
+    provider = BitmapBackupProvider(shell)
+    caplog.set_level(logging.DEBUG)
+    result = provider.create_full_backup(
+        vm_name,
+        snapshot,
+        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        compress=False,
+        bucket_level="monthly",
+        full_transfer_engine="qemu-img-convert",
+        convert_parallel=2,
+        convert_out_of_order=False,
+    )
+
+    assert result.success, f"custom-flags FULL must succeed, got: {result.error}"
+
+    # The command should appear in DEBUG logs as a list.  Look for a
+    # convert command with '2' immediately after '-m' (parallel=2),
+    # and verify no '-W' flag (out_of_order=False).
+    convert_messages = [
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
+    ]
+    assert len(convert_messages) > 0, "qemu-img convert must be used"
+
+    # Check that at least one log line contains both 'convert' and
+    # the pair "'-m', '2'" (as quoted list elements in Python repr).
+    parallel_2_found = any(
+        "convert" in msg and "'-m'" in msg and "'2'" in msg for msg in convert_messages
+    )
+    assert parallel_2_found, (
+        f"convert command must contain -m 2 (parallel=2); got convert messages: {convert_messages}"
+    )
+
+    # Verify -W is NOT present in any convert message.
+    out_of_order_found = any("'-W'" in msg for msg in convert_messages)
+    assert not out_of_order_found, (
+        "convert command must NOT contain -W (out_of_order=False); "
+        f"got convert messages: {convert_messages}"
+    )
+
+    _assert_standalone_qcow2(shell, result.target_path)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 8: libnbd engine — compression modes + speed comparison
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+@pytest.mark.parametrize("test_vm", ["4G"], indirect=True)
+def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
+    """Verify libnbd FULL backup with all compression modes and measure speed.
+
+    Closes gap 1 (CRITICAL): no integration test verified that
+    ``full_transfer_engine="libnbd"`` + ``compress=True`` actually
+    produces a compressed qcow2 via the ``qemu-nbd --image-opts
+    driver=compress`` write-side server.
+
+    1. Write 50 MB of patterned data (VM stopped) — small amount
+       because libnbd pread/pwrite is ~570x slower than qemu-img convert.
+    2. Start the VM.
+    3. For each compression mode (none, zstd, zlib):
+       a. Create a FULL backup via ``full_transfer_engine="libnbd"``.
+       b. Verify the libnbd performance WARNING is logged.
+       c. Verify ``compression-type`` in qcow2 metadata matches the mode.
+       d. Verify the result is a standalone qcow2.
+       e. Measure elapsed time.
+    4. Assert compressed actual-size < uncompressed actual-size.
+    5. Log a summary table of all timings for comparison.
+    """
+    if not _HAS_LIBNBD:
+        pytest.skip("libnbd Python bindings not available")
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+
+    from qsnap.utils.nbd_client import LibnbdClient
+
+    # Step 1: Write 50 MB data (VM stopped).
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(1)
+    if not _write_data(shell, base_image, 50):
+        pytest.skip("Failed to write 50 MB test data")
+
+    # Step 2: Start the VM.
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
+    timings: list[tuple[str, float, int]] = []  # (mode, seconds, actual_size)
+
+    # --- none (uncompressed) ---
+    _cleanup_checkpoints(shell, vm_name)
+    caplog.clear()
+    caplog.set_level(logging.DEBUG)
+    t0 = time.monotonic()
+    r_none = provider.create_full_backup(
+        vm_name,
+        SnapshotInfo(
+            name=f"{vm_name}.libnbd-none", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
+        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        compress=False,
+        bucket_level="monthly",
+        full_transfer_engine="libnbd",
+    )
+    t_none = time.monotonic() - t0
+    assert r_none.success, f"libnbd uncompressed FULL failed: {r_none.error}"
+    _assert_standalone_qcow2(shell, r_none.target_path)
+    ct_none = _get_compression_type(shell, r_none.target_path)
+    assert ct_none == "zlib", (
+        f"libnbd uncompressed: expected compression-type 'zlib' (default), got {ct_none!r}"
+    )
+    actual_none = _get_actual_size(shell, r_none.target_path)
+    # Verify libnbd WARNING was logged.
+    libnbd_warnings = [
+        r.message for r in caplog.records if "full_transfer_engine=libnbd" in r.message
+    ]
+    assert len(libnbd_warnings) >= 1, "libnbd engine performance warning must be logged"
+    timings.append(("none", t_none, actual_none))
+
+    # --- zstd ---
+    _cleanup_checkpoints(shell, vm_name)
+    time.sleep(1.1)
+    caplog.clear()
+    t0 = time.monotonic()
+    r_zstd = provider.create_full_backup(
+        vm_name,
+        SnapshotInfo(
+            name=f"{vm_name}.libnbd-zstd", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
+        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        compress=True,
+        compression_type="zstd",
+        bucket_level="monthly",
+        full_transfer_engine="libnbd",
+    )
+    t_zstd = time.monotonic() - t0
+    assert r_zstd.success, f"libnbd zstd FULL failed: {r_zstd.error}"
+    _assert_standalone_qcow2(shell, r_zstd.target_path)
+    ct_zstd = _get_compression_type(shell, r_zstd.target_path)
+    assert ct_zstd == "zstd", f"libnbd zstd: expected compression-type 'zstd', got {ct_zstd!r}"
+    actual_zstd = _get_actual_size(shell, r_zstd.target_path)
+    timings.append(("zstd", t_zstd, actual_zstd))
+
+    # --- zlib ---
+    _cleanup_checkpoints(shell, vm_name)
+    time.sleep(1.1)
+    caplog.clear()
+    t0 = time.monotonic()
+    r_zlib = provider.create_full_backup(
+        vm_name,
+        SnapshotInfo(
+            name=f"{vm_name}.libnbd-zlib", path=base_image, timestamp=datetime.now(), allocation=0
+        ),
+        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        compress=True,
+        compression_type="zlib",
+        bucket_level="monthly",
+        full_transfer_engine="libnbd",
+    )
+    t_zlib = time.monotonic() - t0
+    assert r_zlib.success, f"libnbd zlib FULL failed: {r_zlib.error}"
+    _assert_standalone_qcow2(shell, r_zlib.target_path)
+    ct_zlib = _get_compression_type(shell, r_zlib.target_path)
+    assert ct_zlib == "zlib", f"libnbd zlib: expected compression-type 'zlib', got {ct_zlib!r}"
+    actual_zlib = _get_actual_size(shell, r_zlib.target_path)
+    timings.append(("zlib", t_zlib, actual_zlib))
+
+    # Step 4: Compressed must be smaller than uncompressed.
+    assert actual_zstd < actual_none, (
+        f"libnbd zstd ({actual_zstd}) must be smaller than uncompressed ({actual_none})"
+    )
+    assert actual_zlib < actual_none, (
+        f"libnbd zlib ({actual_zlib}) must be smaller than uncompressed ({actual_none})"
+    )
+
+    # Step 5: Log summary table.
+    logger = logging.getLogger(__name__)
+    logger.info("=== libnbd FULL backup speed comparison (50 MB data) ===")
+    for mode, elapsed, actual in timings:
+        throughput = (50 / elapsed) if elapsed > 0 else 0
+        logger.info(
+            "  %-6s  time=%6.1fs  actual=%8d B  throughput=%5.1f MB/s",
+            mode,
+            elapsed,
+            actual,
+            throughput,
+        )
+
     _cleanup_checkpoints(shell, vm_name)

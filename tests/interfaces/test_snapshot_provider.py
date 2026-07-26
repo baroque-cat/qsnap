@@ -109,5 +109,3 @@ def test_snapshot_provider_delete_returns_shellresult(cls, init_kwargs):
     )
     result = provider.delete(snapshot)
     assert isinstance(result, ShellResult)
-
-

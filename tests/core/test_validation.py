@@ -17,8 +17,6 @@ from __future__ import annotations
 import logging
 from unittest.mock import patch
 
-import pytest
-
 from qsnap.core import Core, VMRunResult
 from qsnap.models.results import CheckResult, ShellResult
 from tests.mocks import MockConfigFacade, MockShell
@@ -1098,8 +1096,7 @@ def test_validate_compress_driver_missing_dry_run_warning(
     # WARNING about environment validation failure was logged.
     warning_messages = [r.message for r in caplog.records]
     assert any(
-        "Environment validation failed" in msg and "dry-run" in msg
-        for msg in warning_messages
+        "Environment validation failed" in msg and "dry-run" in msg for msg in warning_messages
     ), f"Expected dry-run validation WARNING, got: {warning_messages}"
 
 

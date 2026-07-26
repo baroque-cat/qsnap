@@ -104,38 +104,46 @@ def test_socket_and_tmp_cleanup(test_vm):
     if vm_running and nbd_available:
         provider = BitmapBackupProvider(shell)
         source = SnapshotInfo(
-            name=f"{vm_name}.cleanup", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.cleanup",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
         )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         _cleanup_checkpoints(shell, vm_name)
         result = provider.create_full_backup(
-            vm_name, source, target, compress=False, bucket_level="monthly",
+            vm_name,
+            source,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
 
         # Source NBD socket must be gone.
-        assert not socket_path.exists(), (
-            f"Source socket {socket_path} was not cleaned up"
-        )
+        assert not socket_path.exists(), f"Source socket {socket_path} was not cleaned up"
 
         if result.success:
-            assert not tmp_file.exists(), (
-                f"Tmp file {tmp_file} must be renamed on success"
-            )
+            assert not tmp_file.exists(), f"Tmp file {tmp_file} must be renamed on success"
         else:
-            assert not tmp_file.exists(), (
-                f"Tmp file {tmp_file} must be removed on failure"
-            )
+            assert not tmp_file.exists(), f"Tmp file {tmp_file} must be removed on failure"
     else:
         # Stopped-VM path: direct convert, no NBD socket.
         provider = BitmapBackupProvider(shell)
         source = SnapshotInfo(
-            name=f"{vm_name}.cleanup-stopped", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.cleanup-stopped",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
         )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
         result = provider.create_full_backup(
-            vm_name, source, target, compress=False, bucket_level="monthly",
+            vm_name,
+            source,
+            target,
+            compress=False,
+            bucket_level="monthly",
         )
         assert result.success or result.error is not None, f"Stopped-VM path failed: {result.error}"
         assert not tmp_file.exists(), f"Tmp file {tmp_file} must be cleaned up"
@@ -176,12 +184,19 @@ def test_domjobabort_after_backup(test_vm):
 
     provider = BitmapBackupProvider(shell)
     source = SnapshotInfo(
-        name=f"{vm_name}.domjobabort", path=base_image, timestamp=datetime.now(), allocation=0,
+        name=f"{vm_name}.domjobabort",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     result = provider.create_full_backup(
-        vm_name, source, target, compress=False, bucket_level="monthly",
+        vm_name,
+        source,
+        target,
+        compress=False,
+        bucket_level="monthly",
     )
     assert result.success, f"FULL backup failed: {result.error}"
 
@@ -233,7 +248,9 @@ def test_stall_detection_kills_hung(tmp_path: Path, monkeypatch):
     )
 
     assert not result.success, "Stall must be detected"
-    assert "Stall detected" in (result.error or ""), f"Expected 'Stall detected' in {result.error!r}"
+    assert "Stall detected" in (result.error or ""), (
+        f"Expected 'Stall detected' in {result.error!r}"
+    )
     assert result.returncode == -1, f"Expected returncode=-1, got {result.returncode}"
 
 
@@ -265,9 +282,7 @@ def test_stall_detection_slow_progress_survives(tmp_path: Path, monkeypatch):
     )
 
     assert result.success, f"Slow progress must NOT trigger stall: {result.error}"
-    assert "Stall detected" not in (result.error or ""), (
-        f"False-positive stall: {result.error}"
-    )
+    assert "Stall detected" not in (result.error or ""), f"False-positive stall: {result.error}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -314,7 +329,9 @@ def test_stale_state_self_healing(test_vm):
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider.transfer_missing(
-        vm_config=vm_config, target=target, snapshots=[stale],
+        vm_config=vm_config,
+        target=target,
+        snapshots=[stale],
     )
 
     # Stale entry removed.

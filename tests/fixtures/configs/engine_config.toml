@@ -1,0 +1,37 @@
+# Config fixture testing full_transfer_engine, convert_parallel, and
+# convert_out_of_order fields with inheritance cascade.
+#
+# Global defaults:  full_transfer_engine = "libnbd", convert_parallel = 2,
+# convert_out_of_order = false.
+# - vm_inherit:  inherits all three from global — libnbd, 2, false.
+# - vm_override: one target overrides full_transfer_engine to "qemu-img-convert",
+#   another target inherits all three from global.
+
+full_transfer_engine = "libnbd"
+convert_parallel = 2
+convert_out_of_order = false
+
+[[vm]]
+name = "vm_inherit"
+base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_inherit"
+  incremental = true
+
+[[vm]]
+name = "vm_override"
+base_image = "/var/lib/libvirt/images/vm_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_convert"
+  full_transfer_engine = "qemu-img-convert"
+  convert_parallel = 8
+  convert_out_of_order = true
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_inherit"
+  # Inherits full_transfer_engine="libnbd", convert_parallel=2,
+  # convert_out_of_order=false from global.

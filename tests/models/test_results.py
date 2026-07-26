@@ -24,7 +24,6 @@ from qsnap.models.results import (
     RestoreResult,
     RetentionResult,
     ShellResult,
-    SnapshotInfo,
     SnapshotResult,
 )
 

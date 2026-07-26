@@ -330,9 +330,7 @@ def test_check_state_orphaned_checkpoint_removed_target(
     # and the current target hash.  The factory now routes through
     # create_backup_provider (design D5).
     mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [orphan_cp]
-    mock_factory._bitmap_backup_provider.target_hash = (
-        lambda p: current_hash
-    )
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: current_hash
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -383,9 +381,7 @@ def test_check_state_orphaned_checkpoint_changed_path(
     current_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8]
 
     mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [orphan_cp]
-    mock_factory._bitmap_backup_provider.target_hash = (
-        lambda p: current_hash
-    )
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: current_hash
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -427,9 +423,9 @@ def test_check_state_no_orphans_all_match(
     matching_cp = f"qsnap-{target_hash}-snap1"
 
     mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: [matching_cp]
-    mock_factory._bitmap_backup_provider.target_hash = (
-        lambda p: hashlib.md5(p.encode()).hexdigest()[:8]
-    )
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: hashlib.md5(
+        p.encode()
+    ).hexdigest()[:8]
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
@@ -527,9 +523,9 @@ def test_check_state_non_qsnap_checkpoints_ignored(
     ]
 
     mock_factory._bitmap_backup_provider.list_checkpoints = lambda vm_name: checkpoints
-    mock_factory._bitmap_backup_provider.target_hash = (
-        lambda p: hashlib.md5(p.encode()).hexdigest()[:8]
-    )
+    mock_factory._bitmap_backup_provider.target_hash = lambda p: hashlib.md5(
+        p.encode()
+    ).hexdigest()[:8]
 
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)

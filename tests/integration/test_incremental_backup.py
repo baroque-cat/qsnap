@@ -62,11 +62,19 @@ def _write_data(shell: SubprocessShell, disk_path: Path, size_mb: int) -> bool:
     return result.success
 
 
-def _write_data_running(shell: SubprocessShell, disk_path: Path, size_mb: int, offset_mb: int) -> bool:
+def _write_data_running(
+    shell: SubprocessShell, disk_path: Path, size_mb: int, offset_mb: int
+) -> bool:
     """Write *size_mb* MB via ``qemu-io --force-share`` at *offset_mb* (VM running)."""
     size_bytes = size_mb * 1024 * 1024
     result = shell.run(
-        ["qemu-io", "--force-share", "-c", f"write -P 0xBB {offset_mb}M {size_bytes}", str(disk_path)],
+        [
+            "qemu-io",
+            "--force-share",
+            "-c",
+            f"write -P 0xBB {offset_mb}M {size_bytes}",
+            str(disk_path),
+        ],
         timeout=max(120, size_mb // 10 + 30),
         check=True,
     )
@@ -202,8 +210,14 @@ def test_incremental_after_full(test_vm):
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         time.sleep(1)
     if not _write_data(shell, base_image, 200):
-        result = shell.run(["qemu-io", "-c", f"write -P 0xAA 0 {200*1024*1024}", str(base_image)], timeout=60, check=False)
-        pytest.skip(f"Failed to write 200 MB to {base_image}. qemu-io: success={result.success} error={result.error!r} rc={result.returncode}")
+        result = shell.run(
+            ["qemu-io", "-c", f"write -P 0xAA 0 {200 * 1024 * 1024}", str(base_image)],
+            timeout=60,
+            check=False,
+        )
+        pytest.skip(
+            f"Failed to write 200 MB to {base_image}. qemu-io: success={result.success} error={result.error!r} rc={result.returncode}"
+        )
 
     shell.run(["virsh", "start", vm_name], timeout=30)
     time.sleep(2)
@@ -234,7 +248,11 @@ def test_incremental_after_full(test_vm):
     target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
 
     result_full = provider_full.create_full_backup(
-        vm_name, source, target, compress=False, bucket_level="monthly",
+        vm_name,
+        source,
+        target,
+        compress=False,
+        bucket_level="monthly",
     )
     assert result_full.success, f"FULL backup failed: {result_full.error}"
     full_actual = _get_actual_size(shell, result_full.target_path)
@@ -250,7 +268,8 @@ def test_incremental_after_full(test_vm):
     # Write 10 MB at offset 200 MB (outside the existing 200 MB of data).
     inc_write = shell.run(
         ["qemu-io", "-c", "write -P 0xCC 200M 10M", str(base_image)],
-        timeout=60, check=False,
+        timeout=60,
+        check=False,
     )
     if not inc_write.success:
         pytest.skip(f"Failed to write incremental data: {inc_write.error!r}")
@@ -263,9 +282,16 @@ def test_incremental_after_full(test_vm):
     snap_name = f"{vm_name}.incr-test"
     snap_result = shell.run(
         [
-            "virsh", "snapshot-create-as", "--domain", vm_name,
-            "--name", snap_name, "--disk-only",
-            "--diskspec", "vda,snapshot=external", "--no-metadata",
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
         ],
         timeout=60,
         check=True,
@@ -282,6 +308,7 @@ def test_incremental_after_full(test_vm):
         )
         if xml_result.success:
             import re as _re
+
             m = _re.search(r'<source file="([^"]+)"', xml_result.stdout)
             if m:
                 overlay_path = Path(m.group(1))
@@ -289,7 +316,10 @@ def test_incremental_after_full(test_vm):
             pytest.skip("Could not determine overlay path after external snapshot")
 
     snapshot_info = SnapshotInfo(
-        name=snap_name, path=overlay_path, timestamp=datetime.now(), allocation=0,
+        name=snap_name,
+        path=overlay_path,
+        timestamp=datetime.now(),
+        allocation=0,
     )
 
     # Step 5: Incremental transfer via libnbd.
@@ -297,7 +327,10 @@ def test_incremental_after_full(test_vm):
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider_inc.transfer_missing(
-        vm_config=vm_config, target=target, snapshots=[snapshot_info], stall_timeout=300,
+        vm_config=vm_config,
+        target=target,
+        snapshots=[snapshot_info],
+        stall_timeout=300,
     )
     assert len(results) > 0, "transfer_missing must return at least one result"
 
@@ -319,17 +352,19 @@ def test_incremental_after_full(test_vm):
     # Backing chain.
     backing = _get_backing_filename(shell, inc_path)
     assert backing is not None, "Incremental must have a backing file"
-    assert ".FULL." in backing or str(result_full.target_path) in backing or str(result_full.target_path.name) in backing, (
-        f"Incremental backing {backing!r} must reference the FULL backup"
-    )
+    assert (
+        ".FULL." in backing
+        or str(result_full.target_path) in backing
+        or str(result_full.target_path.name) in backing
+    ), f"Incremental backing {backing!r} must reference the FULL backup"
 
     # Dirty bytes proportional to 10 MB, not 3 GB.
     transferred = inc_result.bytes_transferred
     max_expected = 10 * 1024 * 1024 * 10  # 10 MB * 10x overhead ≈ 100 MB
     assert transferred < max_expected, (
-        f"Incremental delta ({transferred / (1024*1024):.1f} MB) "
+        f"Incremental delta ({transferred / (1024 * 1024):.1f} MB) "
         f"must be proportional to 10 MB dirty data, not 3 GB disk. "
-        f"Max expected: {max_expected / (1024*1024):.0f} MB"
+        f"Max expected: {max_expected / (1024 * 1024):.0f} MB"
     )
     assert transferred < full_actual, (
         f"Incremental bytes_transferred ({transferred}) must be < FULL ({full_actual})"
@@ -381,45 +416,67 @@ def test_incremental_compression_not_applied(test_vm, caplog):
     # Step 1: Zstd-compressed FULL backup.
     provider = BitmapBackupProvider(shell)
     source = SnapshotInfo(
-        name=f"{vm_name}.full-zstd", path=base_image, timestamp=datetime.now(), allocation=0,
+        name=f"{vm_name}.full-zstd",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
     )
     target = TargetConfig(path=target_dir, incremental=True, compress=True, verify="off")
 
     r_full = provider.create_full_backup(
-        vm_name, source, target, compress=True, compression_type="zstd", bucket_level="monthly",
+        vm_name,
+        source,
+        target,
+        compress=True,
+        compression_type="zstd",
+        bucket_level="monthly",
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
     ct_full = _get_compression_type(shell, r_full.target_path)
-    assert ct_full == "zstd", (
-        f"FULL must have compression-type 'zstd', got {ct_full!r}"
-    )
+    assert ct_full == "zstd", f"FULL must have compression-type 'zstd', got {ct_full!r}"
 
     # Step 2: Write new data, create external snapshot.
     _write_data_running(shell, base_image, 5, offset_mb=500)
     snap_name = f"{vm_name}.incr-nocompress"
     shell.run(
-        ["virsh", "snapshot-create-as", "--domain", vm_name,
-         "--name", snap_name, "--disk-only",
-         "--diskspec", "vda,snapshot=external", "--no-metadata"],
-        timeout=60, check=True,
+        [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
+        ],
+        timeout=60,
+        check=True,
     )
     overlay = _get_snapshot_disk_path(shell, vm_name)
     if overlay is None:
         pytest.skip("Could not determine overlay path")
 
     snapshot_info = SnapshotInfo(
-        name=snap_name, path=overlay, timestamp=datetime.now(), allocation=0,
+        name=snap_name,
+        path=overlay,
+        timestamp=datetime.now(),
+        allocation=0,
     )
 
     # Step 3: transfer_missing with compress=True target.
     import logging
+
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     with caplog.at_level(logging.INFO):
         results = provider_inc.transfer_missing(
-            vm_config=vm_config, target=target,
-            snapshots=[snapshot_info], stall_timeout=300,
+            vm_config=vm_config,
+            target=target,
+            snapshots=[snapshot_info],
+            stall_timeout=300,
         )
     assert len(results) > 0, "transfer_missing must return results"
 
@@ -430,12 +487,12 @@ def test_incremental_compression_not_applied(test_vm, caplog):
 
         # Step 4: Log message about uncompressed incrementals.
         incr_logs = [
-            r.message for r in caplog.records
+            r.message
+            for r in caplog.records
             if "incremental" in r.message.lower() and "uncompressed" in r.message.lower()
         ]
         assert len(incr_logs) > 0, (
-            "Expected log message 'bitmap incrementals are uncompressed', "
-            "but not found in caplog."
+            "Expected log message 'bitmap incrementals are uncompressed', but not found in caplog."
         )
 
         # Step 5: Compression-type must be "zlib" (default), NOT "zstd".
@@ -450,7 +507,8 @@ def test_incremental_compression_not_applied(test_vm, caplog):
 
         # Step 6: No qemu-nbd compress driver.
         compress_drv = [
-            r.message for r in caplog.records
+            r.message
+            for r in caplog.records
             if "driver=compress" in r.message or "--image-opts" in r.message
         ]
         assert len(compress_drv) == 0, (
@@ -502,12 +560,19 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     # Step 1: FULL backup.
     provider = BitmapBackupProvider(shell)
     source = SnapshotInfo(
-        name=f"{vm_name}.full-dirty", path=base_image, timestamp=datetime.now(), allocation=0,
+        name=f"{vm_name}.full-dirty",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
     )
     target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
 
     r_full = provider.create_full_backup(
-        vm_name, source, target, compress=False, bucket_level="monthly",
+        vm_name,
+        source,
+        target,
+        compress=False,
+        bucket_level="monthly",
     )
     assert r_full.success, f"FULL failed: {r_full.error}"
     full_actual = _get_actual_size(shell, r_full.target_path)
@@ -518,17 +583,30 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     # Step 3: External snapshot.
     snap_name = f"{vm_name}.dirty-proportional"
     shell.run(
-        ["virsh", "snapshot-create-as", "--domain", vm_name,
-         "--name", snap_name, "--disk-only",
-         "--diskspec", "vda,snapshot=external", "--no-metadata"],
-        timeout=60, check=True,
+        [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
+        ],
+        timeout=60,
+        check=True,
     )
     overlay = _get_snapshot_disk_path(shell, vm_name)
     if overlay is None:
         pytest.skip("Could not determine overlay path")
 
     snapshot_info = SnapshotInfo(
-        name=snap_name, path=overlay, timestamp=datetime.now(), allocation=0,
+        name=snap_name,
+        path=overlay,
+        timestamp=datetime.now(),
+        allocation=0,
     )
 
     # Step 4: transfer_missing.
@@ -536,7 +614,10 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider_inc.transfer_missing(
-        vm_config=vm_config, target=target, snapshots=[snapshot_info], stall_timeout=300,
+        vm_config=vm_config,
+        target=target,
+        snapshots=[snapshot_info],
+        stall_timeout=300,
     )
     assert len(results) > 0
     inc_result = results[0]
@@ -545,15 +626,187 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     # Step 5: Size assertions.
     transferred = inc_result.bytes_transferred
     # Must be smaller than FULL (obviously).
-    assert transferred < full_actual, (
-        f"Incremental ({transferred}) must be < FULL ({full_actual})"
-    )
+    assert transferred < full_actual, f"Incremental ({transferred}) must be < FULL ({full_actual})"
     # Must be proportional to 5 MB of dirty data, not 500 MB disk.
     max_expected = 5 * 1024 * 1024 * 10  # 50 MB
     assert transferred < max_expected, (
-        f"Incremental delta ({transferred / (1024*1024):.1f} MB) "
+        f"Incremental delta ({transferred / (1024 * 1024):.1f} MB) "
         f"must be proportional to 5 MB dirty data. "
-        f"Max expected: {max_expected / (1024*1024):.0f} MB"
+        f"Max expected: {max_expected / (1024 * 1024):.0f} MB"
+    )
+
+    _cleanup_snapshots(shell, vm_name)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 4: Incremental after libnbd FULL — backing chain integrity
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_incremental_after_libnbd_full(test_vm):
+    """Verify incremental backup works after a FULL created via libnbd engine.
+
+    Closes gap 2 (WARNING): no integration test verified that a qcow2
+    created via ``full_transfer_engine="libnbd"`` (``qemu-img create``
+    + ``_start_write_server`` + ``_transfer(zero_skip=True)``) correctly
+    serves as a backing file for a subsequent incremental.
+
+    1. Write 50 MB of initial data (VM stopped), then start VM.
+    2. Create FULL backup via ``full_transfer_engine="libnbd"``.
+    3. Write 10 MB of new dirty data.
+    4. Create an external disk-only snapshot to freeze the dirty state.
+    5. Call ``transfer_missing()`` — must produce an incremental delta
+       (because a checkpoint from the libnbd FULL already exists).
+    6. Assert incremental ``actual-size`` < FULL ``actual-size``.
+    7. Assert incremental has a backing file pointing to the FULL.
+    8. Assert ``bytes_transferred`` is proportional to 10 MB, not full disk.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+
+    # Pre-checks.
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin + checkpoint not available")
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed — required for libnbd engine")
+
+    # Step 1: Write 50 MB initial data (VM stopped), then start.
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(1)
+    if not _write_data(shell, base_image, 50):
+        pytest.skip("Failed to write 50 MB initial data")
+
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    _cleanup_checkpoints(shell, vm_name)
+    _cleanup_snapshots(shell, vm_name)
+
+    # Step 2: FULL backup via libnbd engine.
+    provider_full = BitmapBackupProvider(shell, nbd=LibnbdClient())
+    source = SnapshotInfo(
+        name=f"{vm_name}.libnbd-full",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+
+    result_full = provider_full.create_full_backup(
+        vm_name,
+        source,
+        target,
+        compress=False,
+        bucket_level="monthly",
+        full_transfer_engine="libnbd",
+    )
+    assert result_full.success, f"libnbd FULL backup failed: {result_full.error}"
+    full_actual = _get_actual_size(shell, result_full.target_path)
+    assert full_actual > 0, f"FULL actual-size must be > 0, got {full_actual}"
+
+    # Step 3: Write 10 MB of new dirty data.  Stop the VM first because
+    # qemu-io --force-share requires read-only mode in recent qemu.
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    time.sleep(1)
+    inc_write = shell.run(
+        ["qemu-io", "-c", "write -P 0xCC 50M 10M", str(base_image)],
+        timeout=60,
+        check=False,
+    )
+    if not inc_write.success:
+        pytest.skip(f"Failed to write incremental data: {inc_write.error!r}")
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not restart after incremental data write")
+
+    # Step 4: External disk-only snapshot.
+    snap_name = f"{vm_name}.libnbd-incr"
+    snap_result = shell.run(
+        [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
+        ],
+        timeout=60,
+        check=True,
+    )
+    if not snap_result.success:
+        pytest.skip(f"Snapshot creation failed: {snap_result.error}")
+
+    overlay_path = _get_snapshot_disk_path(shell, vm_name)
+    if overlay_path is None:
+        pytest.skip("Could not determine overlay path after external snapshot")
+
+    snapshot_info = SnapshotInfo(
+        name=snap_name,
+        path=overlay_path,
+        timestamp=datetime.now(),
+        allocation=0,
+    )
+
+    # Step 5: Incremental transfer via libnbd.
+    provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
+    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+
+    results = provider_inc.transfer_missing(
+        vm_config=vm_config,
+        target=target,
+        snapshots=[snapshot_info],
+        stall_timeout=300,
+    )
+    assert len(results) > 0, "transfer_missing must return at least one result"
+
+    inc_result = results[0]
+    assert inc_result.success, (
+        f"Incremental after libnbd FULL failed: {inc_result.error}. "
+        f"Check that transfer_missing detected the checkpoint from the libnbd FULL."
+    )
+
+    # Step 6: Size assertions.
+    inc_path = inc_result.target_path
+    assert inc_path.exists(), f"Incremental file not found: {inc_path}"
+
+    inc_actual = _get_actual_size(shell, inc_path)
+    assert inc_actual < full_actual, (
+        f"Incremental actual-size ({inc_actual}) must be < FULL ({full_actual})"
+    )
+
+    # Step 7: Backing chain.
+    backing = _get_backing_filename(shell, inc_path)
+    assert backing is not None, "Incremental must have a backing file"
+    assert (
+        ".FULL." in backing
+        or str(result_full.target_path) in backing
+        or str(result_full.target_path.name) in backing
+    ), f"Incremental backing {backing!r} must reference the libnbd FULL backup"
+
+    # Step 8: Dirty bytes proportional to 10 MB, not 50 MB disk.
+    transferred = inc_result.bytes_transferred
+    max_expected = 10 * 1024 * 1024 * 10  # 10 MB * 10x overhead ≈ 100 MB
+    assert transferred < max_expected, (
+        f"Incremental delta ({transferred / (1024 * 1024):.1f} MB) "
+        f"must be proportional to 10 MB dirty data, not 50 MB disk. "
+        f"Max expected: {max_expected / (1024 * 1024):.0f} MB"
+    )
+    assert transferred < full_actual, (
+        f"Incremental bytes_transferred ({transferred}) must be < FULL ({full_actual})"
     )
 
     _cleanup_snapshots(shell, vm_name)

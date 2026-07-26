@@ -120,7 +120,9 @@ def test_onchange_skips_when_unchanged(test_vm, caplog):
         pytest.skip("python3-libnbd not installed")
 
     # Create snapshot and record in state.
-    snap_info = _snapshot_create(shell, vm_name, f"{vm_name}.onchange-skip", snapshot_dir, base_image)
+    snap_info = _snapshot_create(
+        shell, vm_name, f"{vm_name}.onchange-skip", snapshot_dir, base_image
+    )
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
@@ -128,7 +130,9 @@ def test_onchange_skips_when_unchanged(test_vm, caplog):
 
     # Create Core with onchange target.
     target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir, targets=[target])
+    vm_config = VMConfig(
+        name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir, targets=[target]
+    )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "onchange_skip.toml")
     factory = DefaultFactory(shell, state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
@@ -136,7 +140,9 @@ def test_onchange_skips_when_unchanged(test_vm, caplog):
     # --- First run: backup proceeds (no baseline) ---
     with caplog.at_level(logging.INFO):
         result_first = core.backup(vm_name)
-    skip_first = [r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message]
+    skip_first = [
+        r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message
+    ]
     assert len(skip_first) == 0, f"First run must NOT skip: {skip_first}"
 
     baseline = state.get_last_backup_allocation(str(target_dir))
@@ -152,7 +158,9 @@ def test_onchange_skips_when_unchanged(test_vm, caplog):
     caplog.clear()
     with caplog.at_level(logging.INFO):
         core.backup(vm_name)
-    skip_msgs = [r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message]
+    skip_msgs = [
+        r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message
+    ]
     assert len(skip_msgs) >= 1, (
         f"Expected onchange skip on second run, but no skip message found. "
         f"Logs: {[r.message for r in caplog.records]}"
@@ -205,7 +213,8 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
     # and has a non-trivial allocation.
     shell.run(
         ["qemu-io", "--force-share", "-c", "write -P 0xCC 0 200M", str(base_image)],
-        timeout=120, check=True,
+        timeout=120,
+        check=True,
     )
 
     # First snapshot — overlay captures the 200 MB written above.
@@ -215,7 +224,9 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
     state.record_snapshot(vm_name, snap1)
 
     target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir, targets=[target])
+    vm_config = VMConfig(
+        name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir, targets=[target]
+    )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "onchange_proceed.toml")
     factory = DefaultFactory(shell, state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
@@ -240,7 +251,8 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
     # Both are valid outcomes depending on qcow2 cluster allocation.
     shell.run(
         ["qemu-io", "--force-share", "-c", "write -P 0xDD 100M 100M", str(base_image)],
-        timeout=120, check=True,
+        timeout=120,
+        check=True,
     )
 
     # Create second snapshot (allocation may or may not differ).
@@ -251,10 +263,12 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
     caplog.clear()
     with caplog.at_level(logging.INFO):
         result_second = core.backup(vm_name)
-    vm_result2 = result_second.results[0]
+    _ = result_second.results[0]
     # The second run must not crash — either proceeds (gate open) or
     # skips (gate closed).  Both are correct.
-    skip_msgs = [r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message]
+    skip_msgs = [
+        r.message for r in caplog.records if "unchanged" in r.message and "skipping" in r.message
+    ]
     if snap2.allocation != baseline1:
         # Allocation changed → gate must be open → no skip message.
         assert len(skip_msgs) == 0, (

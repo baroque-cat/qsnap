@@ -766,3 +766,115 @@ def test_global_config_backup_create_explicit_onchange():
     """GlobalConfig(backup_create='onchange') has backup_create == 'onchange'."""
     cfg = GlobalConfig(backup_create="onchange")
     assert cfg.backup_create == "onchange"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.full_transfer_engine — FULL backup transfer engine selection
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_full_transfer_engine_default_is_qemu_img_convert():
+    """GlobalConfig().full_transfer_engine defaults to 'qemu-img-convert'."""
+    assert GlobalConfig().full_transfer_engine == "qemu-img-convert"
+
+
+def test_global_config_full_transfer_engine_is_immutable():
+    """GlobalConfig is frozen; mutating full_transfer_engine raises FrozenInstanceError."""
+    cfg = GlobalConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.full_transfer_engine = "libnbd"  # type: ignore[misc]
+
+
+def test_global_config_full_transfer_engine_set_to_libnbd():
+    """GlobalConfig(full_transfer_engine='libnbd') stores 'libnbd'."""
+    cfg = GlobalConfig(full_transfer_engine="libnbd")
+    assert cfg.full_transfer_engine == "libnbd"
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.convert_parallel — qemu-img convert -m flag (parallel coroutines)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_convert_parallel_default_is_4():
+    """GlobalConfig().convert_parallel defaults to 4."""
+    assert GlobalConfig().convert_parallel == 4
+
+
+def test_global_config_convert_parallel_is_immutable():
+    """GlobalConfig is frozen; mutating convert_parallel raises FrozenInstanceError."""
+    cfg = GlobalConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.convert_parallel = 8  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig.convert_out_of_order — qemu-img convert -W flag (out-of-order writes)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_convert_out_of_order_default_is_true():
+    """GlobalConfig().convert_out_of_order defaults to True."""
+    assert GlobalConfig().convert_out_of_order is True
+
+
+def test_global_config_convert_out_of_order_is_immutable():
+    """GlobalConfig is frozen; mutating convert_out_of_order raises FrozenInstanceError."""
+    cfg = GlobalConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.convert_out_of_order = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.full_transfer_engine — inherited from GlobalConfig via ConfigFacade
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_full_transfer_engine_default():
+    """TargetConfig().full_transfer_engine defaults to 'qemu-img-convert' (dataclass-level default).
+
+    ConfigFacade resolves inheritance at a higher layer; this test verifies
+    the dataclass field default is correct.
+    """
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.full_transfer_engine == "qemu-img-convert"
+
+
+def test_target_config_full_transfer_engine_overrides():
+    """TargetConfig(full_transfer_engine='libnbd') overrides the default 'qemu-img-convert'."""
+    target = TargetConfig(path=Path("/backup/testvm"), full_transfer_engine="libnbd")
+    assert target.full_transfer_engine == "libnbd"
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.convert_parallel — qemu-img convert -m flag
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_convert_parallel_default():
+    """TargetConfig().convert_parallel defaults to 4 (dataclass-level default)."""
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.convert_parallel == 4
+
+
+def test_target_config_convert_parallel_overrides():
+    """TargetConfig(convert_parallel=8) overrides the default 4."""
+    target = TargetConfig(path=Path("/backup/testvm"), convert_parallel=8)
+    assert target.convert_parallel == 8
+
+
+# ---------------------------------------------------------------------------
+# TargetConfig.convert_out_of_order — qemu-img convert -W flag
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_convert_out_of_order_default():
+    """TargetConfig().convert_out_of_order defaults to True (dataclass-level default)."""
+    target = TargetConfig(path=Path("/backup/testvm"))
+    assert target.convert_out_of_order is True
+
+
+def test_target_config_convert_out_of_order_overrides():
+    """TargetConfig(convert_out_of_order=False) overrides the default True."""
+    target = TargetConfig(path=Path("/backup/testvm"), convert_out_of_order=False)
+    assert target.convert_out_of_order is False

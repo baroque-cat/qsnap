@@ -9,7 +9,7 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 - **External snapshots** — disk-only, no-metadata snapshots via `virsh snapshot-create-as`
 - **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode)
 - **Incremental backups** — NBD bitmap-based backup to remote targets, with compression support for FULL backups
-- **Periodic full backups** — standalone qcow2 via `qemu-img convert`, with optional compression
+- **Periodic full backups** — standalone qcow2 via `qemu-img convert` (default) or `libnbd` pread/pwrite engine, with optional compression and configurable parallel coroutines
 - **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced before cascade-deletion
 - **Incremental backup verification** — four tiers: `off`, `metadata`, `hash` (SHA-256), or `full` (`qemu-img compare`)
 - **Retention policies** — time-based retention with hourly/daily/weekly/monthly/yearly buckets
@@ -163,6 +163,9 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Overridden per-VM/target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
+| `full_transfer_engine` | string | `"qemu-img-convert"` | FULL backup transfer engine: `"qemu-img-convert"` (default — C code, parallel coroutines) or `"libnbd"` (Python `pread`/`pwrite` loop via `INbdClient`). Inherits from global → target |
+| `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
+| `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). `true` optimizes for HDDs; `false` for in-order writes. Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
 | `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when the VM disk allocation hasn't changed since the last backup to this target). Inherits from global → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
@@ -198,6 +201,9 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Default is `"metadata"`; `"hash"`/`"full"` run chain-traversing `qemu-img compare`. Explicit value takes precedence |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
+| `full_transfer_engine` | string | `"qemu-img-convert"` | FULL backup transfer engine: `"qemu-img-convert"` (default) or `"libnbd"`. Inherits from global → VM → target |
+| `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
+| `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
 | `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when disk allocation unchanged). Inherits from global → target |
 
@@ -373,16 +379,46 @@ When a VM is **running**, `qemu-img convert` cannot read the active layer direct
 1. **Detect VM state** — `virsh dominfo --domain <vm>` is called; the `State:` line is parsed. If the VM is running, the NBD path is selected.
 2. **Check libvirt version** — `virsh --version` must report major version >= 6. If older, qsnap logs a WARNING and falls back to direct convert (which will fail on a running VM's active layer).
 3. **Start NBD export** — `virsh backup-begin --domain <vm> <xml>` is called with a `<domainbackup mode='pull'>` XML that specifies a Unix socket path (`/tmp/qsnap-backup-{pid}.sock`). No `--incremental` flag is used — this is a full export, not an incremental checkpoint.
-4. **Pull data via NBD** — `qemu-img convert -O qcow2 -m 4 -W -p nbd:unix:<socket> <target>.tmp` reads the entire disk through the NBD server, which coordinates with the running QEMU process to provide a consistent view without lock conflicts. When `compress = true`, the command includes `-c -o compression_type=<type>` for optimized C-level zstd compression (~850 MB/s).
+4. **Pull data via NBD** — `qemu-img convert -O qcow2 -m <parallel> [-W] -p nbd:unix:<socket> <target>.tmp` reads the entire disk through the NBD server, which coordinates with the running QEMU process to provide a consistent view without lock conflicts. The `-m` flag (parallel coroutines) and `-W` flag (out-of-order writes) are configurable via `convert_parallel` and `convert_out_of_order`. When `compress = true`, the command includes `-c -o compression_type=<type>` for optimized C-level zstd compression.
 5. **Clean up** — the socket file is removed in a `finally` block, and the `.tmp` file is atomically renamed to `vm.FULL.YYYYMMDD.qcow2` on success (or deleted on failure).
 
 This mechanism is used by the backup provider:
 
 | Provider | FULL Backup Method | Notes |
 |---|---|---|
-| `BitmapBackupProvider` | `qemu-img convert` (NBD source for running VMs, direct file for stopped VMs) | FULL backups use `qemu-img convert -m 4 -W -p` with optional `-c` compression via `run_with_stall_detection()`. For running VMs, `virsh backup-begin` starts the NBD export and a checkpoint is created atomically. For stopped VMs, direct `qemu-img convert <source_path>` is used (no NBD). Incremental backups use the Python `libnbd` `pread`/`pwrite` loop with dirty-bitmap intersection. |
+| `BitmapBackupProvider` | `qemu-img convert` (default) or `libnbd` pread/pwrite | FULL backups use `qemu-img convert -m <parallel> [-W] -p` with optional `-c` compression via `run_with_stall_detection()`. The engine is selected by `full_transfer_engine`: `"qemu-img-convert"` (default) or `"libnbd"` (Python `pread`/`pwrite` loop via `INbdClient` — creates an empty qcow2, starts a write-side `qemu-nbd`, and transfers via `_transfer(zero_skip=True)`). For running VMs, `virsh backup-begin` starts the NBD export and a checkpoint is created atomically. For stopped VMs, direct `qemu-img convert <source_path>` is used (no NBD). Incremental backups always use the Python `libnbd` `pread`/`pwrite` loop with dirty-bitmap intersection, regardless of `full_transfer_engine`. |
 
 The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
+
+### FULL Backup Transfer Engine
+
+The `full_transfer_engine` key selects how FULL backups are transferred:
+
+| Engine | Value | How it works |
+|---|---|---|
+| **qemu-img-convert** (default) | `"qemu-img-convert"` | `qemu-img convert` reads from the NBD source (running VM) or source file (stopped VM) and writes the target qcow2. C code with parallel coroutines (`-m`), out-of-order writes (`-W`), and optional compression (`-c`). |
+| **libnbd** | `"libnbd"` | Creates an empty qcow2 via `qemu-img create`, starts a write-side `qemu-nbd` (with compress driver when `compress = true`), and transfers data via the Python `libnbd` `pread`/`pwrite` loop with `zero_skip = True`. |
+
+The `convert_parallel` and `convert_out_of_order` keys only apply to the `qemu-img-convert` engine — the `libnbd` engine has no parallelism or out-of-order concept.
+
+Configuration example:
+
+```toml
+# Global default: use qemu-img-convert with 8 parallel coroutines
+full_transfer_engine = "qemu-img-convert"
+convert_parallel = 8
+convert_out_of_order = true
+
+[[vm]]
+name = "myvm"
+base_image = "/var/lib/libvirt/images/myvm.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/myvm"
+
+  # Per-target override: use libnbd engine for this target
+  [[vm.target]]
+  path = "/mnt/backup/myvm"
+  full_transfer_engine = "libnbd"
+```
 
 ### Bitmap Mode (NBD Incremental Backups)
 

@@ -22,7 +22,6 @@ import pytest
 
 from qsnap.shell.subprocess_shell import SubprocessShell
 
-
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: probe failure logged at DEBUG, not ERROR
 # ──────────────────────────────────────────────────────────────────────
@@ -52,15 +51,10 @@ def test_probe_failure_logged_at_debug_not_error(caplog):
         result = shell.run(["false"], timeout=10, check=True)
 
     # The command should fail (exit code 1).
-    assert not result.success, (
-        f"Expected 'false' command to fail, got success={result.success!r}"
-    )
+    assert not result.success, f"Expected 'false' command to fail, got success={result.success!r}"
 
     # Collect log records emitted by the shell logger.
-    shell_records = [
-        r for r in caplog.records
-        if r.name == "qsnap.shell.subprocess_shell"
-    ]
+    shell_records = [r for r in caplog.records if r.name == "qsnap.shell.subprocess_shell"]
 
     assert len(shell_records) > 0, (
         "Expected at least one log record from qsnap.shell — none found. "
@@ -76,10 +70,7 @@ def test_probe_failure_logged_at_debug_not_error(caplog):
         )
 
     # Explicitly verify no ERROR or WARNING records were emitted.
-    error_or_warning = [
-        r for r in shell_records
-        if r.levelno >= logging.WARNING
-    ]
+    error_or_warning = [r for r in shell_records if r.levelno >= logging.WARNING]
     assert len(error_or_warning) == 0, (
         f"Found {len(error_or_warning)} WARNING/ERROR log records when "
         f"check=True.  Only DEBUG is expected for probing calls.  "
@@ -121,8 +112,7 @@ def test_compress_probe_logged_at_debug(caplog):
 
     # The compress probe always exits non-zero — that is expected.
     assert not result.success, (
-        f"Compress driver probe should fail (needs file= parameter), "
-        f"got success={result.success!r}"
+        f"Compress driver probe should fail (needs file= parameter), got success={result.success!r}"
     )
 
     # The stderr should contain text indicating the driver was found
@@ -134,20 +124,14 @@ def test_compress_probe_logged_at_debug(caplog):
     )
 
     # Verify all shell log records are at DEBUG level.
-    shell_records = [
-        r for r in caplog.records
-        if r.name == "qsnap.shell.subprocess_shell"
-    ]
+    shell_records = [r for r in caplog.records if r.name == "qsnap.shell.subprocess_shell"]
     for record in shell_records:
         assert record.levelno <= logging.DEBUG, (
             f"Compress probe log at level {record.levelname} "
             f"(expected DEBUG). Message: {record.message!r}"
         )
 
-    error_records = [
-        r for r in shell_records
-        if r.levelno >= logging.WARNING
-    ]
+    error_records = [r for r in shell_records if r.levelno >= logging.WARNING]
     assert len(error_records) == 0, (
         f"Compress probe produced {len(error_records)} WARNING/ERROR "
         f"log records. Expected only DEBUG."

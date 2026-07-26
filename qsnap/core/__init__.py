@@ -2677,6 +2677,9 @@ class Core:
         *,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
+        full_transfer_engine: str = "qemu-img-convert",
+        convert_parallel: int = 4,
+        convert_out_of_order: bool = True,
     ) -> list[BackupResult]:
         """Transfer missing snapshots with exponential backoff retry.
 
@@ -2701,6 +2704,9 @@ class Core:
                 snapshots,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
+                full_transfer_engine=full_transfer_engine,
+                convert_parallel=convert_parallel,
+                convert_out_of_order=convert_out_of_order,
             )
 
         results: list[BackupResult] = []
@@ -2711,6 +2717,9 @@ class Core:
                 snapshots,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
+                full_transfer_engine=full_transfer_engine,
+                convert_parallel=convert_parallel,
+                convert_out_of_order=convert_out_of_order,
             )
 
             # Check if all transfers succeeded
@@ -2777,9 +2786,7 @@ class Core:
         if last_backup_alloc is None:
             return True  # first backup to this target
         current_alloc = snapshots[-1].allocation
-        if current_alloc != last_backup_alloc:
-            return True  # allocation changed
-        return False
+        return current_alloc != last_backup_alloc
 
     def _backup_target(
         self,
@@ -2793,16 +2800,16 @@ class Core:
         """
         # Per-target onchange gate (design D3): skip backup when the VM
         # disk has not changed since the last backup to this target.
-        if target.backup_create == "onchange":
-            if not self._should_backup_onchange(vm_config, target, snapshots):
-                logger.info(
-                    "[backup] %s: target %s unchanged "
-                    "(allocation %d == last backup) — skipping",
-                    vm_config.name,
-                    target.path,
-                    snapshots[-1].allocation if snapshots else 0,
-                )
-                return False  # no failure, just skipped
+        if target.backup_create == "onchange" and not self._should_backup_onchange(
+            vm_config, target, snapshots
+        ):
+            logger.info(
+                "[backup] %s: target %s unchanged (allocation %d == last backup) — skipping",
+                vm_config.name,
+                target.path,
+                snapshots[-1].allocation if snapshots else 0,
+            )
+            return False  # no failure, just skipped
 
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
@@ -2859,6 +2866,9 @@ class Core:
                         bucket_level=bucket_level,
                         compression_type=target.compression_type,
                         stall_timeout=stall_timeout,
+                        full_transfer_engine=target.full_transfer_engine,
+                        convert_parallel=target.convert_parallel,
+                        convert_out_of_order=target.convert_out_of_order,
                     )
                     if full_result.success:
                         # ── Post-create FULL backup verification ────
@@ -2926,6 +2936,9 @@ class Core:
                 snapshots,
                 compression_type=target.compression_type,
                 stall_timeout=stall_timeout,
+                full_transfer_engine=target.full_transfer_engine,
+                convert_parallel=target.convert_parallel,
+                convert_out_of_order=target.convert_out_of_order,
             )
             failed = [r for r in results if not r.success]
             if failed:
@@ -2996,9 +3009,7 @@ class Core:
             and snapshots
             and target.backup_create == "onchange"
         ):
-            self._state.set_last_backup_allocation(
-                str(target.path), snapshots[-1].allocation
-            )
+            self._state.set_last_backup_allocation(str(target.path), snapshots[-1].allocation)
 
         # Backup retention + cleanup
         backups, retention_result = self._evaluate_backup_retention(vm_config, target)

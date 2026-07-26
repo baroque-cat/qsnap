@@ -28,8 +28,7 @@ from unittest import mock
 import pytest
 
 from qsnap.models.results import NbdResult
-from qsnap.utils.nbd_client import LibnbdClient, MISSING_LIBNBD_ERROR
-
+from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, LibnbdClient
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: connect() returns NbdResult when nbd module is missing
@@ -183,6 +182,6 @@ def test_missing_libnbd_error_includes_arch_instructions():
     assert "Fedora" in MISSING_LIBNBD_ERROR or "dnf" in MISSING_LIBNBD_ERROR, (
         "MISSING_LIBNBD_ERROR should include Fedora instructions"
     )
-    assert "pip install nbd" in MISSING_LIBNBD_ERROR or "pip uninstall nbd" in MISSING_LIBNBD_ERROR, (
-        "MISSING_LIBNBD_ERROR should warn about the PyPI nbd imposter"
-    )
+    assert (
+        "pip install nbd" in MISSING_LIBNBD_ERROR or "pip uninstall nbd" in MISSING_LIBNBD_ERROR
+    ), "MISSING_LIBNBD_ERROR should warn about the PyPI nbd imposter"

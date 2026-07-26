@@ -110,6 +110,18 @@ class ConfigFacade(IConfigFacade):
         if "compression_type" in raw:
             global_kwargs["compression_type"] = str(raw["compression_type"])
 
+        # FULL backup transfer engine (qemu-img-convert default, libnbd alternative).
+        if "full_transfer_engine" in raw:
+            global_kwargs["full_transfer_engine"] = str(raw["full_transfer_engine"])
+
+        # qemu-img convert -m flag (parallel coroutines, range 1-8).
+        if "convert_parallel" in raw:
+            global_kwargs["convert_parallel"] = int(raw["convert_parallel"])
+
+        # qemu-img convert -W flag (out-of-order writes).
+        if "convert_out_of_order" in raw:
+            global_kwargs["convert_out_of_order"] = bool(raw["convert_out_of_order"])
+
         # Stall detection timeout for data-transfer commands.
         if "backup_stall_timeout" in raw:
             global_kwargs["backup_stall_timeout"] = str(raw["backup_stall_timeout"])
@@ -163,6 +175,21 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(
                 f"Invalid compression_type: {self._global.compression_type!r}. "
                 f"Must be one of: {', '.join(sorted(valid_compression))}"
+            )
+
+        # Validate full_transfer_engine (qemu-img-convert default, libnbd alternative).
+        valid_engines = {"qemu-img-convert", "libnbd"}
+        if self._global.full_transfer_engine not in valid_engines:
+            raise ConfigError(
+                f"Invalid full_transfer_engine: {self._global.full_transfer_engine!r}. "
+                f"Must be one of: {', '.join(sorted(valid_engines))}"
+            )
+
+        # Validate convert_parallel (range 1-8).
+        if not 1 <= self._global.convert_parallel <= 8:
+            raise ConfigError(
+                f"Invalid convert_parallel: {self._global.convert_parallel}. "
+                f"Must be an integer in range 1-8."
             )
 
         # Validate backup_stall_timeout via parse_stall_timeout().
@@ -321,6 +348,9 @@ class ConfigFacade(IConfigFacade):
                     global_cfg.compress,
                     global_cfg.compression_type,
                     global_cfg.backup_stall_timeout,
+                    global_cfg.full_transfer_engine,
+                    global_cfg.convert_parallel,
+                    global_cfg.convert_out_of_order,
                     vm_backup_create,
                 )
             )
@@ -350,6 +380,9 @@ class ConfigFacade(IConfigFacade):
         global_compress: bool = True,
         global_compression_type: str = "zstd",
         global_backup_stall_timeout: str = "30m",
+        global_full_transfer_engine: str = "qemu-img-convert",
+        global_convert_parallel: int = 4,
+        global_convert_out_of_order: bool = True,
         global_backup_create: str = "always",
     ) -> TargetConfig:
         if "path" not in tgt_raw:
@@ -456,6 +489,27 @@ class ConfigFacade(IConfigFacade):
                 f"Must be one of: {', '.join(sorted(valid_compression))}"
             )
 
+        # full_transfer_engine: target overrides global default.
+        full_transfer_engine = str(tgt_raw.get("full_transfer_engine", global_full_transfer_engine))
+        valid_engines = {"qemu-img-convert", "libnbd"}
+        if full_transfer_engine not in valid_engines:
+            raise ConfigError(
+                f"Invalid full_transfer_engine: {full_transfer_engine!r}. "
+                f"Must be one of: {', '.join(sorted(valid_engines))}"
+            )
+
+        # convert_parallel: target overrides global default.
+        convert_parallel = cast(int, tgt_raw.get("convert_parallel", global_convert_parallel))
+        if not 1 <= convert_parallel <= 8:
+            raise ConfigError(
+                f"Invalid convert_parallel: {convert_parallel}. Must be an integer in range 1-8."
+            )
+
+        # convert_out_of_order: target overrides global default.
+        convert_out_of_order = bool(
+            tgt_raw.get("convert_out_of_order", global_convert_out_of_order)
+        )
+
         # backup_stall_timeout: target overrides global default.
         backup_stall_timeout = str(tgt_raw.get("backup_stall_timeout", global_backup_stall_timeout))
         try:
@@ -519,6 +573,9 @@ class ConfigFacade(IConfigFacade):
             target_preserve_min=target_preserve_min,
             compress=compress,
             compression_type=compression_type,
+            full_transfer_engine=full_transfer_engine,
+            convert_parallel=convert_parallel,
+            convert_out_of_order=convert_out_of_order,
             backup_stall_timeout=backup_stall_timeout,
             backup_retry_max=backup_retry_max,
             backup_retry_base=backup_retry_base,

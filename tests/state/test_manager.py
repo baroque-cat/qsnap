@@ -329,6 +329,7 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
     ops = manager.get_deferred_operations("vm1")
     assert ops[0].last_warned_at == warned
 
+
 # ── full backup tracking tests ───────────────────────────────────────────
 
 

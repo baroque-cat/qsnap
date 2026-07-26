@@ -2231,7 +2231,9 @@ def test_transfer_retries_on_content_comparison_mismatch(
     ):
         results = core._transfer_with_retry(provider, vm, target, [snap])
 
-    assert transfer_spy.call_count >= 2, "content comparison mismatch should be retried at least once"
+    assert transfer_spy.call_count >= 2, (
+        "content comparison mismatch should be retried at least once"
+    )
     assert all(r.success for r in results), "all results should succeed after retry"
     assert "succeeded on retry" in caplog.text
 
@@ -4121,7 +4123,7 @@ def test_dry_run_activated_from_cli(
             mock_state,
             "set_last_allocation",
             wraps=mock_state.set_last_allocation,
-        ) as alloc_spy,
+        ) as _alloc_spy,
     ):
         result = core.run()
 
@@ -4211,7 +4213,9 @@ def test_resolve_disks_returns_empty_on_failure(
     """
     # Override the default domblklist expectation to simulate failure.
     # Remove existing domblklist first, then add failure.
-    mock_shell._expectations = [e for e in mock_shell._expectations if "domblklist" not in e.pattern]
+    mock_shell._expectations = [
+        e for e in mock_shell._expectations if "domblklist" not in e.pattern
+    ]
     mock_shell.expect("virsh domblklist").returns(
         ShellResult(
             success=False,
@@ -4248,9 +4252,9 @@ def test_resolve_disks_returns_empty_on_failure(
 
     # WARNING was logged about domblklist failure.
     warning_messages = [r.message for r in caplog.records]
-    assert any(
-        "domblklist failed" in msg for msg in warning_messages
-    ), f"Expected domblklist failure WARNING, got: {warning_messages}"
+    assert any("domblklist failed" in msg for msg in warning_messages), (
+        f"Expected domblklist failure WARNING, got: {warning_messages}"
+    )
 
 
 # ── Onchange Backup Gate (core-onchange-gate) ───────────────────────────────
@@ -4333,9 +4337,7 @@ def test_onchange_backup_no_change_skipped(
         result = core._backup_target(vm, target, [snap])
 
     # Gate blocked → _backup_target returns False (no failure, just skipped).
-    assert result is False, (
-        "_backup_target should return False when onchange gate blocks backup"
-    )
+    assert result is False, "_backup_target should return False when onchange gate blocks backup"
     # transfer_missing was NOT called.
     assert not transfer_spy.called, (
         "transfer_missing should NOT be called when onchange gate blocks"
@@ -4387,8 +4389,7 @@ def test_onchange_backup_allocation_grew_proceeds(
         core._backup_target(vm, target, [snap])
 
     assert transfer_spy.called, (
-        "transfer_missing should be called when onchange gate passes "
-        "(allocation grew)"
+        "transfer_missing should be called when onchange gate passes (allocation grew)"
     )
 
 
@@ -4432,9 +4433,7 @@ def test_always_mode_backup_gate_bypassed(
     ) as gate_spy:
         core._backup_target(vm, target, [snap])
 
-    assert not gate_spy.called, (
-        "_should_backup_onchange should NOT be called in always mode"
-    )
+    assert not gate_spy.called, "_should_backup_onchange should NOT be called in always mode"
 
 
 def test_onchange_no_snapshots_skipped(
@@ -4473,12 +4472,8 @@ def test_onchange_no_snapshots_skipped(
     ) as transfer_spy:
         result = core._backup_target(vm, target, [])
 
-    assert result is False, (
-        "_backup_target should return False when gate blocks (no snapshots)"
-    )
-    assert not transfer_spy.called, (
-        "transfer_missing should NOT be called when no snapshots"
-    )
+    assert result is False, "_backup_target should return False when gate blocks (no snapshots)"
+    assert not transfer_spy.called, "transfer_missing should NOT be called when no snapshots"
 
 
 def test_onchange_baseline_updated_after_successful_transfer(
@@ -4582,3 +4577,293 @@ def test_onchange_baseline_not_updated_on_failure(
 
     # Baseline was NOT updated because the transfer failed.
     baseline_spy.assert_not_called()
+
+
+# ── Configurable Full Backup Engine: Core Pass-Through Tests ─────────────
+
+
+def test_core_passes_full_transfer_engine_to_create_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.full_transfer_engine and passes it to provider.create_full_backup()."""
+    target = make_target(
+        target_preserve="7d",
+        full_transfer_engine="libnbd",
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Configure MockBucketFullStrategy to return (True, "monthly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, "create_full_backup should be called when strategy returns True"
+    assert full_spy.call_args.kwargs.get("full_transfer_engine") == "libnbd", (
+        f"full_transfer_engine should be 'libnbd', got: "
+        f"{full_spy.call_args.kwargs.get('full_transfer_engine')!r}"
+    )
+
+
+def test_core_passes_convert_parallel_to_create_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.convert_parallel and passes it to provider.create_full_backup()."""
+    target = make_target(
+        target_preserve="7d",
+        convert_parallel=8,
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Configure MockBucketFullStrategy to return (True, "monthly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, "create_full_backup should be called when strategy returns True"
+    assert full_spy.call_args.kwargs.get("convert_parallel") == 8, (
+        f"convert_parallel should be 8, got: {full_spy.call_args.kwargs.get('convert_parallel')!r}"
+    )
+
+
+def test_core_passes_convert_out_of_order_to_create_full_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.convert_out_of_order and passes it to provider.create_full_backup()."""
+    target = make_target(
+        target_preserve="7d",
+        convert_out_of_order=False,
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Configure MockBucketFullStrategy to return (True, "monthly")
+    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, "create_full_backup should be called when strategy returns True"
+    assert full_spy.call_args.kwargs.get("convert_out_of_order") is False, (
+        f"convert_out_of_order should be False, got: "
+        f"{full_spy.call_args.kwargs.get('convert_out_of_order')!r}"
+    )
+
+
+def test_core_passes_full_transfer_engine_to_transfer_missing(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.full_transfer_engine and passes it to provider.transfer_missing()."""
+    target = make_target(
+        target_preserve="7d",
+        full_transfer_engine="libnbd",
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # only transfer_missing is called.
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "transfer_missing",
+        wraps=backup_provider.transfer_missing,
+    ) as transfer_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert transfer_spy.called, "transfer_missing should be called"
+    assert transfer_spy.call_args.kwargs.get("full_transfer_engine") == "libnbd", (
+        f"full_transfer_engine should be 'libnbd', got: "
+        f"{transfer_spy.call_args.kwargs.get('full_transfer_engine')!r}"
+    )
+
+
+def test_core_passes_convert_parallel_to_transfer_missing(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.convert_parallel and passes it to provider.transfer_missing()."""
+    target = make_target(
+        target_preserve="7d",
+        convert_parallel=8,
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # only transfer_missing is called.
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "transfer_missing",
+        wraps=backup_provider.transfer_missing,
+    ) as transfer_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert transfer_spy.called, "transfer_missing should be called"
+    assert transfer_spy.call_args.kwargs.get("convert_parallel") == 8, (
+        f"convert_parallel should be 8, got: "
+        f"{transfer_spy.call_args.kwargs.get('convert_parallel')!r}"
+    )
+
+
+def test_core_passes_convert_out_of_order_to_transfer_missing(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Core reads target.convert_out_of_order and passes it to provider.transfer_missing()."""
+    target = make_target(
+        target_preserve="7d",
+        convert_out_of_order=False,
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # only transfer_missing is called.
+
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "transfer_missing",
+        wraps=backup_provider.transfer_missing,
+    ) as transfer_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert transfer_spy.called, "transfer_missing should be called"
+    assert transfer_spy.call_args.kwargs.get("convert_out_of_order") is False, (
+        f"convert_out_of_order should be False, got: "
+        f"{transfer_spy.call_args.kwargs.get('convert_out_of_order')!r}"
+    )
