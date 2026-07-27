@@ -138,6 +138,7 @@ def _state_check_to_rows(
         stale = ", ".join(result.stale_deps) if result.stale_deps else "-"
         corrupt = ", ".join(result.corrupt_files) if result.corrupt_files else "-"
         orphans = ", ".join(result.orphan_checkpoints) if result.orphan_checkpoints else "-"
+        broken = ", ".join(result.broken_chains) if result.broken_chains else "-"
         rows.append(
             {
                 "vm": vm_name,
@@ -146,6 +147,7 @@ def _state_check_to_rows(
                 "stale_deps": stale,
                 "corrupt": corrupt,
                 "orphan_ckpts": orphans,
+                "broken_chains": broken,
             }
         )
     return rows
@@ -329,7 +331,15 @@ def handle_check(core: Core, args: Namespace) -> int:
     if state:
         data = core.check_state(vm_filter)
         rows = _state_check_to_rows(data)
-        columns = ["vm", "status", "phantom", "stale_deps", "corrupt", "orphan_ckpts"]
+        columns = [
+            "vm",
+            "status",
+            "phantom",
+            "stale_deps",
+            "corrupt",
+            "orphan_ckpts",
+            "broken_chains",
+        ]
         has_issues = any(r.status != "ok" for r in data.values())
         output = format_output(rows, columns, fmt)
         print(output or "State is consistent — no issues found.")
@@ -465,6 +475,7 @@ def _reconcile_to_rows(
     rows: list[dict[str, str]] = []
     for result in data.values():
         errors = ", ".join(result.errors) if result.errors else "-"
+        broken = ", ".join(result.broken_chains) if result.broken_chains else "-"
         rows.append(
             {
                 "vm": result.vm_name,
@@ -473,6 +484,7 @@ def _reconcile_to_rows(
                 "stale_deps": str(result.stale_deps_removed),
                 "baselines": str(result.baselines_cleared),
                 "orphan_ckpts": str(result.orphan_checkpoints_deleted),
+                "broken_chains": broken,
                 "errors": errors,
             }
         )
@@ -498,6 +510,7 @@ def handle_reconcile(core: Core, args: Namespace) -> int:
         "stale_deps",
         "baselines",
         "orphan_ckpts",
+        "broken_chains",
         "errors",
     ]
     output = format_output(rows, columns, fmt)

@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
@@ -792,3 +794,246 @@ def test_detect_orphan_checkpoints_auto_cleanup_non_fatal(
     assert len(critical_or_error) == 0, (
         f"Should not have CRITICAL/ERROR logs, got {len(critical_or_error)}"
     )
+
+
+# ── test_check_state_broken_backing_chain_detected ──────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_check_state_broken_backing_chain_detected(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A non-FULL backup with a broken backing chain is detected and reported.
+
+    When ``qemu-img info --backing-chain`` fails for a non-FULL backup,
+    the backup is added to ``broken_chains`` and ``"broken_chains"``
+    appears in the status.
+    """
+    snap_dir = tmp_path / "snapshots"
+    backup_dir = tmp_path / "backup"
+    state_dir = tmp_path / "state"
+    snap_dir.mkdir()
+    backup_dir.mkdir()
+    state_dir.mkdir()
+
+    target = make_target(path=str(backup_dir))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # A non-FULL incremental backup file
+    non_full_name = "inc.20250713T1000_vda"
+    non_full_path = backup_dir / f"{non_full_name}.qcow2"
+    non_full_path.touch()
+
+    # Override the mock backup provider's list() to return our backup
+    mock_factory._bitmap_backup_provider.list = lambda target: [
+        SnapshotInfo(
+            name=non_full_name,
+            path=non_full_path,
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+        ),
+    ]
+
+    # Simulate a broken backing chain: qemu-img info returns failure
+    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open backing file",
+            returncode=1,
+            error="backing chain broken",
+        )
+    )
+
+    config = MockConfigFacade(
+        global_config=make_global_config(state_dir=str(state_dir)),
+        vms=[vm],
+    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    expected_entry = f"{non_full_name} (target: {str(backup_dir)})"
+    assert result["testvm"].broken_chains == [expected_entry]
+    assert "broken_chains" in result["testvm"].status
+
+
+# ── test_check_state_all_backing_chains_intact ──────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_check_state_all_backing_chains_intact(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When all non-FULL backups have intact backing chains, nothing is reported.
+
+    ``qemu-img info --backing-chain`` succeeds for every non-FULL backup,
+    so ``broken_chains`` is empty and ``"broken_chains"`` does NOT appear
+    in the status.
+    """
+    snap_dir = tmp_path / "snapshots"
+    backup_dir = tmp_path / "backup"
+    state_dir = tmp_path / "state"
+    snap_dir.mkdir()
+    backup_dir.mkdir()
+    state_dir.mkdir()
+
+    target = make_target(path=str(backup_dir))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # Two non-FULL incremental backups with intact backing chains
+    inc1_name = "inc.20250713T1000_vda"
+    inc1_path = backup_dir / f"{inc1_name}.qcow2"
+    inc1_path.touch()
+    inc2_name = "inc.20250713T1100_vda"
+    inc2_path = backup_dir / f"{inc2_name}.qcow2"
+    inc2_path.touch()
+
+    mock_factory._bitmap_backup_provider.list = lambda target: [
+        SnapshotInfo(
+            name=inc1_name,
+            path=inc1_path,
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+        ),
+        SnapshotInfo(
+            name=inc2_name,
+            path=inc2_path,
+            timestamp=datetime(2025, 7, 13, 11, 0),
+            allocation=2000,
+        ),
+    ]
+
+    # All backing chains are intact: qemu-img info succeeds
+    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "disk.qcow2"}]\n',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    config = MockConfigFacade(
+        global_config=make_global_config(state_dir=str(state_dir)),
+        vms=[vm],
+    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.check_state()
+
+    assert result["testvm"].broken_chains == []
+    assert "broken_chains" not in result["testvm"].status
+
+
+# ── test_check_state_full_backups_skipped_in_chain_validation ───────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_check_state_full_backups_skipped_in_chain_validation(
+    tmp_path: Path,
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """FULL backups are NOT checked for backing-chain integrity.
+
+    ``check_state()`` skips any backup whose name contains ``".FULL."`` —
+    only non-FULL backups trigger ``qemu-img info --backing-chain``.
+    The FULL backup never appears in ``broken_chains`` even though the
+    mock shell returns failure for all ``qemu-img info`` calls.
+    """
+    snap_dir = tmp_path / "snapshots"
+    backup_dir = tmp_path / "backup"
+    state_dir = tmp_path / "state"
+    snap_dir.mkdir()
+    backup_dir.mkdir()
+    state_dir.mkdir()
+
+    target = make_target(path=str(backup_dir))
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
+
+    # A FULL backup (standalone — no backing chain to validate)
+    full_name = "testvm.FULL.monthly"
+    full_path = backup_dir / full_name
+    full_path.touch()
+
+    # A non-FULL incremental backup
+    non_full_name = "inc.20250713T1000_vda"
+    non_full_path = backup_dir / f"{non_full_name}.qcow2"
+    non_full_path.touch()
+
+    mock_factory._bitmap_backup_provider.list = lambda target: [
+        SnapshotInfo(
+            name=full_name,
+            path=full_path,
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=50000,
+        ),
+        SnapshotInfo(
+            name=non_full_name,
+            path=non_full_path,
+            timestamp=datetime(2025, 7, 13, 11, 0),
+            allocation=1000,
+        ),
+    ]
+
+    # All qemu-img info calls return failure — the FULL is skipped so
+    # it never hits this mock; only the non-FULL triggers it.
+    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open backing file",
+            returncode=1,
+            error="backing chain broken",
+        )
+    )
+
+    config = MockConfigFacade(
+        global_config=make_global_config(state_dir=str(state_dir)),
+        vms=[vm],
+    )
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        result = core.check_state()
+
+    # Only the non-FULL backup should be reported as broken
+    assert len(result["testvm"].broken_chains) == 1
+    assert non_full_name in result["testvm"].broken_chains[0]
+    assert full_name not in result["testvm"].broken_chains[0]
+    assert "broken_chains" in result["testvm"].status
+
+    # Verify that qemu-img info --backing-chain was called exactly once
+    # (for the non-FULL backup only — FULL is skipped entirely).
+    qemu_img_calls = [
+        c
+        for c in run_spy.call_args_list
+        if "qemu-img info" in " ".join(c[0][0])
+        and "--backing-chain" in " ".join(c[0][0])
+    ]
+    assert len(qemu_img_calls) == 1, (
+        f"Expected exactly 1 qemu-img info --backing-chain call, "
+        f"got {len(qemu_img_calls)}"
+    )
+    assert str(non_full_path) in " ".join(qemu_img_calls[0][0][0])

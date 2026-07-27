@@ -326,6 +326,7 @@ class StateCheckResult:
     stale_deps: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     corrupt_files: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     orphan_checkpoints: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    broken_chains: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
 
 # ── State reconciliation ────────────────────────────────────────────────
@@ -349,6 +350,7 @@ class ReconcileResult:
     orphan_checkpoints_deleted: int = 0
     orphan_files_removed: int = 0
     errors: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    broken_chains: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
 
 # ── Action audit trail ───────────────────────────────────────────────────

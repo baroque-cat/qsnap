@@ -144,9 +144,7 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def remove_all_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> int:
+    def remove_all_incremental_dependencies(self, target_path: str, full_name: str) -> int:
         """Remove ALL incremental dependency records linked to *full_name*.
 
         Returns the count of removed dependency entries.

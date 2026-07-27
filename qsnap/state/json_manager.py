@@ -406,16 +406,43 @@ class JsonStateManager(IStateManager):
     def _dependencies_path(self) -> Path:
         return self._state_dir / "_dependencies.json"
 
+    @staticmethod
+    def _normalize_full_name(full_name: str) -> str:
+        """Normalize a FULL backup name to stem form (without ``.qcow2``).
+
+        Storage uses stem keys (as produced by
+        ``Core._resolve_chain_full_anchor``).  Callers may pass either
+        stem (``vm.FULL.20260727``) or extended (``vm.FULL.20260727.qcow2``)
+        forms — this normalizes both to stem for lookup (design D3).
+        """
+        if full_name.endswith(".qcow2"):
+            return Path(full_name).stem
+        return full_name
+
     def _load_dependencies(self) -> dict[str, dict[str, list[str]]]:
         """Load dependency data.
 
         Format: ``{target_path: {full_name: [incremental_name, ...]}}``
+
+        Legacy migration (design D3): keys ending in ``.qcow2`` are
+        renamed to their stem form on load.  Migration is idempotent —
+        loading an already-migrated file produces no changes.
         """
         path = self._dependencies_path()
         if not path.exists():
             return {}
         with open(path, encoding="utf-8") as fh:
             data: dict[str, dict[str, list[str]]] = json.load(fh)
+        # Migrate legacy .qcow2 keys to stem form (idempotent).
+        migrated = False
+        for _target_path, deps in data.items():
+            keys_to_migrate = [k for k in deps if k.endswith(".qcow2")]
+            for old_key in keys_to_migrate:
+                new_key = Path(old_key).stem
+                deps[new_key] = deps.pop(old_key)
+                migrated = True
+        if migrated:
+            self._save_dependencies(data)
         return data
 
     def _save_dependencies(self, data: dict[str, dict[str, list[str]]]) -> None:
@@ -428,21 +455,31 @@ class JsonStateManager(IStateManager):
     def record_incremental_dependency(
         self, target_path: str, incremental_name: str, full_name: str
     ) -> None:
-        """Record that *incremental_name* depends on *full_name*."""
+        """Record that *incremental_name* depends on *full_name*.
+
+        Normalizes *full_name* to stem form before storage (design D3).
+        """
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})
-        deps = target_deps.get(full_name, [])
+        normalized = self._normalize_full_name(full_name)
+        deps = target_deps.get(normalized, [])
         if incremental_name not in deps:
             deps.append(incremental_name)
-        target_deps[full_name] = deps
+        target_deps[normalized] = deps
         data[target_path] = target_deps
         self._save_dependencies(data)
 
     def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
-        """Return the incremental backup names that depend on *full_name*."""
+        """Return the incremental backup names that depend on *full_name*.
+
+        Accepts both stem (``vm.FULL.20260727``) and extended
+        (``vm.FULL.20260727.qcow2``) forms — normalizes to stem before
+        lookup (design D3).
+        """
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})
-        return list(target_deps.get(full_name, []))
+        normalized = self._normalize_full_name(full_name)
+        return list(target_deps.get(normalized, []))
 
     def remove_full_backup(self, target_path: str, name: str) -> bool:
         """Remove a full backup record from persistent state."""
@@ -458,14 +495,19 @@ class JsonStateManager(IStateManager):
     def remove_incremental_dependency(
         self, target_path: str, incremental_name: str, full_name: str
     ) -> bool:
-        """Remove an incremental dependency from persistent state."""
+        """Remove an incremental dependency from persistent state.
+
+        Accepts both stem and extended forms of *full_name* — normalizes
+        to stem before lookup (design D3).
+        """
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})
-        deps = target_deps.get(full_name, [])
+        normalized = self._normalize_full_name(full_name)
+        deps = target_deps.get(normalized, [])
         if incremental_name not in deps:
             return False
         deps.remove(incremental_name)
-        target_deps[full_name] = deps
+        target_deps[normalized] = deps
         data[target_path] = target_deps
         self._save_dependencies(data)
         return True
@@ -551,19 +593,21 @@ class JsonStateManager(IStateManager):
         self._save_target_state(data)
         return True
 
-    def remove_all_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> int:
+    def remove_all_incremental_dependencies(self, target_path: str, full_name: str) -> int:
         """Remove ALL incremental dependencies linked to *full_name*.
+
+        Accepts both stem and extended forms of *full_name* — normalizes
+        to stem before lookup (design D3).
 
         Returns the count of removed dependency entries.
         """
         data = self._load_dependencies()
         target_deps = data.get(target_path, {})
-        if full_name not in target_deps:
+        normalized = self._normalize_full_name(full_name)
+        if normalized not in target_deps:
             return 0
-        count = len(target_deps[full_name])
-        del target_deps[full_name]
+        count = len(target_deps[normalized])
+        del target_deps[normalized]
         data[target_path] = target_deps
         self._save_dependencies(data)
         return count

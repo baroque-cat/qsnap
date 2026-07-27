@@ -338,9 +338,9 @@ def test_previous_backup_vanished_retryable_failure(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(
-        ShellResult(success=False, stdout="", stderr="", returncode=1, error="test -f failed")
-    )
+    # Backing-chain validation (new in fix-broken-backing-chain): the
+    # walk validates non-FULL backups via qemu-img info --backing-chain.
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(_ok_result())
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
@@ -363,8 +363,29 @@ def test_previous_backup_vanished_retryable_failure(
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
 
+    # Custom run wrapper: the first test -f on the PREVIOUS BACKUP
+    # (during the backwards walk) succeeds; the second test -f on the
+    # same file (the (1b) re-check) fails — this simulates the previous
+    # backup vanishing between the walk and qemu-img create.
+    # Other test -f calls (e.g., source snapshot existence check in
+    # transfer_missing) are delegated to the mock shell.
+    prev_test_f_count = 0
+    original_run = mock_shell.run
+
+    def _run_with_vanish(cmd, timeout, check=False):
+        nonlocal prev_test_f_count
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("test -f") and str(prev_backup) in cmd_str:
+            prev_test_f_count += 1
+            if prev_test_f_count == 1:
+                return _ok_result()
+            return ShellResult(
+                success=False, stdout="", stderr="", returncode=1, error="test -f failed"
+            )
+        return original_run(cmd, timeout, check)
+
     with (
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch.object(mock_shell, "run", side_effect=_run_with_vanish) as run_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
     ):

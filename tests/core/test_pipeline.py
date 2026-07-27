@@ -6338,3 +6338,442 @@ def test_reconcile_orphan_files_after_phantom_cleanup(
     # Orphan incremental file deleted from disk.
     assert delete_spy.called, "Orphan incremental should be deleted"
     assert result["testvm"].orphan_files_removed == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INCREMENTAL GHOST RETENTION, REVERSE DEP MAP, STATE CLEANUP (cascade-unit)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Helper: build a minimal qemu-img info JSON response with an optional backing-filename.
+_QEMU_IMG_INFO_NO_BACKING = json.dumps({"format": "qcow2", "virtual-size": 1048576})
+
+
+def _qemu_img_info_json(backing_filename: str | None = None) -> str:
+    """Return qemu-img info JSON."""
+    if backing_filename is None:
+        return _QEMU_IMG_INFO_NO_BACKING
+    return json.dumps({"format": "qcow2", "virtual-size": 1048576, "backing-filename": backing_filename})
+
+
+# ── test_incremental_kept_due_to_active_dependent ────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_incremental_kept_due_to_active_dependent(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Non-FULL incremental ghost-retained when a dependent is in keep-set.
+
+    Backups: [FULL, T0008, T0141].  T0141.backing=T0008, T0008.backing=FULL.
+    Retention keeps T0141, removes T0008 → T0008 is NOT deleted because
+    T0141 (in keep-set) has T0008 as its backing file.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    t0008_name = "vm.T0008.qcow2"
+    t0141_name = "vm.T0141.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    t0008_path = target.path / t0008_name
+    t0141_path = target.path / t0141_name
+
+    # T0141 → backing = T0008; T0008 → backing = FULL; FULL → no backing
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0141_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(t0008_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0008_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=t0008_name, path=t0008_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=t0141_name, path=t0141_path, timestamp=now, allocation=1000),
+    ]
+    retention = RetentionResult(keep=[full_name, t0141_name], remove=[t0008_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert t0008_name not in deleted_names, (
+        f"{t0008_name} should be ghost-retained because {t0141_name} (in keep-set) depends on it"
+    )
+
+
+# ── test_incremental_deleted_when_no_active_dependents ───────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_incremental_deleted_when_no_active_dependents(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Non-FULL incremental deleted when no other backup depends on it.
+
+    Backups: [FULL, T0008].  T0008.backing=FULL.  Retention keeps FULL,
+    removes T0008 → T0008 deleted; _resolve_chain_full_anchor and
+    remove_incremental_dependency are called.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    inc_name = "vm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    # T0008 → backing = FULL; FULL → no backing
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    # Pre-populate state so remove_incremental_dependency can be verified.
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+    retention = RetentionResult(keep=[full_name], remove=[inc_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert inc_name in deleted_names, (
+        f"{inc_name} should be deleted (no dependents in keep-set)"
+    )
+
+    # State cleanup: incremental dependency removed
+    deps = mock_state.get_incremental_dependencies(str(target.path), full_name)
+    assert inc_name not in deps, (
+        f"remove_incremental_dependency should clean {inc_name} → {full_name}"
+    )
+
+
+# ── test_orphaned_incrementals_cascade_deleted_after_inc_deletion ────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_orphaned_incrementals_cascade_deleted_after_inc_deletion(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Non-FULL incremental deleted → orphaned dependents cascade-deleted.
+
+    Backups: [FULL, inc_root, inc_a, inc_b].  inc_a.backing=inc_root,
+    inc_b.backing=inc_root, inc_root.backing=FULL.  Retention keeps FULL,
+    removes [inc_root, inc_a, inc_b] → inc_root deleted, inc_a and inc_b
+    cascade-deleted (neither in keep-set).
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    root_name = "vm.T0001.qcow2"
+    inc_a_name = "vm.T0008.qcow2"
+    inc_b_name = "vm.T0141.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    root_path = target.path / root_name
+    inc_a_path = target.path / inc_a_name
+    inc_b_path = target.path / inc_b_name
+
+    # inc_a → backing = root; inc_b → backing = root; root → backing = FULL; FULL → no backing
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_a_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(root_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_b_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(root_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{root_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=root_name, path=root_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=inc_a_name, path=inc_a_path, timestamp=now, allocation=600),
+        SnapshotInfo(name=inc_b_name, path=inc_b_path, timestamp=now, allocation=700),
+    ]
+    retention = RetentionResult(keep=[full_name], remove=[root_name, inc_a_name, inc_b_name])
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    # inc_root deleted (no dependents in keep-set)
+    assert root_name in deleted_names, f"{root_name} should be deleted (no active dependents)"
+    # orphans cascade-deleted
+    assert inc_a_name in deleted_names, f"{inc_a_name} should be cascade-deleted as orphan"
+    assert inc_b_name in deleted_names, f"{inc_b_name} should be cascade-deleted as orphan"
+
+
+# ── test_dependency_cleaned_on_retention_driven_inc_deletion ─────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_dependency_cleaned_on_retention_driven_inc_deletion(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """remove_incremental_dependency called with resolved FULL anchor on inc deletion.
+
+    When retention deletes an incremental, _resolve_chain_full_anchor
+    resolves the FULL anchor and remove_incremental_dependency cleans state.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    inc_name = "vm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    # inc → backing = FULL (contains .FULL. so anchor resolves in one hop)
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    # Pre-populate state with FULL + dependency
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+    retention = RetentionResult(keep=[full_name], remove=[inc_name])
+
+    with patch.object(
+        mock_state, "remove_incremental_dependency",
+        wraps=mock_state.remove_incremental_dependency,
+    ) as remove_dep_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    # remove_incremental_dependency called with the resolved FULL anchor stem
+    assert remove_dep_spy.called, "remove_incremental_dependency should be called"
+    dep_calls = [(c.args[1], c.args[2]) for c in remove_dep_spy.call_args_list]
+    expected_anchor_stem = Path(full_name).stem  # "vm.FULL.monthly"
+    assert (inc_name, expected_anchor_stem) in dep_calls, (
+        f"remove_incremental_dependency should be called with ({inc_name}, {expected_anchor_stem}), "
+        f"got: {dep_calls}"
+    )
+
+
+# ── test_reverse_dependency_map_built_correctly ──────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_reverse_dependency_map_built_correctly(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_build_backing_refs builds correct reverse dependency map.
+
+    Backups: [FULL, T0008, T0141].  T0141.backing=T0008, T0008.backing=FULL.
+    Expected: {FULL.path → [T0008], T0008.path → [T0141]}.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    t0008_name = "vm.T0008.qcow2"
+    t0141_name = "vm.T0141.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    t0008_path = target.path / t0008_name
+    t0141_path = target.path / t0141_name
+
+    # T0141 → backing = T0008; T0008 → backing = FULL; FULL → no backing
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0141_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(t0008_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0008_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=t0008_name, path=t0008_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=t0141_name, path=t0141_path, timestamp=now, allocation=1000),
+    ]
+
+    refs = core._build_backing_refs(backups)
+
+    full_path_str = str(full_path)
+    t0008_path_str = str(t0008_path)
+
+    assert full_path_str in refs, f"refs should contain {full_path_str} as a backing path"
+    assert refs[full_path_str] == [t0008_name], (
+        f"Expected [{t0008_name}] depending on {full_path_str}, got {refs[full_path_str]}"
+    )
+    assert t0008_path_str in refs, f"refs should contain {t0008_path_str} as a backing path"
+    assert refs[t0008_path_str] == [t0141_name], (
+        f"Expected [{t0141_name}] depending on {t0008_path_str}, got {refs[t0008_path_str]}"
+    )
+    # FULL has no backing-filename → no entry for FULL path as dependent
+    t0141_path_str = str(t0141_path)
+    assert t0141_path_str not in refs, (
+        f"T0141 has no backing-filename, should not be in refs keys"
+    )
+
+
+# ── test_broken_qemu_img_info_skipped_in_reverse_map ─────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_broken_qemu_img_info_skipped_in_reverse_map(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Broken qemu-img info for one backup → skipped in map, deletion continues.
+
+    When qemu-img info fails for one backup, _build_backing_refs skips it.
+    The other backups are still processed normally and deletion proceeds.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "vm.FULL.monthly.qcow2"
+    inc_ok_name = "vm.T0001.qcow2"
+    inc_broken_name = "vm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_ok_path = target.path / inc_ok_name
+    inc_broken_path = target.path / inc_broken_name
+
+    # inc_ok → backing = FULL (works normally)
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_ok_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
+    )
+    # inc_broken → qemu-img info FAILS (simulates broken file)
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_broken_name}").returns(
+        ShellResult(success=False, stdout="", stderr="corrupt file", returncode=1, error="corrupt file")
+    )
+    # FULL → no backing
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
+        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_ok_name, path=inc_ok_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=inc_broken_name, path=inc_broken_path, timestamp=now, allocation=700),
+    ]
+    retention = RetentionResult(keep=[full_name], remove=[inc_ok_name, inc_broken_name])
+
+    # inc_broken has no backing-filename in the map (skipped), so when
+    # it's processed, backing_refs.get(inc_broken.path) → [] → not ghosted
+    # → resolved via _resolve_chain_full_anchor. But _resolve_chain_full_anchor
+    # also calls qemu-img info, which fails → anchor = None → delete proceeds
+    # without state cleanup (anchor is None).
+    backup_provider = mock_factory._backup_provider
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert inc_ok_name in deleted_names, f"{inc_ok_name} should be deleted (no dependents)"
+    assert inc_broken_name in deleted_names, (
+        f"{inc_broken_name} should still be deleted even though qemu-img info failed"
+    )
+
+    # Verify _build_backing_refs built map only for healthy backups
+    refs = core._build_backing_refs(backups)
+    inc_broken_path_str = str(inc_broken_path)
+    assert inc_broken_path_str not in refs, (
+        "Broken qemu-img info file should not appear in backing refs map"
+    )
+    # inc_ok does appear as dependent of FULL
+    assert str(full_path) in refs, "FULL path should be in refs as backing for inc_ok"

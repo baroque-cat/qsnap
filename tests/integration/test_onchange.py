@@ -27,7 +27,6 @@ Run only when explicitly requested::
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +43,7 @@ except ImportError:
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import TargetConfig, VMConfig
-from qsnap.models.results import FullBackupInfo, SnapshotInfo
+from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
@@ -192,11 +191,9 @@ def test_onchange_skips_when_unchanged(test_vm, caplog):
     )
 
     # Verify old allocation-based message is NOT present (Approach B replacement).
-    old_msgs = [
-        r.message for r in caplog.records if "unchanged (allocation" in r.message
-    ]
+    old_msgs = [r.message for r in caplog.records if "unchanged (allocation" in r.message]
     assert len(old_msgs) == 0, (
-        f"Old 'unchanged (allocation' message found — should be replaced by Approach B"
+        "Old 'unchanged (allocation' message found — should be replaced by Approach B"
     )
 
     _cleanup_checkpoints(shell, vm_name)
@@ -255,8 +252,7 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
 
     first_backup_count = _count_qcow2_files(target_dir)
     assert first_backup_count >= 1, (
-        f"Expected at least one backup on target after first run, "
-        f"got {first_backup_count}"
+        f"Expected at least one backup on target after first run, got {first_backup_count}"
     )
 
     vm_result = result_first.results[0]
@@ -277,15 +273,14 @@ def test_onchange_proceeds_when_changed(test_vm, caplog):
     # --- Second run: new snapshot → gate open → backup proceeds ---
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        result_second = core.backup(vm_name)
+        core.backup(vm_name)
     skip_msgs = [
         r.message
         for r in caplog.records
         if "no new snapshots" in r.message and "skipping" in r.message
     ]
     assert len(skip_msgs) == 0, (
-        f"Gate must be open when new snapshot exists. "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"Gate must be open when new snapshot exists. Logs: {[r.message for r in caplog.records]}"
     )
 
     # Verify incremental backup file(s) created on target.
@@ -322,9 +317,7 @@ def test_onchange_approach_b_gate(test_vm, caplog):
     _start_vm_and_check(shell, vm_name)
 
     # --- Phase 1: First backup (target empty) ---
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.phase1-snap", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.phase1-snap", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
@@ -363,8 +356,7 @@ def test_onchange_approach_b_gate(test_vm, caplog):
         if "no new snapshots" in r.message and "skipping" in r.message
     ]
     assert len(skip_msgs) >= 1, (
-        f"Phase 2: no new snapshots → gate must skip. "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"Phase 2: no new snapshots → gate must skip. Logs: {[r.message for r in caplog.records]}"
     )
 
     # --- Phase 3: Create new snapshot → gate opens → backup proceeds ---
@@ -374,9 +366,7 @@ def test_onchange_approach_b_gate(test_vm, caplog):
         timeout=120,
         check=True,
     )
-    snap3 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.phase3-snap", snapshot_dir, base_image
-    )
+    snap3 = _snapshot_create(shell, vm_name, f"{vm_name}.phase3-snap", snapshot_dir, base_image)
     state.record_snapshot(vm_name, snap3)
 
     caplog.clear()
@@ -395,9 +385,7 @@ def test_onchange_approach_b_gate(test_vm, caplog):
     )
 
     # Verify old allocation message is never emitted.
-    old_msgs = [
-        r.message for r in caplog.records if "unchanged (allocation" in r.message
-    ]
+    old_msgs = [r.message for r in caplog.records if "unchanged (allocation" in r.message]
     assert len(old_msgs) == 0, "Old 'unchanged (allocation' must not appear"
 
     _cleanup_checkpoints(shell, vm_name)
@@ -439,9 +427,7 @@ def test_onchange_manual_deletion_recovery(test_vm, caplog):
     )
 
     # Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.recovery-snap", snapshot_dir, base_image
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.recovery-snap", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -467,10 +453,10 @@ def test_onchange_manual_deletion_recovery(test_vm, caplog):
 
     # --- Run full pipeline (includes startup validation) ---
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        result = core.run(vm_name)
+    with caplog.at_level(logging.INFO):
+        core.run(vm_name)
 
-    # Collect all log messages at WARNING or above.
+    # Collect all log messages at INFO or above.
     all_messages = [r.message for r in caplog.records]
     all_messages_str = "\n".join(all_messages)
 
@@ -485,11 +471,8 @@ def test_onchange_manual_deletion_recovery(test_vm, caplog):
     cleared_msgs = [
         m
         for m in all_messages
-        if "cleared" in m.lower() and (
-            "last_backup_allocation" in m
-            or "baseline" in m.lower()
-            or "no FULLs" in m.lower()
-        )
+        if "cleared" in m.lower()
+        and ("last_backup_allocation" in m or "baseline" in m.lower() or "no FULLs" in m.lower())
     ]
     assert len(cleared_msgs) >= 1, (
         f"Expected baseline/state cleared after phantom cleanup. Got:\n{all_messages_str}"
@@ -504,8 +487,7 @@ def test_onchange_manual_deletion_recovery(test_vm, caplog):
     # The phantom file should NOT exist (it was never real).
     phantom_files = [f for f in target_files if phantom_full_name in f.name]
     assert len(phantom_files) == 0, (
-        f"Phantom file {phantom_full_name} should not exist on disk. "
-        f"It was a state-only record."
+        f"Phantom file {phantom_full_name} should not exist on disk. It was a state-only record."
     )
 
     _cleanup_checkpoints(shell, vm_name)
@@ -539,9 +521,7 @@ def test_retention_runs_on_skip(test_vm, caplog):
     _start_vm_and_check(shell, vm_name)
 
     # --- Phase 1: Create backup files on target (normal retention) ---
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.retention-snap", snapshot_dir, base_image
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.retention-snap", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -565,9 +545,7 @@ def test_retention_runs_on_skip(test_vm, caplog):
         pytest.skip("Phase 1 backup failed — cannot test retention on skip.")
 
     phase1_count = _count_qcow2_files(target_dir)
-    assert phase1_count >= 1, (
-        f"Phase 1: expected backup files on target, got {phase1_count}"
-    )
+    assert phase1_count >= 1, f"Phase 1: expected backup files on target, got {phase1_count}"
 
     # --- Phase 2: Aggressive retention — gate skips, retention deletes ---
     # Create a new Core with aggressive retention settings.
@@ -589,9 +567,7 @@ def test_retention_runs_on_skip(test_vm, caplog):
     config_aggressive = MockConfigFacade(
         vms=[vm_config_aggressive], config_path=tmpdir / "onchange_retention_phase2.toml"
     )
-    core_aggressive = Core(
-        config=config_aggressive, factory=factory, state=state, shell=shell
-    )
+    core_aggressive = Core(config=config_aggressive, factory=factory, state=state, shell=shell)
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -601,9 +577,7 @@ def test_retention_runs_on_skip(test_vm, caplog):
     all_messages_str = "\n".join(all_messages)
 
     # Gate must have skipped (no new snapshots).
-    skip_msgs = [
-        m for m in all_messages if "no new snapshots" in m and "skipping" in m
-    ]
+    skip_msgs = [m for m in all_messages if "no new snapshots" in m and "skipping" in m]
     assert len(skip_msgs) >= 1, (
         f"Phase 2: gate must skip (no new snapshots). Got:\n{all_messages_str}"
     )

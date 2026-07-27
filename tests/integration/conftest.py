@@ -155,6 +155,15 @@ def test_vm(request):
     xml_path = tmpdir / f"{vm_name}.xml"
     xml_path.write_text(xml)
 
+    # Pre-cleanup: destroy and undefine any stale domain left behind by a
+    # previous test run that crashed before its teardown (finally block) ran.
+    # Without this, ``virsh define`` fails with "domain already exists" and
+    # the fixture skips — the stale VM is never cleaned up, perpetuating the
+    # problem across all subsequent runs.
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    _cleanup_checkpoints(shell, vm_name)
+    shell.run(["virsh", "undefine", vm_name], timeout=30)
+
     # Define the VM in libvirt
     define_result = shell.run(
         ["virsh", "define", str(xml_path)],

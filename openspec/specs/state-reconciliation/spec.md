@@ -57,6 +57,7 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 - **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory that is not tracked in `_full_backups.json` or `_dependencies.json` and matches the qsnap naming pattern (`{vm_name}.*`)
 - **THEN** the system SHALL delete the file from the target and log a WARNING
 - **AND** the count SHALL be recorded in `ReconcileResult.orphan_files_removed`
+- **AND** after deletion, the system SHALL attempt to clean up any stale dependency records by calling `_resolve_chain_full_anchor(backup.path)` and, if an anchor is found, calling `IStateManager.remove_incremental_dependency(target_path, backup.name, anchor)`
 
 #### Scenario: Reconcile skips non-qsnap files on target
 
@@ -76,10 +77,33 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 
 ### Requirement: ReconcileResult dataclass
 
-The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results.py` with the following fields: `vm_name: str`, `phantom_snapshots_removed: int`, `phantom_fulls_removed: int`, `stale_deps_removed: int`, `baselines_cleared: int`, `orphan_checkpoints_deleted: int`, `orphan_files_removed: int`, `errors: list[str]`.
+The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results.py` with the following fields: `vm_name: str`, `phantom_snapshots_removed: int`, `phantom_fulls_removed: int`, `stale_deps_removed: int`, `baselines_cleared: int`, `orphan_checkpoints_deleted: int`, `orphan_files_removed: int`, `errors: list[str]`, `broken_chains: list[str]`.
 
 #### Scenario: ReconcileResult is frozen
 
 - **WHEN** a `ReconcileResult` is constructed
 - **THEN** all fields SHALL be immutable (frozen dataclass)
 - **AND** `errors` SHALL default to an empty list
+
+### Requirement: Broken backing chain detection in reconcile
+
+`Core.reconcile()` SHALL detect broken backing chains on backup files at each target before classifying them as orphans. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `qemu-img info --force-share --backing-chain --output=json <path>` via `IShell.run()` and check whether the command succeeds. Files where the command fails SHALL be logged with a WARNING message indicating a broken backing chain was detected and that the file will be classified as an orphan and deleted. The `ReconcileResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing the names of backups with broken backing chains.
+
+#### Scenario: Reconcile detects broken chain before orphan classification
+- **WHEN** `qsnap reconcile` is invoked
+- **AND** a non-FULL backup file at a target has a broken backing chain
+- **THEN** a WARNING is logged indicating the broken chain
+- **AND** the backup name is added to `ReconcileResult.broken_chains`
+- **AND** the file proceeds through normal orphan classification (if not tracked in state, it is deleted)
+
+#### Scenario: Reconcile with intact chains — no broken_chains
+- **WHEN** `qsnap reconcile` is invoked
+- **AND** all non-FULL backup files have intact backing chains
+- **THEN** `ReconcileResult.broken_chains` is an empty list
+
+#### Scenario: Reconcile dry-run reports broken chains without deletion
+- **WHEN** `qsnap reconcile --dry-run` is invoked
+- **AND** a non-FULL backup file at a target has a broken backing chain
+- **THEN** a WARNING is logged indicating the broken chain
+- **AND** the backup name is added to `ReconcileResult.broken_chains`
+- **AND** the file is NOT deleted (dry-run mode)

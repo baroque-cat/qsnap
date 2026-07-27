@@ -163,3 +163,21 @@ All concrete implementations of `IStateManager` (JsonStateManager, InMemoryState
 
 - **WHEN** `InMemoryStateManager.clear_last_backup_allocation(target_path)` is called
 - **THEN** the method SHALL remove the key from the in-memory dict and return True if it existed
+
+### Requirement: Legacy dependency key migration on load
+
+`JsonStateManager._load_dependencies()` SHALL migrate `_dependencies.json` keys from the extended form (with `.qcow2` extension) to the stem form (without `.qcow2`) on load. For each target path's dependency dict, any key ending in `.qcow2` SHALL be renamed to its stem form, preserving the value list. Migration SHALL be idempotent — loading an already-migrated file produces no changes.
+
+#### Scenario: Legacy .qcow2 keys migrated to stem on load
+- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727.qcow2": ["incr-001"]}}`
+- **THEN** on load, the key is migrated to `"vm.FULL.20260727"` (stem form)
+- **AND** `get_incremental_dependencies("target", "vm.FULL.20260727")` returns `["incr-001"]`
+
+#### Scenario: Already-migrated file loaded unchanged
+- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727": ["incr-001"]}}` (stem keys)
+- **THEN** on load, no migration occurs and the data is returned as-is
+
+#### Scenario: Mixed keys migrated correctly
+- **WHEN** `_dependencies.json` contains both `"vm.FULL.20260727.qcow2"` and `"vm.FULL.20260715"` keys
+- **THEN** on load, the `.qcow2` key is migrated to stem form
+- **AND** the already-stem key is left unchanged

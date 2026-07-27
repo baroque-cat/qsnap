@@ -1089,6 +1089,31 @@ class BitmapBackupProvider(IBackupProvider):
             dst.disconnect()
             src.disconnect()
 
+    def _validate_backing_chain(self, path: Path) -> bool:
+        """Check whether a backup file has an intact backing chain.
+
+        Runs ``qemu-img info --force-share --backing-chain --output=json``
+        which traverses the entire chain and fails if any file is
+        missing.  Standalone files (FULLs with no backing) are
+        considered valid — the command succeeds on standalone files.
+
+        Returns ``True`` if the command succeeds (exit code 0),
+        ``False`` otherwise.  Never raises exceptions.
+        """
+        result = self._shell.run(
+            [
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--backing-chain",
+                "--output=json",
+                str(path),
+            ],
+            timeout=60,
+            check=True,
+        )
+        return result.success
+
     def _copy_dirty_blocks(
         self,
         vm_name: str,
@@ -1144,14 +1169,38 @@ class BitmapBackupProvider(IBackupProvider):
                 dirty_bytes=0,
             )
 
-        # (1) Resolve the previous backup (newest at target).
+        # (1) Resolve the previous backup — walk backwards through
+        # backups (sorted ascending by timestamp) to find the newest
+        # backup with an intact backing chain.  Rationale: if the
+        # newest backup has a broken chain (its backing file was
+        # deleted by retention), qemu-img create -b will fail.  Walking
+        # backwards skips broken-chain files and chains to the last
+        # available valid backup (design D4).  FULLs are standalone
+        # (no backing) and always valid.
         backups = self.list(target)
-        previous = backups[-1] if backups else None
+        previous: SnapshotInfo | None = None
+        for backup in reversed(backups):
+            # Check file existence (race guard — retention may have
+            # deleted between list() and now).
+            exists = self._shell.run(["test", "-f", str(backup.path)], timeout=10, check=True)
+            if not exists.success:
+                continue
+            # FULLs are standalone — always valid.
+            if ".FULL." not in backup.name and not self._validate_backing_chain(backup.path):
+                logger.warning(
+                    "[backup] %s: backup %s has broken backing chain — skipping as previous",
+                    vm_name,
+                    backup.name,
+                )
+                continue
+            previous = backup
+            break
         if previous is None:
             return _CopyResult(
                 error=(
-                    f"no previous backup found at {target.path} — cannot create "
-                    "a backing-chained delta without a FULL anchor"
+                    f"no valid previous backup found at {target.path} — "
+                    "all backups have broken backing chains. "
+                    "Run: qsnap check --deep, then qsnap reconcile"
                 ),
                 previous_path=None,
                 dirty_bytes=0,

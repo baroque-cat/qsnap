@@ -353,6 +353,8 @@ def test_reconcile_result_is_frozen():
         result.orphan_files_removed = 99
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.errors = ["mutated"]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.broken_chains = ["mutated"]
 
     # Verify the exact set of field names.
     field_names = {f.name for f in dataclasses.fields(ReconcileResult)}
@@ -365,6 +367,7 @@ def test_reconcile_result_is_frozen():
         "orphan_checkpoints_deleted",
         "orphan_files_removed",
         "errors",
+        "broken_chains",
     }
 
     # Verify field values.

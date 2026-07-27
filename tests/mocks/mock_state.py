@@ -6,6 +6,7 @@ Stores state in a dict.  All methods fully functional.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
@@ -13,6 +14,17 @@ from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotIn
 
 class InMemoryStateManager(IStateManager):
     """In-memory state manager for unit tests."""
+
+    @staticmethod
+    def _normalize_full_name(full_name: str) -> str:
+        """Normalize a FULL backup name to stem form (without ``.qcow2``).
+
+        Mirrors ``JsonStateManager._normalize_full_name`` for test parity
+        (design D3).
+        """
+        if full_name.endswith(".qcow2"):
+            return Path(full_name).stem
+        return full_name
 
     def __init__(self) -> None:
         self._state: dict[str, dict[str, object]] = {}
@@ -139,13 +151,15 @@ class InMemoryStateManager(IStateManager):
         self, target_path: str, incremental_name: str, full_name: str
     ) -> None:
         target_deps = self._dependencies.setdefault(target_path, {})
-        deps = target_deps.setdefault(full_name, [])
+        normalized = self._normalize_full_name(full_name)
+        deps = target_deps.setdefault(normalized, [])
         if incremental_name not in deps:
             deps.append(incremental_name)
 
     def get_incremental_dependencies(self, target_path: str, full_name: str) -> list[str]:
         target_deps = self._dependencies.get(target_path, {})
-        return list(target_deps.get(full_name, []))
+        normalized = self._normalize_full_name(full_name)
+        return list(target_deps.get(normalized, []))
 
     def remove_full_backup(self, target_path: str, name: str) -> bool:
         """Remove a full backup record from in-memory state."""
@@ -159,9 +173,14 @@ class InMemoryStateManager(IStateManager):
     def remove_incremental_dependency(
         self, target_path: str, incremental_name: str, full_name: str
     ) -> bool:
-        """Remove an incremental dependency from in-memory state."""
+        """Remove an incremental dependency from in-memory state.
+
+        Accepts both stem and extended forms of *full_name* — normalizes
+        to stem before lookup (design D3).
+        """
         target_deps = self._dependencies.get(target_path, {})
-        deps = target_deps.get(full_name, [])
+        normalized = self._normalize_full_name(full_name)
+        deps = target_deps.get(normalized, [])
         if incremental_name in deps:
             deps.remove(incremental_name)
             return True
@@ -193,11 +212,15 @@ class InMemoryStateManager(IStateManager):
     ) -> int:
         """Remove ALL incremental dependencies linked to *full_name*.
 
+        Accepts both stem and extended forms of *full_name* — normalizes
+        to stem before lookup (design D3).
+
         Returns the count of removed dependency entries.
         """
         deps = self._dependencies.get(target_path, {})
-        if full_name not in deps:
+        normalized = self._normalize_full_name(full_name)
+        if normalized not in deps:
             return 0
-        count = len(deps[full_name])
-        del deps[full_name]
+        count = len(deps[normalized])
+        del deps[normalized]
         return count

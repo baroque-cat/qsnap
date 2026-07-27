@@ -1220,6 +1220,7 @@ class Core:
             phantom_fulls: list[str] = []
             stale_deps: list[str] = []
             corrupt_files: list[str] = []
+            broken_chains: list[str] = []
             status_parts: list[str] = []
 
             # ── Phantom snapshots ────────────────────────────────────
@@ -1247,6 +1248,33 @@ class Core:
                 status_parts.append("stale_fulls")
             if stale_deps:
                 status_parts.append("stale_deps")
+
+            # ── Broken backing chains ───────────────────────────────
+            # For each target, validate backing-chain integrity of
+            # non-FULL backup files via qemu-img info --backing-chain.
+            # FULLs are standalone (no backing) and skipped.
+            for target in vm.targets:
+                provider = self._factory.create_backup_provider(vm, target)
+                backups = provider.list(target)
+                for backup in backups:
+                    if ".FULL." in backup.name:
+                        continue
+                    result = self._shell.run(
+                        [
+                            "qemu-img",
+                            "info",
+                            "--force-share",
+                            "--backing-chain",
+                            "--output=json",
+                            str(backup.path),
+                        ],
+                        timeout=30,
+                        check=True,
+                    )
+                    if not result.success:
+                        broken_chains.append(f"{backup.name} (target: {target.path})")
+            if broken_chains:
+                status_parts.append("broken_chains")
 
             # ── Corrupt state files ──────────────────────────────────
             state_dir = Path(self._config.get_global().state_dir)
@@ -1280,6 +1308,7 @@ class Core:
                 stale_deps=stale_deps,
                 corrupt_files=corrupt_files,
                 orphan_checkpoints=orphan_checkpoints,
+                broken_chains=broken_chains,
             )
         return results
 
@@ -1394,6 +1423,7 @@ class Core:
             orphan_ckpts = 0
             orphan_files = 0
             errors: list[str] = []
+            broken_chains: list[str] = []
 
             # 1. Phantom snapshots (file missing on disk)
             try:
@@ -1410,8 +1440,7 @@ class Core:
                         else:
                             self._state.remove_snapshot(vm.name, sn.name)
                             logger.warning(
-                                "[reconcile] %s: removed phantom snapshot %s "
-                                "(file not found: %s)",
+                                "[reconcile] %s: removed phantom snapshot %s (file not found: %s)",
                                 vm.name,
                                 sn.name,
                                 sn.path,
@@ -1468,25 +1497,27 @@ class Core:
                 # 3. Clear stale baseline if no FULLs remain
                 try:
                     remaining = self._state.get_full_backups(target_path)
-                    if not remaining:
-                        if self._state.get_last_backup_allocation(target_path) is not None:
-                            if self._dry_run:
-                                logger.info(
-                                    "[dry-run reconcile] %s: would clear "
-                                    "last_backup_allocation for target %s",
-                                    vm.name,
-                                    target_path,
-                                )
-                                baselines_cleared += 1
-                            else:
-                                self._state.clear_last_backup_allocation(target_path)
-                                logger.info(
-                                    "[reconcile] %s: cleared last_backup_allocation "
-                                    "for target %s (no FULLs remain)",
-                                    vm.name,
-                                    target_path,
-                                )
-                                baselines_cleared += 1
+                    if (
+                        not remaining
+                        and self._state.get_last_backup_allocation(target_path) is not None
+                    ):
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would clear "
+                                "last_backup_allocation for target %s",
+                                vm.name,
+                                target_path,
+                            )
+                            baselines_cleared += 1
+                        else:
+                            self._state.clear_last_backup_allocation(target_path)
+                            logger.info(
+                                "[reconcile] %s: cleared last_backup_allocation "
+                                "for target %s (no FULLs remain)",
+                                vm.name,
+                                target_path,
+                            )
+                            baselines_cleared += 1
                 except Exception as exc:
                     errors.append(f"baseline check for {target_path}: {exc}")
                     logger.warning(
@@ -1500,16 +1531,13 @@ class Core:
                 try:
                     fulls_after = self._state.get_full_backups(target_path)
                     for full in fulls_after:
-                        deps = self._state.get_incremental_dependencies(
-                            target_path, full.name
-                        )
+                        deps = self._state.get_incremental_dependencies(target_path, full.name)
                         for dep_name in deps:
                             dep_path = target.path / f"{dep_name}.qcow2"
                             if not os.path.exists(str(dep_path)):
                                 if self._dry_run:
                                     logger.info(
-                                        "[dry-run reconcile] %s: would remove stale "
-                                        "dep %s → %s",
+                                        "[dry-run reconcile] %s: would remove stale dep %s → %s",
                                         vm.name,
                                         dep_name,
                                         full.name,
@@ -1539,9 +1567,7 @@ class Core:
 
             # 5. Orphan checkpoint auto-cleanup
             try:
-                orphans = self._detect_orphan_checkpoints(
-                    vm, auto_cleanup=not self._dry_run
-                )
+                orphans = self._detect_orphan_checkpoints(vm, auto_cleanup=not self._dry_run)
                 orphan_ckpts = len(orphans)
             except Exception as exc:
                 errors.append(f"orphan checkpoints: {exc}")
@@ -1564,10 +1590,42 @@ class Core:
                     fulls = self._state.get_full_backups(target_path)
                     for full in fulls:
                         known_stems.add(Path(full.name).stem)
-                        deps = self._state.get_incremental_dependencies(
-                            target_path, full.name
-                        )
+                        deps = self._state.get_incremental_dependencies(target_path, full.name)
                         known_stems.update(deps)
+
+                    # Detect broken-chain files before orphan
+                    # classification (B6).  Non-FULL backups with
+                    # broken backing chains are logged with a WARNING
+                    # and added to broken_chains.  They then proceed
+                    # through normal orphan classification (if not
+                    # tracked in state, they are deleted).
+                    for backup in backups_on_disk:
+                        if ".FULL." in backup.name:
+                            continue
+                        chain_result = self._shell.run(
+                            [
+                                "qemu-img",
+                                "info",
+                                "--force-share",
+                                "--backing-chain",
+                                "--output=json",
+                                str(backup.path),
+                            ],
+                            timeout=30,
+                            check=True,
+                        )
+                        if not chain_result.success:
+                            broken_chains.append(backup.name)
+                            logger.warning(
+                                "[reconcile] %s: broken backing chain "
+                                "detected for %s on target %s — file "
+                                "will be classified as orphan and "
+                                "deleted. Consider running: "
+                                "qsnap check --deep",
+                                vm.name,
+                                backup.name,
+                                target_path,
+                            )
 
                     for backup in backups_on_disk:
                         if backup.name in known_stems:
@@ -1584,14 +1642,18 @@ class Core:
                             continue
                         if self._dry_run:
                             logger.info(
-                                "[dry-run reconcile] %s: would remove orphan "
-                                "file %s on target %s",
+                                "[dry-run reconcile] %s: would remove orphan file %s on target %s",
                                 vm.name,
                                 backup.name,
                                 target_path,
                             )
                             orphan_files += 1
                         else:
+                            # Resolve FULL anchor BEFORE deletion —
+                            # _resolve_chain_full_anchor walks the
+                            # backing chain via qemu-img info, which
+                            # needs the file to exist (fixes B4).
+                            anchor = self._resolve_chain_full_anchor(backup.path)
                             provider.delete(backup)
                             logger.warning(
                                 "[reconcile] %s: removed orphan file %s from "
@@ -1601,11 +1663,16 @@ class Core:
                                 target_path,
                             )
                             orphan_files += 1
+                            # Clean up any stale dependency records
+                            # for this orphan file (fixes B4).
+                            if anchor is not None:
+                                self._state.remove_incremental_dependency(
+                                    target_path, backup.name, anchor
+                                )
                 except Exception as exc:
                     errors.append(f"orphan files for {target_path}: {exc}")
                     logger.warning(
-                        "[reconcile] %s: error checking orphan files for "
-                        "target %s: %s",
+                        "[reconcile] %s: error checking orphan files for target %s: %s",
                         vm.name,
                         target_path,
                         exc,
@@ -1614,15 +1681,12 @@ class Core:
             # 7. Orphan snapshot files in snapshot_dir (files on disk
             # not tracked in state).
             try:
-                recorded = {
-                    sn.path.name for sn in self._state.get_snapshots(vm.name)
-                }
+                recorded = {sn.path.name for sn in self._state.get_snapshots(vm.name)}
                 for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
                     if qcow2_file.name not in recorded:
                         if self._dry_run:
                             logger.info(
-                                "[dry-run reconcile] %s: would remove orphan "
-                                "snapshot file %s",
+                                "[dry-run reconcile] %s: would remove orphan snapshot file %s",
                                 vm.name,
                                 qcow2_file,
                             )
@@ -1657,6 +1721,7 @@ class Core:
                 orphan_checkpoints_deleted=orphan_ckpts,
                 orphan_files_removed=orphan_files,
                 errors=errors,
+                broken_chains=broken_chains,
             )
         return results
 
@@ -2129,8 +2194,7 @@ class Core:
                             str(target.path), full.name
                         )
                         logger.warning(
-                            "[startup] %s: phantom FULL %s removed "
-                            "(cascade: %d deps cleaned)",
+                            "[startup] %s: phantom FULL %s removed (cascade: %d deps cleaned)",
                             vm_config.name,
                             full.name,
                             removed,
@@ -3393,7 +3457,9 @@ class Core:
                 for r in results:
                     if r.success:
                         speed = (
-                            r.bytes_transferred / (1024 * 1024) / r.duration if r.duration > 0 else 0.0
+                            r.bytes_transferred / (1024 * 1024) / r.duration
+                            if r.duration > 0
+                            else 0.0
                         )
                         self._actions.append(
                             ActionRecord(
@@ -3523,6 +3589,43 @@ class Core:
         retention_result = engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
         return backups, retention_result
 
+    def _build_backing_refs(
+        self,
+        backups: list[SnapshotInfo],
+    ) -> dict[str, list[str]]:
+        """Build a reverse backing-chain dependency map.
+
+        Scans ``backing-filename`` of each backup via ``qemu-img info``
+        and returns ``{absolute_backing_path → [dependent_name, ...]}``.
+
+        Relative ``backing-filename`` values are resolved to absolute
+        paths against the backup's parent directory.  Files where
+        ``qemu-img info`` fails or JSON parsing fails are skipped (no
+        entry in the map) — this handles race conditions gracefully
+        (design D2, risk R2).
+        """
+        refs: dict[str, list[str]] = {}
+        for backup in backups:
+            info_result = self._shell.run(
+                ["qemu-img", "info", "--output=json", str(backup.path)],
+                timeout=60,
+                check=True,
+            )
+            if not info_result.success:
+                continue
+            try:
+                info = json.loads(info_result.stdout)
+            except json.JSONDecodeError:
+                continue
+            backing = info.get("backing-filename")
+            if not isinstance(backing, str) or not backing:
+                continue
+            backing_path = Path(backing)
+            if not backing_path.is_absolute():
+                backing_path = backup.path.parent / backing_path
+            refs.setdefault(str(backing_path), []).append(backup.name)
+        return refs
+
     def _cleanup_backups(
         self,
         vm_config: VMConfig,
@@ -3534,18 +3637,32 @@ class Core:
 
         Honours ``_preserve_backups`` and ``_dry_run``.
 
-        Cascade deletion (design D2):
+        Cascade deletion (design D2/D5):
         - Before deleting a FULL (name matches ``*.FULL.*``), check
           ``state.get_incremental_dependencies()``.  If any dependent
           incremental is in the keep-set, skip deletion (ghost retention).
         - After deleting a FULL with no dependents in keep-set,
           cascade-delete orphaned incrementals not in keep-set.
+        - Before deleting a non-FULL incremental, check the reverse
+          backing-chain dependency map (``_build_backing_refs``).  If
+          any other backup in the keep-set has this incremental as its
+          backing file, skip deletion (ghost retention for
+          incrementals — extends the FULL ghost retention pattern).
+        - After deleting an incremental with no dependents in keep-set,
+          cascade-delete orphaned dependents not in keep-set and clean
+          up ``IStateManager`` dependency records (fixes B4).
         """
         if not retention_result or not retention_result.remove:
             return
 
         keep_set = set(retention_result.keep)
+        # Process newest-first (descending timestamp) so that children
+        # (dependents) are deleted before parents (backing files).
+        # This ensures _resolve_chain_full_anchor() can still walk the
+        # chain before a parent is cascade-deleted, preventing stale
+        # state records (fixes integration test finding).
         to_delete = [b for b in backups if b.name in retention_result.remove]
+        to_delete.reverse()
 
         if self._preserve_backups:
             logger.info(
@@ -3559,6 +3676,12 @@ class Core:
             for backup in to_delete:
                 logger.info("[dry-run] Would delete backup: %s", backup.name)
             return
+
+        # Build reverse backing-chain dependency map for incremental
+        # safety (design D2).  This prevents deleting an incremental
+        # that is the backing file for another incremental in the
+        # keep-set (ghost retention for incrementals — design D5).
+        backing_refs = self._build_backing_refs(backups)
 
         provider = self._factory.create_backup_provider(vm_config, target)
         for backup in to_delete:
@@ -3659,6 +3782,23 @@ class Core:
                             )
                         )
             else:
+                # Non-FULL incremental — check backing-chain
+                # dependencies before deletion (design D5: ghost
+                # retention extended to incrementals).
+                dependents = backing_refs.get(str(backup.path), [])
+                ghosted = [d for d in dependents if d in keep_set]
+                if ghosted:
+                    logger.info(
+                        "[delete] %s: ghost-retained incremental %s (%d dependent(s) in keep-set)",
+                        vm_config.name,
+                        backup.name,
+                        len(ghosted),
+                    )
+                    continue
+                # No dependents in keep-set — safe to delete.
+                # Resolve the FULL anchor BEFORE deletion (the file
+                # is needed to walk the backing chain).
+                anchor = self._resolve_chain_full_anchor(backup.path)
                 provider.delete(backup)
                 logger.info(
                     "[delete] %s: removed backup %s from %s",
@@ -3674,6 +3814,35 @@ class Core:
                         path=backup.path,
                     )
                 )
+                # Cascade-delete orphaned dependents not in keep-set
+                # (prevents broken-chain files from accumulating).
+                for dep_name in dependents:
+                    if dep_name not in keep_set:
+                        dep_backup = SnapshotInfo(
+                            name=dep_name,
+                            path=target.path / f"{dep_name}.qcow2",
+                            timestamp=datetime.now(),
+                            allocation=0,
+                        )
+                        provider.delete(dep_backup)
+                        logger.info(
+                            "[delete] %s: cascade-deleted orphan %s from %s",
+                            vm_config.name,
+                            dep_name,
+                            target.path,
+                        )
+                        self._actions.append(
+                            ActionRecord(
+                                action="backup_delete",
+                                vm_name=vm_config.name,
+                                name=dep_name,
+                                path=target.path / f"{dep_name}.qcow2",
+                            )
+                        )
+                # Clean up state: remove the incremental→FULL
+                # dependency record (fixes B4 — stale state records).
+                if anchor is not None:
+                    self._state.remove_incremental_dependency(str(target.path), backup.name, anchor)
 
     def _generate_snapshot_name(self, vm_config: VMConfig, disk: str) -> str:
         """Generate a unique snapshot name using the configured timestamp format.

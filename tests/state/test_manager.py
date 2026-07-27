@@ -495,6 +495,235 @@ def test_duplicate_dependency_not_recorded(tmp_path: Path) -> None:
     assert deps == ["incr-001"]
 
 
+# ── full_name normalization tests (design D3) ─────────────────────────
+
+
+@pytest.mark.unit
+def test_get_incremental_deps_with_stem_key(tmp_path: Path) -> None:
+    """Lookup with .qcow2 form finds dependency stored with stem form.
+
+    Record a dependency with the stem key ``vm.FULL.20260727``, then
+    lookup using the extended ``vm.FULL.20260727.qcow2`` form.  The
+    normalization should strip ``.qcow2`` and find the stored entry.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "vm.FULL.20260727")
+
+    deps = manager.get_incremental_dependencies(target, "vm.FULL.20260727.qcow2")
+    assert deps == ["incr-001"]
+
+
+@pytest.mark.unit
+def test_get_incremental_deps_with_qcow2_key_finds_stem_stored(tmp_path: Path) -> None:
+    """Record with .qcow2 form normalizes to stem; lookup with stem finds it.
+
+    Record a dependency using the extended ``vm.FULL.20260727.qcow2``
+    form as the *full_name*.  The normalization in
+    ``record_incremental_dependency`` should strip the ``.qcow2``
+    extension and store the entry under the stem key
+    ``vm.FULL.20260727``.  A subsequent lookup with the stem form must
+    return the recorded incremental.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "vm.FULL.20260727.qcow2")
+
+    # Lookup via stem form — must find the entry stored under stem.
+    deps = manager.get_incremental_dependencies(target, "vm.FULL.20260727")
+    assert deps == ["incr-001"]
+
+    # Lookup via .qcow2 form also works (normalized both ways).
+    deps_qcow2 = manager.get_incremental_dependencies(
+        target, "vm.FULL.20260727.qcow2"
+    )
+    assert deps_qcow2 == ["incr-001"]
+
+
+# ── legacy dependency key migration tests (design D3) ──────────────────
+
+
+@pytest.mark.unit
+def test_legacy_qcow2_keys_migrated_to_stem_on_load(tmp_path: Path) -> None:
+    """Legacy _dependencies.json with .qcow2 keys is auto-migrated to stem on load.
+
+    Write a ``_dependencies.json`` file containing a ``.qcow2`` key
+    (e.g. ``"vm.FULL.20260727.qcow2"``).  When ``JsonStateManager``
+    loads and migrates it, the key should be renamed to stem form
+    (``"vm.FULL.20260727"``), and a lookup with either form must
+    succeed.  The file on disk must be rewritten with stem keys only.
+    """
+    state_dir = tmp_path
+    dep_file = state_dir / "_dependencies.json"
+    dep_data = {
+        "/mnt/backup/testvm": {
+            "vm.FULL.20260727.qcow2": ["incr-001"],
+        },
+    }
+    dep_file.write_text(json.dumps(dep_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    # Lookup with stem form must find the migrated entry.
+    deps = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260727"
+    )
+    assert deps == ["incr-001"]
+
+    # Lookup with .qcow2 form also works after migration.
+    deps_qcow2 = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260727.qcow2"
+    )
+    assert deps_qcow2 == ["incr-001"]
+
+    # File on disk must have been rewritten with stem key only.
+    with open(dep_file, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    target_deps = loaded["/mnt/backup/testvm"]
+    assert "vm.FULL.20260727" in target_deps
+    assert "vm.FULL.20260727.qcow2" not in target_deps
+
+
+@pytest.mark.unit
+def test_already_migrated_deps_file_loaded_unchanged(tmp_path: Path) -> None:
+    """Already-migrated _dependencies.json (stem keys only) is loaded as-is.
+
+    Write a ``_dependencies.json`` that already uses stem keys (no
+    ``.qcow2`` suffixes).  After loading via ``JsonStateManager``, the
+    data must be accessible and the file content on disk must remain
+    unchanged — no migration rewrite should occur.
+    """
+    state_dir = tmp_path
+    dep_file = state_dir / "_dependencies.json"
+    dep_data = {
+        "/mnt/backup/testvm": {
+            "vm.FULL.20260727": ["incr-001"],
+            "vm.FULL.20260728": ["incr-002", "incr-003"],
+        },
+    }
+    dep_file.write_text(json.dumps(dep_data), encoding="utf-8")
+
+    # Record the original file content for comparison.
+    with open(dep_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    # Both entries are accessible after load (no data loss).
+    deps1 = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260727"
+    )
+    assert deps1 == ["incr-001"]
+
+    deps2 = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260728"
+    )
+    assert deps2 == ["incr-002", "incr-003"]
+
+    # The file must remain unchanged — no migration rewrite triggered.
+    with open(dep_file, encoding="utf-8") as fh:
+        after_raw = fh.read()
+    assert after_raw == original_raw, (
+        "Already-migrated deps file must not be rewritten (idempotent)"
+    )
+
+
+@pytest.mark.unit
+def test_mixed_keys_migrated_correctly(tmp_path: Path) -> None:
+    """Mixed .qcow2 and stem keys: only .qcow2 key is migrated, stem key untouched.
+
+    Write a ``_dependencies.json`` containing both a ``.qcow2`` key and
+    a stem key.  After load, the ``.qcow2`` key must be migrated to
+    stem, the existing stem key must be intact, and the file on disk
+    must contain only stem keys.
+    """
+    state_dir = tmp_path
+    dep_file = state_dir / "_dependencies.json"
+    dep_data = {
+        "/mnt/backup/testvm": {
+            "vm.FULL.20260727.qcow2": ["incr-old"],
+            "vm.FULL.20260728": ["incr-new"],
+        },
+    }
+    dep_file.write_text(json.dumps(dep_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    # Migrated .qcow2 key must be accessible via stem.
+    deps_old = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260727"
+    )
+    assert deps_old == ["incr-old"]
+
+    # Unchanged stem key must still be accessible.
+    deps_new = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260728"
+    )
+    assert deps_new == ["incr-new"]
+
+    # The .qcow2 key must also be accessible via .qcow2 lookup
+    # (normalization strips extension to find the migrated stem key).
+    deps_old_qcow2 = manager.get_incremental_dependencies(
+        "/mnt/backup/testvm", "vm.FULL.20260727.qcow2"
+    )
+    assert deps_old_qcow2 == ["incr-old"]
+
+    # File on disk must contain only stem keys.
+    with open(dep_file, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    target_deps = loaded["/mnt/backup/testvm"]
+    assert "vm.FULL.20260727" in target_deps
+    assert "vm.FULL.20260727.qcow2" not in target_deps
+    assert "vm.FULL.20260728" in target_deps
+    assert target_deps["vm.FULL.20260727"] == ["incr-old"]
+    assert target_deps["vm.FULL.20260728"] == ["incr-new"]
+
+
+# ── InMemoryStateManager normalization tests (design D3) ───────────────
+
+
+@pytest.mark.mock
+def test_inmemory_get_deps_with_stem_key() -> None:
+    """InMemoryStateManager: lookup with .qcow2 form finds stem-stored dependency.
+
+    Record a dependency with the stem form of ``full_name``, then
+    lookup with the ``.qcow2`` form.  The normalization must strip the
+    extension and return the recorded entry.
+    """
+    manager = InMemoryStateManager()
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "vm.FULL.20260727")
+
+    deps = manager.get_incremental_dependencies(target, "vm.FULL.20260727.qcow2")
+    assert deps == ["incr-001"]
+
+
+@pytest.mark.mock
+def test_inmemory_record_qcow2_key_finds_stem_stored() -> None:
+    """InMemoryStateManager: record with .qcow2 form normalizes to stem.
+
+    Record a dependency using the ``.qcow2`` form of ``full_name``.
+    The normalization must strip the extension and store under the
+    stem key.  Lookup with stem form must return the entry.
+    """
+    manager = InMemoryStateManager()
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "vm.FULL.20260727.qcow2")
+
+    deps = manager.get_incremental_dependencies(target, "vm.FULL.20260727")
+    assert deps == ["incr-001"]
+
+    # Lookup with .qcow2 form also works (normalized both ways).
+    deps_qcow2 = manager.get_incremental_dependencies(
+        target, "vm.FULL.20260727.qcow2"
+    )
+    assert deps_qcow2 == ["incr-001"]
+
+
 # ── _full_backups.json migration tests ──────────────────────────────
 
 

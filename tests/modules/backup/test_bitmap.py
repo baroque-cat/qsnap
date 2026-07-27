@@ -32,9 +32,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.results import NbdExtent, NbdResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
+from qsnap.utils.retry import is_retryable
 from tests.mocks.mock_nbd import MockNbdClient
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -1702,6 +1705,11 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
     mock_shell.expect_first(r"qemu-img info.*--force-share").returns(
         ShellResult(success=False, stdout="", stderr="I/O error", returncode=1, error="I/O error")
     )
+    # Backing-chain validation (new in fix-broken-backing-chain): the
+    # --backing-chain pattern is more specific than --force-share, so it
+    # must be inserted AFTER the --force-share expect_first to land at
+    # the front of the list and match first.
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(_ok_result())
 
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
@@ -3264,3 +3272,357 @@ def test_atomic_full_export_libnbd_with_checkpoint(
     assert len(create_cmds) == 0, (
         "checkpoint-create-as must NOT be called (atomic via backup-begin)"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# BACKING-CHAIN VALIDATION TESTS (fix-broken-backing-chain)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_validate_backing_chain_valid_returns_true(mock_shell, tmp_path):
+    """_validate_backing_chain returns True when backing chain is intact."""
+    path = tmp_path / "snapshot.qcow2"
+    path.write_bytes(b"")
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(_ok_result())
+    provider = BitmapBackupProvider(mock_shell)
+    assert provider._validate_backing_chain(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_validate_backing_chain_broken_returns_false(mock_shell, tmp_path):
+    """_validate_backing_chain returns False when backing chain is broken."""
+    path = tmp_path / "snapshot.qcow2"
+    path.write_bytes(b"")
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="image: Could not open backing file: No such file",
+            returncode=1,
+            error="",
+        )
+    )
+    provider = BitmapBackupProvider(mock_shell)
+    assert provider._validate_backing_chain(path) is False
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_validate_backing_chain_standalone_full_returns_true(mock_shell, tmp_path):
+    """_validate_backing_chain returns True for standalone FULL (no backing).
+
+    Standalone files are always valid — qemu-img info --backing-chain
+    succeeds on files with no backing file."""
+    path = tmp_path / "vm.FULL.20250101.qcow2"
+    path.write_bytes(b"")
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(_ok_result())
+    provider = BitmapBackupProvider(mock_shell)
+    assert provider._validate_backing_chain(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_previous_backup_vanished_retryable_failure(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Previous backup vanishes between walk and (1b) re-check → retryable error.
+
+    Walk finds previous (test -f succeeds, chain validated).  The (1b)
+    re-check test -f fails → error mentions 'vanished' and 'eof',
+    is_retryable(error) returns True."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    backups = [
+        SnapshotInfo(
+            name=prev_backup.stem,
+            path=prev_backup,
+            timestamp=datetime(2024, 12, 30, 0, 0, 0),
+            allocation=100,
+        ),
+    ]
+
+    # Custom run: first test -f on prev_backup succeeds (walk),
+    # second fails ((1b) re-check).
+    test_f_count = [0]
+    original_run = mock_shell.run
+
+    def counting_run(cmd, timeout, **kwargs):
+        cmd_str = " ".join(cmd)
+        if cmd_str == f"test -f {prev_backup}":
+            test_f_count[0] += 1
+            if test_f_count[0] >= 2:
+                return ShellResult(
+                    success=False, stdout="", stderr="", returncode=1, error=""
+                )
+        return original_run(cmd, timeout, **kwargs)
+
+    # Mock backing-chain validation for the non-FULL incremental
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20241230"
+    ).returns(_ok_result())
+
+    nbd = MockNbdClient(size=65536)
+
+    with patch.object(mock_shell, "run", side_effect=counting_run):
+        with patch.object(BitmapBackupProvider, "list", return_value=backups):
+            provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+            result = provider._copy_dirty_blocks(
+                vm_name=vm_config.name,
+                target=target,
+                target_file=target_path / "testvm.20250101T000000.qcow2",
+                socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+                write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+                pid_file=tmp_path / "qemu-nbd.pid",
+                disk_target="vda",
+                stall_timeout=1800,
+            )
+
+    assert result.error is not None
+    assert "vanished" in result.error
+    assert "eof" in result.error.lower()
+    assert is_retryable(result.error) is True
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_broken_chain_newest_backup_skipped_walk_to_valid(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Walk skips newest backup with broken chain, selects next-newest intact.
+
+    reversed(backups) starts with newest: test -f ok, chain broken → skip.
+    Next: test -f ok, chain intact → selected as previous.
+    Transfer proceeds with the older intact backup."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+
+    older_backup = target_path / "testvm.20241230T000000.qcow2"
+    older_backup.write_bytes(b"")
+    newer_backup = target_path / "testvm.20250101T000000.qcow2"
+    newer_backup.write_bytes(b"")
+
+    # Sorted ascending by timestamp: older first, newer last.
+    # reversed(backups): newer first, older second.
+    backups = [
+        SnapshotInfo(
+            name=older_backup.stem,
+            path=older_backup,
+            timestamp=datetime(2024, 12, 30, 0, 0, 0),
+            allocation=100,
+        ),
+        SnapshotInfo(
+            name=newer_backup.stem,
+            path=newer_backup,
+            timestamp=datetime(2025, 1, 1, 0, 0, 0),
+            allocation=200,
+        ),
+    ]
+
+    # Newest has broken chain
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20250101"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="Could not open backing file",
+            returncode=1,
+            error="",
+        )
+    )
+    # Older has intact chain
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20241230"
+    ).returns(_ok_result())
+
+    nbd = MockNbdClient(size=65536)
+
+    with patch.object(BitmapBackupProvider, "list", return_value=backups):
+        with patch.object(
+            BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
+        ):
+            with patch.object(
+                BitmapBackupProvider, "_transfer", return_value=(None, 65536)
+            ):
+                with patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
+                    # Post-transfer shell calls
+                    mock_shell.expect("qemu-img create").returns(_ok_result())
+                    mock_shell.expect("rm -f").returns(_ok_result())
+                    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+                    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+                    target_file = target_path / "testvm.20250101T000000.qcow2"
+                    result = provider._copy_dirty_blocks(
+                        vm_name=vm_config.name,
+                        target=target,
+                        target_file=target_file,
+                        socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+                        write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+                        pid_file=tmp_path / "qemu-nbd.pid",
+                        disk_target="vda",
+                        stall_timeout=1800,
+                    )
+
+    assert result.error is None
+    assert result.previous_path == older_backup, (
+        f"Expected previous to be older intact backup {older_backup}, "
+        f"got {result.previous_path}"
+    )
+    assert result.dirty_bytes == 65536
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_all_non_full_broken_fall_back_to_full(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """All non-FULL backups have broken chains → walk selects FULL as previous.
+
+    FULLs are standalone (no backing) and always valid — the check
+    ``\".FULL.\"`` in name short-circuits without calling
+    _validate_backing_chain."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+
+    full_backup = target_path / "testvm.FULL.20241201.qcow2"
+    full_backup.write_bytes(b"")
+    incr1 = target_path / "testvm.20241215T000000.qcow2"
+    incr1.write_bytes(b"")
+    incr2 = target_path / "testvm.20241230T000000.qcow2"
+    incr2.write_bytes(b"")
+
+    # Sorted ascending by timestamp: FULL first, then incr1, then incr2.
+    # reversed(backups): incr2, incr1, FULL.
+    backups = [
+        SnapshotInfo(
+            name=full_backup.stem,
+            path=full_backup,
+            timestamp=datetime(2024, 12, 1, 0, 0, 0),
+            allocation=1024,
+        ),
+        SnapshotInfo(
+            name=incr1.stem,
+            path=incr1,
+            timestamp=datetime(2024, 12, 15, 0, 0, 0),
+            allocation=200,
+        ),
+        SnapshotInfo(
+            name=incr2.stem,
+            path=incr2,
+            timestamp=datetime(2024, 12, 30, 0, 0, 0),
+            allocation=150,
+        ),
+    ]
+
+    # Both incrementals have broken chains.
+    # Registered second → checked first by MockShell (inserted at [0]).
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20241215"
+    ).returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="")
+    )
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20241230"
+    ).returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="")
+    )
+
+    nbd = MockNbdClient(size=65536)
+
+    with patch.object(BitmapBackupProvider, "list", return_value=backups):
+        with patch.object(
+            BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
+        ):
+            with patch.object(
+                BitmapBackupProvider, "_transfer", return_value=(None, 65536)
+            ):
+                with patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
+                    mock_shell.expect("qemu-img create").returns(_ok_result())
+                    mock_shell.expect("rm -f").returns(_ok_result())
+                    mock_shell.expect(r"^mv ").returns(_ok_result())
+
+                    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+                    target_file = target_path / "testvm.20250101T000000.qcow2"
+                    result = provider._copy_dirty_blocks(
+                        vm_name=vm_config.name,
+                        target=target,
+                        target_file=target_file,
+                        socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+                        write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+                        pid_file=tmp_path / "qemu-nbd.pid",
+                        disk_target="vda",
+                        stall_timeout=1800,
+                    )
+
+    assert result.error is None
+    assert result.previous_path == full_backup, (
+        f"Expected previous to fall back to FULL {full_backup}, "
+        f"got {result.previous_path}"
+    )
+    assert result.dirty_bytes == 65536
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_no_valid_backup_found_error_with_guidance(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """No backup with intact chain (all incrementals broken, no FULL).
+
+    Error directs user to ``qsnap check --deep`` and ``qsnap reconcile``."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+
+    incr = target_path / "testvm.20241230T000000.qcow2"
+    incr.write_bytes(b"")
+
+    backups = [
+        SnapshotInfo(
+            name=incr.stem,
+            path=incr,
+            timestamp=datetime(2024, 12, 30, 0, 0, 0),
+            allocation=100,
+        ),
+    ]
+
+    # Incremental has broken chain
+    mock_shell.expect_first(
+        r"qemu-img info.*--backing-chain.*20241230"
+    ).returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="")
+    )
+
+    nbd = MockNbdClient(size=65536)
+
+    with patch.object(BitmapBackupProvider, "list", return_value=backups):
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        result = provider._copy_dirty_blocks(
+            vm_name=vm_config.name,
+            target=target,
+            target_file=target_path / "testvm.20250101T000000.qcow2",
+            socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+            write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+            pid_file=tmp_path / "qemu-nbd.pid",
+            disk_target="vda",
+            stall_timeout=1800,
+        )
+
+    assert result.error is not None
+    assert "no valid previous backup" in result.error.lower()
+    assert "qsnap check --deep" in result.error
+    assert "qsnap reconcile" in result.error
