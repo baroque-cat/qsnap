@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Dependency-aware deletion of FULL backups and their orphaned incrementals. When a FULL backup falls out of all retention buckets, Core checks if any kept incremental still references it. If yes, the FULL is ghost-retained. If no, the FULL and all orphaned incrementals are cascade-deleted.
+State cleanup when FULL and incremental backups are deleted by per-chain retention. Per-chain retention groups backups by chain and evaluates keep/remove at the chain level — the entire chain is either kept or removed atomically. Ghost-retention and cascade-deletion are no longer used (see the `per-chain-retention` capability spec).
 
 ## Requirements
 
@@ -43,57 +43,9 @@ The `full_name` parameter in `get_incremental_dependencies`, `remove_incremental
 - **AND** `get_incremental_dependencies(target, "vm.FULL.20260727")` is called (stem form)
 - **THEN** the method returns `["incr-001"]`
 
-### Requirement: Core prevents deletion of FULLs with active dependents
-
-`Core._cleanup_backups()` SHALL check `IStateManager.get_incremental_dependencies()` before deleting any FULL backup. If any dependent incremental is in the retention keep-set, the FULL SHALL NOT be deleted (ghost retention). The FULL SHALL only be deleted when it falls out of ALL retention buckets AND no dependent incremental is in the keep-set.
-
-Additionally, before deleting any non-FULL incremental, `Core._cleanup_backups()` SHALL check a reverse backing-chain dependency map (built via `qemu-img info` on all backups at the target) to determine whether any other backup in the keep-set has the incremental as its backing file. If any dependent is in the keep-set, the incremental SHALL NOT be deleted (ghost retention for incrementals — extending the existing FULL ghost retention pattern).
-
-#### Scenario: FULL kept due to active dependent
-- **WHEN** a FULL is in the retention remove-set but an incremental referencing it is in the keep-set
-- **THEN** the FULL is NOT deleted and a log message explains the ghost retention
-
-#### Scenario: FULL deleted when no active dependents
-- **WHEN** a FULL is in the retention remove-set and no dependent incremental is in the keep-set
-- **THEN** the FULL is deleted
-
-#### Scenario: Incremental kept due to active dependent in keep-set
-- **WHEN** a non-FULL incremental is in the retention remove-set
-- **AND** another backup at the target has this incremental as its `backing-filename` (determined via `qemu-img info`)
-- **AND** that dependent backup is in the retention keep-set
-- **THEN** the incremental is NOT deleted (ghost-retained)
-- **AND** a log message explains the ghost retention with the count of dependents in keep-set
-
-#### Scenario: Incremental deleted when no active dependents
-- **WHEN** a non-FULL incremental is in the retention remove-set
-- **AND** no other backup at the target has this incremental as its `backing-filename`
-- **THEN** the incremental is deleted
-
-### Requirement: Cascade deletion of orphaned incrementals
-
-When a FULL is deleted, all incrementals that referenced it AND are not in the retention keep-set SHALL be cascade-deleted. Incrementals in the keep-set that referenced the deleted FULL SHALL be rebased to the next available FULL anchor (or flagged as orphaned if none exists).
-
-When a non-FULL incremental is deleted (after passing the ghost-retention check), all backups that have the deleted incremental as their `backing-filename` AND are not in the retention keep-set SHALL be cascade-deleted. This prevents orphaned broken-chain files from accumulating on the target.
-
-#### Scenario: Orphaned incrementals cascade-deleted
-- **WHEN** a FULL is deleted and 3 incrementals referenced it, none of which are in the keep-set
-- **THEN** all 3 orphaned incrementals are deleted
-
-#### Scenario: Kept incremental rebased to new anchor
-- **WHEN** a FULL is deleted and 1 incremental referencing it IS in the keep-set
-- **THEN** that incremental is rebased to the next available FULL anchor in the target directory
-- **AND** if no other FULL anchor exists, a WARNING is logged
-
-#### Scenario: Orphaned incrementals cascade-deleted after incremental deletion
-- **WHEN** a non-FULL incremental is deleted (ghost-retention check passed — no dependents in keep-set)
-- **AND** 2 other backups at the target have the deleted incremental as their `backing-filename`
-- **AND** neither of those 2 backups is in the keep-set
-- **THEN** both orphaned backups are cascade-deleted
-- **AND** a log message records each cascade deletion
-
 ### Requirement: _full_backups.json format migration
 
-`JsonStateManager` SHALL auto-migrate the `_full_backups.json` file from the old format (dict keyed by target_path → single dict) to the new format (dict keyed by target_path → list of dicts) on load. If the value for a key is a dict (not a list), it SHALL be wrapped in a single-element list.
+`JsonStateManager` SHALL auto-migrate the `_full_backups.json` file from the old format (dict keyed by target_path -> single dict) to the new format (dict keyed by target_path -> list of dicts) on load. If the value for a key is a dict (not a list), it SHALL be wrapped in a single-element list.
 
 #### Scenario: Old format auto-migrated
 - **WHEN** `_full_backups.json` contains `{"target_path": {"name": "...", "timestamp": "..."}}` (dict value)
@@ -105,29 +57,20 @@ When a non-FULL incremental is deleted (after passing the ghost-retention check)
 
 ### Requirement: State cleanup when FULL backup is deleted
 
-When `Core._cleanup_backups()` deletes a FULL backup (after passing M1 verification), Core SHALL call `IStateManager.remove_full_backup(target_path, full_name)` to remove the `FullBackupInfo` entry from persistent state. This prevents phantom FULL entries from blocking future bucket-driven FULL creation. Deletion blocked by M1 failure SHALL NOT call `remove_full_backup()`.
+When `Core._cleanup_backups()` deletes a FULL backup (after passing M1 verification), Core SHALL call `IStateManager.remove_full_backup(target_path, full_name)` to remove the `FullBackupInfo` entry from persistent state. Core SHALL also call `IStateManager.remove_all_incremental_dependencies(target_path, full_name)` to clean all dependency records linked to that FULL. Deletion blocked by M1 failure SHALL NOT call `remove_full_backup()` or `remove_all_incremental_dependencies()`.
+
+#### Scenario: State cleaned after FULL deletion
+- **WHEN** a FULL is deleted by per-chain retention (entire chain in remove list)
+- **THEN** `remove_full_backup(target_path, full_name)` is called
+- **AND** `remove_all_incremental_dependencies(target_path, full_name)` is called
+- **AND** the FULL entry is removed from `_full_backups.json`
+- **AND** all dependency records for that FULL are removed from `_dependencies.json`
 
 ### Requirement: State cleanup when incremental backup is deleted
 
-When `Core._cleanup_backups()` cascade-deletes an orphaned incremental, Core SHALL call `IStateManager.remove_incremental_dependency(target_path, incremental_name, full_name)` to clean the dependency record.
+When `Core._cleanup_backups()` deletes an incremental (as part of a removed chain), Core SHALL call `IStateManager.remove_incremental_dependency(target_path, incremental_name, full_name)` to clean the dependency record. The `full_name` SHALL be resolved by walking the backing chain via `_resolve_chain_full_anchor()` before the file is deleted.
 
-When `Core._cleanup_backups()` deletes a non-FULL incremental via the else-branch (retention-driven deletion, not cascade), Core SHALL also call `IStateManager.remove_incremental_dependency(target_path, incremental_name, full_name)` to clean the dependency record. The `full_name` SHALL be resolved by walking the backing chain via `_resolve_chain_full_anchor()` before the file is deleted.
-
-#### Scenario: Dependency record cleaned on retention-driven incremental deletion
-- **WHEN** a non-FULL incremental is deleted by retention (else-branch of `_cleanup_backups`)
+#### Scenario: Dependency record cleaned on chain removal
+- **WHEN** an incremental is deleted as part of a removed chain
 - **THEN** `remove_incremental_dependency` is called with the target path, incremental name, and resolved FULL anchor
 - **AND** the dependency record is removed from `_dependencies.json`
-
-### Requirement: Reverse backing-chain dependency map
-
-`Core._cleanup_backups()` SHALL build a reverse backing-chain dependency map before the deletion loop. The map SHALL be a `dict[str, list[str]]` mapping `{absolute_backing_path → [dependent_backup_name, ...]}`. The map SHALL be built by running `qemu-img info --output=json` on each backup at the target (via `IShell`) and extracting the `backing-filename` field. Relative `backing-filename` values SHALL be resolved to absolute paths against the backup's parent directory. Files where `qemu-img info` fails or JSON parsing fails SHALL be skipped (no entry in the map).
-
-#### Scenario: Reverse dependency map built correctly
-- **WHEN** `_cleanup_backups()` is called with backups `[FULL, T0008, T0141]` where T0141.backing=T0008 and T0008.backing=FULL
-- **THEN** the reverse dependency map contains `{FULL.path: [T0008], T0008.path: [T0141]}`
-- **AND** FULL has no entry (it has no backing file)
-
-#### Scenario: Broken qemu-img info skipped
-- **WHEN** `qemu-img info` fails for a backup file
-- **THEN** that backup is not included in the reverse dependency map
-- **AND** the deletion loop continues without error

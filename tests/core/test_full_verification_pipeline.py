@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -296,7 +297,7 @@ def test_cleanup_backups_m1_passes_full_deleted(
     mock_state,
     mock_shell,
 ):
-    """M1 at pre-deletion passes, FULL and dependents cascade-deleted."""
+    """M1 at pre-deletion passes, FULL deleted via per-chain cleanup."""
     target = make_target(target_preserve="7d")
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2", "inc2.qcow2"]
@@ -335,12 +336,27 @@ def test_cleanup_backups_m1_passes_full_deleted(
         allocation=0,
     )
 
-    # Only FULL is in remove set; inc1/inc2 will be cascade-deleted
-    # when the FULL is processed (they're dependents not in keep-set).
+    # FULL, inc1, inc2 all in remove list via per-chain retention
     retention = RetentionResult(
         keep=[],  # nothing kept — all should be removed
-        remove=[full_name],
+        remove=[full_name] + dep_names,
     )
+
+    # Mock _resolve_chain_full_anchor for inc1 and inc2
+    inc_full_path = str(target.path / full_name)
+    for dn in dep_names:
+        mock_shell.expect(rf"qemu-img info.*--output=json.*{dn}").returns(
+            ShellResult(
+                success=True,
+                stdout=json.dumps({
+                    "format": "qcow2",
+                    "backing-filename": inc_full_path,
+                }),
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
 
     with (
         patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
@@ -364,10 +380,10 @@ def test_cleanup_backups_m1_passes_full_deleted(
     assert "inc2.qcow2" in deleted_names, "inc2.qcow2 should be cascade-deleted"
 
 
-# ── test_cleanup_backups_m1_fails_cascade_blocked ────────────────────────
+# ── test_cleanup_backups_m1_fails_deletion_blocked ────────────────────────
 
 
-def test_cleanup_backups_m1_fails_cascade_blocked(
+def test_cleanup_backups_m1_fails_deletion_blocked(
     make_vm_config,
     make_target,
     make_global_config,
@@ -376,7 +392,7 @@ def test_cleanup_backups_m1_fails_cascade_blocked(
     mock_shell,
     caplog,
 ):
-    """M1 fails at pre-deletion, cascade completely blocked, CRITICAL logged."""
+    """M1 fails at pre-deletion — per-chain deletion blocked, CRITICAL logged."""
     target = make_target(target_preserve="7d")
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
@@ -419,7 +435,7 @@ def test_cleanup_backups_m1_fails_cascade_blocked(
     ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
-    # delete() should NOT be called — cascade is blocked
+    # delete() should NOT be called — per-chain deletion blocked
     assert not delete_spy.called, "delete should NOT be called when M1 fails"
     # CRITICAL log should be emitted
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
@@ -968,10 +984,10 @@ def test_cleanup_blocked_on_m1_fail(
     assert not delete_spy.called, "delete should be blocked when M1 fails"
 
 
-# ── test_cascade_deletion_blocked_on_corrupt_full ─────────────────────────
+# ── test_per_chain_deletion_blocked_on_corrupt_full ───────────────────────
 
 
-def test_cascade_deletion_blocked_on_corrupt_full(
+def test_per_chain_deletion_blocked_on_corrupt_full(
     make_vm_config,
     make_target,
     make_global_config,
@@ -980,7 +996,7 @@ def test_cascade_deletion_blocked_on_corrupt_full(
     mock_shell,
     caplog,
 ):
-    """Cascade deletion blocked when FULL is corrupt — dependents preserved."""
+    """Per-chain deletion blocked when FULL is corrupt — M1 failure prevents deletion."""
     target = make_target(target_preserve="7d")
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2", "inc2.qcow2"]
@@ -1006,7 +1022,7 @@ def test_cascade_deletion_blocked_on_corrupt_full(
         allocation=0,
     )
 
-    # All items in remove set — but cascade should be blocked
+    # All items in remove set — but M1 failure blocks deletion
     retention = RetentionResult(
         keep=[],
         remove=[full_name] + dep_names,
@@ -1027,9 +1043,9 @@ def test_cascade_deletion_blocked_on_corrupt_full(
     ):
         core._cleanup_backups(vm, target, [full_info], retention)
 
-    # Nothing should be deleted — cascade is blocked
+    # Nothing should be deleted — per-chain deletion blocked by M1 failure
     assert not delete_spy.called, (
-        "Cascade deletion should be completely blocked when FULL is corrupt"
+        "Per-chain deletion should be completely blocked when FULL is corrupt"
     )
     # CRITICAL log should mention blocking deletion
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
@@ -1039,10 +1055,10 @@ def test_cascade_deletion_blocked_on_corrupt_full(
     )
 
 
-# ── test_orphaned_incrementals_cascade_deleted ────────────────────────────
+# ── test_per_chain_orphaned_incrementals_deleted ──────────────────────────
 
 
-def test_orphaned_incrementals_cascade_deleted(
+def test_per_chain_orphaned_incrementals_deleted(
     make_vm_config,
     make_target,
     make_global_config,
@@ -1050,7 +1066,7 @@ def test_orphaned_incrementals_cascade_deleted(
     mock_state,
     mock_shell,
 ):
-    """Orphaned incrementals are cascade-deleted when M1 passes on FULL."""
+    """Incrementals deleted via per-chain cleanup when M1 passes."""
     target = make_target(target_preserve="7d")
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
@@ -1082,8 +1098,22 @@ def test_orphaned_incrementals_cascade_deleted(
         allocation=0,
     )
 
-    # Only FULL is explicitly in remove; incremental is implicitly orphaned
-    retention = RetentionResult(keep=[], remove=[full_name])
+    # FULL + inc both in remove via per-chain evaluation
+    retention = RetentionResult(keep=[], remove=[full_name, "inc1.qcow2"])
+
+    # Mock _resolve_chain_full_anchor for inc1
+    mock_shell.expect(r"qemu-img info.*--output=json.*inc1\.qcow2").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "backing-filename": str(target.path / full_name),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch("qsnap.core.verify_full_backup", return_value=None),
@@ -1095,11 +1125,12 @@ def test_orphaned_incrementals_cascade_deleted(
     ):
         core._cleanup_backups(vm, target, [full_info, inc1_info], retention)
 
-    # Both FULL and orphaned incremental should be deleted
+    # FULL should be deleted (per-chain, M1 passed)
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
     assert full_name in deleted_names, f"FULL {full_name} should be deleted"
+    # Incremental also deleted (in remove list via per-chain retention)
     assert "inc1.qcow2" in deleted_names, (
-        "Orphaned incremental inc1.qcow2 should be cascade-deleted"
+        "Incremental inc1.qcow2 should be deleted via per-chain cleanup"
     )
     assert delete_spy.call_count == 2, (
         f"FULL + 1 dependent = 2 deletions, got {delete_spy.call_count}"
@@ -1324,7 +1355,7 @@ def test_incremental_deleted_dependency_removed_from_state(
     mock_state,
     mock_shell,
 ):
-    """Incremental cascade-deleted → remove_incremental_dependency() called."""
+    """Incremental deleted via per-chain cleanup → remove_incremental_dependency() called."""
     target = make_target(target_preserve="7d")
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
@@ -1356,8 +1387,23 @@ def test_incremental_deleted_dependency_removed_from_state(
         allocation=0,
     )
 
-    # Only FULL is in remove set; inc1 is implicitly orphaned (cascade)
-    retention = RetentionResult(keep=[], remove=[full_name])
+    # FULL + inc in remove set via per-chain evaluation
+    retention = RetentionResult(keep=[], remove=[full_name, "inc1.qcow2"])
+
+    # Mock _resolve_chain_full_anchor: qemu-img info on inc1 returns FULL backing.
+    mock_shell.expect_first(r"qemu-img info.*--output=json.*inc1\.qcow2").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1000,
+                "backing-filename": str(target.path / full_name),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch("qsnap.core.verify_full_backup", return_value=None),
@@ -1370,9 +1416,9 @@ def test_incremental_deleted_dependency_removed_from_state(
         core._cleanup_backups(vm, target, [full_info, inc1_info], retention)
 
     assert remove_spy.called, (
-        "remove_incremental_dependency should be called for cascade-deleted incremental"
+        "remove_incremental_dependency should be called for per-chain-deleted incremental"
     )
-    assert remove_spy.call_args[0] == (str(target.path), "inc1.qcow2", full_name), (
+    assert remove_spy.call_args[0] == (str(target.path), "inc1.qcow2", Path(full_name).stem), (
         f"remove_incremental_dependency called with wrong args: {remove_spy.call_args[0]}"
     )
 

@@ -17,6 +17,7 @@ from qsnap.core import VMRunResult
 from qsnap.models.results import (
     ActionRecord,
     BackupResult,
+    ChainVerifyResult,
     ChangeResult,
     CommitResult,
     DeferredBlockcommit,
@@ -413,3 +414,34 @@ def test_reconcile_result_defaults_and_equality():
     # Two instances with different vm_name are not equal.
     c = ReconcileResult(vm_name="other")
     assert a != c
+
+
+# ── ChainVerifyResult ─────────────────────────────────────────────────────
+
+
+def test_chain_verify_result_broken_file_field():
+    """ChainVerifyResult has broken_file (Path | None) defaulting to None, and is frozen."""
+    # 1. broken_file defaults to None when not specified.
+    result = ChainVerifyResult(success=True, error=None)
+    assert result.broken_file is None
+
+    # 2. broken_file can be set to a Path value.
+    path = Path("/var/lib/libvirt/images/vm.qcow2")
+    result_with = ChainVerifyResult(success=False, error="missing backing file", broken_file=path)
+    assert result_with.broken_file == path
+    assert isinstance(result_with.broken_file, Path)
+
+    # 3. Verify the exact set of field names.
+    field_names = {f.name for f in dataclasses.fields(ChainVerifyResult)}
+    assert field_names == {"success", "error", "broken_file"}
+
+    # 4. Verify the dataclass is frozen (immutable).
+    assert result.__dataclass_params__.frozen is True
+
+    # 5. Mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.broken_file = Path("/mutated")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.success = False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.error = "mutated"

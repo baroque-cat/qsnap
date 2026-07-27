@@ -22,15 +22,12 @@ from unittest.mock import patch
 import pytest
 
 from qsnap.core import Core
-from qsnap.models.config import VMConfig
 from qsnap.models.results import (
     FullBackupInfo,
-    ReconcileResult,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
-
 
 # ── shared helpers ────────────────────────────────────────────────────────
 
@@ -112,13 +109,11 @@ def test_reconcile_skips_non_qsnap_files_on_target(
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[non_qsnap]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            with caplog.at_level(logging.WARNING):
-                result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy, caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     assert not delete_spy.called, "Non-qsnap file should NOT be deleted"
     assert result["testvm"].orphan_files_removed == 0
@@ -173,12 +168,11 @@ def test_reconcile_removes_orphan_snapshot_files(
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     assert delete_spy.called, "provider.delete() should be called for orphan file"
     assert result["testvm"].orphan_files_removed == 1
@@ -214,9 +208,8 @@ def test_reconcile_orphan_file_cleanup_non_fatal(
     with patch.object(
         mock_factory._bitmap_backup_provider, "list",
         side_effect=OSError("target directory not accessible"),
-    ):
-        with caplog.at_level(logging.WARNING):
-            result = core.reconcile()
+    ), caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     # Error recorded in the ReconcileResult, no exception raised.
     assert len(result["testvm"].errors) > 0
@@ -288,12 +281,11 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     assert delete_spy.called, "Orphan file should be deleted"
     assert result["testvm"].orphan_files_removed == 1
@@ -356,13 +348,11 @@ def test_reconcile_detects_broken_chain_before_orphan(
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            with caplog.at_level(logging.WARNING):
-                result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy, caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     # File is still deleted (broken-chain detection doesn't stop orphan logic).
     assert delete_spy.called, "Orphan file should still be deleted even with broken chain"
@@ -451,12 +441,11 @@ def test_reconcile_intact_chains_no_broken_chains(
     with patch.object(
         mock_factory._bitmap_backup_provider, "list",
         return_value=[incremental_info, full_snap_info],
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     # Neither file is orphan — both tracked in state.
     assert not delete_spy.called, "Tracked files should NOT be deleted"
@@ -512,13 +501,11 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            with caplog.at_level(logging.WARNING):
-                result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy, caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     # File NOT deleted in dry-run mode.
     assert not delete_spy.called, (

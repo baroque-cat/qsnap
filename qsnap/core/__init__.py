@@ -138,6 +138,11 @@ class Core:
         # Action audit trail — accumulated during _run_pipeline(), cleared
         # at the start of each run (design D1: ephemeral, single-run scope).
         self._actions: list[ActionRecord] = []
+        # Targets that need a forced FULL backup (auto-recovery detected
+        # broken chains at startup).  Populated by
+        # _validate_state_at_startup(); consumed and cleared by
+        # _backup_target() (design D3: auto-recovery).
+        self._force_full_targets: set[str] = set()
 
     # ── properties ─────────────────────────────────────────────────────
 
@@ -2145,12 +2150,17 @@ class Core:
     def _validate_state_at_startup(self, vm_config: VMConfig) -> None:
         """Lightweight state-vs-disk check at pipeline start.
 
-        Runs phantom FULL detection + stale baseline cleanup BEFORE
-        the onchange gate, so the gate sees correct state.  Non-fatal:
-        logs warnings, never raises.
+        Runs phantom FULL detection + stale baseline cleanup, then
+        auto-recovery of broken backup chains, BEFORE the onchange
+        gate and retention evaluation.  Non-fatal: logs warnings,
+        never raises.
 
-        This does NOT auto-delete orphan checkpoints — only
-        ``qsnap reconcile`` does that (spec: state-consistency-check).
+        Auto-recovery (spec: auto-recovery):
+        - For each non-FULL backup, run ``qemu-img info --backing-chain``.
+        - If the command fails (broken chain), delete the backup and
+          clean its state dependency record.
+        - If no valid FULL remains after recovery, set the force-full
+          flag for that target.
         """
         for target in vm_config.targets:
             try:
@@ -2225,6 +2235,99 @@ class Core:
                         vm_config.name,
                         target.path,
                         exc,
+                    )
+
+        # Auto-recovery: detect and delete broken-chain backups (spec:
+        # auto-recovery).  Runs BEFORE retention evaluation to ensure
+        # per-chain grouping can resolve all chains.
+        if self._preserve_backups or self._dry_run:
+            # Skip auto-recovery when preserve or dry-run mode is
+            # active — user wants to inspect state without modifications.
+            return
+
+        for target in vm_config.targets:
+            try:
+                provider = self._factory.create_backup_provider(vm_config, target)
+                backups = provider.list(target)
+            except Exception as exc:
+                logger.warning(
+                    "[startup] %s: failed to list backups for target %s: %s",
+                    vm_config.name,
+                    target.path,
+                    exc,
+                )
+                continue
+
+            if not backups:
+                continue
+
+            broken_count = 0
+            full_exists = False
+            for backup in backups:
+                if ".FULL." in backup.name:
+                    full_exists = True
+                    continue
+                # Non-FULL — verify backing chain integrity
+                verify_result = self._shell.run(
+                    [
+                        "qemu-img", "info", "--force-share",
+                        "--backing-chain", "--output=json",
+                        str(backup.path),
+                    ],
+                    timeout=60,
+                    check=True,
+                )
+                if not verify_result.success:
+                    # Broken chain — resolve anchor BEFORE deletion
+                    # (the file is needed to walk the backing chain).
+                    try:
+                        anchor = self._resolve_chain_full_anchor(backup.path)
+                        provider.delete(backup)
+                        if anchor is not None:
+                            self._state.remove_incremental_dependency(
+                                str(target.path), backup.name, anchor
+                            )
+                        broken_count += 1
+                        logger.warning(
+                            "[startup] %s: auto-recovery deleted broken-chain "
+                            "backup %s from %s",
+                            vm_config.name,
+                            backup.name,
+                            target.path,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[startup] %s: failed to delete broken backup %s: %s",
+                            vm_config.name,
+                            backup.name,
+                            exc,
+                        )
+
+            if broken_count:
+                logger.warning(
+                    "[startup] %s: auto-recovery deleted %d broken-chain "
+                    "backup(s) from %s",
+                    vm_config.name,
+                    broken_count,
+                    target.path,
+                )
+
+            # If no valid FULL remains, force FULL creation on next backup
+            if not full_exists:
+                try:
+                    remaining_fulls = self._state.get_full_backups(str(target.path))
+                    valid_fulls = [
+                        f for f in remaining_fulls if os.path.exists(str(f.path))
+                    ]
+                except Exception:
+                    valid_fulls = []
+                if not valid_fulls:
+                    self._force_full_targets.add(str(target.path))
+                    logger.info(
+                        "[startup] %s: force-full flag set for target %s "
+                        "(no valid FULL remains)",
+                        vm_config.name,
+                        target.path,
                     )
 
     def _execute_pipeline(self, vm_config: VMConfig) -> bool:
@@ -2533,7 +2636,15 @@ class Core:
         self,
         vm_config: VMConfig,
     ) -> RetentionResult | None:
-        """Step 3: Evaluate which snapshots to keep/remove."""
+        """Step 3: Evaluate which snapshots to keep/remove.
+
+        After the retention engine produces keep/remove lists, Core
+        post-processes the remove list to only include items forming a
+        contiguous oldest prefix (spec: snapshot-oldest-prefix).  Items
+        in the original remove list that are NOT in the oldest prefix
+        are moved to the keep list (chain gap fillers) so blockcommit
+        always processes a contiguous range from the base image.
+        """
         snapshots = self._state.get_snapshots(vm_config.name)
         if not snapshots:
             return None
@@ -2542,7 +2653,24 @@ class Core:
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         dow = self._config.get_global().preserve_day_of_week
-        return engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
+        result = engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
+
+        # Oldest-prefix post-processing (spec: snapshot-oldest-prefix).
+        sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
+        original_remove = set(result.remove)
+        final_remove: list[str] = []
+        final_keep: list[str] = list(result.keep)
+        prefix_done = False
+        for snap in sorted_snaps:
+            if not prefix_done and snap.name in original_remove:
+                final_remove.append(snap.name)
+            elif snap.name in original_remove:
+                # Non-prefix remove item → moved to keep (chain gap filler)
+                final_keep.append(snap.name)
+            else:
+                # First keep item encountered → prefix stops
+                prefix_done = True
+        return RetentionResult(keep=final_keep, remove=final_remove)
 
     def _verify_backing_chain(self, vm_config: VMConfig) -> ChainVerifyResult:
         """Verify backing chain integrity of the active disk image.
@@ -2576,10 +2704,15 @@ class Core:
             check=True,
         )
         if not result.success:
+            # qemu-img info --backing-chain failed — likely a missing
+            # backing file.  Walk the chain one hop at a time to find
+            # the broken file so partial blockcommit can proceed
+            # (spec: blockcommit-recovery).
+            broken = self._find_broken_chain_file(active_path)
             return ChainVerifyResult(
                 success=False,
                 error=f"qemu-img info failed: {result.error}",
-                broken_file=None,
+                broken_file=broken,
             )
 
         try:
@@ -2676,6 +2809,52 @@ class Core:
                         )
 
         return ChainVerifyResult(success=True, error=None, broken_file=None)
+
+    def _find_broken_chain_file(self, start_path: Path) -> Path | None:
+        """Walk the backing chain from *start_path* to find the first missing file.
+
+        Used when ``qemu-img info --backing-chain`` fails to identify
+        which specific file is broken (spec: blockcommit-recovery).
+        Returns the path of the first missing file, or ``None`` if the
+        chain walk itself fails or the chain is intact.
+        """
+        current = Path(start_path)
+        for _ in range(64):  # bound the walk — real chains are short
+            # Check if current file exists.
+            existence = self._shell.run(
+                ["test", "-f", str(current)],
+                timeout=10,
+                check=True,
+            )
+            if not existence.success:
+                return current
+
+            # Get backing-filename for the current file.
+            info_result = self._shell.run(
+                ["qemu-img", "info", "--output=json", str(current)],
+                timeout=30,
+                check=True,
+            )
+            if not info_result.success:
+                return current
+
+            try:
+                info = json.loads(info_result.stdout)
+            except json.JSONDecodeError:
+                return None
+
+            backing = info.get("backing-filename")
+            if not isinstance(backing, str) or not backing:
+                # No backing file — chain is complete, nothing broken.
+                return None
+
+            backing_path = Path(backing)
+            if not backing_path.is_absolute():
+                backing_path = current.parent / backing_path
+
+            current = backing_path
+
+        return None
 
     def _get_chain_length(
         self,
@@ -2983,18 +3162,48 @@ class Core:
         global_cfg = self._config.get_global()
 
         # Pre-commit chain verification
+        stuck: list[SnapshotInfo] = []
         if global_cfg.chain_verify_before_commit:
             verify_result = self._verify_backing_chain(vm_config)
             if not verify_result.success:
-                logger.critical(
-                    "Pre-commit chain verification failed for VM %s: %s. "
-                    "Check file existence, run qemu-img check, or "
-                    "restore from backup.",
-                    vm_config.name,
-                    verify_result.error,
-                )
-                # Do NOT defer — broken chain needs operator intervention
-                return
+                if verify_result.broken_file is not None:
+                    # Partial blockcommit (design D7): split the
+                    # committable list at the broken file, commit the
+                    # portion before the break, and auto-rebase the
+                    # stuck snapshots onto the new base.
+                    before_break, stuck = self._split_at_break(
+                        vm_config, committable, verify_result.broken_file,
+                    )
+                    if not before_break:
+                        logger.critical(
+                            "Pre-commit chain verification failed for VM %s: %s. "
+                            "No snapshots can be committed before the break at %s. "
+                            "Check file existence, run qemu-img check, or "
+                            "restore from backup.",
+                            vm_config.name,
+                            verify_result.error,
+                            verify_result.broken_file,
+                        )
+                        return
+                    logger.warning(
+                        "Pre-commit chain verification found break at %s — "
+                        "partial blockcommit: %d snapshot(s) committable, "
+                        "%d stuck (will be auto-rebased)",
+                        verify_result.broken_file,
+                        len(before_break),
+                        len(stuck),
+                    )
+                    committable = before_break
+                else:
+                    logger.critical(
+                        "Pre-commit chain verification failed for VM %s: %s. "
+                        "Check file existence, run qemu-img check, or "
+                        "restore from backup.",
+                        vm_config.name,
+                        verify_result.error,
+                    )
+                    # Do NOT defer — broken chain needs operator intervention
+                    return
         else:
             logger.info(
                 "chain_verify_before_commit is disabled — "
@@ -3088,6 +3297,14 @@ class Core:
             # post-commit measurement so it finds the current active layer.
             self._state.remove_snapshot(vm_config.name, sn.name)
 
+        # Auto-rebase stuck snapshots (design D7): after a partial
+        # blockcommit, snapshots at or after the chain break need to be
+        # rebased onto the new base (the base image, now containing the
+        # committed data).  Uses ``qemu-img rebase -u`` (unsafe mode)
+        # because the original backing chain is broken.
+        if stuck:
+            self._auto_rebase_stuck(vm_config, stuck)
+
         # Offline commits deleted overlay files that the (inactive) domain
         # XML may still reference in <backingStore> chains — refresh the
         # XML so the domain stays bootable (design D8).
@@ -3134,6 +3351,187 @@ class Core:
                 "skipping post-commit chain check for VM %s",
                 vm_config.name,
             )
+
+    def _split_at_break(
+        self,
+        vm_config: VMConfig,
+        committable: list[SnapshotInfo],
+        broken_file: Path,
+    ) -> tuple[list[SnapshotInfo], list[SnapshotInfo]]:
+        """Split committable snapshots at the broken file (design D7).
+
+        Walks the backing chain to determine which snapshots are
+        before the broken file (safe to commit) and which are at or
+        after the break (stuck — need auto-rebase).
+
+        Returns ``(before_break, stuck)``.  When the chain cannot be
+        walked (e.g., qemu-img fails), returns ``(committable, [])``
+        as a conservative fallback — all snapshots are treated as
+        committable, letting the blockcommit manager handle any
+        failures.
+        """
+        # Walk the backing chain to get the ordered list of file paths.
+        snapshots = self._state.get_snapshots(vm_config.name)
+        if snapshots:
+            active_path = max(snapshots, key=lambda s: s.timestamp).path
+        else:
+            active_path = vm_config.base_image
+
+        result = self._shell.run(
+            [
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--backing-chain",
+                "--output=json",
+                str(active_path),
+            ],
+            timeout=30,
+            check=True,
+        )
+        if not result.success:
+            # qemu-img info --backing-chain failed — use per-file
+            # queries to find the break point (spec: blockcommit-recovery).
+            # For each committable snapshot (oldest first), query its
+            # backing-filename.  Once we find a snapshot whose backing
+            # file is the broken one (or that IS the broken file), all
+            # subsequent snapshots are stuck.
+            before_break: list[SnapshotInfo] = []
+            stuck: list[SnapshotInfo] = []
+            found_break = False
+            for snap in sorted(committable, key=lambda s: s.timestamp):
+                if found_break:
+                    stuck.append(snap)
+                    continue
+                if str(snap.path) == str(broken_file):
+                    # This snapshot IS the broken file — stuck.
+                    stuck.append(snap)
+                    found_break = True
+                    continue
+                # Query this snapshot's backing-filename.
+                info_result = self._shell.run(
+                    ["qemu-img", "info", "--output=json", str(snap.path)],
+                    timeout=30,
+                    check=True,
+                )
+                if not info_result.success:
+                    # Can't query — treat as stuck (conservative).
+                    stuck.append(snap)
+                    found_break = True
+                    continue
+                try:
+                    info = json.loads(info_result.stdout)
+                except json.JSONDecodeError:
+                    stuck.append(snap)
+                    found_break = True
+                    continue
+                backing = info.get("backing-filename", "")
+                if backing and str(Path(backing)) == str(broken_file):
+                    # This snapshot's backing file is the broken one — stuck.
+                    stuck.append(snap)
+                    found_break = True
+                else:
+                    before_break.append(snap)
+            return before_break, stuck
+
+        try:
+            chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
+        except json.JSONDecodeError:
+            logger.warning(
+                "Could not parse backing chain for split-at-break — "
+                "treating all as committable"
+            )
+            return committable, []
+
+        # chain_data is [active, snap_n, ..., snap_1, base] (newest to oldest).
+        # Build an ordered list of paths (oldest to newest) and find the
+        # broken file's position.
+        chain_paths: list[str] = []
+        for item in reversed(chain_data):
+            image = cast(str, item.get("image") or item.get("filename", ""))
+            if image:
+                chain_paths.append(image)
+
+        broken_str = str(broken_file)
+        broken_idx: int | None = None
+        for i, path in enumerate(chain_paths):
+            if path == broken_str:
+                broken_idx = i
+                break
+
+        if broken_idx is None:
+            # Broken file not found in the chain — it might be a
+            # backing-filename reference that doesn't correspond to an
+            # actual chain entry.  Treat all as stuck (conservative).
+            logger.warning(
+                "Broken file %s not found in backing chain — "
+                "treating all committable snapshots as stuck",
+                broken_file,
+            )
+            return [], committable
+
+        # Snapshots before broken_idx in the chain are committable.
+        before_paths = set(chain_paths[:broken_idx])
+        before_break = [s for s in committable if str(s.path) in before_paths]
+        stuck = [s for s in committable if str(s.path) not in before_paths]
+
+        return before_break, stuck
+
+    def _auto_rebase_stuck(
+        self,
+        vm_config: VMConfig,
+        stuck: list[SnapshotInfo],
+    ) -> None:
+        """Rebase stuck snapshots onto the base image (design D7).
+
+        After a partial blockcommit, snapshots at or after the chain
+        break need to be rebased onto the base image (which now
+        contains the committed data).  Uses ``qemu-img rebase -u``
+        (unsafe mode) because the original backing chain is broken —
+        data consistency is not guaranteed, but the chain is made
+        traversable for future blockcommit attempts.
+
+        Snapshots whose files no longer exist on disk are removed from
+        state (self-healing).
+        """
+        new_base = vm_config.base_image
+        for snap in sorted(stuck, key=lambda s: s.timestamp, reverse=True):
+            exists = self._shell.run(
+                ["test", "-f", str(snap.path)], timeout=10, check=True,
+            )
+            if not exists.success:
+                # File already gone — clean up state.
+                self._state.remove_snapshot(vm_config.name, snap.name)
+                logger.info(
+                    "Stuck snapshot %s file not found — removed from state",
+                    snap.name,
+                )
+                continue
+            rebase_cmd = [
+                "qemu-img",
+                "rebase",
+                "-u",
+                "-b",
+                str(new_base),
+                "-F",
+                "qcow2",
+                str(snap.path),
+            ]
+            result = self._shell.run(rebase_cmd, timeout=60, check=True)
+            if not result.success:
+                logger.warning(
+                    "Failed to auto-rebase stuck snapshot %s onto %s: %s",
+                    snap.path,
+                    new_base,
+                    result.error,
+                )
+            else:
+                logger.info(
+                    "[blockcommit] %s: auto-rebased stuck snapshot %s onto %s",
+                    vm_config.name,
+                    snap.name,
+                    new_base,
+                )
 
     # ── backup steps (5) ───────────────────────────────────────────────
 
@@ -3338,11 +3736,24 @@ class Core:
                         target.path,
                     )
                 all_fulls = filtered_fulls
-                policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
-                strategy = self._factory.create_bucket_full_strategy()
-                should_full, bucket_level = strategy.should_create_full(
-                    target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
-                )
+                # Check force-full flag (auto-recovery set this at
+                # startup when no valid FULL remained — spec: auto-recovery).
+                if str(target.path) in self._force_full_targets:
+                    should_full = True
+                    bucket_level = "force-recovery"
+                    self._force_full_targets.discard(str(target.path))
+                    logger.info(
+                        "[backup] %s: force-full flag active for target %s — "
+                        "creating FULL unconditionally",
+                        vm_config.name,
+                        target.path,
+                    )
+                else:
+                    policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
+                    strategy = self._factory.create_bucket_full_strategy()
+                    should_full, bucket_level = strategy.should_create_full(
+                        target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
+                    )
                 if should_full:
                     if self._dry_run:
                         # Log FULL-would-be-created without executing (design D7).
@@ -3567,27 +3978,91 @@ class Core:
 
     # ── utilities ──────────────────────────────────────────────────────
 
+    def _group_backups_by_chain(
+        self,
+        backups: list[SnapshotInfo],
+    ) -> dict[str, list[SnapshotInfo]]:
+        """Group backups by their FULL anchor chain.
+
+        Returns ``{chain_id: [backups in chain]}``.
+
+        - FULL backups (filename contains ``.FULL.``) are their own
+          ``chain_id`` (key = backup.name).
+        - Incrementals are grouped by ``_resolve_chain_full_anchor()``
+          which walks the backing chain to the FULL.
+        - Orphans (anchor resolution returns ``None``) are grouped
+          under ``"__orphan__"`` and placed in the remove list for
+          auto-recovery cleanup (spec: per-chain-retention).
+        """
+        chains: dict[str, list[SnapshotInfo]] = {}
+        for backup in backups:
+            if ".FULL." in backup.name:
+                chain_id = backup.name
+            else:
+                chain_id = self._resolve_chain_full_anchor(backup.path)
+                if chain_id is None:
+                    chain_id = "__orphan__"
+            chains.setdefault(chain_id, []).append(backup)
+        return chains
+
     def _evaluate_backup_retention(
         self,
         vm_config: VMConfig,
         target: TargetConfig,
     ) -> tuple[list[SnapshotInfo], RetentionResult | None]:
-        """List backups on *target* and evaluate retention.
+        """List backups on *target* and evaluate per-chain retention.
 
-        Returns ``(backups, retention_result)``.  When no backups exist,
-        ``retention_result`` is ``None``.
+        Groups backups by chain (FULL anchor), creates one
+        ``RetentionItem`` per chain using the FULL's timestamp, and
+        expands chain-level results to individual items.  Orphaned
+        incrementals (broken backing chain) are placed in the remove
+        list for auto-recovery cleanup.
+
+        Returns ``(backups, retention_result)``.  When no backups
+        exist, ``retention_result`` is ``None``.
         """
         provider = self._factory.create_backup_provider(vm_config, target)
         backups = provider.list(target)
         if not backups:
             return [], None
 
+        chains = self._group_backups_by_chain(backups)
+
+        # Build chain-level retention items (one per chain, FULL's timestamp).
+        chain_items: list[RetentionItem] = []
+        chain_map: dict[str, list[SnapshotInfo]] = {}
+        for chain_id, chain_backups in chains.items():
+            chain_map[chain_id] = chain_backups
+            full_backup = next(
+                (b for b in chain_backups if ".FULL." in b.name), None
+            )
+            representative = full_backup if full_backup else chain_backups[0]
+            chain_items.append(
+                RetentionItem(name=chain_id, timestamp=representative.timestamp)
+            )
+
         policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
         engine = self._factory.create_retention_engine(policy)
-        items = [RetentionItem(name=b.name, timestamp=b.timestamp) for b in backups]
         dow = self._config.get_global().preserve_day_of_week
-        retention_result = engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
-        return backups, retention_result
+        chain_result = engine.evaluate(
+            chain_items, policy, datetime.now(), preserve_day_of_week=dow
+        )
+
+        # Expand chain-level results to individual items.
+        remove_chains = set(chain_result.remove)
+
+        final_keep: list[str] = []
+        final_remove: list[str] = []
+
+        for chain_id, chain_backups in chain_map.items():
+            if chain_id == "__orphan__" or chain_id in remove_chains:
+                for b in chain_backups:
+                    final_remove.append(b.name)
+            else:
+                for b in chain_backups:
+                    final_keep.append(b.name)
+
+        return backups, RetentionResult(keep=final_keep, remove=final_remove)
 
     def _build_backing_refs(
         self,
@@ -3633,34 +4108,47 @@ class Core:
         backups: list[SnapshotInfo],
         retention_result: RetentionResult | None,
     ) -> None:
-        """Delete backups flagged for removal by retention.
+        """Delete backups flagged for removal by per-chain retention.
 
         Honours ``_preserve_backups`` and ``_dry_run``.
 
-        Cascade deletion (design D2/D5):
-        - Before deleting a FULL (name matches ``*.FULL.*``), check
-          ``state.get_incremental_dependencies()``.  If any dependent
-          incremental is in the keep-set, skip deletion (ghost retention).
-        - After deleting a FULL with no dependents in keep-set,
-          cascade-delete orphaned incrementals not in keep-set.
-        - Before deleting a non-FULL incremental, check the reverse
-          backing-chain dependency map (``_build_backing_refs``).  If
-          any other backup in the keep-set has this incremental as its
-          backing file, skip deletion (ghost retention for
-          incrementals — extends the FULL ghost retention pattern).
-        - After deleting an incremental with no dependents in keep-set,
-          cascade-delete orphaned dependents not in keep-set and clean
-          up ``IStateManager`` dependency records (fixes B4).
+        Per-chain deletion (spec: per-chain-retention):
+        - FULLs: M1 verification (non-configurable), M2 if configured,
+          then delete + state cleanup (remove_full_backup +
+          remove_all_incremental_dependencies).
+        - Incrementals: resolve FULL anchor before deletion, then
+          delete + state cleanup (remove_incremental_dependency).
+        - No ghost-retention, no cascade-deletion, no backing_refs.
+        - Post-cleanup: verify chain integrity of all keep-set items.
         """
         if not retention_result or not retention_result.remove:
+            # Nothing to delete, but still run post-cleanup verification
+            # on keep-set items (spec: per-chain-retention).
+            if retention_result and retention_result.keep:
+                keep_set_verify = set(retention_result.keep)
+                for backup in backups:
+                    if backup.name in keep_set_verify and ".FULL." not in backup.name:
+                        verify_result = self._shell.run(
+                            [
+                                "qemu-img", "info", "--force-share",
+                                "--backing-chain", "--output=json",
+                                str(backup.path),
+                            ],
+                            timeout=60,
+                            check=True,
+                        )
+                        if not verify_result.success:
+                            logger.critical(
+                                "post-cleanup verification FAILED for %s — "
+                                "backing chain is broken. Run: qsnap check --deep %s",
+                                backup.name,
+                                target.path,
+                            )
             return
 
         keep_set = set(retention_result.keep)
         # Process newest-first (descending timestamp) so that children
         # (dependents) are deleted before parents (backing files).
-        # This ensures _resolve_chain_full_anchor() can still walk the
-        # chain before a parent is cascade-deleted, preventing stale
-        # state records (fixes integration test finding).
         to_delete = [b for b in backups if b.name in retention_result.remove]
         to_delete.reverse()
 
@@ -3677,38 +4165,18 @@ class Core:
                 logger.info("[dry-run] Would delete backup: %s", backup.name)
             return
 
-        # Build reverse backing-chain dependency map for incremental
-        # safety (design D2).  This prevents deleting an incremental
-        # that is the backing file for another incremental in the
-        # keep-set (ghost retention for incrementals — design D5).
-        backing_refs = self._build_backing_refs(backups)
-
         provider = self._factory.create_backup_provider(vm_config, target)
         for backup in to_delete:
             is_full = ".FULL." in backup.name
             if is_full:
-                # Check for dependent incrementals in keep-set (ghost retention)
-                dependents = self._state.get_incremental_dependencies(str(target.path), backup.name)
-                ghosted = [d for d in dependents if d in keep_set]
-                if ghosted:
-                    logger.info(
-                        "[delete] %s: ghost-retained FULL %s (%d dependent(s) in keep-set)",
-                        vm_config.name,
-                        backup.name,
-                        len(ghosted),
-                    )
-                    continue
-                # No dependents in keep-set — verify FULL integrity before deletion
-                # M1 (metadata) verification is NON-CONFIGURABLE — always enforced
-                # to prevent data loss from cascade-deleting a corrupt FULL.
+                # M1 (metadata) verification is NON-CONFIGURABLE — always
+                # enforced to prevent data loss from deleting a corrupt FULL.
                 m1_error = verify_full_backup(self._shell, backup.path, "metadata")
                 if m1_error is not None:
                     logger.critical(
-                        "FULL backup %s is corrupt — blocking deletion of "
-                        "FULL and %d dependent incrementals to prevent "
-                        "data loss. Run: qsnap check --deep %s. Error: %s",
+                        "FULL backup %s is corrupt — blocking deletion. "
+                        "Run: qsnap check --deep %s. Error: %s",
                         backup.name,
-                        len(dependents),
                         target.path,
                         m1_error,
                     )
@@ -3721,18 +4189,14 @@ class Core:
                     if m2_error is not None:
                         logger.critical(
                             "FULL backup %s failed M2 check — blocking "
-                            "deletion of FULL and %d dependent "
-                            "incrementals. Run: qsnap check --deep %s. "
-                            "Error: %s",
+                            "deletion. Run: qsnap check --deep %s. Error: %s",
                             backup.name,
-                            len(dependents),
                             target.path,
                             m2_error,
                         )
                         continue
 
-                # No dependents in keep-set AND M1 (and optionally M2) passed
-                # — delete FULL
+                # M1 (and optionally M2) passed — delete FULL
                 provider.delete(backup)
                 logger.info(
                     "[delete] %s: removed backup %s from %s",
@@ -3748,56 +4212,14 @@ class Core:
                         path=backup.path,
                     )
                 )
-                # Clean up state: remove FullBackupInfo from persistent state
-                # to prevent phantom FULLs from blocking future FULL creation.
+                # Clean up state: remove FULL + all dependency records.
                 self._state.remove_full_backup(str(target.path), backup.name)
-                # Cascade-delete orphaned incrementals not in keep-set
-                for dep_name in dependents:
-                    if dep_name not in keep_set:
-                        dep_backup = SnapshotInfo(
-                            name=dep_name,
-                            path=target.path / f"{dep_name}.qcow2",
-                            timestamp=datetime.now(),
-                            allocation=0,
-                        )
-                        provider.delete(dep_backup)
-                        # Clean up state: remove the incremental→FULL
-                        # dependency to prevent ghost retention on
-                        # already-deleted incrementals.
-                        self._state.remove_incremental_dependency(
-                            str(target.path), dep_name, backup.name
-                        )
-                        logger.info(
-                            "[delete] %s: removed backup %s from %s",
-                            vm_config.name,
-                            dep_name,
-                            target.path,
-                        )
-                        self._actions.append(
-                            ActionRecord(
-                                action="backup_delete",
-                                vm_name=vm_config.name,
-                                name=dep_name,
-                                path=target.path / f"{dep_name}.qcow2",
-                            )
-                        )
+                self._state.remove_all_incremental_dependencies(
+                    str(target.path), backup.name
+                )
             else:
-                # Non-FULL incremental — check backing-chain
-                # dependencies before deletion (design D5: ghost
-                # retention extended to incrementals).
-                dependents = backing_refs.get(str(backup.path), [])
-                ghosted = [d for d in dependents if d in keep_set]
-                if ghosted:
-                    logger.info(
-                        "[delete] %s: ghost-retained incremental %s (%d dependent(s) in keep-set)",
-                        vm_config.name,
-                        backup.name,
-                        len(ghosted),
-                    )
-                    continue
-                # No dependents in keep-set — safe to delete.
-                # Resolve the FULL anchor BEFORE deletion (the file
-                # is needed to walk the backing chain).
+                # Incremental — resolve FULL anchor BEFORE deletion
+                # (the file is needed to walk the backing chain).
                 anchor = self._resolve_chain_full_anchor(backup.path)
                 provider.delete(backup)
                 logger.info(
@@ -3814,35 +4236,45 @@ class Core:
                         path=backup.path,
                     )
                 )
-                # Cascade-delete orphaned dependents not in keep-set
-                # (prevents broken-chain files from accumulating).
-                for dep_name in dependents:
-                    if dep_name not in keep_set:
-                        dep_backup = SnapshotInfo(
-                            name=dep_name,
-                            path=target.path / f"{dep_name}.qcow2",
-                            timestamp=datetime.now(),
-                            allocation=0,
-                        )
-                        provider.delete(dep_backup)
-                        logger.info(
-                            "[delete] %s: cascade-deleted orphan %s from %s",
-                            vm_config.name,
-                            dep_name,
-                            target.path,
-                        )
-                        self._actions.append(
-                            ActionRecord(
-                                action="backup_delete",
-                                vm_name=vm_config.name,
-                                name=dep_name,
-                                path=target.path / f"{dep_name}.qcow2",
-                            )
-                        )
-                # Clean up state: remove the incremental→FULL
-                # dependency record (fixes B4 — stale state records).
+                # Clean up state: remove the incremental→FULL dependency.
                 if anchor is not None:
-                    self._state.remove_incremental_dependency(str(target.path), backup.name, anchor)
+                    self._state.remove_incremental_dependency(
+                        str(target.path), backup.name, anchor
+                    )
+                else:
+                    # Anchor resolution failed (broken chain) — search
+                    # all FULLs for this target to find and remove the
+                    # orphaned dependency record (spec: per-chain-retention).
+                    for full_info in self._state.get_full_backups(str(target.path)):
+                        deps = self._state.get_incremental_dependencies(
+                            str(target.path), full_info.name
+                        )
+                        if backup.name in deps:
+                            self._state.remove_incremental_dependency(
+                                str(target.path), backup.name, full_info.name
+                            )
+
+        # Post-cleanup chain integrity verification (spec:
+        # per-chain-retention).  Verify that all keep-set items with
+        # backing chains have intact chains.
+        for backup in backups:
+            if backup.name in keep_set and ".FULL." not in backup.name:
+                verify_result = self._shell.run(
+                    [
+                        "qemu-img", "info", "--force-share",
+                        "--backing-chain", "--output=json",
+                        str(backup.path),
+                    ],
+                    timeout=60,
+                    check=True,
+                )
+                if not verify_result.success:
+                    logger.critical(
+                        "post-cleanup verification FAILED for %s — "
+                        "backing chain is broken. Run: qsnap check --deep %s",
+                        backup.name,
+                        target.path,
+                    )
 
     def _generate_snapshot_name(self, vm_config: VMConfig, disk: str) -> str:
         """Generate a unique snapshot name using the configured timestamp format.

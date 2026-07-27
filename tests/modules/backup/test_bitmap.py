@@ -348,7 +348,8 @@ def test_checkpoint_cleanup_after_successful_transfer(
 
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
-    assert "--metadata" in delete_cmds[0]
+    # First delete is now a FULL delete (no --metadata), with metadata fallback only on failure.
+    assert "--metadata" not in delete_cmds[0]
     assert prior_checkpoint in delete_cmds[0]
     assert vm_config.name in delete_cmds[0]
 
@@ -457,7 +458,9 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
 
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
-    assert "--metadata" in delete_cmds[0]
+    # First delete is a FULL delete (no --metadata).  The full delete succeeds on the successor
+    # (the successor was just created and the VM is still running), so no fallback is issued.
+    assert "--metadata" not in delete_cmds[0]
     assert vm_config.name in delete_cmds[0]
     assert prior_checkpoint not in delete_cmds[0], "prior checkpoint must NOT be deleted"
     assert f"qsnap-{target_hash}-" in delete_cmds[0], "successor (not prior) should be deleted"
@@ -1862,7 +1865,8 @@ def test_atomic_incremental_passes_checkpoint_xml_and_incremental(
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint in delete_cmds[0]
-    assert "--metadata" in delete_cmds[0]
+    # First delete is a FULL delete (no --metadata); metadata fallback only on failure.
+    assert "--metadata" not in delete_cmds[0]
 
     # No qemu-img convert
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
@@ -2024,7 +2028,8 @@ def test_atomic_rotation_deletes_older_after_success(
         "Exactly one checkpoint-delete expected (prior is oldest, superseded)"
     )
     assert prior in delete_cmds[0], f"Prior checkpoint {prior!r} should be deleted"
-    assert "--metadata" in delete_cmds[0]
+    # First delete is a FULL delete (no --metadata); metadata fallback only on failure.
+    assert "--metadata" not in delete_cmds[0]
 
     create_cmds = [cmd for cmd in all_run_cmds if "checkpoint-create-as" in cmd]
     assert len(create_cmds) == 0
@@ -2094,8 +2099,11 @@ def test_checkpoint_delete_failure_non_fatal(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
-    assert len(delete_cmds) == 1
+    # Two commands: full delete (no --metadata) fails, then metadata fallback also fails.
+    assert len(delete_cmds) == 2
     assert prior in delete_cmds[0]
+    assert "--metadata" not in delete_cmds[0], "First delete should be full (no --metadata)"
+    assert "--metadata" in delete_cmds[1], "Second delete should be metadata-only fallback"
 
     create_cmds = [cmd for cmd in all_run_cmds if "checkpoint-create-as" in cmd]
     assert len(create_cmds) == 0
@@ -2118,8 +2126,8 @@ def test_checkpoint_delete_failure_non_fatal(
 
 
 def test_new_checkpoint_name_bumps_on_collision():
-    """When the seconds-resolution candidate is already in *taken*, the
-    timestamp is bumped forward one second at a time until unique."""
+    """When the seconds-resolution candidate with hex suffix is already in
+    *taken*, the timestamp is bumped forward one second at a time until unique."""
     target_hash = "abc12345"
     frozen_time = datetime(2026, 7, 21, 10, 30, 0)
 
@@ -2129,8 +2137,17 @@ def test_new_checkpoint_name_bumps_on_collision():
         mock_dt.strptime = datetime.strptime
         mock_dt.min = datetime.min
 
-        collision_candidate = f"qsnap-{target_hash}-{frozen_time.strftime('%Y%m%dT%H%M%S')}"
-        bumped = BitmapBackupProvider._new_checkpoint_name(target_hash, taken={collision_candidate})
+        # Mock secrets.token_hex to return a predictable value so the
+        # first-iteration name collides with the taken set, forcing a bump.
+        with patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe") as mock_hex:
+            collision_candidate = (
+                f"qsnap-{target_hash}-"
+                f"{frozen_time.strftime('%Y%m%dT%H%M%S')}"
+                f"-deadbe"
+            )
+            bumped = BitmapBackupProvider._new_checkpoint_name(
+                target_hash, taken={collision_candidate}
+            )
 
     assert bumped != collision_candidate, (
         f"Bumped name {bumped!r} must differ from collision candidate {collision_candidate!r}"
@@ -2138,12 +2155,16 @@ def test_new_checkpoint_name_bumps_on_collision():
 
     import re
 
-    assert re.fullmatch(rf"qsnap-{target_hash}-\d{{8}}T\d{{6}}", bumped), (
-        f"Bumped name {bumped!r} must match qsnap-{target_hash}-YYYYMMDDTHHMMSS"
+    # New format: qsnap-{target_hash}-YYYYMMDDTHHMMSS-{6_hex_chars}
+    assert re.fullmatch(rf"qsnap-{target_hash}-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}", bumped), (
+        f"Bumped name {bumped!r} must match qsnap-{target_hash}-YYYYMMDDTHHMMSS-XXXXXX"
     )
 
+    # With predictable hex=deadbe, the bump shifts timestamp by +1 second
     expected_bumped = (
-        f"qsnap-{target_hash}-{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
+        f"qsnap-{target_hash}-"
+        f"{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
+        f"-deadbe"
     )
     assert bumped == expected_bumped, f"Expected bumped name {expected_bumped!r}, got {bumped!r}"
 
@@ -2154,7 +2175,9 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     """When the prior checkpoint name equals the current second's candidate,
     transfer_missing invokes backup-begin with a DIFFERENT successor
     checkpoint name (bump behavior end-to-end at the provider level)."""
-    frozen_time = datetime(2026, 7, 21, 15, 30, 0)
+    # Use a frozen time BEFORE the snapshot timestamp (2025-01-01) so
+    # the temporal cross-check does not reject the prior checkpoint.
+    frozen_time = datetime(2024, 12, 21, 15, 30, 0)
 
     vm_config = make_vm_config()
     target_path = tmp_path / "target"
@@ -2163,7 +2186,12 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-{frozen_time.strftime('%Y%m%dT%H%M%S')}"
+    # Prior checkpoint in new format with predictable hex suffix to trigger collision.
+    prior_checkpoint = (
+        f"qsnap-{target_hash}-"
+        f"{frozen_time.strftime('%Y%m%dT%H%M%S')}"
+        f"-deadbe"
+    )
 
     prev_backup = target_path / "testvm.20241230T000000.qcow2"
     prev_backup.write_bytes(b"")
@@ -2188,6 +2216,7 @@ def test_transfer_missing_collision_successor_differs_from_prior(
 
     with (
         patch("qsnap.modules.backup.bitmap.datetime") as mock_dt,
+        patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"),
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -2220,8 +2249,11 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     )
     assert successor_name.startswith(f"qsnap-{target_hash}-")
 
+    # With predictable hex=deadbe colliding with prior, bump shifts by +1 second.
     expected_successor = (
-        f"qsnap-{target_hash}-{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
+        f"qsnap-{target_hash}-"
+        f"{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
+        f"-deadbe"
     )
     assert successor_name == expected_successor, (
         f"Expected successor {expected_successor!r}, got {successor_name!r}"
@@ -3448,31 +3480,28 @@ def test_broken_chain_newest_backup_skipped_walk_to_valid(
 
     nbd = MockNbdClient(size=65536)
 
-    with patch.object(BitmapBackupProvider, "list", return_value=backups):
-        with patch.object(
-            BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
-        ):
-            with patch.object(
-                BitmapBackupProvider, "_transfer", return_value=(None, 65536)
-            ):
-                with patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
-                    # Post-transfer shell calls
-                    mock_shell.expect("qemu-img create").returns(_ok_result())
-                    mock_shell.expect("rm -f").returns(_ok_result())
-                    mock_shell.expect(r"^mv ").returns(_ok_result())
+    with patch.object(BitmapBackupProvider, "list", return_value=backups), patch.object(
+        BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
+    ), patch.object(
+        BitmapBackupProvider, "_transfer", return_value=(None, 65536)
+    ), patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
+        # Post-transfer shell calls
+        mock_shell.expect("qemu-img create").returns(_ok_result())
+        mock_shell.expect("rm -f").returns(_ok_result())
+        mock_shell.expect(r"^mv ").returns(_ok_result())
 
-                    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
-                    target_file = target_path / "testvm.20250101T000000.qcow2"
-                    result = provider._copy_dirty_blocks(
-                        vm_name=vm_config.name,
-                        target=target,
-                        target_file=target_file,
-                        socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
-                        write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
-                        pid_file=tmp_path / "qemu-nbd.pid",
-                        disk_target="vda",
-                        stall_timeout=1800,
-                    )
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        target_file = target_path / "testvm.20250101T000000.qcow2"
+        result = provider._copy_dirty_blocks(
+            vm_name=vm_config.name,
+            target=target,
+            target_file=target_file,
+            socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+            write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+            pid_file=tmp_path / "qemu-nbd.pid",
+            disk_target="vda",
+            stall_timeout=1800,
+        )
 
     assert result.error is None
     assert result.previous_path == older_backup, (
@@ -3542,30 +3571,27 @@ def test_all_non_full_broken_fall_back_to_full(
 
     nbd = MockNbdClient(size=65536)
 
-    with patch.object(BitmapBackupProvider, "list", return_value=backups):
-        with patch.object(
-            BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
-        ):
-            with patch.object(
-                BitmapBackupProvider, "_transfer", return_value=(None, 65536)
-            ):
-                with patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
-                    mock_shell.expect("qemu-img create").returns(_ok_result())
-                    mock_shell.expect("rm -f").returns(_ok_result())
-                    mock_shell.expect(r"^mv ").returns(_ok_result())
+    with patch.object(BitmapBackupProvider, "list", return_value=backups), patch.object(
+        BitmapBackupProvider, "_start_write_server", return_value=_ok_result()
+    ), patch.object(
+        BitmapBackupProvider, "_transfer", return_value=(None, 65536)
+    ), patch.object(BitmapBackupProvider, "_terminate_qemu_nbd"):
+        mock_shell.expect("qemu-img create").returns(_ok_result())
+        mock_shell.expect("rm -f").returns(_ok_result())
+        mock_shell.expect(r"^mv ").returns(_ok_result())
 
-                    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
-                    target_file = target_path / "testvm.20250101T000000.qcow2"
-                    result = provider._copy_dirty_blocks(
-                        vm_name=vm_config.name,
-                        target=target,
-                        target_file=target_file,
-                        socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
-                        write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
-                        pid_file=tmp_path / "qemu-nbd.pid",
-                        disk_target="vda",
-                        stall_timeout=1800,
-                    )
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        target_file = target_path / "testvm.20250101T000000.qcow2"
+        result = provider._copy_dirty_blocks(
+            vm_name=vm_config.name,
+            target=target,
+            target_file=target_file,
+            socket_path=f"/tmp/qsnap-backup-{os.getpid()}.sock",
+            write_socket=f"/tmp/qsnap-write-{os.getpid()}.sock",
+            pid_file=tmp_path / "qemu-nbd.pid",
+            disk_target="vda",
+            stall_timeout=1800,
+        )
 
     assert result.error is None
     assert result.previous_path == full_backup, (
@@ -3626,3 +3652,255 @@ def test_no_valid_backup_found_error_with_guidance(
     assert "no valid previous backup" in result.error.lower()
     assert "qsnap check --deep" in result.error
     assert "qsnap reconcile" in result.error
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G3: CHECKPOINT LIFECYCLE UNIT TESTS (chain-aware-retention-recovery)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_checkpoint_full_delete_succeeds(mock_shell):
+    """Full checkpoint delete succeeds via _delete_checkpoint_best_effort.
+    First command is virsh checkpoint-delete WITHOUT --metadata."""
+    vm_name = "testvm"
+    checkpoint_name = "qsnap-abc12345-test-checkpoint"
+
+    # Full delete (no --metadata) succeeds → no fallback needed.
+    mock_shell.expect_first("checkpoint-delete.*--metadata").returns(
+        ShellResult(success=False, stdout="", stderr="no metadata needed", returncode=1, error="")
+    )
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        provider._delete_checkpoint_best_effort(vm_name, checkpoint_name)
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
+    assert len(delete_cmds) == 1, (
+        f"Expected exactly 1 checkpoint-delete (full, no metadata), got {len(delete_cmds)}: {delete_cmds}"
+    )
+    assert "--metadata" not in delete_cmds[0], (
+        f"Full delete should NOT have --metadata, got: {delete_cmds[0]}"
+    )
+    assert checkpoint_name in delete_cmds[0]
+    assert vm_name in delete_cmds[0]
+
+
+def test_checkpoint_full_delete_fallback_metadata(mock_shell, caplog):
+    """Fallback to metadata-only when VM shut off (full delete fails).
+    First delete (no --metadata) fails, second (--metadata) succeeds."""
+    vm_name = "testvm"
+    checkpoint_name = "qsnap-abc12345-test-checkpoint"
+
+    # Full delete FAILS, metadata fallback SUCCEEDS.
+    # expect_first for --metadata catches the second call first.
+    mock_shell.expect_first("checkpoint-delete.*--metadata").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="domain is not running",
+            returncode=1,
+            error="domain is not running",
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        provider = BitmapBackupProvider(mock_shell)
+        provider._delete_checkpoint_best_effort(vm_name, checkpoint_name)
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
+    assert len(delete_cmds) == 2, (
+        f"Expected 2 commands (full + metadata fallback), got {len(delete_cmds)}: {delete_cmds}"
+    )
+    assert "--metadata" not in delete_cmds[0], (
+        f"First delete should be full (no --metadata), got: {delete_cmds[0]}"
+    )
+    assert "--metadata" in delete_cmds[1], (
+        f"Second delete should be metadata fallback, got: {delete_cmds[1]}"
+    )
+    assert checkpoint_name in delete_cmds[0]
+    assert checkpoint_name in delete_cmds[1]
+
+
+def test_new_checkpoint_name_includes_uuid_suffix():
+    """Checkpoint name includes UUID hex suffix.
+    Format: qsnap-{target_hash}-{yyyymmddTHHMMSS}-{6_hex_chars}"""
+    import re
+
+    target_hash = "abc12345"
+    name = BitmapBackupProvider._new_checkpoint_name(target_hash, taken=set())
+
+    pattern = rf"^qsnap-{re.escape(target_hash)}-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}$"
+    assert re.fullmatch(pattern, name), (
+        f"Name {name!r} must match qsnap-{target_hash}-YYYYMMDDTHHMMSS-XXXXXX"
+    )
+    # The hex suffix should be exactly 6 characters.
+    hex_suffix = name.rsplit("-", 1)[-1]
+    assert len(hex_suffix) == 6, f"Hex suffix should be 6 chars, got {hex_suffix!r} ({len(hex_suffix)})"
+
+
+def test_parse_checkpoint_timestamp_with_uuid_suffix():
+    """_parse_checkpoint_timestamp handles both old format (no suffix)
+    and new format (with hex suffix)."""
+    target_hash = "abc12345"
+
+    # Old format: no suffix
+    old_name = f"qsnap-{target_hash}-20240101T120000"
+    old_ts = BitmapBackupProvider._parse_checkpoint_timestamp(old_name, target_hash)
+    assert old_ts is not None, f"Failed to parse old-format name {old_name!r}"
+    assert old_ts == datetime(2024, 1, 1, 12, 0, 0), f"Expected 2024-01-01T12:00:00, got {old_ts}"
+
+    # New format: with hex suffix
+    new_name = f"qsnap-{target_hash}-20240101T120000-a1b2c3"
+    new_ts = BitmapBackupProvider._parse_checkpoint_timestamp(new_name, target_hash)
+    assert new_ts is not None, f"Failed to parse new-format name {new_name!r}"
+    assert new_ts == datetime(2024, 1, 1, 12, 0, 0), f"Expected 2024-01-01T12:00:00, got {new_ts}"
+
+    # Both parse to the same timestamp
+    assert old_ts == new_ts
+
+
+def test_checkpoint_collision_force_cleanup_and_retry(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """Bitmap collision triggers _force_cleanup_checkpoints, then retries
+    backup-begin with a fresh successor.  The retry succeeds."""
+    vm_config = make_vm_config()
+    target = make_target(path=str(tmp_path / "target"), verify="off")
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+
+    # Pre-register basic expectations.
+    mock_shell.expect_first("checkpoint-list").returns(
+        ShellResult(
+            success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
+        )
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # socket cleanup
+
+    # Custom run: first backup-begin fails with collision,
+    # second (retry) succeeds.  Also intercept checkpoint-list:
+    # first call returns prior, second (after force_cleanup) returns empty.
+    backup_call_count = [0]
+    cp_list_count = [0]
+    original_run = mock_shell.run
+
+    def collision_run(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "backup-begin" in cmd_str:
+            backup_call_count[0] += 1
+            if backup_call_count[0] == 1:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="Bitmap already exists",
+                    returncode=1,
+                    error="Bitmap already exists",
+                )
+            return _ok_result()
+        if "checkpoint-list" in cmd_str:
+            cp_list_count[0] += 1
+            if cp_list_count[0] >= 2:
+                # After force cleanup, no checkpoints remain.
+                return ShellResult(
+                    success=True, stdout="", stderr="", returncode=0, error=None
+                )
+        return original_run(cmd, timeout, check)
+
+    with (
+        patch.object(mock_shell, "run", side_effect=collision_run) as run_spy,
+        patch.object(
+            BitmapBackupProvider, "_force_cleanup_checkpoints"
+        ) as mock_force_cleanup,
+        patch(
+            "qsnap.modules.backup.bitmap.get_first_disk_target", return_value="vda"
+        ),
+        patch.object(
+            BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
+        ),
+    ):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True, (
+        f"Expected retry to succeed, got error: {results[0].error}"
+    )
+
+    # _force_cleanup_checkpoints was called with correct args.
+    mock_force_cleanup.assert_called_once_with(vm_config.name, target_hash)
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 2, (
+        f"Expected 2 backup-begin calls (first failed + retry), got {len(backup_cmds)}"
+    )
+
+
+def test_force_cleanup_checkpoints_deletes_all(mock_shell):
+    """_force_cleanup_checkpoints deletes ALL qsnap checkpoints for the
+    VM+target via _delete_checkpoint_best_effort."""
+    vm_name = "testvm"
+    target_hash = "abc12345"
+    prefix = f"qsnap-{target_hash}-"
+
+    checkpoints = [
+        f"{prefix}20240101T120000",
+        f"{prefix}20240102T120000",
+        f"{prefix}20240103T120000-deadbe",
+    ]
+
+    # checkpoint-list returns all three
+    mock_shell.expect_first("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout="\n".join(checkpoints) + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Each checkpoint will be deleted via _delete_checkpoint_best_effort
+    # which issues a full delete (no --metadata).
+    for _ in checkpoints:
+        mock_shell.expect("checkpoint-delete").returns(_ok_result())
+
+    # virsh --version for list_checkpoints
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch.object(
+            BitmapBackupProvider, "_delete_checkpoint_best_effort"
+        ) as mock_delete,
+    ):
+        provider = BitmapBackupProvider(mock_shell)
+        provider._force_cleanup_checkpoints(vm_name, target_hash)
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+
+    # checkpoint-list was called for the listing
+    cp_list_cmds = [cmd for cmd in all_run_cmds if "checkpoint-list" in cmd]
+    assert len(cp_list_cmds) == 1
+    assert vm_name in cp_list_cmds[0]
+
+    # _delete_checkpoint_best_effort called for each checkpoint
+    assert mock_delete.call_count == len(checkpoints), (
+        f"Expected delete for each of {len(checkpoints)} checkpoints, "
+        f"got {mock_delete.call_count} calls"
+    )
+    called_names = {c.args[0] for c in mock_delete.call_args_list}
+    assert called_names == {vm_name}, "All calls should use the same VM name"
+    called_checkpoints = {c.args[1] for c in mock_delete.call_args_list}
+    assert called_checkpoints == set(checkpoints), (
+        f"Expected deletion of {set(checkpoints)}, got {called_checkpoints}"
+    )

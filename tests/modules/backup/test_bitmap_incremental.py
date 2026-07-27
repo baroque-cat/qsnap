@@ -1537,3 +1537,240 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
     assert call_kwargs.get("zero_skip") is False, (
         f"Incremental _transfer should have zero_skip=False, got: {call_kwargs}"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G5: TEMPORAL MISMATCH UNIT TESTS (chain-aware-retention-recovery)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_temporal_mismatch_snapshot_predates_checkpoint(
+    mock_shell, make_vm_config, make_target, tmp_path
+) -> None:
+    """Snapshot predating checkpoint is skipped with temporal mismatch error.
+    The prior checkpoint timestamp (2025-02-01) is newer than the snapshot
+    timestamp (2025-01-01), so the backup is skipped to avoid incomplete
+    incremental."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    # Checkpoint timestamp 2025-02-01 > snapshot timestamp 2025-01-01
+    prior_checkpoint = f"qsnap-{target_hash}-20250201T000000"
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+        provider = BitmapBackupProvider(mock_shell, nbd=_default_nbd())
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is False, (
+        f"Expected temporal mismatch failure, got: {results[0]}"
+    )
+    assert "temporal mismatch" in results[0].error.lower(), (
+        f"Error should mention 'temporal mismatch', got: {results[0].error}"
+    )
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    # backup-begin is NEVER called — temporal check triggers continue before it.
+    backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 0, (
+        f"backup-begin should NOT be called when temporal mismatch skips, "
+        f"got: {backup_cmds}"
+    )
+    # No data transfer started
+    convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
+    assert len(convert_cmds) == 0
+
+
+def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
+    mock_shell, make_vm_config, make_target, tmp_path
+) -> None:
+    """Snapshot after checkpoint proceeds normally (no temporal mismatch).
+    The prior checkpoint timestamp (2024-12-30) is before the snapshot
+    timestamp (2025-01-01), so the backup proceeds."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    # Checkpoint timestamp 2024-12-30 < snapshot timestamp 2025-01-01
+    prior_checkpoint = f"qsnap-{target_hash}-20241230T000000"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run),
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True, (
+        f"Expected successful backup, got error: {results[0].error}"
+    )
+
+
+def test_size_sanity_check_warns_on_large_transfer(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+) -> None:
+    """Large transfer triggers WARNING but does NOT fail the backup.
+    dirty_bytes (700000) > snapshot.allocation (65536) * 10 → WARNING logged,
+    backup still succeeds."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-20241230T000000"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
+
+    # Override block_status to return a large total of dirty bytes (> 10× allocation).
+    nbd.block_status_payload = {
+        "base:allocation": [NbdExtent(offset=0, length=700000, data=True)],
+        "qemu:dirty-bitmap:backup-vda": [
+            NbdExtent(offset=0, length=700000, data=True),
+        ],
+    }
+    nbd._size = 700000
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run),
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True, (
+        f"Backup should succeed despite large transfer, got error: {results[0].error}"
+    )
+
+    # Verify WARNING was logged about large transfer
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "WARNING" and "dirty bytes" in rec.getMessage().lower()
+    ]
+    assert len(warnings) >= 1, (
+        f"Expected WARNING about large dirty bytes, got logs: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_temporal_mismatch_no_checkpoint_proceeds(
+    mock_shell, make_vm_config, make_target, tmp_path
+) -> None:
+    """No prior checkpoint exists (checkpoint-list is empty) → backup
+    proceeds normally without any temporal check (full export)."""
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+        patch(
+            "qsnap.modules.backup.bitmap.get_first_disk_target", return_value="vda"
+        ),
+        patch.object(
+            BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
+        ),
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True, (
+        f"Expected full export success with no prior checkpoint, got error: {results[0].error}"
+    )
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 1

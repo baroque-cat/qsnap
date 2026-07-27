@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from qsnap.core import Core, PipelineResult
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
@@ -2457,183 +2457,6 @@ def test_full_deleted_when_no_active_dependents(
     # FULL should be deleted
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
     assert full_name in deleted_names, "FULL with no active dependents should be deleted"
-
-
-# ── test_orphaned_incrementals_cascade_deleted ────────────────────────────
-
-
-def test_orphaned_incrementals_cascade_deleted(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Orphaned incrementals are cascade-deleted after their FULL anchor is removed."""
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    full_name = "snap1.FULL.monthly.qcow2"
-    inc1 = "snap2.qcow2"
-    inc2 = "snap3.qcow2"
-    now = datetime.now()
-
-    # FULL with two dependent incrementals
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
-    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
-    mock_state.record_incremental_dependency(str(target.path), inc2, full_name)
-
-    backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
-        SnapshotInfo(name=inc2, path=target.path / inc2, timestamp=now, allocation=600),
-    ]
-    # All are removed
-    retention = RetentionResult(keep=[], remove=[full_name, inc1, inc2])
-
-    # Provide expectations for verify_full_backup (M1 + M2)
-    mock_shell.expect("qemu-img info.*--output=json").returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps({"format": "qcow2", "virtual-size": 10000}),
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("qemu-img check.*--output=json").returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps({"errors": 0, "leaks": 0}),
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
-        core._cleanup_backups(vm, target, backups, retention)
-
-    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    assert full_name in deleted_names, "FULL should be deleted"
-    assert inc1 in deleted_names, "orphaned incremental should be cascade-deleted"
-    assert inc2 in deleted_names, "orphaned incremental should be cascade-deleted"
-
-
-# ── test_kept_incremental_rebased_to_new_anchor ───────────────────────────
-
-
-def test_kept_incremental_rebased_to_new_anchor(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Kept incremental is NOT cascade-deleted when its FULL anchor is removed.
-
-    When the FULL anchor is deleted but the dependent incremental is in
-    the keep-set, the incremental is preserved (not cascade-deleted).
-    """
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    full_name = "snap1.FULL.monthly.qcow2"
-    inc1 = "snap2.qcow2"
-    inc2 = "snap3.qcow2"
-    now = datetime.now()
-
-    # FULL with two dependents
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
-    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
-    mock_state.record_incremental_dependency(str(target.path), inc2, full_name)
-
-    backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
-        SnapshotInfo(name=inc2, path=target.path / inc2, timestamp=now, allocation=600),
-    ]
-    # FULL removed, inc1 kept, inc2 removed
-    retention = RetentionResult(keep=[inc1], remove=[full_name, inc2])
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
-        core._cleanup_backups(vm, target, backups, retention)
-
-    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    # FULL has dependents in keep-set (inc1) → ghost-retained
-    assert full_name not in deleted_names, "FULL should be ghost-retained (inc1 is in keep-set)"
-    # inc1 is in keep-set → NOT deleted
-    assert inc1 not in deleted_names, "kept incremental should NOT be cascade-deleted"
-
-
-# ── test_core_post_processes_retention_for_dependencies ───────────────────
-
-
-def test_core_post_processes_retention_for_dependencies(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core post-processes retention result for dependencies.
-
-    Even when the retention engine says to remove a FULL, Core checks
-    for dependent incrementals and overrides the deletion when active
-    dependents exist.
-    """
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    full_name = "snap1.FULL.monthly.qcow2"
-    inc1 = "snap2.qcow2"
-    now = datetime.now()
-
-    # FULL with one dependent incremental in keep-set
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
-    mock_state.record_incremental_dependency(str(target.path), inc1, full_name)
-
-    backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc1, path=target.path / inc1, timestamp=now, allocation=500),
-    ]
-    # Retention engine says: remove FULL, keep incremental
-    retention = RetentionResult(keep=[inc1], remove=[full_name])
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
-        core._cleanup_backups(vm, target, backups, retention)
-
-    # Even though retention says remove FULL, Core post-processes and skips it
-    # due to active dependent (inc1 in keep-set)
-    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    assert full_name not in deleted_names, (
-        "Core should post-process retention and skip FULL with active dependents"
-    )
-    assert inc1 not in deleted_names, "inc1 is in keep-set and should not be deleted"
 
 
 # ── Dry-Run FULL Backup Tests ──────────────────────────────────────────────
@@ -6000,12 +5823,11 @@ def test_reconcile_auto_deletes_orphan_checkpoints(
     with patch.object(
         mock_factory._backup_provider, "list_checkpoints",
         return_value=[orphan_cp],
-    ):
-        with patch.object(
-            mock_shell, "run",
-            wraps=mock_shell.run,
-        ) as shell_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_shell, "run",
+        wraps=mock_shell.run,
+    ) as shell_spy:
+        result = core.reconcile()
 
     # Verify checkpoint-delete was issued for the orphan.
     delete_calls = [
@@ -6048,12 +5870,11 @@ def test_reconcile_removes_orphan_files_on_target(
     )
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     assert delete_spy.called, "provider.delete() should be called for orphan file"
     assert result["testvm"].orphan_files_removed == 1
@@ -6086,12 +5907,11 @@ def test_reconcile_orphan_files_dry_run(
     )
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     assert not delete_spy.called, "provider.delete() should NOT be called in dry-run"
     assert result["testvm"].orphan_files_removed == 1
@@ -6125,13 +5945,11 @@ def test_reconcile_skips_non_qsnap_files_on_target(
     )
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[non_qsnap]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            with caplog.at_level(logging.WARNING):
-                result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy, caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     assert not delete_spy.called, "Non-qsnap file should NOT be deleted"
     assert result["testvm"].orphan_files_removed == 0
@@ -6197,12 +6015,11 @@ def test_reconcile_orphan_files_no_false_positives(
     ]
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=tracked
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     assert not delete_spy.called, "Tracked files should NOT be deleted"
     assert result["testvm"].orphan_files_removed == 0
@@ -6266,11 +6083,10 @@ def test_reconcile_removes_orphan_snapshot_files(
     # Ensure provider.list returns empty (no orphans on target).
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[]
-    ):
-        with patch.object(
-            mock_shell, "run", wraps=mock_shell.run,
-        ) as shell_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_shell, "run", wraps=mock_shell.run,
+    ) as shell_spy:
+        result = core.reconcile()
 
     # rm -f was called for the orphan snapshot file.
     rm_calls = [
@@ -6324,12 +6140,11 @@ def test_reconcile_orphan_files_after_phantom_cleanup(
     )
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_inc]
-    ):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "delete",
-            wraps=mock_factory._bitmap_backup_provider.delete,
-        ) as delete_spy:
-            result = core.reconcile()
+    ), patch.object(
+        mock_factory._bitmap_backup_provider, "delete",
+        wraps=mock_factory._bitmap_backup_provider.delete,
+    ) as delete_spy:
+        result = core.reconcile()
 
     # Phantom FULL removed from state.
     remaining = mock_state.get_full_backups(str(target.path))
@@ -6355,70 +6170,6 @@ def _qemu_img_info_json(backing_filename: str | None = None) -> str:
     return json.dumps({"format": "qcow2", "virtual-size": 1048576, "backing-filename": backing_filename})
 
 
-# ── test_incremental_kept_due_to_active_dependent ────────────────────────
-
-
-@pytest.mark.unit
-@pytest.mark.mock
-def test_incremental_kept_due_to_active_dependent(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Non-FULL incremental ghost-retained when a dependent is in keep-set.
-
-    Backups: [FULL, T0008, T0141].  T0141.backing=T0008, T0008.backing=FULL.
-    Retention keeps T0141, removes T0008 → T0008 is NOT deleted because
-    T0141 (in keep-set) has T0008 as its backing file.
-    """
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    full_name = "vm.FULL.monthly.qcow2"
-    t0008_name = "vm.T0008.qcow2"
-    t0141_name = "vm.T0141.qcow2"
-    now = datetime.now()
-    full_path = target.path / full_name
-    t0008_path = target.path / t0008_name
-    t0141_path = target.path / t0141_name
-
-    # T0141 → backing = T0008; T0008 → backing = FULL; FULL → no backing
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0141_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(str(t0008_path)), stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{t0008_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
-    )
-
-    backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=t0008_name, path=t0008_path, timestamp=now, allocation=500),
-        SnapshotInfo(name=t0141_name, path=t0141_path, timestamp=now, allocation=1000),
-    ]
-    retention = RetentionResult(keep=[full_name, t0141_name], remove=[t0008_name])
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
-        core._cleanup_backups(vm, target, backups, retention)
-
-    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    assert t0008_name not in deleted_names, (
-        f"{t0008_name} should be ghost-retained because {t0141_name} (in keep-set) depends on it"
-    )
-
-
 # ── test_incremental_deleted_when_no_active_dependents ───────────────────
 
 
@@ -6431,11 +6182,11 @@ def test_incremental_deleted_when_no_active_dependents(
     mock_state,
     mock_shell,
 ):
-    """Non-FULL incremental deleted when no other backup depends on it.
+    """Per-chain deletion: entire chain in remove → both FULL + inc deleted.
 
-    Backups: [FULL, T0008].  T0008.backing=FULL.  Retention keeps FULL,
-    removes T0008 → T0008 deleted; _resolve_chain_full_anchor and
-    remove_incremental_dependency are called.
+    Backups: [FULL, inc]. Retention removes both → FULL deleted after
+    M1 verification, inc deleted with _resolve_chain_full_anchor.
+    remove_incremental_dependency + remove_full_backup both called.
     """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -6453,7 +6204,7 @@ def test_incremental_deleted_when_no_active_dependents(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    # T0008 → backing = FULL; FULL → no backing
+    # inc → backing = FULL (contains .FULL. so _resolve_chain_full_anchor resolves in one hop)
     mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
         ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
     )
@@ -6461,7 +6212,7 @@ def test_incremental_deleted_when_no_active_dependents(
         ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
     )
 
-    # Pre-populate state so remove_incremental_dependency can be verified.
+    # Pre-populate state for verification.
     mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
@@ -6469,95 +6220,31 @@ def test_incremental_deleted_when_no_active_dependents(
         SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
         SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
     ]
-    retention = RetentionResult(keep=[full_name], remove=[inc_name])
+    # Entire chain removed — per-chain semantics, no ghost retention.
+    retention = RetentionResult(keep=[], remove=[full_name, inc_name])
 
     backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+    with (
+        patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy,
+        patch.object(
+            mock_state, "remove_full_backup", wraps=mock_state.remove_full_backup
+        ) as remove_full_spy,
+        patch.object(
+            mock_state, "remove_incremental_dependency",
+            wraps=mock_state.remove_incremental_dependency,
+        ) as remove_inc_spy,
+        patch("qsnap.core.verify_full_backup", return_value=None),
+    ):
         core._cleanup_backups(vm, target, backups, retention)
 
     deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    assert inc_name in deleted_names, (
-        f"{inc_name} should be deleted (no dependents in keep-set)"
-    )
+    assert full_name in deleted_names, "FULL should be deleted in per-chain mode"
+    assert inc_name in deleted_names, "inc should be deleted in per-chain mode"
 
-    # State cleanup: incremental dependency removed
-    deps = mock_state.get_incremental_dependencies(str(target.path), full_name)
-    assert inc_name not in deps, (
-        f"remove_incremental_dependency should clean {inc_name} → {full_name}"
-    )
-
-
-# ── test_orphaned_incrementals_cascade_deleted_after_inc_deletion ────────
-
-
-@pytest.mark.unit
-@pytest.mark.mock
-def test_orphaned_incrementals_cascade_deleted_after_inc_deletion(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Non-FULL incremental deleted → orphaned dependents cascade-deleted.
-
-    Backups: [FULL, inc_root, inc_a, inc_b].  inc_a.backing=inc_root,
-    inc_b.backing=inc_root, inc_root.backing=FULL.  Retention keeps FULL,
-    removes [inc_root, inc_a, inc_b] → inc_root deleted, inc_a and inc_b
-    cascade-deleted (neither in keep-set).
-    """
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    full_name = "vm.FULL.monthly.qcow2"
-    root_name = "vm.T0001.qcow2"
-    inc_a_name = "vm.T0008.qcow2"
-    inc_b_name = "vm.T0141.qcow2"
-    now = datetime.now()
-    full_path = target.path / full_name
-    root_path = target.path / root_name
-    inc_a_path = target.path / inc_a_name
-    inc_b_path = target.path / inc_b_name
-
-    # inc_a → backing = root; inc_b → backing = root; root → backing = FULL; FULL → no backing
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_a_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(str(root_path)), stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_b_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(str(root_path)), stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{root_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(str(full_path)), stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{full_name}").returns(
-        ShellResult(success=True, stdout=_qemu_img_info_json(), stderr="", returncode=0, error=None)
-    )
-
-    backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=root_name, path=root_path, timestamp=now, allocation=500),
-        SnapshotInfo(name=inc_a_name, path=inc_a_path, timestamp=now, allocation=600),
-        SnapshotInfo(name=inc_b_name, path=inc_b_path, timestamp=now, allocation=700),
-    ]
-    retention = RetentionResult(keep=[full_name], remove=[root_name, inc_a_name, inc_b_name])
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
-        core._cleanup_backups(vm, target, backups, retention)
-
-    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
-    # inc_root deleted (no dependents in keep-set)
-    assert root_name in deleted_names, f"{root_name} should be deleted (no active dependents)"
-    # orphans cascade-deleted
-    assert inc_a_name in deleted_names, f"{inc_a_name} should be cascade-deleted as orphan"
-    assert inc_b_name in deleted_names, f"{inc_b_name} should be cascade-deleted as orphan"
+    # remove_full_backup called for the FULL
+    assert remove_full_spy.called, "remove_full_backup should be called"
+    # remove_incremental_dependency called for the inc
+    assert remove_inc_spy.called, "remove_incremental_dependency should be called"
 
 
 # ── test_dependency_cleaned_on_retention_driven_inc_deletion ─────────────
@@ -6695,7 +6382,7 @@ def test_reverse_dependency_map_built_correctly(
     # FULL has no backing-filename → no entry for FULL path as dependent
     t0141_path_str = str(t0141_path)
     assert t0141_path_str not in refs, (
-        f"T0141 has no backing-filename, should not be in refs keys"
+        "T0141 has no backing-filename, should not be in refs keys"
     )
 
 
@@ -6777,3 +6464,1165 @@ def test_broken_qemu_img_info_skipped_in_reverse_map(
     )
     # inc_ok does appear as dependent of FULL
     assert str(full_path) in refs, "FULL path should be in refs as backing for inc_ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Per-Chain Retention (G1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_per_chain_retention_keeps_entire_chain(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Single chain entirely kept by retention engine.
+
+    Engine returns keep=[chain_id]. Verify all chain members in keep list.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    # Mock _resolve_chain_full_anchor for inc
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "backing-filename": str(target.path / full_name),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+    ]
+
+    # Mock backup provider list
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=backups
+    ), patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(keep=[full_name], remove=[]),
+    ):
+        _, result = core._evaluate_backup_retention(vm, target)
+
+    assert result is not None
+    assert full_name in result.keep
+    assert inc_name in result.keep
+
+
+def test_per_chain_retention_removes_entire_old_chain(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Old chain entirely removed. Engine returns remove=[chain_id].
+
+    Verify all chain members in remove list.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    # Mock _resolve_chain_full_anchor for inc
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "backing-filename": str(target.path / full_name),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+    ]
+
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=backups
+    ), patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(keep=[], remove=[full_name, Path(full_name).stem]),
+    ):
+        _, result = core._evaluate_backup_retention(vm, target)
+
+    assert result is not None
+    assert full_name in result.remove
+    assert inc_name in result.remove
+
+
+def test_per_chain_no_middle_deletion(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Engine returns remove=[middle_chain_id], keep=[newer, older].
+
+    Only middle chain's members are removed; others kept.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    middle_full = "testvm.FULL.daily.qcow2"
+    middle_inc = "testvm.T0008.qcow2"
+    newer_full = "testvm.FULL.weekly.qcow2"
+    newer_inc = "testvm.T0141.qcow2"
+    older_full = "testvm.FULL.yearly.qcow2"
+    now = datetime.now()
+
+    for fn in [middle_full, newer_full, older_full]:
+        mock_state.record_full_backup(str(target.path), fn, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), middle_inc, middle_full)
+    mock_state.record_incremental_dependency(str(target.path), newer_inc, newer_full)
+
+    # Mock _resolve_chain_full_anchor for incs
+    for inc_name, fn in [(middle_inc, middle_full), (newer_inc, newer_full)]:
+        mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+            ShellResult(
+                success=True,
+                stdout=json.dumps({
+                    "format": "qcow2",
+                    "backing-filename": str(target.path / fn),
+                }),
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+
+    backups = [
+        SnapshotInfo(name=middle_full, path=target.path / middle_full, timestamp=now, allocation=10000),
+        SnapshotInfo(name=middle_inc, path=target.path / middle_inc, timestamp=now, allocation=500),
+        SnapshotInfo(name=newer_full, path=target.path / newer_full, timestamp=now, allocation=10000),
+        SnapshotInfo(name=newer_inc, path=target.path / newer_inc, timestamp=now, allocation=500),
+        SnapshotInfo(name=older_full, path=target.path / older_full, timestamp=now, allocation=10000),
+    ]
+
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=backups
+    ), patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(
+            keep=[newer_full, older_full, Path(newer_full).stem],
+            remove=[middle_full, Path(middle_full).stem],
+        ),
+    ):
+        _, result = core._evaluate_backup_retention(vm, target)
+
+    assert result is not None
+    # Middle chain removed
+    assert middle_full in result.remove
+    assert middle_inc in result.remove
+    # Newer and older chains kept
+    assert newer_full in result.keep
+    assert newer_inc in result.keep
+    assert older_full in result.keep
+
+
+def test_group_backups_by_chain_correct_full(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Incrementals grouped to correct FULL via _group_backups_by_chain.
+
+    Mock qemu-img info to return backing-filename pointing to FULL.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    # Mock _resolve_chain_full_anchor: inc → backing = FULL
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1048576,
+                "backing-filename": str(full_path),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+
+    chains = core._group_backups_by_chain(backups)
+    assert full_name in chains, "FULL should be grouped under its own name"
+    # Incrementals are grouped under the stem of the FULL anchor
+    anchor_stem = Path(full_name).stem
+    assert anchor_stem in chains, "inc should be grouped under FULL anchor stem"
+    assert inc_name in [b.name for b in chains[anchor_stem]], (
+        "inc should be grouped with FULL anchor"
+    )
+
+
+def test_group_backups_by_chain_orphan_from_broken_chain(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Broken-chain incremental classified as orphan.
+
+    Mock qemu-img info to fail → _resolve_chain_full_anchor returns None.
+    Verify orphan classification under '__orphan__'.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+    inc_path = target.path / inc_name
+
+    # qemu-img info --output=json fails → _resolve_chain_full_anchor returns None
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(success=False, stdout="", stderr="error", returncode=1, error="failed")
+    )
+
+    backups = [
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+
+    chains = core._group_backups_by_chain(backups)
+    assert "__orphan__" in chains
+    assert inc_name in [b.name for b in chains["__orphan__"]]
+
+
+def test_per_chain_cleanup_entire_chain_deleted(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Entire chain deleted atomically via per-chain cleanup.
+
+    Verify remove_full_backup() + remove_all_incremental_dependencies() called.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    now = datetime.now()
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+    ]
+    retention = RetentionResult(keep=[], remove=[full_name])
+
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_state, "remove_full_backup", wraps=mock_state.remove_full_backup,
+        ) as remove_full_spy,
+        patch.object(
+            mock_state, "remove_all_incremental_dependencies",
+            wraps=mock_state.remove_all_incremental_dependencies,
+        ) as remove_all_spy,
+    ):
+        core._cleanup_backups(vm, target, backups, retention)
+
+    assert remove_full_spy.called, "remove_full_backup should be called"
+    assert remove_all_spy.called, "remove_all_incremental_dependencies should be called"
+
+
+def test_per_chain_cleanup_no_ghost_retention(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """No ghost-retention: FULL in remove with inc in keep → FULL still deleted.
+
+    In per-chain mode, the entire chain goes. When retention says remove
+    the chain, all members (including the FULL) are deleted regardless of
+    any keep-set incrementals.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "snap1.FULL.monthly.qcow2"
+    inc_name = "snap2.qcow2"
+    now = datetime.now()
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+    ]
+    # inc in keep, FULL in remove → per-chain: FULL still deleted (no ghost-retention)
+    retention = RetentionResult(keep=[inc_name], remove=[full_name])
+
+    backup_provider = mock_factory._backup_provider
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy,
+    ):
+        core._cleanup_backups(vm, target, backups, retention)
+
+    deleted_names = [call.args[0].name for call in delete_spy.call_args_list]
+    assert full_name in deleted_names, (
+        "FULL should be deleted in per-chain mode (no ghost-retention)"
+    )
+
+
+def test_per_chain_cleanup_incremental_state_cleaned(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When incremental deleted, remove_incremental_dependency() called with correct anchor."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    # _resolve_chain_full_anchor: inc → backing = FULL
+    mock_shell.expect_first(rf"qemu-img info.*--output=json.*{inc_name}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "backing-filename": str(full_path),
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+    retention = RetentionResult(keep=[], remove=[full_name, inc_name])
+
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_state, "remove_incremental_dependency",
+            wraps=mock_state.remove_incremental_dependency,
+        ) as remove_spy,
+    ):
+        core._cleanup_backups(vm, target, backups, retention)
+
+    assert remove_spy.called, "remove_incremental_dependency should be called"
+    assert remove_spy.call_args[0] == (str(target.path), inc_name, Path(full_name).stem), (
+        f"remove_incremental_dependency called with wrong args: {remove_spy.call_args[0]}"
+    )
+
+
+def test_per_chain_post_cleanup_verification_pass(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """After cleanup, all keep-set chains verified intact.
+
+    Mock qemu-img info --backing-chain succeeds for all keep-set non-FULLs.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+    # FULL removed, inc kept → inc will be post-cleanup verified
+    retention = RetentionResult(keep=[full_name, inc_name], remove=[])
+
+    # Post-cleanup verification: qemu-img info --backing-chain on inc succeeds
+    mock_shell.expect_first(r"qemu-img.*--backing-chain").returns(
+        ShellResult(success=True, stdout="[]", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.CRITICAL)
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch("qsnap.core.os.path.exists", return_value=True),
+    ):
+        core._cleanup_backups(vm, target, backups, retention)
+
+    # No CRITICAL log — chain is intact
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert not critical_logs, f"Expected no CRITICAL log, got: {critical_logs}"
+
+
+def test_per_chain_post_cleanup_verification_fail(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """After cleanup, a keep-set chain is broken → CRITICAL log.
+
+    Mock qemu-img info --backing-chain fails for a kept incremental.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    inc_name = "testvm.T0008.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_path = target.path / inc_name
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+    retention = RetentionResult(keep=[full_name, inc_name], remove=[full_name])
+
+    # Post-cleanup verification fails on inc
+    mock_shell.expect_first(r"qemu-img.*--backing-chain").returns(
+        ShellResult(success=False, stdout="", stderr="broken", returncode=1, error="broken")
+    )
+
+    caplog.set_level(logging.CRITICAL)
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch("qsnap.core.os.path.exists", return_value=True),
+    ):
+        core._cleanup_backups(vm, target, backups, retention)
+
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "Expected CRITICAL log for broken post-cleanup chain"
+    assert any(
+        "post-cleanup verification FAILED" in r.message for r in critical_logs
+    ), "CRITICAL log should mention post-cleanup verification"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Oldest-Prefix Snapshot Retention
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_snapshot_oldest_prefix_contiguous_removed(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Contiguous oldest prefix removed.
+
+    Snapshots sorted by timestamp, contiguous remove items from oldest kept in remove.
+    """
+    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    timestamps = [
+        datetime(2025, 7, 13, 8, 0),
+        datetime(2025, 7, 13, 9, 0),
+        datetime(2025, 7, 13, 10, 0),
+        datetime(2025, 7, 13, 11, 0),
+    ]
+    for i, ts in enumerate(timestamps):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"snap{i+1}",
+                path=Path(f"/tmp/snap{i+1}.qcow2"),
+                timestamp=ts,
+                allocation=1000,
+            ),
+        )
+
+    # Engine returns: remove oldest 2, keep newest 2
+    with patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(
+            keep=["snap3", "snap4"],
+            remove=["snap1", "snap2"],
+        ),
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # snap1 and snap2 form contiguous oldest prefix → kept in remove
+    assert "snap1" in result.remove
+    assert "snap2" in result.remove
+    # snap3 and snap4 are keep
+    assert "snap3" in result.keep
+    assert "snap4" in result.keep
+
+
+def test_snapshot_oldest_prefix_middle_moved_to_keep(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Middle snapshots in remove list moved to keep (gap fillers).
+
+    Engine removes snap2 and snap1 but keeps snap3 and snap4.
+    snap1 (oldest remove) stays in remove; snap2 (non-prefix after keep) moves to keep.
+    """
+    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    timestamps = [
+        datetime(2025, 7, 13, 8, 0),
+        datetime(2025, 7, 13, 9, 0),
+        datetime(2025, 7, 13, 10, 0),
+        datetime(2025, 7, 13, 11, 0),
+    ]
+    for i, ts in enumerate(timestamps):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"snap{i+1}",
+                path=Path(f"/tmp/snap{i+1}.qcow2"),
+                timestamp=ts,
+                allocation=1000,
+            ),
+        )
+
+    with patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(
+            keep=["snap2", "snap4"],
+            remove=["snap1", "snap3"],
+        ),
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # snap1 is the oldest prefix → kept in remove
+    assert "snap1" in result.remove
+    # snap3 is non-prefix (after snap2 keep) → moved to keep
+    assert "snap3" in result.keep
+    assert "snap3" not in result.remove
+
+
+def test_snapshot_oldest_prefix_mixed(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Mixed prefix and gap fillers.
+
+    Engine removes snap1, snap3, snap4. Keep snap2, snap5.
+    snap1 (contiguous from oldest) stays in remove.
+    snap3, snap4 (non-contiguous after keep snap2) moved to keep.
+    """
+    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    timestamps = [
+        datetime(2025, 7, 13, 8, 0),
+        datetime(2025, 7, 13, 9, 0),
+        datetime(2025, 7, 13, 10, 0),
+        datetime(2025, 7, 13, 11, 0),
+        datetime(2025, 7, 13, 12, 0),
+    ]
+    for i, ts in enumerate(timestamps):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"snap{i+1}",
+                path=Path(f"/tmp/snap{i+1}.qcow2"),
+                timestamp=ts,
+                allocation=1000,
+            ),
+        )
+
+    with patch.object(
+        mock_factory._retention_engine, "evaluate",
+        return_value=RetentionResult(
+            keep=["snap2", "snap5"],
+            remove=["snap1", "snap3", "snap4"],
+        ),
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # snap1 is contiguous oldest prefix → remove
+    assert "snap1" in result.remove
+    # snap3 and snap4 are non-prefix → moved to keep
+    assert "snap3" in result.keep
+    assert "snap4" in result.keep
+    assert "snap3" not in result.remove
+    assert "snap4" not in result.remove
+
+
+def test_blockcommit_receives_oldest_prefix(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Blockcommit processes only contiguous prefix.
+
+    Verify to_merge list only contains oldest prefix items.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record 4 snapshots
+    base_path = "/var/lib/libvirt/snapshots/testvm"
+    timestamps = [
+        datetime(2025, 7, 13, 8, 0),
+        datetime(2025, 7, 13, 9, 0),
+        datetime(2025, 7, 13, 10, 0),
+        datetime(2025, 7, 13, 11, 0),
+    ]
+    for i, ts in enumerate(timestamps):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"snap{i+1}",
+                path=Path(f"{base_path}/snap{i+1}.qcow2"),
+                timestamp=ts,
+                allocation=1000,
+            ),
+        )
+
+    # Oldest-prefix: snap1 removed, snap2-snap4 kept
+    retention = RetentionResult(
+        keep=["snap2", "snap3", "snap4"],
+        remove=["snap1"],
+    )
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.called, "blockcommit should be called"
+    merge_names = [s.name for s in bc_spy.call_args[0][1]]
+    assert "snap1" in merge_names, "contiguous oldest prefix should be committed"
+    assert "snap2" not in merge_names, "non-remove items should NOT be committed"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Auto-Recovery
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_auto_recovery_force_full_not_triggered_when_full_exists(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When a valid FULL exists on target, _force_full_targets is NOT populated."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_name = "testvm.T0008.qcow2"
+    inc_path = target.path / inc_name
+
+    # Record FULL in state
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+
+    # inc chain is intact → qemu-img info --backing-chain succeeds
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout="[]", stderr="", returncode=0, error=None)
+    )
+
+    with (
+        patch("qsnap.core.os.path.exists", return_value=True),
+        patch.object(
+            mock_factory._backup_provider, "list", return_value=backups
+        ),
+    ):
+        core._validate_state_at_startup(vm)
+
+    # Force-full should NOT be set because FULL exists
+    assert str(target.path) not in core._force_full_targets, (
+        "force_full_targets should NOT contain target when valid FULL exists"
+    )
+
+
+def test_auto_recovery_error_non_fatal(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Auto-recovery error (qemu-img timeout) does not abort pipeline."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    now = datetime.now()
+    full_path = target.path / full_name
+    inc_name = "testvm.T0008.qcow2"
+    inc_path = target.path / inc_name
+
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+
+    backups = [
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+    ]
+
+    # qemu-img info --backing-chain on inc raises subprocess.TimeoutExpired
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=False, stdout="", stderr="timeout", returncode=124, error="timeout")
+    )
+
+    caplog.set_level(logging.WARNING)
+    with (
+        patch("qsnap.core.os.path.exists", return_value=True),
+        patch.object(
+            mock_factory._backup_provider, "list", return_value=backups
+        ),
+    ):
+        # Should not raise exception
+        core._validate_state_at_startup(vm)
+
+    # Pipeline continues — error is non-fatal (logged at WARNING)
+    assert "auto-recovery" in caplog.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Chain Integrity Verification (G7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_chain_verify_result_broken_file_on_missing(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """ChainVerifyResult.broken_file set when file missing in chain."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Broken chain with MISSING_FILE
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+    # MISSING_FILE → test -f fails
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
+    mock_shell.expect("test -f.*MISSING_FILE").returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
+    )
+    mock_shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    result = core._verify_backing_chain(vm)
+    assert result.success is False
+    assert result.broken_file is not None
+    assert "MISSING_FILE" in str(result.broken_file)
+
+
+def test_chain_verify_result_no_broken_file_on_cycle(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """ChainVerifyResult.broken_file is not None for cyclic reference (cycle IS a broken file)."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    cyclic_chain = json.dumps([
+        {"image": "/var/lib/libvirt/images/testvm.qcow2", "format": "qcow2"},
+        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+        {"image": "/var/lib/libvirt/snapshots/testvm/snap1.qcow2", "format": "qcow2"},
+    ])
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=cyclic_chain, stderr="", returncode=0, error=None)
+    )
+
+    with patch("os.path.exists", return_value=True):
+        result = core._verify_backing_chain(vm)
+
+    assert result.success is False
+    # A cycle has a broken_file = image_path (the cycle detection sets it)
+    assert result.broken_file is not None
+    assert "snap1" in str(result.broken_file)
+
+
+def test_chain_verify_broken_returns_broken_file_and_attempts_partial(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """When backing chain broken, _verify_backing_chain returns broken_file.
+
+    _split_at_break is called, partial blockcommit attempted.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Broken chain with MISSING_FILE
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+    # MISSING_FILE → test -f fails
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
+    mock_shell.expect("test -f.*MISSING_FILE").returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
+    )
+    mock_shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.WARNING)
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Blockcommit may still be called for partial (before break)
+    # The key is that _verify_backing_chain found the break and attempted partial
+    assert "Pre-commit chain verification found break" in caplog.text
+
+
+def test_chain_verify_broken_chain_does_not_defer(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Broken chain does NOT defer the operation.
+
+    Partial blockcommit or skip, not defer. Verify no deferred operations.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshots_for_chain(mock_state, "testvm")
+
+    # Broken chain
+    broken_json = _load_fixture("backing_chain_broken.json")
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
+    )
+    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
+    mock_shell.expect("test -f.*MISSING_FILE").returns(
+        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
+    )
+    mock_shell.expect("test -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
+
+    with patch("os.path.exists", return_value=True):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Broken chains must never be deferred
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_per_chain_null_retention_result_noop(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """None passed as retention result → _cleanup_backups is a no-op.
+
+    No deletions, no state changes.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full_name = "testvm.FULL.monthly.qcow2"
+    now = datetime.now()
+    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+
+    backups = [
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+    ]
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(backup_provider, "delete", wraps=backup_provider.delete) as delete_spy:
+        core._cleanup_backups(vm, target, backups, None)
+
+    assert not delete_spy.called, "delete should NOT be called when retention_result is None"

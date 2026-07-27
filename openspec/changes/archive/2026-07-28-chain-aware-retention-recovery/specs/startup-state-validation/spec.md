@@ -1,10 +1,4 @@
-# Startup State Validation
-
-## Purpose
-
-Lightweight state-vs-disk validation at pipeline startup that detects and cleans phantom FULLs and stale `last_backup_allocation` baselines before the onchange gate runs. This ensures the gate sees correct state and phantom entries don't block legitimate FULL creation.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Startup state validation before onchange gate
 
@@ -40,6 +34,8 @@ The system SHALL perform a lightweight state-vs-disk validation at the start of 
 - **WHEN** the pipeline starts and orphaned libvirt checkpoints are detected
 - **THEN** the system SHALL NOT automatically delete them (only `qsnap reconcile` does auto-cleanup)
 - **AND** SHALL leave checkpoint cleanup to the explicit `reconcile` command
+
+## ADDED Requirements
 
 ### Requirement: Broken backup chain auto-recovery at startup
 
