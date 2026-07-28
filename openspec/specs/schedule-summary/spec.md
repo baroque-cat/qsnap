@@ -8,20 +8,20 @@ Human-readable retention schedule preview that simulates the retention engine ag
 
 ### Requirement: Core.schedule_summary produces a human-readable retention preview
 
-`Core.schedule_summary(vm_filter=None)` SHALL simulate the retention engine against a synthetic timestamp distribution and return a formatted string showing expected chain length, bucket breakdown, storage estimates, and real size projections for each VM and each target. The size projections SHALL include: current base image allocated size (via `qemu-img info`), average incremental size from state history, projected number of FULLs and incrementals based on bucket counts, projected total target size, and current target directory size.
+`Core.schedule_summary(vm_filter=None)` SHALL display count-based retention information for each VM and each target. The output SHALL show `chain_length`, `keep_generations`, current snapshot/chain counts, and real size projections. The method SHALL NOT generate synthetic timestamps or compute retention windows. The methods `_retention_window()` and `_generate_synthetic_items()` SHALL NOT exist.
 
-#### Scenario: Empty state produces meaningful simulation
+#### Scenario: Empty state produces meaningful summary
 - **WHEN** `schedule_summary()` is called with zero recorded snapshots
-- **THEN** it SHALL generate synthetic timestamps (one per hour for the configured retention window + 50% margin) and evaluate retention against them
-- **AND** it SHALL include size projections using the base image actual-size
+- **THEN** it SHALL display `chain_length` and `keep_generations` from config
+- **AND** show "Current chain: 0 snapshots"
 
 #### Scenario: Summary logs at INFO on every timer invocation
 - **WHEN** the pipeline runs via systemd timer
 - **THEN** `schedule_summary()` output SHALL be logged at INFO level in the pipeline entry log
 
-#### Scenario: Summary shows snapshot and backup breakdown with size estimates
-- **WHEN** `schedule_summary()` runs with `snapshot_preserve="24h 2d"` and `target_preserve="24h 7d 4w"`
-- **THEN** output SHALL include separate sections for snapshots and per-target backups, each showing bucket counts (hourly, daily, weekly), expected total kept count, estimated storage, projected FULL count, projected incremental count, and projected total size
+#### Scenario: Summary shows snapshot and backup counts
+- **WHEN** `schedule_summary()` runs with `snapshot_chain_length=168` and `target_keep_generations=2`
+- **THEN** output SHALL include separate sections for snapshots and per-target backups, each showing chain_length, keep_generations, current count, and estimated storage
 
 #### Scenario: Summary includes real base image size
 - **WHEN** `schedule_summary()` runs for a VM with `base_image` pointing to a 100 GB qcow2
@@ -31,13 +31,13 @@ Human-readable retention schedule preview that simulates the retention engine ag
 - **WHEN** `schedule_summary()` runs for a VM with 7 recorded snapshots averaging 1.5 GB
 - **THEN** output SHALL include "Avg incremental: ~1.5 GB (last 7 snapshots)"
 
-### Requirement: TimeBasedRetention.explain returns structured bucket metadata
+### Requirement: TimeBasedRetention.explain returns structured metadata
 
-`TimeBasedRetention.explain(items, policy, now, preserve_day_of_week)` SHALL return a dict mapping each bucket name (`"hourly"`, `"daily"`, `"weekly"`, `"monthly"`, `"yearly"`, `"preserve_min"`) to a dict with `"count"` (number of unique items kept by that bucket) and optionally `"range"` (earliest and latest timestamps in the bucket).
+`IRetentionEngine.explain(items, policy, now)` SHALL return a dict with `keep_count` (number of items kept) and `remove_count` (number of items removed). The method SHALL NOT return per-bucket breakdowns.
 
-#### Scenario: explain returns per-bucket counts
-- **WHEN** `explain(items, policy, now)` is called with a policy of `hourly=24, daily=7`
-- **THEN** the result SHALL contain `{"hourly": {"count": 24, ...}, "daily": {"count": 7, ...}}`
+#### Scenario: explain returns counts
+- **WHEN** `explain(items, policy, now)` is called with 10 items and `policy.chain_length=5`
+- **THEN** the result SHALL contain `{"keep_count": 5, "remove_count": 5}`
 
 #### Scenario: explain is a pure function
 - **WHEN** `explain()` is called twice with identical arguments

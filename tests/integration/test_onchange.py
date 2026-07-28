@@ -440,7 +440,6 @@ def test_onchange_manual_deletion_recovery(test_vm, caplog):
         str(target_dir),
         phantom_full_name,
         snap.timestamp,
-        "monthly",
     )
 
     target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
@@ -504,8 +503,8 @@ def test_retention_runs_on_skip(test_vm, caplog):
     """Gate/retention separation: retention still runs when gate skips transfer.
 
     1. Create snapshot, back up to target (creates backup files on target).
-    2. Reconfigure with aggressive retention (``target_preserve="0h"``,
-       ``target_preserve_min="0h"`` — expire everything).
+     2. Reconfigure with aggressive retention (``target_chain_length=0``,
+        ``target_keep_generations=0`` — expire everything).
     3. Run backup — gate skips (no new snapshots), but retention runs
        and deletes the expired backup files from target.
     4. Verify caplog contains "no new snapshots — skipping" (gate closed).
@@ -549,14 +548,14 @@ def test_retention_runs_on_skip(test_vm, caplog):
 
     # --- Phase 2: Aggressive retention — gate skips, retention deletes ---
     # Create a new Core with aggressive retention settings.
-    # "0h" with preserve_min="0h" causes the retention engine to keep nothing.
+    # chain_length=0 with keep_generations=0 causes the retention engine to keep nothing.
     target_aggressive = TargetConfig(
         path=target_dir,
         backup_create="onchange",
         compress=False,
         verify="off",
-        target_preserve="0h",
-        target_preserve_min="0h",
+        target_chain_length=0,
+        target_keep_generations=0,
     )
     vm_config_aggressive = VMConfig(
         name=vm_name,

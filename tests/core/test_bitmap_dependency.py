@@ -328,7 +328,7 @@ def test_dependency_visible_in_check_state(
 
     # Record state: FULL first, then dependency.
     mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "monthly"
+        str(backup_dir), full_name, datetime(2025, 1, 1, 0, 0, 0)
     )
     mock_state.record_incremental_dependency(str(backup_dir), inc_name, full_name)
 

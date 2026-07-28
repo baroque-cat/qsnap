@@ -1,13 +1,19 @@
-"""TimeBasedRetention — btrbk-style time-based retention engine.
+"""TimeBasedRetention — count-based retention engine.
 
 Pure function: no I/O, no Core inheritance, no side effects.
+
+The count-based engine sorts items by timestamp ascending, keeps the
+newest N, and marks the rest for removal.  For snapshots, N =
+``policy.chain_length``; for targets (per-chain), N =
+``policy.keep_generations``.  When ``chain_length`` is ``0`` (unset for
+snapshots), the engine falls back to ``keep_generations`` as the keep
+count; when both are ``0``, all items are marked for removal.
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from typing import Any
 
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.models.config import RetentionPolicy
@@ -21,14 +27,13 @@ _UNIT_TO_DELTA: dict[str, timedelta] = {
     "y": timedelta(days=365),
 }
 
-_WEEKDAY_MAP: dict[str, int] = {
-    "monday": 0,
-    "tuesday": 1,
-    "wednesday": 2,
-    "thursday": 3,
-    "friday": 4,
-    "saturday": 5,
-    "sunday": 6,
+
+# Multipliers for stall-timeout parsing (seconds per unit).
+_STALL_UNIT_TO_SECONDS: dict[str, int] = {
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
 }
 
 
@@ -55,15 +60,6 @@ def parse_duration(text: str) -> timedelta:
     return count * _UNIT_TO_DELTA[unit]
 
 
-# Multipliers for stall-timeout parsing (seconds per unit).
-_STALL_UNIT_TO_SECONDS: dict[str, int] = {
-    "s": 1,
-    "m": 60,
-    "h": 3600,
-    "d": 86400,
-}
-
-
 def parse_stall_timeout(text: str) -> int:
     """Parse a stall-timeout duration string into whole seconds.
 
@@ -83,37 +79,27 @@ def parse_stall_timeout(text: str) -> int:
     return count * _STALL_UNIT_TO_SECONDS[unit]
 
 
-def _bucket_key(
-    ts: datetime,
-    bucket: str,
-    preserve_day_of_week: str = "monday",
-) -> tuple[int, ...]:
-    """Return the grouping key for *ts* under the given *bucket*.
+def _keep_count(policy: RetentionPolicy) -> int:
+    """Return the number of items to keep for the given policy.
 
-    For the ``weekly`` bucket, the week boundary is determined by
-    *preserve_day_of_week* (case-insensitive, ``"monday"`` … ``"sunday"``).
+    When ``chain_length`` is positive, it is the keep count (snapshot
+    context).  Otherwise ``keep_generations`` is the keep count (target
+    context).  When both are zero, all items are removed.
     """
-    if bucket == "hourly":
-        return (ts.year, ts.month, ts.day, ts.hour)
-    if bucket == "daily":
-        return (ts.year, ts.month, ts.day)
-    if bucket == "weekly":
-        target_dow = _WEEKDAY_MAP[preserve_day_of_week.lower()]
-        delta = (ts.weekday() - target_dow) % 7
-        week_start = ts.date() - timedelta(days=delta)
-        return (week_start.year, week_start.month, week_start.day)
-    if bucket == "monthly":
-        return (ts.year, ts.month)
-    if bucket == "yearly":
-        return (ts.year,)
-    raise ValueError(f"Unknown bucket: {bucket!r}")
+    if policy.chain_length > 0:
+        return policy.chain_length
+    return policy.keep_generations
 
 
 class TimeBasedRetention(IRetentionEngine):
-    """Time-based retention engine implementing the btrbk algorithm.
+    """Count-based retention engine.
 
     The engine is a pure function: given the same inputs, it always
     returns the same output.  No I/O, no random, no external state.
+
+    The keep count N is determined by :func:`_keep_count`: ``chain_length``
+    when positive, otherwise ``keep_generations``.  Items are sorted by
+    timestamp ascending; the newest N are kept and the rest removed.
     """
 
     def __init__(self, policy: RetentionPolicy) -> None:
@@ -124,7 +110,6 @@ class TimeBasedRetention(IRetentionEngine):
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
-        preserve_day_of_week: str = "monday",
     ) -> RetentionResult:
         if not items:
             return RetentionResult(keep=[], remove=[])
@@ -132,118 +117,31 @@ class TimeBasedRetention(IRetentionEngine):
         # Sort by timestamp ascending (oldest first).
         sorted_items = sorted(items, key=lambda it: it.timestamp)
 
-        keep_names: set[str] = set()
+        n = _keep_count(policy)
 
-        # 1. preserve_min — keep all items within the minimum window.
-        if policy.preserve_min == "all":
-            keep_names.update(it.name for it in sorted_items)
-        elif policy.preserve_min == "latest":
-            # Keep only the single most recent item.
-            if sorted_items:
-                keep_names.add(sorted_items[-1].name)
+        # Keep the newest N items (last N in ascending order).
+        if n <= 0:
+            keep: list[str] = []
+            remove = [it.name for it in sorted_items]
         else:
-            min_delta = parse_duration(policy.preserve_min)
-            threshold = now - min_delta
-            keep_names.update(it.name for it in sorted_items if it.timestamp >= threshold)
+            keep = [it.name for it in sorted_items[-n:]]
+            remove = [it.name for it in sorted_items[:-n]] if n < len(sorted_items) else []
 
-        # 2. Time-bucket retention.
-        buckets = [
-            ("hourly", policy.hourly),
-            ("daily", policy.daily),
-            ("weekly", policy.weekly),
-            ("monthly", policy.monthly),
-            ("yearly", policy.yearly),
-        ]
-        for bucket_name, count in buckets:
-            if count <= 0:
-                continue
-            kept = self._select_by_bucket(sorted_items, bucket_name, count, preserve_day_of_week)
-            keep_names.update(it.name for it in kept)
-
-        # Build ordered keep / remove lists (oldest first).
-        keep = [it.name for it in sorted_items if it.name in keep_names]
-        remove = [it.name for it in sorted_items if it.name not in keep_names]
         return RetentionResult(keep=keep, remove=remove)
-
-    @staticmethod
-    def _select_by_bucket(
-        items: list[RetentionItem],
-        bucket: str,
-        count: int,
-        preserve_day_of_week: str = "monday",
-    ) -> list[RetentionItem]:
-        """Select the earliest item per bucket, keeping the *count* most recent buckets."""
-        # Group items by bucket key; keep the first (earliest) item per group.
-        groups: dict[tuple[int, ...], RetentionItem] = {}
-        for item in items:
-            key = _bucket_key(item.timestamp, bucket, preserve_day_of_week)
-            if key not in groups:
-                groups[key] = item  # items are sorted ascending → first is earliest
-
-        # Sort group keys descending (most recent bucket first).
-        sorted_keys = sorted(groups.keys(), reverse=True)
-
-        # Take the first *count* buckets.
-        selected_keys = sorted_keys[:count]
-        return [groups[key] for key in selected_keys]
 
     def explain(
         self,
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
-        preserve_day_of_week: str = "monday",
-    ) -> dict[str, dict[str, Any]]:
-        """Return a structured per-bucket breakdown of the retention policy.
+    ) -> dict[str, int]:
+        """Return a count-based summary of the retention policy.
 
-        Each bucket name maps to a dict with ``"count"`` (number of items
-        kept by that bucket) and optionally ``"range"`` (earliest and
-        latest timestamps of kept items).
+        Returns a dict with ``keep_count`` (number of items kept) and
+        ``remove_count`` (number of items removed).
         """
-        if not items:
-            return {}
-
-        result: dict[str, dict[str, Any]] = {}
-
-        sorted_items = sorted(items, key=lambda it: it.timestamp)
-
-        # preserve_min bucket
-        if policy.preserve_min == "all":
-            pm_items = list(sorted_items)
-        elif policy.preserve_min == "latest":
-            pm_items = [sorted_items[-1]] if sorted_items else []
-        else:
-            min_delta = parse_duration(policy.preserve_min)
-            threshold = now - min_delta
-            pm_items = [it for it in sorted_items if it.timestamp >= threshold]
-
-        if pm_items:
-            result["preserve_min"] = {
-                "count": len(pm_items),
-                "range": (pm_items[0].timestamp, pm_items[-1].timestamp),
-            }
-        else:
-            result["preserve_min"] = {"count": 0}
-
-        # Time-bucket retention
-        buckets = [
-            ("hourly", policy.hourly),
-            ("daily", policy.daily),
-            ("weekly", policy.weekly),
-            ("monthly", policy.monthly),
-            ("yearly", policy.yearly),
-        ]
-        for bucket_name, count in buckets:
-            if count <= 0:
-                result[bucket_name] = {"count": 0}
-                continue
-            kept = self._select_by_bucket(sorted_items, bucket_name, count, preserve_day_of_week)
-            if kept:
-                result[bucket_name] = {
-                    "count": len(kept),
-                    "range": (kept[-1].timestamp, kept[0].timestamp),
-                }
-            else:
-                result[bucket_name] = {"count": 0}
-
-        return result
+        total = len(items)
+        n = _keep_count(policy)
+        keep_count = min(n, total) if n > 0 else 0
+        remove_count = total - keep_count
+        return {"keep_count": keep_count, "remove_count": remove_count}

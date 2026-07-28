@@ -1424,7 +1424,6 @@ class BitmapBackupProvider(IBackupProvider):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
-        bucket_level: str = "monthly",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         full_transfer_engine: str = "qemu-img-convert",

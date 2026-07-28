@@ -23,19 +23,19 @@ ConfigFacade SHALL parse a TOML configuration file and produce immutable GlobalC
 - **THEN** an error is raised with the parse error details
 
 ### Requirement: Option inheritance from global to per-VM to per-target
-ConfigFacade SHALL resolve option inheritance: global-level options are defaults, VM-level options override globals, and target-level options override both.
+ConfigFacade SHALL resolve option inheritance: global-level options are defaults, VM-level options override globals, and target-level options override both. The count-based retention fields (`snapshot_chain_length`, `target_chain_length`, `target_keep_generations`) SHALL follow the same inheritance chain.
 
-#### Scenario: VM overrides global retention policy
-- **WHEN** global config sets `snapshot_preserve = "24h 2d"` and a VM sets `snapshot_preserve = "48h 4d"`
-- **THEN** that VM's VMConfig has `snapshot_preserve = "48h 4d"`
+#### Scenario: VM overrides global chain length
+- **WHEN** global config sets `snapshot_chain_length = 168` and a VM sets `snapshot_chain_length = 24`
+- **THEN** that VM's VMConfig has `snapshot_chain_length = 24`
 
-#### Scenario: Target inherits VM retention when not overridden
-- **WHEN** VM has `target_preserve = "20d 10w"` and a target does not specify its own `target_preserve`
-- **THEN** the target's TargetConfig has the VM-level retention policy
+#### Scenario: Target inherits VM chain length when not overridden
+- **WHEN** VM has `target_chain_length = 168` and a target does not specify its own `target_chain_length`
+- **THEN** the target's TargetConfig has `target_chain_length = 168`
 
-#### Scenario: Target overrides VM retention
-- **WHEN** VM has `target_preserve = "20d 10w"` and a target specifies `target_preserve = "10d 5w"`
-- **THEN** the target's TargetConfig has `target_preserve = "10d 5w"`
+#### Scenario: Target overrides VM chain length
+- **WHEN** VM has `target_chain_length = 168` and a target specifies `target_chain_length = 336`
+- **THEN** the target's TargetConfig has `target_chain_length = 336`
 
 ### Requirement: Multiple VMs from a single config
 ConfigFacade SHALL support multiple `[[vm]]` sections in one TOML file, each producing a separate VMConfig.
@@ -56,7 +56,7 @@ ConfigFacade SHALL provide `get_vm(name)` that returns the VMConfig for a specif
 - **THEN** a KeyError or ConfigError is raised
 
 ### Requirement: ConfigFacade parses new fault-tolerance fields
-`ConfigFacade` SHALL parse `auto_cleanup`, `state_backup_count`, `chain_verify_before_commit`, `chain_verify_after_commit`, and `deep_check_schedule` from the global section. It SHALL parse `blockcommit_deep_verify` and `snapshot_deep_verify` from each `[[vm]]` section. It SHALL parse `backup_retry_max`, `backup_retry_base`, and `compress` from each `[[vm.target]]` section. All fields SHALL use their documented defaults when absent. `ConfigFacade` SHALL NOT parse `full_every` (removed). If `full_every` is present in TOML, a deprecation WARNING SHALL be logged. If `full_compress` is present and `compress` is not, `full_compress` SHALL be mapped to `compress` with a deprecation WARNING. If any of `incremental_mode`, `rate_limit`, or `copy_base` are present in TOML (target-level), a deprecation WARNING SHALL be logged naming the field — the fields are ignored.
+`ConfigFacade` SHALL parse `auto_cleanup`, `state_backup_count`, `chain_verify_before_commit`, `chain_verify_after_commit`, and `deep_check_schedule` from the global section. It SHALL parse `blockcommit_deep_verify` from each `[[vm]]` section. It SHALL parse `backup_retry_max`, `backup_retry_base`, and `compress` from each `[[vm.target]]` section. All fields SHALL use their documented defaults when absent. `ConfigFacade` SHALL NOT parse `full_every` (removed). If `full_every` is present in TOML, a deprecation WARNING SHALL be logged. If `full_compress` is present and `compress` is not, `full_compress` SHALL be mapped to `compress` with a deprecation WARNING. If any of `incremental_mode`, `rate_limit`, or `copy_base` are present in TOML (target-level), a deprecation WARNING SHALL be logged naming the field — the fields are ignored.
 
 #### Scenario: Global safety fields parsed
 - **WHEN** config TOML contains `auto_cleanup = true`, `state_backup_count = 2`, `chain_verify_before_commit = true`
@@ -68,7 +68,7 @@ ConfigFacade SHALL provide `get_vm(name)` that returns the VMConfig for a specif
 
 #### Scenario: full_every in config triggers deprecation warning
 - **WHEN** a `[[vm.target]]` section contains `full_every = "7d"`
-- **THEN** a WARNING is logged: "full_every is deprecated, FULLs are now bucket-driven"
+- **THEN** a WARNING is logged: "full_every is deprecated, FULLs are now count-driven"
 - **AND** the value is ignored
 
 #### Scenario: full_compress mapped to compress
@@ -85,51 +85,13 @@ ConfigFacade SHALL provide `get_vm(name)` that returns the VMConfig for a specif
 - **THEN** that target's `TargetConfig.backup_retry_max` is `5` and `backup_retry_base` is `"10s"`
 
 ### Requirement: ConfigFacade updates example config
-The shipped `qsnap.toml.example` SHALL document all fault-tolerance fields plus all existing-but-not-shown fields: `snapshot_preserve_min`, `target_preserve_min`, `compress`, `change_detection_mode`, `disks`, `deferred_warn_count`, `deferred_crit_count`, `deferred_warn_age`, `deferred_crit_age`. It SHALL NOT document `full_every`, `full_compress`, `rate_limit`, `incremental_mode`, or `copy_base` (removed). Removed fields (`incremental_mode`, `rate_limit`, `copy_base`) present in existing user TOMLs SHALL trigger a deprecation WARNING naming the field and be otherwise ignored.
+The shipped `qsnap.toml.example` SHALL document all fault-tolerance fields plus count-based retention fields: `snapshot_chain_length`, `target_chain_length`, `target_keep_generations`. It SHALL NOT document `snapshot_preserve`, `target_preserve`, `snapshot_preserve_min`, `target_preserve_min`, `preserve_day_of_week`, `full_every`, `full_compress`, `rate_limit`, `incremental_mode`, or `copy_base` (removed). Removed fields present in existing user TOMLs SHALL trigger a deprecation WARNING naming the field and be otherwise ignored.
 
 #### Scenario: Example config is parseable with all fields documented
 - **WHEN** `qsnap -c qsnap.toml.example list config` is executed
 - **THEN** the config is parsed successfully and all documented fields are visible in the output
 
-### Requirement: Config validation forbids preserve_min without buckets
-`ConfigFacade` SHALL validate that if `target_preserve` is not `None` and not `"latest"` and all parsed bucket counts (hourly through yearly) are 0 AND no F-anchors are present, then `target_preserve_min` SHALL be `"all"`. If `target_preserve_min` is not `"all"` and all bucket counts are 0 and no F-anchors are present, `ConfigFacade` SHALL raise `ConfigError` with a message explaining that `preserve_min` without buckets requires a FULL anchor which cannot be created without at least one active bucket.
 
-Additionally, `ConfigFacade` SHALL validate that any bucket with a non-zero count MAY have an `F` prefix in the parsed policy string. If an F-anchor is present on a bucket with `count = 0`, `ConfigFacade` SHALL raise `ConfigError` with message: "F-anchor on bucket '<bucket>' requires count > 0".
-
-#### Scenario: preserve_min without buckets rejected
-- **WHEN** a target has `target_preserve = "0h 0d 0w 0m 0y"` and `target_preserve_min = "48h"` and no F-anchors
-- **THEN** `ConfigError` is raised with message: "preserve_min without active buckets is not allowed — at least one bucket must have count > 0"
-
-#### Scenario: preserve_min=all without buckets allowed
-- **WHEN** a target has `target_preserve = "0h 0d 0w 0m 0y"` and `target_preserve_min = "all"` and no F-anchors
-- **THEN** no error is raised (chain grows indefinitely, nothing is deleted)
-
-#### Scenario: preserve_min with buckets allowed
-- **WHEN** a target has `target_preserve = "24h 7d"` and `target_preserve_min = "6h"`
-- **THEN** no error is raised (buckets are active, FULLs will be created)
-
-#### Scenario: F-anchor with count=0 rejected
-- **WHEN** a target has `target_preserve = "0Fh 7d"` and ConfigFacade parses the policy
-- **THEN** `ConfigError` is raised with message: "F-anchor on bucket 'h' requires count > 0"
-
-#### Scenario: F-anchor with count=0 and preserve_min allowed
-- **WHEN** a target has `target_preserve = "0Fh 7d"` and `target_preserve_min = "48h"`
-- **THEN** `ConfigError` is raised with message: "F-anchor on bucket 'h' requires count > 0" (F-anchor validation runs before preserve_min check)
-
-### Requirement: F-syntax parsing in _parse_preserve
-`Core._parse_preserve(preserve_str, preserve_min_str=None)` SHALL parse the `F` prefix in bucket tokens. The regex SHALL be extended to `(\d+)(F?)([hdwmy])`. When `F` is present, the corresponding `anchor_*` field on the returned `RetentionPolicy` SHALL be set to `True`.
-
-#### Scenario: F-syntax parsed correctly
-- **WHEN** `_parse_preserve("24h 7Fd 4Fw")` is called
-- **THEN** returns `RetentionPolicy(hourly=24, daily=7, weekly=4, anchor_daily=True, anchor_weekly=True)`
-
-#### Scenario: No F-prefix — anchors remain False
-- **WHEN** `_parse_preserve("24h 7d 4w")` is called
-- **THEN** returns `RetentionPolicy(hourly=24, daily=7, weekly=4, anchor_hourly=False, anchor_daily=False, anchor_weekly=False)`
-
-#### Scenario: F-prefix with invalid bucket character
-- **WHEN** `_parse_preserve("7Fx")` is called
-- **THEN** the token is ignored (does not match regex `[hdwmy]`)
 
 ### Requirement: Parse compression_type from TOML
 
@@ -235,3 +197,35 @@ Additionally, `ConfigFacade` SHALL validate that any bucket with a non-zero coun
 #### Scenario: No [global] section — backward compatible
 - **WHEN** the TOML config uses top-level keys only (no `[global]` section)
 - **THEN** parsing works exactly as before (backward compatible)
+
+### Requirement: ConfigFacade parses count-based retention fields
+
+`ConfigFacade` SHALL parse `snapshot_chain_length` (int), `target_chain_length` (int), and `target_keep_generations` (int) from the global, VM, and target TOML sections. These fields SHALL use option inheritance (global → VM → target). When absent at all levels, they SHALL default to `None`.
+
+#### Scenario: Global chain_length parsed
+- **WHEN** config TOML contains `snapshot_chain_length = 168` at the global level
+- **THEN** `GlobalConfig.snapshot_chain_length` is `168`
+
+#### Scenario: VM-level chain_length overrides global
+- **WHEN** global sets `snapshot_chain_length = 168` and a VM sets `snapshot_chain_length = 24`
+- **THEN** `VMConfig.snapshot_chain_length` is `24`
+
+#### Scenario: Target-level chain_length overrides VM
+- **WHEN** VM sets `target_chain_length = 168` and a target sets `target_chain_length = 336`
+- **THEN** `TargetConfig.target_chain_length` is `336`
+
+### Requirement: Count-based retention validation
+
+`ConfigFacade` SHALL validate that `snapshot_chain_length` (when set) is an integer >= 1. `ConfigFacade` SHALL validate that `target_chain_length` (when set) is an integer >= 1. `ConfigFacade` SHALL validate that `target_keep_generations` (when set) is an integer >= 1. Values of 0 or negative SHALL raise `ConfigError`.
+
+#### Scenario: Valid chain_length
+- **WHEN** config has `snapshot_chain_length = 168`
+- **THEN** ConfigFacade accepts it
+
+#### Scenario: Zero chain_length rejected
+- **WHEN** config has `snapshot_chain_length = 0`
+- **THEN** ConfigFacade raises `ConfigError` with message: "snapshot_chain_length must be >= 1"
+
+#### Scenario: Negative keep_generations rejected
+- **WHEN** config has `target_keep_generations = -1`
+- **THEN** ConfigFacade raises `ConfigError` with message: "target_keep_generations must be >= 1"

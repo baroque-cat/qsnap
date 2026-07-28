@@ -8,12 +8,13 @@ from qsnap.factory.default import DefaultFactory
 from qsnap.interfaces.factory import IVMModuleFactory
 
 
-def test_ivmmodulefactory_defines_all_creation_methods():
-    """IVMModuleFactory is an ABC defining exactly the six creation methods.
+def test_ivm_module_factory_methods():
+    """IVMModuleFactory defines exactly five creation methods.
 
     Verifies that the abstract method set matches the spec exactly (no more,
-    no fewer), that the ABC cannot be instantiated directly, and that
-    DefaultFactory is a subclass.
+    no fewer), that ``create_bucket_full_strategy`` is NOT in the interface,
+    that the ABC cannot be instantiated directly, and that ``DefaultFactory``
+    is a subclass.
     """
     # IVMModuleFactory is an ABC.
     assert hasattr(IVMModuleFactory, "__abstractmethods__")
@@ -24,7 +25,6 @@ def test_ivmmodulefactory_defines_all_creation_methods():
         "create_retention_engine",
         "create_change_detector",
         "create_lifecycle_manager",
-        "create_bucket_full_strategy",
     }
     # Exact match: no speculative future methods, no missing methods.
     assert set(IVMModuleFactory.__abstractmethods__) == expected_methods

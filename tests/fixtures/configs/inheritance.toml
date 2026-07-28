@@ -1,33 +1,33 @@
 # Inheritance config — option cascading (global, VM override, target override, target inherit)
 
 # Global defaults
-snapshot_preserve = "24h 2d"
-target_preserve = "20d 10w"
+snapshot_chain_length = 24
+target_chain_length = 30
 
 [[vm]]
 name = "vm_override"
 base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
-# VM overrides global snapshot_preserve
-snapshot_preserve = "48h 4d"
-# VM overrides global target_preserve
-target_preserve = "20d 10w"
+# VM overrides global snapshot_chain_length
+snapshot_chain_length = 48
+# VM overrides global target_chain_length
+target_chain_length = 30
 
   [[vm.target]]
   path = "/mnt/backup/vm_override_inherit"
-  # Target inherits VM's target_preserve (no override)
+  # Target inherits VM's target_chain_length (no override)
 
   [[vm.target]]
   path = "/mnt/backup/vm_override_override"
-  # Target overrides VM's target_preserve
-  target_preserve = "10d 5w"
+  # Target overrides VM's target_chain_length
+  target_chain_length = 15
 
 [[vm]]
 name = "vm_inherit"
 base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
-# VM inherits global snapshot_preserve and target_preserve (no override)
+# VM inherits global snapshot_chain_length and target_chain_length (no override)
 
   [[vm.target]]
   path = "/mnt/backup/vm_inherit"
-  # Target inherits global target_preserve (via VM inheritance)
+  # Target inherits global target_chain_length (via VM inheritance)

@@ -65,7 +65,6 @@ class IBackupProvider(ABC):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
-        bucket_level: str = "monthly",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         full_transfer_engine: str = "qemu-img-convert",
@@ -80,9 +79,6 @@ class IBackupProvider(ABC):
         name from the snapshot filename — the explicit parameter is the
         single source of truth (design D1: dependency injection over
         fragile parsing).
-
-        ``bucket_level`` records which retention bucket triggered the
-        FULL (e.g. ``"yearly"``, ``"monthly"``).
 
         ``compression_type`` selects the compression algorithm
         (``"zstd"`` default, ``"zlib"`` alternative).  Only effective

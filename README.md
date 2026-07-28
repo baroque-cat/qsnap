@@ -10,12 +10,11 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 - **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode)
 - **Incremental backups** — NBD bitmap-based backup to remote targets, with compression support for FULL backups
 - **Periodic full backups** — standalone qcow2 via `qemu-img convert` (default) or `libnbd` pread/pwrite engine, with optional compression and configurable parallel coroutines
-- **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced before cascade-deletion
+- **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced at the verify-before-delete gate
 - **Incremental backup verification** — four tiers: `off`, `metadata`, `hash` (SHA-256), or `full` (`qemu-img compare`)
-- **Retention policies** — time-based retention with hourly/daily/weekly/monthly/yearly buckets
-- **Minimum retention floor** — `preserve_min` keeps recent snapshots/backups regardless of bucket counts
-- **Config validation** — rejects all-zero retention buckets when backup targets are configured
-- **Schedule preview** — `--print-schedule` / `-S` simulates retention against synthetic timestamps
+- **Retention policies** — count-based retention with configurable chain lengths and generation counts
+- **Config validation** — validates chain_length and keep_generations values
+- **Schedule preview** — `--print-schedule` / `-S` shows current chain lengths and retention counts
 - **Backing chain integrity** — automatic `blockcommit` or `qemu-img commit` to merge old snapshots
 - **Stale state self-healing** — automatically cleans up state entries for already-blockcommitted snapshots and externally-deleted FULL backups (phantom entries). Runs at pipeline startup before the onchange gate
 - **State reconciliation** — `qsnap reconcile` actively repairs state-vs-disk inconsistencies in both directions: removes phantom state entries (file missing on disk) AND deletes orphan files on disk (not tracked in state). Supports `--dry-run` preview
@@ -60,17 +59,14 @@ poetry install
 
 ```toml
 timestamp_format = "long"
-preserve_day_of_week = "monday"
 state_dir = "/var/lib/qsnap/state"
 
-# Default retention: keep 24 hourly, 7 daily, 4 weekly, 12 monthly, 1 yearly
-snapshot_preserve = "24h 7d 4w 12m 1y"
-target_preserve = "48h 14d 8w 12m 1y"
+# Default: trigger blockcommit after 168 snapshots
+snapshot_chain_length = 168
 
-# Minimum retention floor: always keep last 2 hours of snapshots/backups
-# regardless of bucket counts above
-snapshot_preserve_min = "2h"
-target_preserve_min = "4h"
+# Default: create new FULL after 100 incrementals, keep 2 generations
+target_chain_length = 100
+target_keep_generations = 2
 
 [[vm]]
 name = "debiantest"
@@ -156,13 +152,11 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `timestamp_format` | string | `"short"` | Snapshot name format: `"short"` (`20250714T130000`) or `"long"` (`2025-07-14T13:00:00`) |
-| `preserve_day_of_week` | string | `"monday"` | Day used as the weekly bucket boundary: `monday`-`sunday` |
 | `state_dir` | string | `/var/lib/qsnap/state` | Directory for JSON state files (snapshot records, deferred operations) |
 | `lockfile` | string | `/var/lock/qsnap.lock` | Lockfile path to prevent concurrent runs |
-| `snapshot_preserve` | string | none | Retention policy for snapshots, e.g. `"24h 7d 4w 12m 1y"` |
-| `snapshot_preserve_min` | string | `"all"` | Minimum retention floor for snapshots, e.g. `"2h"`. Keeps recent snapshots regardless of bucket counts |
-| `target_preserve` | string | none | Retention policy for backups on targets, e.g. `"48h 14d 8w 12m 1y"` |
-| `target_preserve_min` | string | `"all"` | Minimum retention floor for backups on targets |
+| `snapshot_chain_length` | int | none | Max snapshots before blockcommit triggers. 0 = keep all |
+| `target_chain_length` | int | none | Max incremental backups before new FULL backup |
+| `target_keep_generations` | int | none | Number of FULL backup generations to keep per target |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Overridden per-VM/target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
 | `full_transfer_engine` | string | `"qemu-img-convert"` | FULL backup transfer engine: `"qemu-img-convert"` (default — C code, parallel coroutines) or `"libnbd"` (Python `pread`/`pwrite` loop via `INbdClient`). Inherits from global → target |
@@ -172,7 +166,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when all snapshots are already backed up to this target — compares snapshot names in state against backup files on target via `provider.list()`). Inherits from global → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
 | `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
-| `full_verify_before_delete` | string | `"check"` | FULL verification before cascade-deletion: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
+| `full_verify_before_delete` | string | `"check"` | FULL verification at verify-before-delete gate: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
 | `deep_check_targets` | bool | `false` | When `true`, `qsnap check --deep` also scans backup target directories |
 
 ### VM Keys
@@ -183,10 +177,9 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `base_image` | string | **required** | Path to the base qcow2 image |
 | `snapshot_dir` | string | **required** | Directory where snapshot qcow2 files are stored |
 | `snapshot_create` | string | `"always"` | When to create snapshots: `"always"` or `"onchange"` (skip if disk allocation unchanged) |
-| `snapshot_preserve` | string | inherits global | VM-specific snapshot retention (overrides global) |
-| `snapshot_preserve_min` | string | inherits global | VM-specific minimum retention floor (overrides global) |
-| `target_preserve` | string | inherits global | VM-specific backup retention (overrides global) |
-| `target_preserve_min` | string | inherits global | VM-specific minimum backup retention floor (overrides global) |
+| `snapshot_chain_length` | int | inherits global | VM-specific snapshot chain length |
+| `target_chain_length` | int | inherits global | VM-specific target chain length |
+| `target_keep_generations` | int | inherits global | VM-specific FULL generations to keep |
 | `snapshot_quiesce` | bool | `false` | Use `--quiesce` for filesystem-consistent snapshots |
 | `lifecycle_mode` | string | `"virsh"` | How to merge snapshots (adaptive): `"virsh"` — live `virsh blockcommit` of non-active layers while running, offline `qemu-img commit` when shut off; `"qemu-img"` — offline-only, defers while the VM runs |
 | `change_detection_mode` | string | `"allocation-size"` | How to detect disk changes: `"allocation-size"` or `"none"` |
@@ -198,8 +191,8 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 |---|---|---|---|
 | `path` | string | **required** | Directory where backup qcow2 files are stored |
 | `incremental` | bool | `true` | Whether to do incremental backups (bitmap deltas with backing chain) |
-| `target_preserve` | string | inherits VM/global | Target-specific backup retention (overrides VM and global) |
-| `target_preserve_min` | string | inherits VM/global | Target-specific minimum backup retention floor |
+| `target_chain_length` | int | inherits VM/global | Target-specific chain length |
+| `target_keep_generations` | int | inherits VM/global | Target-specific FULL generations to keep |
 | `verify` | string | `"metadata"` | Backup verification tier: `"off"`, `"metadata"`, `"hash"`, or `"full"`. Default is `"metadata"`; `"hash"`/`"full"` run chain-traversing `qemu-img compare`. Explicit value takes precedence |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Bitmap (NBD) incrementals are always uncompressed — dirty blocks are written via random-access `pwrite`. Inherits from global → VM → target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true`. Inherits from global → VM → target |
@@ -211,65 +204,37 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 
 ## Retention Policy Guide
 
-qsnap uses time-based retention with configurable buckets. The `snapshot_preserve` and `target_preserve` strings specify how many snapshots/backups to keep in each time bucket:
+qsnap uses count-based retention. Three config keys control how long chains are maintained:
 
-```
-"24h 7d 4w 12m 1y"
-│    │  │  │   │
-│    │  │  │   └─ yearly: keep 1
-│    │  │  └───── monthly: keep 12
-│    │  └──────── weekly: keep 4
-│    └─────────── daily: keep 7
-└──────────────── hourly: keep 24
-```
+- **`snapshot_chain_length`** — Maximum number of snapshots before blockcommit triggers. When the snapshot count exceeds this value, the oldest snapshots are committed (merged) into the base image. Set to `0` to keep all snapshots indefinitely.
 
-### Bucket Semantics
+- **`target_chain_length`** — Maximum number of incremental backups before a new FULL backup is created. When `incremental_count > target_chain_length` (strictly greater than), the next backup transfer creates a FULL instead of an incremental.
 
-- **hourly** (`h`) — keeps the earliest snapshot in each hour
-- **daily** (`d`) — keeps the earliest snapshot in each calendar day
-- **weekly** (`w`) — keeps the earliest snapshot in each ISO week (boundary set by `preserve_day_of_week`)
-- **monthly** (`m`) — keeps the earliest snapshot in each calendar month
-- **yearly** (`y`) — keeps the earliest snapshot in each calendar year
+- **`target_keep_generations`** — Number of FULL backup generations to keep per target. Each FULL followed by its incrementals is a generation. When a new FULL is created and verified, older generations beyond this count are removed.
 
-Within each bucket, the count selects the N most recent bucket groups. For example, `7d` keeps snapshots from the 7 most recent days, one per day.
-
-### Minimum Retention Floor (`preserve_min`)
-
-The `snapshot_preserve_min` and `target_preserve_min` keys provide a safety net. They ensure that recent snapshots/backups are never removed, even if the bucket counts would otherwise remove them.
-
-| `preserve_min` value | Behavior |
-|---|---|
-| `"all"` (default) | Never remove any snapshot/backup (only bucket counts apply) |
-| `"latest"` | Always keep at least the most recent snapshot/backup |
-| `"2h"` | Keep all snapshots/backups from the last 2 hours |
-| `"7d"` | Keep all snapshots/backups from the last 7 days |
-| `"0h"` | No minimum floor — bucket counts alone determine retention |
-
-**Example:** With `snapshot_preserve = "24h 7d 4w"` and `snapshot_preserve_min = "2h"`, all snapshots from the last 2 hours are always kept, plus the bucket-selected ones from the last 24 hours, 7 days, and 4 weeks.
+Retention follows a simple rule: **keep the newest N, remove the oldest**. For snapshots, the N newest snapshots are kept and older ones are blockcommitted. For backups, the N newest FULL generations are kept.
 
 ### Example Scenarios
 
-**Home host** — conservative, keep everything recent:
+**Home host** — conservative, keep lots of recent data:
 
 ```toml
-snapshot_preserve = "48h 14d 8w 6m 1y"
-snapshot_preserve_min = "12h"
-target_preserve = "72h 30d 12w 12m 1y"
-target_preserve_min = "24h"
+snapshot_chain_length = 336
+target_chain_length = 200
+target_keep_generations = 3
 ```
 
-**Server** — aggressive pruning, long-term monthly/yearly:
+**Server** — aggressive pruning, shorter chains:
 
 ```toml
-snapshot_preserve = "24h 7d 4w 12m 1y"
-snapshot_preserve_min = "2h"
-target_preserve = "48h 14d 8w 24m 2y"
-target_preserve_min = "4h"
+snapshot_chain_length = 168
+target_chain_length = 100
+target_keep_generations = 2
 ```
 
 ### Schedule Preview
 
-Before running the pipeline, preview what retention will keep:
+Before running the pipeline, preview the current state:
 
 ```bash
 qsnap run myvm --print-schedule
@@ -277,10 +242,10 @@ qsnap run myvm --print-schedule
 qsnap run myvm -S
 ```
 
-This simulates retention against synthetic timestamps (one per hour over the retention window) and shows:
-- The configured policy
+This shows:
+- The configured policy (chain lengths and generation counts)
 - How many snapshots/backups would be kept vs. removed
-- Per-bucket breakdown (hourly, daily, weekly, etc.)
+- Chain length and generation counts
 
 For cron/systemd timer use, the `--timer` flag logs the schedule summary at INFO level before executing the pipeline:
 
@@ -308,8 +273,6 @@ A deferred entry waits in the state file and drains automatically on a later run
 
 After offline commits, qsnap also refreshes the domain's persistent XML (strips stale `<backingStore>` elements) so `virsh start` re-probes the shortened chain and the VM stays bootable.
 
-> **Historical note:** before this behavior was introduced, setting `preserve = "all"` was broken — it produced a "keep nothing" policy and deleted all backups/snapshots instead of keeping everything. The bug is fixed, but backups already lost to it are not recoverable. If you ran an older version with `preserve = "all"`, verify your backup targets.
-
 ## Full Backups
 
 By default, qsnap creates **incremental** backups: each backup file references the previous one via the qcow2 backing chain. This is storage-efficient but means restoring requires the entire chain.
@@ -319,60 +282,20 @@ By default, qsnap creates **incremental** backups: each backup file references t
 - A new backing anchor for subsequent incrementals
 - Protection against chain corruption
 
-### Multi-Level FULL Anchors (automatic mode)
+### Count-Based FULL Creation
 
-**ALL active retention buckets trigger FULL backups** — not just the highest. A policy like `"48h 14d 8w 12m 1y"` creates FULLs at **weekly, monthly, AND yearly** boundaries, capping incremental chains at ~7 days (the shortest active bucket above hourly/daily). This dramatically reduces the risk of chain corruption making restoration impossible.
+FULL backups are created when the incremental chain length exceeds `target_chain_length`. When `incremental_count > target_chain_length` (strictly greater than), the next backup transfer creates a new FULL instead of an incremental. The first backup to a target always starts with a FULL.
 
-For each active bucket, qsnap checks whether the current snapshot falls in a new period compared to the most recent FULL with matching `bucket_level`. Period keys are:
-- **yearly** — `YYYY`
-- **monthly** — `YYYYMM`
-- **weekly** — `YYYY-WNN` (ISO week)
-- **daily** — `YYYYMMDD`
-- **hourly** — `YYYYMMDDHH`
-
-**Short-circuit:** at most ONE FULL is created per snapshot. Buckets are checked in descending order (yearly → monthly → weekly → daily → hourly), and the first bucket whose period has changed wins.
-
-| Policy | Active Buckets | FULL Frequency | Max Incremental Chain |
-|---|---|---|---|
-| `"48h 14d 8w 12m 1y"` | h, d, w, m, y | Weekly + Monthly + Yearly | ~7 days |
-| `"48h 14d 8w"` | h, d, w | Weekly | ~7 days |
-| `"24h 7d"` | h, d | Daily | ~1 day |
-| `"1y"` | y | Yearly | ~365 days |
-| (all zero) | — | No FULLs | Unlimited |
-
-Single-bucket policies preserve the old highest-only behavior. A policy with only `"1y"` active creates exactly one FULL per year.
-
-### Manual F-Syntax (override mode)
-
-The `F` prefix on a bucket token marks it as a **FULL anchor**. When ANY F-anchor is present, automatic multi-level mode is **disabled** — FULLs are created ONLY at F-marked levels:
-
-```toml
-# Automatic mode: FULLs at weekly, monthly, yearly
-target_preserve = "48h 14d 8w 12m 1y"
-
-# Manual F-syntax: FULLs at daily boundaries only
-target_preserve = "48h 7Fd 8w 12m 1y"
-
-# FULLs at every level (hourly + daily + weekly + monthly + yearly)
-target_preserve = "48Fh 7Fd 4Fw 12Fm 1Fy"
-
-# Weekly-only FULLs (ignore daily, monthly, yearly for FULL creation)
-target_preserve = "24h 7d 4Fw 12m 1y"
-```
-
-Non-F buckets still participate in retention — `"24h 7d 4Fw"` retains 24 hourly, 7 daily, and 4 weekly snapshots, but FULLs are created only at weekly boundaries.
-
-**Validation:** an F-anchor on a zero-count bucket is rejected at parse time. `"0Fh 7d"` raises `ConfigError: F-anchor on bucket 'h' requires count > 0`.
+At most ONE FULL is created per snapshot run.
 
 ### How It Works
 
-1. Before each incremental transfer, qsnap retrieves ALL full backups for the target (`get_full_backups()`).
-2. If any `F`-marked buckets exist, only those are checked. Otherwise, all buckets with `count > 0` are checked in descending order.
-3. For each checked bucket: find the most recent FULL with matching `bucket_level`, compare period keys. If the period changed (or no prior FULL exists), create a new FULL.
-4. The full backup is named `vm.FULL.YYYYMMDD.qcow2`.
-5. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
-6. The conversion is atomic: the FULL is written to a `.tmp` file, which is renamed to the final name only on success. For running VMs, the NBD pull-model is used (see [NBD-Based FULL Backups](#nbd-based-full-backups-for-running-vms) below); for stopped VMs, direct `qemu-img convert` from the source qcow2 file is used (no `virsh backup-begin`, no NBD socket — the source path is resolved via `get_first_disk_path`).
-7. After creation, the FULL is recorded in state with its `bucket_level` for cascade deletion tracking.
+1. Before each incremental transfer, qsnap counts the incremental backups since the last FULL for the target.
+2. If the count exceeds `target_chain_length` (or no prior FULL exists), a new FULL is created.
+3. The full backup is named `vm.FULL.YYYYMMDDTHHMM.qcow2`.
+4. Subsequent incremental backups are rebased to the FULL anchor instead of the source snapshot backing file.
+5. The conversion is atomic: the FULL is written to a `.tmp` file, which is renamed to the final name only on success. For running VMs, the NBD pull-model is used (see [NBD-Based FULL Backups](#nbd-based-full-backups-for-running-vms) below); for stopped VMs, direct `qemu-img convert` from the source qcow2 file is used (no `virsh backup-begin`, no NBD socket — the source path is resolved via `get_first_disk_path`).
+6. After creation, the FULL is recorded in state for generation-based deletion tracking.
 
 ### NBD-Based FULL Backups for Running VMs
 
@@ -390,7 +313,7 @@ This mechanism is used by the backup provider:
 |---|---|---|
 | `BitmapBackupProvider` | `qemu-img convert` (default) or `libnbd` pread/pwrite | FULL backups use `qemu-img convert -m <parallel> [-W] -p` with optional `-c` compression via `run_with_stall_detection()`. The engine is selected by `full_transfer_engine`: `"qemu-img-convert"` (default) or `"libnbd"` (Python `pread`/`pwrite` loop via `INbdClient` — creates an empty qcow2, starts a write-side `qemu-nbd`, and transfers via `_transfer(zero_skip=True)`). For running VMs, `virsh backup-begin` starts the NBD export and a checkpoint is created atomically. For stopped VMs, direct `qemu-img convert <source_path>` is used (no NBD). Incremental backups always use the Python `libnbd` `pread`/`pwrite` loop with dirty-bitmap intersection, regardless of `full_transfer_engine`. |
 
-The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time) to ensure correct retention bucket alignment.
+The FULL timestamp is recorded as the **snapshot's timestamp** (not the NBD export time).
 
 ### FULL Backup Transfer Engine
 
@@ -430,7 +353,7 @@ qsnap uses the NBD pull-model for incremental transfers via `virsh backup-begin`
 
 **First incremental after a FULL:** The first incremental after a bitmap FULL contains all blocks written since the FULL **started** — this is intentional (the checkpoint baseline is anchored at the FULL's freeze point), not a duplicate transfer. Its size is bounded by guest write rate × FULL duration, so **schedule FULLs during low write activity**.
 
-**First-run behavior:** On the first bitmap run, the bucket strategy creates a FULL via `create_full_backup()` which leaves an atomic checkpoint baseline. `transfer_missing()` then discovers that checkpoint (newest-wins via `virsh checkpoint-list`) and performs a real incremental against it, embedding `<incremental><checkpoint></incremental>` in the backup XML to export only dirty blocks (see [libvirt Incremental Backup API](#libvirt-incremental-backup-api) below). When no prior checkpoint exists at all, a full NBD export with an atomic checkpoint is performed — safe degradation towards redundant work, never towards data loss.
+**First-run behavior:** On the first count-based run, `create_full_backup()` leaves an atomic checkpoint baseline. `transfer_missing()` then discovers that checkpoint (newest-wins via `virsh checkpoint-list`) and performs a real incremental against it, embedding `<incremental><checkpoint></incremental>` in the backup XML to export only dirty blocks (see [libvirt Incremental Backup API](#libvirt-incremental-backup-api) below). When no prior checkpoint exists at all, a full NBD export with an atomic checkpoint is performed — safe degradation towards redundant work, never towards data loss.
 
 ### Bitmap Mode Limitations
 
@@ -454,10 +377,10 @@ zstd is the default because it is 11x faster than zlib, transitioning backups fr
 
 ### Cascade Deletion
 
-When a FULL backup falls out of all retention buckets, qsnap checks whether any incremental backups still depend on it (via `IStateManager.get_incremental_dependencies()`):
+When a new FULL is created and verified, older generations beyond `target_keep_generations` are removed. qsnap checks whether any incremental backups still depend on the FULL (via `IStateManager.get_incremental_dependencies()`):
 
-- **If dependents exist in the keep-set** — the FULL is retained as a "ghost" (kept but not counted by retention). This prevents breaking the incremental chain.
-- **If no dependents remain** — the FULL is deleted, and any orphaned incrementals (not in the keep-set) are cascade-deleted.
+- **If dependents exist** — the FULL is retained (kept but not counted toward generation limits). This prevents breaking the incremental chain.
+- **If no dependents remain** — the FULL and its orphaned incrementals are deleted.
 
 ## Incremental Backup Verification (per-transfer)
 
@@ -510,7 +433,7 @@ Beyond per-backup verification of incrementals (above), qsnap applies a separate
 |-------|-----------|---------|-------|
 | **Post-create** | `full_verify_after_create` | `"check"` | Runs immediately after `qemu-img convert` completes. Failed FULLs are deleted and NOT recorded in state |
 | **Pre-rebase** | `full_verify_before_rebase` | `"metadata"` | Runs on FULL anchor before rebasing incrementals. Failing anchors are skipped; alternative (older) anchors are tried |
-| **Pre-deletion** | `full_verify_before_delete` | `"check"` | Runs before cascade-deletion. **M1 is always enforced** regardless of this setting — it cannot be disabled. Failed FULLs block deletion entirely with a CRITICAL log |
+| **Pre-deletion** | `full_verify_before_delete` | `"check"` | Runs at verify-before-delete gate before removing old generations. **M1 is always enforced** regardless of this setting — it cannot be disabled. Failed FULLs block deletion entirely with a CRITICAL log |
 
 ### Why Separate FULL Verification?
 
@@ -518,7 +441,7 @@ Unlike incremental backups (which are verified against their source via `verify_
 
 ### Phantom FULL Detection
 
-Before making bucket-driven FULL creation decisions, qsnap verifies that every FULL in state actually exists on disk. Phantom FULLs (deleted externally but still recorded in state) are automatically removed from state with a WARNING. This prevents phantom entries from blocking legitimate FULL creation.
+Before making count-based FULL creation decisions, qsnap verifies that every FULL in state actually exists on disk. Phantom FULLs (deleted externally but still recorded in state) are automatically removed from state with a WARNING. This prevents phantom entries from blocking legitimate FULL creation.
 
 ## State Self-Healing
 
@@ -702,7 +625,7 @@ qsnap deploy <backup-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-con
 
 ```bash
 # Deploy a FULL backup
-qsnap deploy vm.FULL.20260701.monthly --as-vm recovered-vm
+qsnap deploy vm.FULL.20260701T1200 --as-vm recovered-vm
 
 # Deploy an incremental backup (chain is flattened via qemu-img convert)
 qsnap deploy vm.20260715T1200 --as-vm recovered-vm \
@@ -745,17 +668,12 @@ A desktop machine running a few VMs, backing up to a hot-plugged USB drive. Cons
 
 ```toml
 timestamp_format = "long"
-preserve_day_of_week = "monday"
 state_dir = "/var/lib/qsnap/state"
 lockfile = "/var/lock/qsnap.lock"
 
-# Keep lots of recent snapshots, prune older ones
-snapshot_preserve = "48h 14d 8w 6m 1y"
-snapshot_preserve_min = "12h"
-
-# Backups: keep longer on the USB drive
-target_preserve = "72h 30d 12w 12m 1y"
-target_preserve_min = "24h"
+snapshot_chain_length = 336
+target_chain_length = 200
+target_keep_generations = 3
 
 [[vm]]
 name = "desktop-vm"
@@ -773,20 +691,16 @@ snapshot_quiesce = true        # filesystem-consistent snapshots
 
 ### Server with Persistent Network Target
 
-A production server backing up to a persistent NFS/NAS mount. Aggressive pruning, full verification, weekly full backups with compression:
+A production server backing up to a persistent NFS/NAS mount. Aggressive pruning, full verification, full backups with compression:
 
 ```toml
 timestamp_format = "long"
-preserve_day_of_week = "monday"
 state_dir = "/var/lib/qsnap/state"
 lockfile = "/var/lock/qsnap.lock"
 
-# Server: prune aggressively, keep long-term monthly/yearly
-snapshot_preserve = "24h 7d 4w 12m 1y"
-snapshot_preserve_min = "2h"
-
-target_preserve = "48h 14d 8w 24m 2y"
-target_preserve_min = "4h"
+snapshot_chain_length = 168
+target_chain_length = 100
+target_keep_generations = 2
 
 [[vm]]
 name = "prod-server"
@@ -852,7 +766,7 @@ Example output:
 === prod-server ===
   Base image actual-size: 53687091200 B
   Backups [/mnt/nas-backup/prod-server]:
-    Policy: hourly=0 daily=7 weekly=4 monthly=12 yearly=2 preserve_min=4h
+    Policy: chain_length=168 keep_generations=2
     Expected kept:   25
     Expected remove: 0
     Compression: zstd (compress=True)
@@ -865,9 +779,9 @@ The `--dry-run` / `-n` flag prints planned actions without executing any mutatio
 ### What Dry-Run Does
 
 - **Runs environment validation** — all pre-flight checks (`virsh`, `qemu-img` availability; libnbd importability; directory writability; libvirt access) are executed. Failures are logged as **WARNING** (non-fatal) instead of raising `RuntimeError`. This lets you see configuration issues without aborting the preview.
-- **Logs FULL-would-be-created** — when a periodic FULL backup would be triggered by a retention bucket boundary, qsnap logs:
+- **Logs FULL-would-be-created** — when a FULL backup would be triggered by exceeding target_chain_length, qsnap logs:
   ```
-  [dry-run] Would create FULL backup (bucket=weekly, method=NBD, VM=running)
+  [dry-run] Would create FULL backup (chain_length=100, method=NBD, VM=running)
   ```
   The `method` field is `NBD` for running VMs or `direct` for stopped VMs, and `VM` shows the detected running state. No FULL backup is actually created.
 - **Does NOT create snapshots** — `snapshot_provider.create()` is never called.

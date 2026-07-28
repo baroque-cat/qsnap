@@ -12,48 +12,43 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class RetentionPolicy:
-    """Retention policy for snapshots or backups.
+    """Count-based retention policy for snapshots or backups.
 
-    Each field is a count of items to preserve for that time bucket.
-    ``preserve_min`` is a duration string (e.g. ``"6h"``, ``"2d"``) or
-    ``"all"`` meaning keep everything.
+    The retention engine is the same for both snapshots and targets —
+    "keep newest N, remove oldest".  For snapshots, N = ``chain_length``.
+    For targets (per-chain), N = ``keep_generations``.  The engine does
+    not care which field it uses; Core passes the appropriate value.
 
-    The ``anchor_*`` boolean fields mark a bucket as a FULL anchor
-    (set via the ``F`` prefix in the preserve string, e.g. ``"7Fd"``).
-    When any ``anchor_*`` is ``True``, FULL backups are created only at
-    F-marked bucket boundaries instead of all active buckets.
+    ``chain_length`` is how many items to keep in a chain before
+    triggering blockcommit (snapshots) or a new FULL (targets).  When
+    ``0``, the engine falls back to ``keep_generations`` as the keep
+    count; when both are ``0``, all items are marked for removal.
+
+    ``keep_generations`` is how many FULL chains to keep on targets
+    (minimum 1).  Ignored for snapshot retention when ``chain_length``
+    is positive.
     """
 
-    hourly: int = 0
-    daily: int = 0
-    weekly: int = 0
-    monthly: int = 0
-    yearly: int = 0
-    preserve_min: str = "all"
-    anchor_hourly: bool = False
-    anchor_daily: bool = False
-    anchor_weekly: bool = False
-    anchor_monthly: bool = False
-    anchor_yearly: bool = False
+    chain_length: int = 0
+    keep_generations: int = 1
 
 
 @dataclass(frozen=True)
 class GlobalConfig:
     """Global configuration options that serve as defaults for all VMs.
 
-    All fields are optional with documented defaults.  ``snapshot_preserve``
-    and ``target_preserve`` are raw retention-policy strings (e.g.
-    ``"24h 2d"``) resolved by ``ConfigFacade`` via option inheritance.
+    All fields are optional with documented defaults.  Count-based
+    retention defaults (``snapshot_chain_length``, ``target_chain_length``,
+    ``target_keep_generations``) are resolved by ``ConfigFacade`` via
+    option inheritance (global → VM → target).
     """
 
     timestamp_format: str = "long"
-    preserve_day_of_week: str = "monday"
     state_dir: str = "/var/lib/qsnap/state"
     lockfile: str | None = None
-    snapshot_preserve: str | None = None
-    target_preserve: str | None = None
-    snapshot_preserve_min: str | None = None
-    target_preserve_min: str | None = None
+    snapshot_chain_length: int | None = None
+    target_chain_length: int | None = None
+    target_keep_generations: int | None = None
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
@@ -127,8 +122,9 @@ class TargetConfig:
     NBD/checkpoint, crash-consistent, backing-chained incrementals).
     ``libvirt >= 7.2`` and ``python3-libnbd`` are hard requirements.
 
-    ``target_preserve`` is a raw retention-policy string resolved via
-    option inheritance (global → VM → target).
+    ``target_chain_length`` and ``target_keep_generations`` are
+    count-based retention overrides resolved via option inheritance
+    (global → VM → target).
 
     ``verify`` controls post-transfer verification.  The default is
     ``"metadata"`` (checks qcow2 format, corrupt-bit, and — for bitmap
@@ -155,9 +151,9 @@ class TargetConfig:
 
     path: Path
     incremental: bool = True
-    target_preserve: str | None = None
+    target_chain_length: int | None = None
+    target_keep_generations: int | None = None
     verify: str = "metadata"
-    target_preserve_min: str | None = None
     compress: bool = True
     compression_type: str = "zstd"
     # FULL backup transfer engine: ``"qemu-img-convert"`` (default) or
@@ -189,8 +185,9 @@ class VMConfig:
 
     Required fields: ``name``, ``base_image``, ``snapshot_dir``.
     ``snapshot_create`` defaults to ``"always"``.
-    ``snapshot_preserve`` and ``target_preserve`` are raw retention-policy
-    strings resolved via option inheritance.
+    ``snapshot_chain_length``, ``target_chain_length``, and
+    ``target_keep_generations`` are count-based retention overrides
+    resolved via option inheritance (global → VM → target).
 
     ``disks`` is an optional explicit list of disk targets (e.g.
     ``["vda", "vdb"]``).  When ``None``, Core auto-discovers all disks
@@ -215,10 +212,9 @@ class VMConfig:
     base_image: Path
     snapshot_dir: Path
     snapshot_create: str = "always"
-    snapshot_preserve: str | None = None
-    target_preserve: str | None = None
-    snapshot_preserve_min: str | None = None
-    target_preserve_min: str | None = None
+    snapshot_chain_length: int | None = None
+    target_chain_length: int | None = None
+    target_keep_generations: int | None = None
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-size"

@@ -78,7 +78,7 @@ def test_convert_cmd_running_vm_compressed(mock_shell, make_target, tmp_path):
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True, bucket_level="monthly"
+            "testvm", snapshot, target, compress=True
         )
 
     assert result.success is True
@@ -117,7 +117,7 @@ def test_convert_cmd_running_vm_uncompressed(mock_shell, make_target, tmp_path):
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -157,7 +157,7 @@ def test_convert_cmd_stopped_vm_compressed(mock_shell, make_target, tmp_path):
         ) as stall_spy,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True, bucket_level="monthly"
+            "testvm", snapshot, target, compress=True
         )
 
     assert result.success is True
@@ -199,7 +199,7 @@ def test_convert_cmd_stopped_vm_uncompressed(mock_shell, make_target, tmp_path):
         ) as stall_spy,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -246,7 +246,7 @@ def test_convert_failure_removes_tmp(mock_shell, make_target, tmp_path):
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is False
@@ -277,7 +277,7 @@ def test_convert_success_renames_tmp_to_final(mock_shell, make_target, tmp_path)
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -307,7 +307,7 @@ def test_running_vm_uses_nbd_convert(mock_shell, make_target, tmp_path):
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -341,7 +341,7 @@ def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -379,7 +379,7 @@ def test_full_backup_does_not_use_write_server_or_transfer(mock_shell, make_targ
         patch.object(BitmapBackupProvider, "_transfer") as mock_transfer,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -409,7 +409,6 @@ def test_convert_uses_stall_detection(mock_shell, make_target, tmp_path):
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             stall_timeout=1800,
         )
 
@@ -447,7 +446,6 @@ def test_stall_detection_output_file_is_tmp(mock_shell, make_target, tmp_path):
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             stall_timeout=1800,
         )
 
@@ -483,7 +481,6 @@ def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             stall_timeout=300,  # 5m → 300s
         )
 
@@ -526,7 +523,7 @@ def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, 
         ) as stall_spy,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -577,7 +574,7 @@ def test_full_pull_lifecycle_uses_convert(mock_shell, make_vm_config, make_targe
     ) as mock_fpl:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target_cfb, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target_cfb, compress=False
         )
 
     assert result.success is True
@@ -647,7 +644,7 @@ def test_full_pull_lifecycle_no_write_server(mock_shell, make_target, tmp_path):
         patch.object(BitmapBackupProvider, "_transfer") as mock_transfer,
     ):
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -670,7 +667,7 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path):
 
     provider = BitmapBackupProvider(mock_shell)
     result = provider.create_full_backup(
-        "testvm", snapshot, target, compress=False, bucket_level="monthly"
+        "testvm", snapshot, target, compress=False
     )
 
     assert result.success is True
@@ -713,7 +710,6 @@ def test_global_section_compress_false_affects_convert_cmd(mock_shell, make_targ
             snapshot,
             target,
             compress=target.compress,  # Respects target config
-            bucket_level="monthly",
         )
 
     assert result.success is True

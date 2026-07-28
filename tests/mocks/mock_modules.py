@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
@@ -20,7 +19,6 @@ from qsnap.models.results import (
     BackupResult,
     ChangeResult,
     CommitResult,
-    FullBackupInfo,
     RetentionItem,
     RetentionResult,
     ShellResult,
@@ -106,7 +104,6 @@ class MockBackupProvider(IBackupProvider):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
-        bucket_level: str = "monthly",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         full_transfer_engine: str = "qemu-img-convert",
@@ -117,7 +114,7 @@ class MockBackupProvider(IBackupProvider):
             success=True,
             snapshot_name=source_snapshot.name,
             source_path=source_snapshot.path,
-            target_path=target.path / f"{vm_name}.FULL.{bucket_level}.qcow2",
+            target_path=target.path / f"{vm_name}.FULL.qcow2",
             bytes_transferred=1048576,
             error=None,
         )
@@ -177,7 +174,6 @@ class MockBitmapBackupProvider(IBackupProvider):
         source_snapshot: SnapshotInfo,
         target: TargetConfig,
         compress: bool = False,
-        bucket_level: str = "monthly",
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         full_transfer_engine: str = "qemu-img-convert",
@@ -188,7 +184,7 @@ class MockBitmapBackupProvider(IBackupProvider):
             success=True,
             snapshot_name=source_snapshot.name,
             source_path=source_snapshot.path,
-            target_path=target.path / f"{vm_name}.FULL.{bucket_level}.qcow2",
+            target_path=target.path / f"{vm_name}.FULL.qcow2",
             bytes_transferred=1048576,
             error=None,
         )
@@ -213,7 +209,6 @@ class MockRetentionEngine(IRetentionEngine):
         items: list[RetentionItem],
         policy: RetentionPolicy,
         now: datetime,
-        preserve_day_of_week: str = "monday",
     ) -> RetentionResult:
         keep = [item.name for item in items]
         return RetentionResult(keep=keep, remove=[])
@@ -247,35 +242,3 @@ class MockLifecycleManager(ILifecycleManager):
             committed_snapshot=snapshots_to_merge[0].name,
             error=None,
         )
-
-
-class MockBucketFullStrategy(IBucketFullStrategy):
-    """Mock bucket FULL backup strategy.
-
-    Returns a configurable ``tuple[bool, str]`` from ``should_create_full``
-    (default ``(False, "")``).  Stores call arguments for inspection by
-    tests.  No I/O — pure in-memory mock.
-    """
-
-    def __init__(self, return_value: tuple[bool, str] = (False, "")) -> None:
-        self._return_value = return_value
-        self.calls: list[dict[str, object]] = []
-
-    def should_create_full(
-        self,
-        target: TargetConfig,
-        policy: RetentionPolicy,
-        all_fulls: list[FullBackupInfo],
-        snapshot_ts: datetime,
-        now: datetime,
-    ) -> tuple[bool, str]:
-        self.calls.append(
-            {
-                "target": target,
-                "policy": policy,
-                "all_fulls": list(all_fulls),
-                "snapshot_ts": snapshot_ts,
-                "now": now,
-            }
-        )
-        return self._return_value

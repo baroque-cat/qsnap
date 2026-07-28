@@ -92,14 +92,15 @@ Core._execute_pipeline(vm):
   3. retention.evaluate(snapshots) → keep/remove → lifecycle.commit(...)
   4. for each target:
        backup = factory.create_backup_provider(...)
-       _should_create_bucket_full(target, policy, last_full, snapshot_ts)
-         → if new period of highest active bucket: create_full_backup(...)
+       _should_create_full(target, incremental_count)
+         → if incremental_count > target_chain_length: create_full_backup(...)
        transfer missing snapshots (NBD dirty-block transfer — bitmap only)
        recordincremental_dependency(target, incremental, full)
        retention.evaluate(backups) → keep/remove
-       _cleanup_backups() → cascade deletion (design D2):
-         FULL with dependents in keep-set → ghost retention (skip)
-         FULL with no dependents → delete + cascade-delete orphans
+       _cleanup_backups() → generation-based deletion:
+         FULL with no dependents beyond keep_generations → delete
+         Verify-before-delete gate (design D3): old generations NOT deleted
+         until new FULL passes M1/M2 verification
 ```
 
 Modules never know which step they are; Core owns the sequence.

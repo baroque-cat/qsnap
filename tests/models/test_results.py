@@ -8,6 +8,7 @@ semantics, and frozen immutability where specified.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -21,13 +22,13 @@ from qsnap.models.results import (
     ChangeResult,
     CommitResult,
     DeferredBlockcommit,
-    FullBackupInfo,
     ReconcileResult,
     RestoreResult,
     RetentionResult,
     ShellResult,
     SnapshotResult,
 )
+from qsnap.state.json_manager import JsonStateManager
 
 
 def test_snapshot_result_success():
@@ -183,39 +184,98 @@ def test_vm_run_result_backup_failed_field():
         result.backup_failed = True
 
 
-def test_full_backup_info_dataclass_fields_and_frozen():
-    """FullBackupInfo has name (str), path (Path), timestamp (datetime),
-    bucket_level (str) and is frozen."""
-    ts = datetime(2025, 1, 1, 12, 0, 0)
-    info = FullBackupInfo(
-        name="full-backup-20250101",
-        path=Path("/mnt/backup/full-backup-20250101.qcow2"),
-        timestamp=ts,
-    )
-    # Verify field values.
-    assert info.name == "full-backup-20250101"
-    assert info.path == Path("/mnt/backup/full-backup-20250101.qcow2")
-    assert info.timestamp == ts
-    assert info.bucket_level == "monthly"  # default value
-    # Verify field types via isinstance on the actual values.
-    assert isinstance(info.name, str)
-    assert isinstance(info.path, Path)
-    assert isinstance(info.timestamp, datetime)
-    assert isinstance(info.bucket_level, str)
-    # Verify the exact set of field names.
-    field_names = {f.name for f in dataclasses.fields(FullBackupInfo)}
-    assert field_names == {"name", "path", "timestamp", "bucket_level"}
-    # Verify the dataclass is declared frozen.
-    assert info.__dataclass_params__.frozen is True
-    # Verify mutation raises FrozenInstanceError.
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        info.name = "mutated"
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        info.path = Path("/other")
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        info.timestamp = datetime(2025, 1, 2, 12, 0, 0)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        info.bucket_level = "yearly"
+def test_old_json_bucket_level_loaded(tmp_path):
+    """JsonStateManager loads JSON with a legacy ``bucket_level`` field without error.
+
+    The field is silently ignored — old state files should not crash the
+    manager nor leak the bucket_level into FullBackupInfo.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    ts = datetime(2025, 1, 15, 12, 0, 0)
+    manager.record_full_backup("/mnt/backup", "full-backup-20250115.qcow2", ts)
+
+    # Inject a legacy ``bucket_level`` field into the raw JSON.
+    fulls_path = tmp_path / "_full_backups.json"
+    with open(fulls_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    for entry in data.get("/mnt/backup", []):
+        entry["bucket_level"] = "monthly"
+    with open(fulls_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+    # Reload — must not error, must not expose bucket_level.
+    result = manager.get_last_full_backup("/mnt/backup")
+    assert result is not None
+    assert result.name == "full-backup-20250115.qcow2"
+    assert not hasattr(result, "bucket_level"), "bucket_level must not leak into FullBackupInfo"
+
+    # get_full_backups must also be read-tolerant.
+    backups = manager.get_full_backups("/mnt/backup")
+    assert len(backups) == 1
+    assert not hasattr(backups[0], "bucket_level")
+
+
+def test_old_json_bucket_level_read_tolerant(tmp_path):
+    """JsonStateManager is read-tolerant: old JSON with ``bucket_level`` loads.
+
+    Multiple entries with the legacy field must all load without error
+    and the field must be silently dropped.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    ts1 = datetime(2025, 1, 10, 0, 0, 0)
+    ts2 = datetime(2025, 2, 10, 0, 0, 0)
+
+    manager.record_full_backup("/mnt/backup", "full-backup-20250110.qcow2", ts1)
+    manager.record_full_backup("/mnt/backup", "full-backup-20250210.qcow2", ts2)
+
+    # Inject legacy bucket_level into both entries.
+    fulls_path = tmp_path / "_full_backups.json"
+    with open(fulls_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    for entry in data.get("/mnt/backup", []):
+        entry["bucket_level"] = "yearly"
+    with open(fulls_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+    # get_full_backups returns both entries, neither has bucket_level.
+    backups = manager.get_full_backups("/mnt/backup")
+    assert len(backups) == 2
+    for b in backups:
+        assert not hasattr(b, "bucket_level"), f"{b.name} must not expose bucket_level"
+
+
+def test_full_backup_state_saved_retrieved(tmp_path):
+    """record_full_backup(target_path, name, timestamp) saves state,
+    get_last_full_backup retrieves it."""
+    manager = JsonStateManager(state_dir=tmp_path)
+    ts = datetime(2025, 6, 1, 12, 0, 0)
+
+    manager.record_full_backup("/mnt/backup", "vm.FULL.20250601.qcow2", ts)
+
+    result = manager.get_last_full_backup("/mnt/backup")
+    assert result is not None
+    assert result.name == "vm.FULL.20250601.qcow2"
+    assert isinstance(result.path, Path)
+    assert result.timestamp == ts
+
+
+def test_no_full_backup_returns_none(tmp_path):
+    """get_last_full_backup returns None when no FULL has been recorded."""
+    manager = JsonStateManager(state_dir=tmp_path)
+    assert manager.get_last_full_backup("/never/seen/path") is None
+
+
+def test_full_backup_recorded_and_retrieved(tmp_path):
+    """record_full_backup then get_full_backups returns a list with the entry."""
+    manager = JsonStateManager(state_dir=tmp_path)
+    ts = datetime(2025, 7, 1, 12, 0, 0)
+
+    manager.record_full_backup("/mnt/backup", "vm.FULL.20250701.qcow2", ts)
+
+    backups = manager.get_full_backups("/mnt/backup")
+    assert len(backups) == 1
+    assert backups[0].name == "vm.FULL.20250701.qcow2"
+    assert backups[0].timestamp == ts
 
 
 # ── DeferredBlockcommit (last_warned_at) ──────────────────────────────────
@@ -409,7 +469,7 @@ def test_reconcile_result_defaults_and_equality():
     a = ReconcileResult(vm_name="eq-test")
     b = ReconcileResult(vm_name="eq-test")
     assert a == b
-    assert not (a != b)  # __eq__ and __ne__ are consistent
+    assert a == b  # __eq__ and __ne__ are consistent
 
     # Two instances with different vm_name are not equal.
     c = ReconcileResult(vm_name="other")

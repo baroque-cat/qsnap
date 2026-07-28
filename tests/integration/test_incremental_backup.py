@@ -266,7 +266,7 @@ def test_incremental_after_full(test_vm):
         source,
         target,
         compress=False,
-        bucket_level="monthly",
+
     )
     assert result_full.success, f"FULL backup failed: {result_full.error}"
     full_actual = _get_actual_size(shell, result_full.target_path)
@@ -443,7 +443,7 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         target,
         compress=True,
         compression_type="zstd",
-        bucket_level="monthly",
+
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
     ct_full = _get_compression_type(shell, r_full.target_path)
@@ -586,7 +586,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         source,
         target,
         compress=False,
-        bucket_level="monthly",
+
     )
     assert r_full.success, f"FULL failed: {r_full.error}"
     full_actual = _get_actual_size(shell, r_full.target_path)
@@ -721,7 +721,7 @@ def test_incremental_after_libnbd_full(test_vm):
         source,
         target,
         compress=False,
-        bucket_level="monthly",
+
         full_transfer_engine="libnbd",
     )
     assert result_full.success, f"libnbd FULL backup failed: {result_full.error}"

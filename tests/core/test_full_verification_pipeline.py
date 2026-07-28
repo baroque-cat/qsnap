@@ -22,7 +22,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockBucketFullStrategy, MockConfigFacade
+from tests.mocks import MockConfigFacade
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -76,7 +76,7 @@ def _setup_cleanup_backups_context(
 
     # Record a FULL backup entry in state
     mock_state.record_full_backup(
-        str(target_cfg.path), full_name, datetime(2025, 7, 13, 8, 0), "daily"
+        str(target_cfg.path), full_name, datetime(2025, 7, 13, 8, 0)
     )
 
     # Record incremental dependencies
@@ -102,9 +102,13 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     mock_shell,
 ):
     """When full_verify_after_create="compare", verify_full_backup is called
-    with source_path for comparison."""
+    with source_path for comparison.
+
+    Uses count-based FULL trigger: no prior FULLs causes first backup to
+    create a FULL unconditionally.
+    """
     global_cfg = make_global_config(full_verify_after_create="compare")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -122,9 +126,7 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
-
+    # No prior FULLs → first backup triggers FULL creation (count-based).
     with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
 
@@ -149,7 +151,7 @@ def test_full_created_m1_passes_recorded_in_state(
 ):
     """create_full_backup succeeds, M1 passes, record_full_backup is called."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -161,8 +163,7 @@ def test_full_created_m1_passes_recorded_in_state(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     with (
         patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
@@ -194,7 +195,7 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
 ):
     """M1 fails with corrupt bit, FULL file deleted, record_full_backup NOT called."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -206,8 +207,7 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     # Configure rm -f expectation so the file-deletion shell command succeeds
     mock_shell.expect("rm -f").returns(
@@ -245,7 +245,7 @@ def test_full_created_m1_fails_not_qcow2_deleted(
 ):
     """M1 fails with wrong format (not qcow2), FULL file deleted."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -257,8 +257,7 @@ def test_full_created_m1_fails_not_qcow2_deleted(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -298,7 +297,7 @@ def test_cleanup_backups_m1_passes_full_deleted(
     mock_shell,
 ):
     """M1 at pre-deletion passes, FULL deleted via per-chain cleanup."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2", "inc2.qcow2"]
 
@@ -393,7 +392,7 @@ def test_cleanup_backups_m1_fails_deletion_blocked(
     caplog,
 ):
     """M1 fails at pre-deletion — per-chain deletion blocked, CRITICAL logged."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
 
@@ -455,7 +454,7 @@ def test_cleanup_backups_m1_fails_no_dependents_still_blocked(
     mock_shell,
 ):
     """M1 fails on FULL with no dependents, deletion still blocked."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
 
     core, vm, target = _setup_cleanup_backups_context(
@@ -511,7 +510,7 @@ def test_full_verify_metadata_mode_skips_m2(
     mock_shell,
 ):
     """When full_verify_before_delete="metadata", M2 (qemu-img check) is NOT called."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
 
     core, vm, target = _setup_cleanup_backups_context(
@@ -572,7 +571,7 @@ def test_full_verify_hash_match_success(
 ):
     """Compare mode, compare matches, record_full_backup called."""
     global_cfg = make_global_config(full_verify_after_create="compare")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -590,8 +589,7 @@ def test_full_verify_hash_match_success(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
@@ -620,7 +618,7 @@ def test_full_verify_content_comparison_mismatch_fails(
 ):
     """Compare mode, content comparison mismatch, FULL deleted, NOT recorded."""
     global_cfg = make_global_config(full_verify_after_create="compare")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -638,8 +636,7 @@ def test_full_verify_content_comparison_mismatch_fails(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -672,7 +669,7 @@ def test_full_backup_verified_before_state_recording(
 ):
     """Timing check: verify_full_backup called BEFORE record_full_backup."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -684,8 +681,7 @@ def test_full_backup_verified_before_state_recording(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     call_order = []
 
@@ -723,7 +719,7 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
 ):
     """verify_full_backup fails, file deleted, not recorded."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -735,8 +731,7 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
@@ -778,7 +773,7 @@ def test_first_backup_creates_full_with_verification(
 ):
     """First backup to target creates FULL and verifies it."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -790,8 +785,7 @@ def test_first_backup_creates_full_with_verification(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     with (
         patch.object(
@@ -823,7 +817,7 @@ def test_new_weekly_creates_full_with_verification(
 ):
     """New weekly period triggers FULL with verification."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="4w 7d")
+    target = make_target(target_chain_length=0)
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -838,7 +832,6 @@ def test_new_weekly_creates_full_with_verification(
         str(target.path),
         "old_full.FULL.weekly.qcow2",
         datetime(2025, 6, 23),
-        "weekly",
     )
 
     # Snapshot in new weekly period (W28 — July 13, 2025)
@@ -850,8 +843,12 @@ def test_new_weekly_creates_full_with_verification(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
+    # Count-based trigger: old_full has no incrementals, chain_length=0,
+    # so incremental_count (0) > chain_length (0) = False.
+    # Record an incremental to push it over the threshold.
+    mock_state.record_incremental_dependency(
+        str(target.path), "inc_dep.qcow2", "old_full.FULL.weekly.qcow2"
+    )
 
     with (
         patch.object(
@@ -886,7 +883,7 @@ def test_cleanup_proceeds_on_m1_pass(
     mock_shell,
 ):
     """Cleanup proceeds after M1 passes on FULL."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
 
     core, vm, target = _setup_cleanup_backups_context(
@@ -940,7 +937,7 @@ def test_cleanup_blocked_on_m1_fail(
     mock_shell,
 ):
     """Cleanup blocked when M1 fails on FULL."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
 
     core, vm, target = _setup_cleanup_backups_context(
@@ -997,7 +994,7 @@ def test_per_chain_deletion_blocked_on_corrupt_full(
     caplog,
 ):
     """Per-chain deletion blocked when FULL is corrupt — M1 failure prevents deletion."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2", "inc2.qcow2"]
 
@@ -1067,7 +1064,7 @@ def test_per_chain_orphaned_incrementals_deleted(
     mock_shell,
 ):
     """Incrementals deleted via per-chain cleanup when M1 passes."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
 
@@ -1154,7 +1151,7 @@ def test_phantom_full_detected_removed_from_state(
 ):
     """FULL in state but file doesn't exist on disk → cascaded cleanup (design D2)."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1172,7 +1169,6 @@ def test_phantom_full_detected_removed_from_state(
         str(target.path),
         phantom_full_name,
         datetime(2025, 7, 1),
-        "monthly",
     )
 
     # Record incremental dependencies for cascade cleanup verification
@@ -1238,7 +1234,7 @@ def test_all_fulls_exist_no_phantom_cleanup(
 ):
     """All FULLs exist on disk → no phantom cleanup, remove_full_backup() NOT called."""
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target(target_chain_length=5)
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1257,7 +1253,6 @@ def test_all_fulls_exist_no_phantom_cleanup(
         str(target.path),
         full_name,
         datetime(2025, 7, 13, 8, 0),
-        "daily",
     )
 
     # Record incremental dependencies to verify they are NOT cascade-cleaned
@@ -1302,7 +1297,7 @@ def test_full_deleted_fullbackupinfo_removed_from_state(
     mock_shell,
 ):
     """FULL deleted → remove_full_backup() called with correct args."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
 
     core, vm, target = _setup_cleanup_backups_context(
@@ -1356,7 +1351,7 @@ def test_incremental_deleted_dependency_removed_from_state(
     mock_shell,
 ):
     """Incremental deleted via per-chain cleanup → remove_incremental_dependency() called."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     full_name = "full.FULL.daily.qcow2"
     dep_names = ["inc1.qcow2"]
 
@@ -1440,7 +1435,7 @@ def test_hash_mode_passes_source_path_to_verify(
 ):
     """Compare mode passes source_path=most_recent.path to verify_full_backup."""
     global_cfg = make_global_config(full_verify_after_create="compare")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1458,8 +1453,7 @@ def test_hash_mode_passes_source_path_to_verify(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure strategy to trigger FULL creation
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # No prior FULLs → first backup triggers FULL creation (count-based).
 
     with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
         core._backup_target(vm, target, [snap])
@@ -1474,10 +1468,14 @@ def test_hash_mode_passes_source_path_to_verify(
     )
 
 
-# ── test_bucket_strategy_via_factory ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# Verify-before-delete gate — count-based FULL pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── test_verified_full_triggers_retention_and_cleanup ─────────────────────
 
 
-def test_bucket_strategy_via_factory(
+def test_verified_full_triggers_retention_and_cleanup(
     make_vm_config,
     make_target,
     make_global_config,
@@ -1485,14 +1483,13 @@ def test_bucket_strategy_via_factory(
     mock_state,
     mock_shell,
 ):
-    """Core._backup_target calls self._factory.create_bucket_full_strategy().
+    """FULL passes M1/M2 verification — record_full_backup + retention + cleanup run.
 
-    The periodic-full-backup spec requires that bucket strategy is obtained
-    via the factory, not a private ``_should_create_bucket_full()`` method.
-    Core should NOT have a ``_should_create_bucket_full`` private method.
+    Count-based: no prior FULLs so first backup creates FULL.  Verification
+    passes → state recording + backup retention evaluated.
     """
     global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1502,32 +1499,220 @@ def test_bucket_strategy_via_factory(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
+    snap = _record_snap(target, vm, mock_state)
 
-    # Configure mock strategy to NOT trigger FULL (so we only test the
-    # factory interaction, not the FULL creation path).
-    strategy_mock = MockBucketFullStrategy(return_value=(False, ""))
-    mock_factory._bucket_full_strategy = strategy_mock
-
+    # No prior FULLs → first backup triggers FULL creation (count-based).
     with (
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
         patch.object(
-            mock_factory,
-            "create_bucket_full_strategy",
-            wraps=mock_factory.create_bucket_full_strategy,
-        ) as factory_spy,
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
     ):
         core._backup_target(vm, target, [snap])
 
-    # Factory's create_bucket_full_strategy was called.
-    assert factory_spy.called, "create_bucket_full_strategy should be called"
+    # Verification was called.
+    assert verify_spy.called, "verify_full_backup should be called"
+    # FULL was recorded after verification passed.
+    assert record_spy.called, "record_full_backup should be called after verification passes"
+    # At least one FULL is now recorded.
+    fulls = mock_state.get_full_backups(str(target.path))
+    assert len(fulls) >= 1, "FULL should be recorded after successful verification"
 
-    # Core does NOT have a private _should_create_bucket_full method.
-    assert not hasattr(core, "_should_create_bucket_full"), (
-        "Core should not have _should_create_bucket_full private method"
+
+# ── test_failed_full_verification_triggers_rollback ───────────────────────
+
+
+def test_failed_full_verification_triggers_rollback(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """FULL fails M1/M2 verification — rollback: delete file + checkpoint + state.
+
+    When verify_full_backup returns an error, Core must:
+    1. Remove the FULL file via rm -f
+    2. Call _cleanup_failed_checkpoint
+    3. Remove the FULL from state
+    4. Log a WARNING and retry
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # Pre-configure rm -f to succeed (rollback file deletion).
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.WARNING)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        patch.object(
+            core,
+            "_cleanup_failed_checkpoint",
+            wraps=core._cleanup_failed_checkpoint,
+        ) as checkpoint_spy,
+    ):
+        result = core._backup_target(vm, target, [snap])
+
+    # Rollback: FULL removed from state.
+    assert remove_spy.called, "remove_full_backup should be called on verification failure"
+    # Checkpoint cleanup was called.
+    assert checkpoint_spy.called, "_cleanup_failed_checkpoint should be called on rollback"
+    # WARNING logged.
+    assert "rolled back" in caplog.text or "FULL backup verification failed" in caplog.text
+    # backup_failed is True.
+    assert result is True, "backup_failed should be True when verification fails"
+
+
+# ── test_retries_exhausted_keeps_old_generations ──────────────────────────
+
+
+def test_retries_exhausted_keeps_old_generations(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """All FULL backup retries exhausted — old generations preserved, CRITICAL log.
+
+    When every retry attempt fails to create+verify a FULL, the
+    verify-before-delete gate prevents old generations from being deleted.
+    A CRITICAL log is emitted stating old generations are preserved.
+    Core sets ``full_verification_failed = True``, which skips retention
+    evaluation and cleanup.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(
+        backup_retry_max=2,
+        backup_retry_base="0s",
+    )
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # Pre-configure rm -f to succeed (rollback file deletion for every attempt).
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    caplog.set_level(logging.CRITICAL)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: content comparison mismatch",
+        ),
+        patch.object(
+            core,
+            "_evaluate_backup_retention",
+            wraps=core._evaluate_backup_retention,
+        ) as retention_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Retention was NOT evaluated (gate: full_verification_failed blocks it).
+    assert not retention_spy.called, (
+        "Retention should NOT be evaluated when all FULL retries are exhausted"
+    )
+    # CRITICAL log emitted about preserving old generations.
+    assert "old generations preserved" in caplog.text.lower()
+
+
+# ── test_checkpoint_cleaned_up_after_failed_full ──────────────────────────
+
+
+def test_checkpoint_cleaned_up_after_failed_full(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """_cleanup_failed_checkpoint deletes libvirt checkpoints after a failed FULL.
+
+    When a FULL verification fails, Core calls _cleanup_failed_checkpoint
+    which lists checkpoints, filters for qsnap-{hash}-*, and deletes each
+    via virsh checkpoint-delete --metadata.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # Pre-configure checkpoint listing: one checkpoint matching the target hash.
+    target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
+    checkpoint_name = f"qsnap-{target_hash}-snap1"
+
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: corrupt bit set",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[checkpoint_name],
+        ),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Verify checkpoint-delete was called via IShell.run.
+    checkpoint_delete_calls = [
+        c for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
+    ]
+    assert len(checkpoint_delete_calls) >= 1, (
+        "checkpoint-delete should be called to clean up failed FULL checkpoint"
     )

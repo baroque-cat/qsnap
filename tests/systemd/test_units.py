@@ -59,12 +59,13 @@ def test_example_config_is_parseable_by_configfacade():
 # ── example config documentation tests ──────────────────────────────────
 
 
-def test_example_config_documents_preserve_min_fields():
-    """The example config documents snapshot_preserve_min and
-    target_preserve_min fields."""
+def test_example_config_documents_chain_length_fields():
+    """The example config documents snapshot_chain_length,
+    target_chain_length, and target_keep_generations fields."""
     content = EXAMPLE_CONFIG.read_text()
-    assert "snapshot_preserve_min" in content
-    assert "target_preserve_min" in content
+    assert "snapshot_chain_length" in content
+    assert "target_chain_length" in content
+    assert "target_keep_generations" in content
 
 
 def test_example_config_documents_all_safety_fields():

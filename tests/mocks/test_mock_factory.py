@@ -6,24 +6,19 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
-from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import (
     BackupResult,
-    RetentionItem,
-    RetentionResult,
     SnapshotInfo,
 )
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBackupProvider,
     MockBitmapBackupProvider,
-    MockBucketFullStrategy,
     MockChangeDetector,
     MockLifecycleManager,
 )
@@ -48,22 +43,6 @@ def test_mock_factory_returns_interface_types(make_vm_config, make_target):
 
     lifecycle_manager = factory.create_lifecycle_manager()
     assert isinstance(lifecycle_manager, ILifecycleManager)
-
-
-def test_mock_retention_engine_accepts_preserve_day_of_week(make_vm_config):
-    """MockRetentionEngine.evaluate accepts preserve_day_of_week kwarg."""
-    from datetime import datetime
-
-    factory = MockVMModuleFactory()
-    engine = factory.create_retention_engine(RetentionPolicy())
-    items = [RetentionItem(name="snap1", timestamp=datetime(2025, 1, 6, 12, 0))]
-    result = engine.evaluate(
-        items,
-        RetentionPolicy(),
-        now=datetime(2025, 1, 6, 12, 0),
-        preserve_day_of_week="wednesday",
-    )
-    assert isinstance(result, RetentionResult)
 
 
 def test_mock_factory_always_returns_bitmap_provider(make_vm_config, make_target):
@@ -141,22 +120,6 @@ def test_mock_backup_provider_has_create_full_backup(make_vm_config, make_target
     )
     result = provider.create_full_backup("testvm", source_snapshot, make_target())
     assert isinstance(result, BackupResult)
-
-
-def test_mock_factory_create_bucket_full_strategy_returns_mock():
-    """create_bucket_full_strategy() returns a MockBucketFullStrategy that
-    also satisfies ``isinstance(..., IBucketFullStrategy)``."""
-    factory = MockVMModuleFactory()
-    strategy = factory.create_bucket_full_strategy()
-    assert isinstance(strategy, IBucketFullStrategy)
-    assert isinstance(strategy, MockBucketFullStrategy)
-
-
-def test_mock_factory_satisfies_new_interface():
-    """MockVMModuleFactory passes ``isinstance(..., IVMModuleFactory)``
-    after the addition of ``create_bucket_full_strategy`` to the ABC."""
-    factory = MockVMModuleFactory()
-    assert isinstance(factory, IVMModuleFactory) is True
 
 
 # ---------------------------------------------------------------------------

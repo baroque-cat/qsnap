@@ -310,7 +310,7 @@ def test_print_schedule_shows_keep_remove_counts(
     mock_shell,
 ):
     """``print_schedule()`` returns a RetentionResult with keep and remove lists."""
-    vm = make_vm_config(name="testvm", snapshot_preserve="24h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=24)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -353,7 +353,7 @@ def test_print_schedule_does_not_call_mutating_shell_commands(
     mock_shell,
 ):
     """``print_schedule()`` must not call any shell commands."""
-    vm = make_vm_config(name="testvm", snapshot_preserve="24h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=24)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -386,8 +386,8 @@ def test_print_schedule_with_vm_filter_shows_keep_remove(
     mock_shell,
 ):
     """``print_schedule(vm_filter="vm1")`` returns only vm1's result."""
-    vm1 = make_vm_config(name="vm1", snapshot_preserve="24h")
-    vm2 = make_vm_config(name="vm2", snapshot_preserve="24h")
+    vm1 = make_vm_config(name="vm1", snapshot_chain_length=24)
+    vm2 = make_vm_config(name="vm2", snapshot_chain_length=24)
     config = MockConfigFacade(vms=[vm1, vm2])
     core = Core(
         config=config,
@@ -420,7 +420,7 @@ def test_print_schedule_does_not_execute_mutating_commands(
     mock_shell,
 ):
     """``print_schedule()`` must not call blockcommit or backup delete."""
-    vm = make_vm_config(name="testvm", snapshot_preserve="24h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=24)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -588,8 +588,8 @@ def test_print_schedule_shows_snapshot_and_backup_retention(
     """print_schedule returns ScheduleResult with both .snapshots and .backups keys."""
     vm = make_vm_config(
         name="testvm",
-        snapshot_preserve="24h",
-        targets=[make_target(target_preserve="24h")],
+        snapshot_chain_length=24,
+        targets=[make_target(target_chain_length=24)],
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(

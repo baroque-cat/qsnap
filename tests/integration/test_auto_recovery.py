@@ -143,11 +143,12 @@ def _build_core(
     snapshot_dir: Path,
     target_dir: Path,
     *,
-    target_preserve: str = "monthly=1",
+    target_chain_length: int = 24,
+    target_keep_generations: int = 1,
 ) -> tuple[Core, VMConfig, InMemoryStateManager]:
     """Build a Core instance with InMemoryStateManager and DefaultFactory.
 
-    Includes ``target_preserve="monthly=1"`` by default so the bucket
+    Includes ``target_chain_length=24`` by default so the count-based
     strategy triggers FULL backup creation.
     """
     state = InMemoryStateManager()
@@ -155,14 +156,15 @@ def _build_core(
         name=vm_name,
         base_image=base_image,
         snapshot_dir=snapshot_dir,
-        snapshot_preserve="7d",
+        snapshot_chain_length=7,
         targets=[
             TargetConfig(
                 path=target_dir,
                 incremental=True,
                 compress=False,
                 verify="off",
-                target_preserve=target_preserve,
+                target_chain_length=target_chain_length,
+                target_keep_generations=target_keep_generations,
             )
         ],
     )
@@ -261,7 +263,6 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-        bucket_level="monthly",
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
@@ -272,7 +273,6 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         str(target_dir),
         f"{full_name}.qcow2",
         source_snap.timestamp,
-        "monthly",
     )
 
     # ── Step 2: Create backing-chained incrementals ─────────────────
@@ -325,7 +325,7 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
     # state record persists.  This is tracked in the test spec as a
     # non-blocking limitation: the pipeline continues safely, and
     # reconcile() will clean the stale state record later.
-    deps_after = state.get_incremental_dependencies(str(target_dir), full_name)
+    _deps_after = state.get_incremental_dependencies(str(target_dir), full_name)
 
     # Verify that WARNING about broken-chain auto-recovery was logged.
     warning_logs = [
@@ -396,14 +396,13 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-        bucket_level="monthly",
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly"
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
     )
 
     # ── Step 2: Create intact incrementals ──────────────────────────
@@ -497,19 +496,18 @@ def test_auto_recovery_no_full_remains(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-        bucket_level="monthly",
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly"
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
     )
 
     # ── Step 2: Create incrementals ─────────────────────────────────
     incr1_name = f"{vm_name}.20250301_vda_ar_forcefull_incr1"
-    incr1_path = _create_manual_incremental(shell, incr1_name, full_path, target_dir)
+    _incr1_path = _create_manual_incremental(shell, incr1_name, full_path, target_dir)
     state.record_incremental_dependency(str(target_dir), incr1_name, full_name)
 
     # ── Step 3: Delete the FULL file (simulating FULL loss) ────────
@@ -592,10 +590,10 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
 
-    # Use a short retention policy — keep only the last 7 days.
+    # Use a short retention policy — keep only the newest chain.
     core, vm_config, state = _build_core(
         shell, vm_name, base_image, snapshot_dir, target_dir,
-        target_preserve="7d",
+        target_chain_length=0, target_keep_generations=1,
     )
 
     target = vm_config.targets[0]
@@ -618,7 +616,6 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             source_snap,
             target,
             compress=False,
-            bucket_level="monthly",
         )
         assert full_result.success, f"FULL chain {suffix} failed: {full_result.error}"
         full_path = full_result.target_path
@@ -628,14 +625,12 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             str(target_dir),
             f"{full_name}.qcow2",
             source_snap.timestamp,
-            "monthly",
         )
 
         incr_names: list[str] = []
         previous_path = full_path
         for i in range(1, 4):
             incr_name = f"{vm_name}.{suffix}_incr{i}"
-            date_offset = age_days - i
             # Create incremental chained to previous.
             incr_path = _create_manual_incremental(
                 shell, incr_name, previous_path, target_dir
@@ -760,7 +755,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     caplog.clear()
     caplog.set_level(logging.DEBUG)
     result1 = provider.create_full_backup(
-        vm_name, snapshot1, target, compress=False, bucket_level="monthly"
+        vm_name, snapshot1, target, compress=False,
     )
     assert result1.success, f"First FULL backup failed: {result1.error}"
 
@@ -789,7 +784,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     caplog.clear()
     caplog.set_level(logging.DEBUG)
     result2 = provider.create_full_backup(
-        vm_name, snapshot2, target, compress=False, bucket_level="monthly"
+        vm_name, snapshot2, target, compress=False,
     )
     assert result2.success, (
         f"Second FULL backup should succeed without collision. Error: {result2.error}"
@@ -884,14 +879,13 @@ def test_production_incident_reproduction(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-        bucket_level="monthly",
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly"
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
     )
 
     # ── Step 2: Create 25 incrementals (chain of FULL → incr1 → incr2 → ...) ──

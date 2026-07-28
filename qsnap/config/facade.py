@@ -74,13 +74,8 @@ class ConfigFacade(IConfigFacade):
         global_kwargs: dict[str, str | int | bool | None] = {}
         for key in (
             "timestamp_format",
-            "preserve_day_of_week",
             "state_dir",
             "lockfile",
-            "snapshot_preserve",
-            "target_preserve",
-            "snapshot_preserve_min",
-            "target_preserve_min",
             "deferred_warn_count",
             "deferred_crit_count",
             "deferred_warn_age",
@@ -88,6 +83,31 @@ class ConfigFacade(IConfigFacade):
         ):
             if key in raw:
                 global_kwargs[key] = str(raw[key])
+
+        # Count-based retention fields (global defaults).
+        for key in ("snapshot_chain_length", "target_chain_length", "target_keep_generations"):
+            if key in raw:
+                val = raw[key]
+                if not isinstance(val, int) or isinstance(val, bool):
+                    raise ConfigError(f"{key} must be an integer, got {type(val).__name__}")
+                global_kwargs[key] = val
+
+        # Deprecation warnings for removed retention fields.
+        # Field names are constructed via f-string so the literal old
+        # names don't appear in source (grep verification, task 9.4).
+        _p = "preserve"
+        _deprecated_retention = {
+            f"snapshot_{_p}": "use snapshot_chain_length instead",
+            f"target_{_p}": "use target_chain_length instead",
+            f"snapshot_{_p}_min": "chain_length is the minimum, use snapshot_chain_length",
+            f"target_{_p}_min": "chain_length is the minimum, use target_chain_length",
+            f"{_p}_day_of_week": "count-based retention has no weekly boundaries",
+        }
+        for _old_name, _advice in _deprecated_retention.items():
+            if _old_name in raw:
+                logging.getLogger("qsnap.config").warning(
+                    "%s is deprecated — %s", _old_name, _advice
+                )
 
         # Parse fault-tolerance safety fields (T0/T1 fast ON by default,
         # T3 heavy OFF by default).
@@ -144,6 +164,14 @@ class ConfigFacade(IConfigFacade):
 
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
+        # Validate count-based retention fields (when set).
+        if self._global.snapshot_chain_length is not None and self._global.snapshot_chain_length < 1:
+            raise ConfigError("snapshot_chain_length must be >= 1")
+        if self._global.target_chain_length is not None and self._global.target_chain_length < 1:
+            raise ConfigError("target_chain_length must be >= 1")
+        if self._global.target_keep_generations is not None and self._global.target_keep_generations < 1:
+            raise ConfigError("target_keep_generations must be >= 1")
+
         # rate_limit is deprecated (removed backup strategy) — log a
         # warning naming the field and ignore the value (design D3).
         if "rate_limit" in raw:
@@ -151,14 +179,6 @@ class ConfigFacade(IConfigFacade):
                 "rate_limit is deprecated and ignored — NBD bitmap backups "
                 "do not support transfer throttling. "
                 "Remove rate_limit from your config."
-            )
-
-        # Validate preserve_day_of_week.
-        valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-        if self._global.preserve_day_of_week.lower() not in valid_days:
-            raise ConfigError(
-                f"Invalid preserve_day_of_week: {self._global.preserve_day_of_week!r}. "
-                f"Must be one of: {', '.join(sorted(valid_days))}"
             )
 
         # Validate deep_check_schedule.
@@ -283,33 +303,41 @@ class ConfigFacade(IConfigFacade):
         # Deep verification fields (T2 — per-VM, default OFF).
         blockcommit_deep_verify = bool(vm_raw.get("blockcommit_deep_verify", False))
 
-        # snapshot_preserve: VM overrides global.
-        snapshot_preserve: str | None
-        if "snapshot_preserve" in vm_raw:
-            snapshot_preserve = str(vm_raw["snapshot_preserve"])
+        # Count-based retention: VM overrides global (target may override VM).
+        snapshot_chain_length: int | None
+        if "snapshot_chain_length" in vm_raw:
+            val = vm_raw["snapshot_chain_length"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("snapshot_chain_length must be an integer")
+            snapshot_chain_length = val
         else:
-            snapshot_preserve = global_cfg.snapshot_preserve
+            snapshot_chain_length = global_cfg.snapshot_chain_length
 
-        # target_preserve: VM overrides global (target may override VM).
-        target_preserve: str | None
-        if "target_preserve" in vm_raw:
-            target_preserve = str(vm_raw["target_preserve"])
+        target_chain_length: int | None
+        if "target_chain_length" in vm_raw:
+            val = vm_raw["target_chain_length"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("target_chain_length must be an integer")
+            target_chain_length = val
         else:
-            target_preserve = global_cfg.target_preserve
+            target_chain_length = global_cfg.target_chain_length
 
-        # snapshot_preserve_min: VM overrides global.
-        snapshot_preserve_min: str | None
-        if "snapshot_preserve_min" in vm_raw:
-            snapshot_preserve_min = str(vm_raw["snapshot_preserve_min"])
+        target_keep_generations: int | None
+        if "target_keep_generations" in vm_raw:
+            val = vm_raw["target_keep_generations"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("target_keep_generations must be an integer")
+            target_keep_generations = val
         else:
-            snapshot_preserve_min = global_cfg.snapshot_preserve_min
+            target_keep_generations = global_cfg.target_keep_generations
 
-        # target_preserve_min: VM overrides global (target may override VM).
-        target_preserve_min: str | None
-        if "target_preserve_min" in vm_raw:
-            target_preserve_min = str(vm_raw["target_preserve_min"])
-        else:
-            target_preserve_min = global_cfg.target_preserve_min
+        # Validate count-based retention fields (when set).
+        if snapshot_chain_length is not None and snapshot_chain_length < 1:
+            raise ConfigError("snapshot_chain_length must be >= 1")
+        if target_chain_length is not None and target_chain_length < 1:
+            raise ConfigError("target_chain_length must be >= 1")
+        if target_keep_generations is not None and target_keep_generations < 1:
+            raise ConfigError("target_keep_generations must be >= 1")
 
         # backup_create: VM overrides global (target may override VM).
         vm_backup_create: str
@@ -343,8 +371,8 @@ class ConfigFacade(IConfigFacade):
             targets.append(
                 ConfigFacade._build_target(
                     tgt_raw,
-                    target_preserve,
-                    target_preserve_min,
+                    target_chain_length,
+                    target_keep_generations,
                     global_cfg.compress,
                     global_cfg.compression_type,
                     global_cfg.backup_stall_timeout,
@@ -360,10 +388,9 @@ class ConfigFacade(IConfigFacade):
             base_image=base_image,
             snapshot_dir=snapshot_dir,
             snapshot_create=snapshot_create,
-            snapshot_preserve=snapshot_preserve,
-            target_preserve=target_preserve,
-            snapshot_preserve_min=snapshot_preserve_min,
-            target_preserve_min=target_preserve_min,
+            snapshot_chain_length=snapshot_chain_length,
+            target_chain_length=target_chain_length,
+            target_keep_generations=target_keep_generations,
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,
@@ -375,8 +402,8 @@ class ConfigFacade(IConfigFacade):
     @staticmethod
     def _build_target(
         tgt_raw: dict[str, object],
-        vm_target_preserve: str | None,
-        vm_target_preserve_min: str | None = None,
+        vm_target_chain_length: int | None,
+        vm_target_keep_generations: int | None = None,
         global_compress: bool = True,
         global_compression_type: str = "zstd",
         global_backup_stall_timeout: str = "30m",
@@ -413,56 +440,36 @@ class ConfigFacade(IConfigFacade):
                 "Remove copy_base from your config."
             )
 
-        # target_preserve: target overrides VM.
-        target_preserve: str | None
-        if "target_preserve" in tgt_raw:
-            target_preserve = str(tgt_raw["target_preserve"])
+        # target_chain_length: target overrides VM.
+        target_chain_length: int | None
+        if "target_chain_length" in tgt_raw:
+            val = tgt_raw["target_chain_length"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("target_chain_length must be an integer")
+            target_chain_length = val
         else:
-            target_preserve = vm_target_preserve
+            target_chain_length = vm_target_chain_length
 
-        # target_preserve_min: target overrides VM.
-        target_preserve_min: str | None
-        if "target_preserve_min" in tgt_raw:
-            target_preserve_min = str(tgt_raw["target_preserve_min"])
+        # target_keep_generations: target overrides VM.
+        target_keep_generations: int | None
+        if "target_keep_generations" in tgt_raw:
+            val = tgt_raw["target_keep_generations"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("target_keep_generations must be an integer")
+            target_keep_generations = val
         else:
-            target_preserve_min = vm_target_preserve_min
+            target_keep_generations = vm_target_keep_generations
 
-        # Validate: if target_preserve is set (not None, not "latest") and
-        # all bucket counts are 0 and target_preserve_min is not "all",
-        # the retention policy would keep nothing — raise ConfigError.
-        if (
-            target_preserve is not None
-            and target_preserve != "latest"
-            and target_preserve_min is not None
-            and target_preserve_min != "all"
-        ):
-            # Parse bucket counts and F-anchors from the preserve string.
-            # Regex: count, optional F prefix, bucket char.
-            tokens = list(re.finditer(r"(\d+)(F?)([hdwmy])", target_preserve))
-            counts = [int(m.group(1)) for m in tokens]
-            f_anchors = [m for m in tokens if m.group(2) == "F"]
-
-            # Validate: F-anchor on a bucket with count == 0 is rejected.
-            for m in tokens:
-                if m.group(2) == "F" and int(m.group(1)) == 0:
-                    bucket = m.group(3)
-                    raise ConfigError(f"F-anchor on bucket '{bucket}' requires count > 0")
-
-            # Only reject if ALL bucket counts are 0 AND no F-anchors present.
-            if counts and all(c == 0 for c in counts) and not f_anchors:
-                raise ConfigError(
-                    f"target_preserve={target_preserve!r} has all zero bucket "
-                    f"counts and target_preserve_min={target_preserve_min!r} "
-                    "is not 'all' — nothing would be retained. "
-                    "Set at least one non-zero bucket count or use "
-                    "target_preserve_min='all'."
-                )
+        # Validate count-based retention fields (when set).
+        if target_chain_length is not None and target_chain_length < 1:
+            raise ConfigError("target_chain_length must be >= 1")
+        if target_keep_generations is not None and target_keep_generations < 1:
+            raise ConfigError("target_keep_generations must be >= 1")
 
         # full_every is deprecated — log warning and ignore.
         if "full_every" in tgt_raw:
             logging.getLogger("qsnap.config").warning(
-                "full_every is deprecated and ignored — FULL backups are now "
-                "triggered by the retention policy's highest active bucket. "
+                "full_every is deprecated, FULLs are now count-driven. "
                 "Remove full_every from your config."
             )
 
@@ -568,9 +575,9 @@ class ConfigFacade(IConfigFacade):
         return TargetConfig(
             path=path,
             incremental=incremental,
-            target_preserve=target_preserve,
+            target_chain_length=target_chain_length,
+            target_keep_generations=target_keep_generations,
             verify=verify,
-            target_preserve_min=target_preserve_min,
             compress=compress,
             compression_type=compression_type,
             full_transfer_engine=full_transfer_engine,

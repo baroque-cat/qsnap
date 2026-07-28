@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.lifecycle import ILifecycleManager
@@ -21,7 +20,6 @@ from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
-from qsnap.modules.backup.bucket_strategy import BucketFullStrategy
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
@@ -89,6 +87,3 @@ class DefaultFactory(IVMModuleFactory):
         if mode == "qemu-img":
             return QemuImgCommitManager(self._shell)
         return BlockCommitManager(self._shell)
-
-    def create_bucket_full_strategy(self) -> IBucketFullStrategy:
-        return BucketFullStrategy()

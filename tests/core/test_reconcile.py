@@ -253,7 +253,7 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     orphan_path = target.path / f"{orphan_name}.qcow2"
     full_name = "testvm.FULL.20250725"
     full_path = target.path / f"{full_name}.qcow2"
-    full_stem = full_name  # stem (no .qcow2)
+
 
     orphan_backup = SnapshotInfo(
         name=orphan_name,
@@ -409,7 +409,7 @@ def test_reconcile_intact_chains_no_broken_chains(
         name=full_name,
         path=full_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
+
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 

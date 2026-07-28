@@ -1,15 +1,15 @@
 ## Requirements
 
 ### Requirement: GlobalConfig dataclass
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, preserve day of week, state directory, lockfile path, snapshot/target preserve policies, deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, and backup stall timeout.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, state directory, lockfile path, count-based retention defaults (`snapshot_chain_length`, `target_chain_length`, `target_keep_generations`), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, and backup stall timeout. The fields `preserve_day_of_week`, `snapshot_preserve`, `target_preserve`, `snapshot_preserve_min`, and `target_preserve_min` SHALL NOT exist on `GlobalConfig`.
 
 #### Scenario: GlobalConfig is immutable
-- **WHEN** a GlobalConfig instance is created with `timestamp_format="long"` and `preserve_day_of_week="monday"`
+- **WHEN** a GlobalConfig instance is created with `timestamp_format="long"` and `snapshot_chain_length=168`
 - **THEN** attempting to mutate any field raises FrozenInstanceError
 
 #### Scenario: GlobalConfig default values
 - **WHEN** a GlobalConfig is created with only required fields
-- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `compress=True`, `compression_type="zstd"`, `backup_stall_timeout="30m"`, `deferred_warn_count="5"`, `deferred_crit_count="10"`, `deferred_warn_age="7d"`, `deferred_crit_age="14d"`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
+- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `compress=True`, `compression_type="zstd"`, `backup_stall_timeout="30m"`, `snapshot_chain_length=None`, `target_chain_length=None`, `target_keep_generations=None`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
 
 ### Requirement: compression_type field in GlobalConfig
 
@@ -40,22 +40,22 @@ The system SHALL provide an immutable `GlobalConfig` dataclass with frozen field
 - **THEN** attempting to mutate `backup_stall_timeout` raises `FrozenInstanceError`
 
 ### Requirement: VMConfig dataclass
-The system SHALL provide an immutable `VMConfig` dataclass representing a single VM's configuration, including its name, base image path, snapshot directory, snapshot creation mode, retention policy, optional targets, and fault-tolerance deep verification controls.
+The system SHALL provide an immutable `VMConfig` dataclass representing a single VM's configuration, including its name, base image path, snapshot directory, snapshot creation mode, count-based retention overrides (`snapshot_chain_length`, `target_chain_length`, `target_keep_generations`), optional targets, and fault-tolerance deep verification controls. The fields `snapshot_preserve`, `target_preserve`, `snapshot_preserve_min`, and `target_preserve_min` SHALL NOT exist on `VMConfig`.
 
 #### Scenario: VMConfig with required fields
 - **WHEN** a VMConfig is created with `name="myvm"`, `base_image=Path(...)`, `snapshot_dir=Path(...)`
-- **THEN** the instance has all required fields populated and `snapshot_create` defaults to `"always"`, `blockcommit_deep_verify` defaults to `False`
+- **THEN** the instance has all required fields populated and `snapshot_create` defaults to `"always"`, `blockcommit_deep_verify` defaults to `False`, `snapshot_chain_length` defaults to `None`
 
 #### Scenario: VMConfig with targets
 - **WHEN** a VMConfig is created with a list of TargetConfig objects
 - **THEN** `vm.targets` contains those targets in order
 
 ### Requirement: TargetConfig dataclass
-The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, its retention policy, verification mode, retry controls, compression setting, compression type, and backup stall timeout. The `verify` field SHALL default to `"metadata"` at the dataclass level. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence. The `compression_type` field SHALL default to `"zstd"` and inherit from `GlobalConfig.compression_type` when not explicitly set. The `backup_stall_timeout` field SHALL default to `"30m"` and inherit from `GlobalConfig.backup_stall_timeout` when not explicitly set.
+The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, whether incremental backup is enabled, count-based retention overrides (`target_chain_length`, `target_keep_generations`), verification mode, retry controls, compression setting, compression type, and backup stall timeout. The fields `target_preserve` and `target_preserve_min` SHALL NOT exist on `TargetConfig`. The `verify` field SHALL default to `"metadata"` at the dataclass level. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence. The `compression_type` field SHALL default to `"zstd"` and inherit from `GlobalConfig.compression_type` when not explicitly set. The `backup_stall_timeout` field SHALL default to `"30m"` and inherit from `GlobalConfig.backup_stall_timeout` when not explicitly set.
 
 #### Scenario: TargetConfig with incremental enabled
 - **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and `incremental=True`
-- **THEN** both fields are accessible, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `compression_type` defaults to `"zstd"`, `backup_stall_timeout` defaults to `"30m"`, and the instance is frozen
+- **THEN** both fields are accessible, `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `compression_type` defaults to `"zstd"`, `backup_stall_timeout` defaults to `"30m"`, `target_chain_length` defaults to `None`, `target_keep_generations` defaults to `None`, and the instance is frozen
 
 ### Requirement: compression_type field in TargetConfig
 
@@ -85,28 +85,7 @@ The system SHALL provide an immutable `TargetConfig` dataclass representing a ba
 - **AND** the GlobalConfig has `backup_stall_timeout="30m"`
 - **THEN** `target.backup_stall_timeout == "15m"` (target overrides global)
 
-### Requirement: RetentionPolicy dataclass
-The system SHALL provide an immutable `RetentionPolicy` dataclass with fields for hourly, daily, weekly, monthly, and yearly retention counts, plus a `preserve_min` string, PLUS five anchor boolean fields: `anchor_hourly: bool = False`, `anchor_daily: bool = False`, `anchor_weekly: bool = False`, `anchor_monthly: bool = False`, `anchor_yearly: bool = False`. The `preserve_min` field SHALL accept the value `"latest"` in addition to `"all"` and duration strings like `"6h"`, `"2d"`.
 
-#### Scenario: RetentionPolicy with hourly and daily limits
-- **WHEN** a RetentionPolicy is created with `hourly=24`, `daily=2`, `weekly=0`, `monthly=0`, `yearly=0`, `preserve_min="6h"`
-- **THEN** all fields are accessible and match the provided values
-- **THEN** all `anchor_*` fields default to `False`
-
-#### Scenario: RetentionPolicy defaults
-- **WHEN** a RetentionPolicy is created with no arguments
-- **THEN** all retention counts default to 0 and `preserve_min` defaults to `"all"`
-- **THEN** all `anchor_*` fields default to `False`
-
-#### Scenario: Anchor fields set from F-syntax
-- **WHEN** a RetentionPolicy is created with `daily=7, anchor_daily=True, weekly=4, anchor_weekly=True`
-- **THEN** `retention.anchor_daily` is `True` and `retention.anchor_weekly` is `True`
-- **THEN** `retention.anchor_hourly`, `anchor_monthly`, `anchor_yearly` are `False`
-
-#### Scenario: preserve_min = "latest"
-- **WHEN** a RetentionPolicy is created with `preserve_min="latest"`
-- **THEN** `retention.preserve_min` is `"latest"`
-- **THEN** the retention engine keeps only the most recent item
 
 ### Requirement: GlobalConfig lockfile field is consumed
 The `lockfile` field on `GlobalConfig` (already defined, default `None`) SHALL be consumed by the locking mechanism. If `lockfile` is not `None`, the process SHALL acquire a lock on this path before pipeline execution.
@@ -122,23 +101,7 @@ The `timestamp_format` field on `GlobalConfig` (default `"long"`) SHALL be consu
 - **WHEN** `timestamp_format = "short"` in the config and a snapshot is created
 - **THEN** the snapshot name uses `YYYYMMDD` format
 
-### Requirement: GlobalConfig preserve_day_of_week field is consumed
-The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be passed to `TimeBasedRetention.evaluate()` and used to determine weekly bucket boundaries.
 
-#### Scenario: preserve_day_of_week controls weekly grouping
-- **WHEN** `preserve_day_of_week = "sunday"` in the config and `weekly = 2`
-- **THEN** retention preserves at most 2 weekly snapshots with Sunday as the week boundary
-
-### Requirement: GlobalConfig preserve_day_of_week validation
-`ConfigFacade` SHALL validate that `preserve_day_of_week` is one of: monday, tuesday, wednesday, thursday, friday, saturday, sunday (case-insensitive). Invalid values SHALL raise `ConfigError`.
-
-#### Scenario: Valid day of week
-- **WHEN** the config has `preserve_day_of_week = "friday"`
-- **THEN** ConfigFacade accepts it and stores "friday" in GlobalConfig
-
-#### Scenario: Invalid day of week
-- **WHEN** the config has `preserve_day_of_week = "funday"`
-- **THEN** ConfigFacade raises ConfigError with a message indicating the valid values
 
 ### Requirement: TargetConfig incremental_mode field
 `TargetConfig` SHALL have an `incremental_mode: str` field with default value `"bitmap"`. Accepted values SHALL be `"file-copy"` (whole-file copy via rsync) and `"bitmap"` (dirty-block extraction via NBD). The field SHALL be immutable (`frozen=True`). When `incremental_mode="bitmap"` and libvirt < 6.0, the factory SHALL fall back to `FileCopyBackupProvider` without mutating the config.
@@ -190,21 +153,7 @@ The `preserve_day_of_week` field on `GlobalConfig` (default `"monday"`) SHALL be
 - **WHEN** a VMConfig is created without `snapshot_quiesce`
 - **THEN** `vm_config.snapshot_quiesce` is `False`
 
-### Requirement: GlobalConfig contains snapshot_preserve_min and target_preserve_min
 
-`GlobalConfig` SHALL contain fields `snapshot_preserve_min: str | None = None` and `target_preserve_min: str | None = None`.
-
-#### Scenario: Defaults are None
-- **WHEN** `GlobalConfig` is constructed with no preserve_min keys
-- **THEN** `snapshot_preserve_min` and `target_preserve_min` are both `None`
-
-### Requirement: VMConfig contains snapshot_preserve_min and target_preserve_min
-
-`VMConfig` SHALL contain fields `snapshot_preserve_min: str | None = None` and `target_preserve_min: str | None = None`.
-
-#### Scenario: VM inherits from global
-- **WHEN** global sets `snapshot_preserve_min = "3h"` and VM omits it
-- **THEN** `VMConfig.snapshot_preserve_min` resolves to `"3h"`
 
 ### Requirement: GlobalConfig rate_limit field
 
@@ -347,9 +296,7 @@ The `full_verify_before_rebase` field is REMOVED from `GlobalConfig`. It was par
 
 `GlobalConfig` SHALL include a `deep_check_targets: bool` field with default `False`. When enabled, `qsnap check --deep` also checks FULL and incremental backup files on target directories.
 
-### Requirement: Active retention buckets required when targets configured
 
-When a VM has backup targets configured, at least one retention bucket (hourly/daily/weekly/monthly/yearly) SHALL have count > 0 OR `preserve_min` SHALL be `"all"`. A configuration with targets but all-zero bucket counts SHALL raise `ConfigError` at parse time.
 
 ### Requirement: backup_create field in TargetConfig
 
@@ -516,3 +463,31 @@ When a VM has backup targets configured, at least one retention bucket (hourly/d
 - **WHEN** a TargetConfig is created with `convert_out_of_order=False`
 - **AND** the GlobalConfig has `convert_out_of_order=True`
 - **THEN** `target.convert_out_of_order == False` (target overrides global)
+
+### Requirement: GlobalConfig count-based retention fields
+
+`GlobalConfig` SHALL include `snapshot_chain_length: int | None = None`, `target_chain_length: int | None = None`, and `target_keep_generations: int | None = None`. These serve as global defaults for VM-level and target-level overrides.
+
+#### Scenario: Defaults are None
+- **WHEN** `GlobalConfig` is constructed without chain_length keys
+- **THEN** `snapshot_chain_length`, `target_chain_length`, and `target_keep_generations` are all `None`
+
+### Requirement: VMConfig count-based retention fields
+
+`VMConfig` SHALL include `snapshot_chain_length: int | None = None`, `target_chain_length: int | None = None`, and `target_keep_generations: int | None = None`. These override global defaults when set.
+
+#### Scenario: VM inherits from global
+- **WHEN** global sets `snapshot_chain_length = 168` and VM omits it
+- **THEN** `VMConfig.snapshot_chain_length` resolves to `168`
+
+### Requirement: TargetConfig count-based retention fields
+
+`TargetConfig` SHALL include `target_chain_length: int | None = None` and `target_keep_generations: int | None = None`. These override VM-level and global defaults when set.
+
+#### Scenario: Target inherits from VM
+- **WHEN** VM sets `target_chain_length = 168` and target omits it
+- **THEN** `TargetConfig.target_chain_length` resolves to `168`
+
+#### Scenario: Target overrides VM
+- **WHEN** VM sets `target_chain_length = 168` and target sets `target_chain_length = 336`
+- **THEN** `TargetConfig.target_chain_length` resolves to `336`

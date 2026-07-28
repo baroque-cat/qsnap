@@ -1,8 +1,8 @@
 """Tests for immutable configuration dataclasses.
 
 Covers GlobalConfig, VMConfig, TargetConfig, and RetentionPolicy — verifying
-immutability, default values, and the defensive-copy-on-construction behaviour
-for VMConfig.targets.
+immutability, default values, the defensive-copy-on-construction behaviour
+for VMConfig.targets, and count-based retention configuration.
 """
 
 from __future__ import annotations
@@ -14,22 +14,83 @@ import pytest
 
 from qsnap.models.config import GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
 
+# ---------------------------------------------------------------------------
+# Scenario 1: RetentionPolicy default values
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_defaults():
+    """RetentionPolicy() has chain_length=0, keep_generations=1."""
+    policy = RetentionPolicy()
+    assert policy.chain_length == 0
+    assert policy.keep_generations == 1
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2: RetentionPolicy for snapshots
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_for_snapshots():
+    """RetentionPolicy with chain_length=168, keep_generations=1 (snapshot use)."""
+    policy = RetentionPolicy(chain_length=168, keep_generations=1)
+    assert policy.chain_length == 168
+    assert policy.keep_generations == 1
+
+
+# ---------------------------------------------------------------------------
+# Scenario 3: RetentionPolicy for targets
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_for_targets():
+    """RetentionPolicy with chain_length=0, keep_generations=2 (target use)."""
+    policy = RetentionPolicy(chain_length=0, keep_generations=2)
+    assert policy.chain_length == 0
+    assert policy.keep_generations == 2
+
+
+# ---------------------------------------------------------------------------
+# RetentionPolicy is frozen (immutable)
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_immutable():
+    """RetentionPolicy is a frozen dataclass; mutating fields raises FrozenInstanceError."""
+    policy = RetentionPolicy(chain_length=168, keep_generations=2)
+    assert policy.__dataclass_params__.frozen is True
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.chain_length = 24  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.keep_generations = 3  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Scenario 4: GlobalConfig immutability
+# ---------------------------------------------------------------------------
+
 
 def test_global_config_immutable():
     """GlobalConfig is a frozen dataclass; attribute mutation raises FrozenInstanceError."""
-    cfg = GlobalConfig(timestamp_format="long", preserve_day_of_week="monday")
+    cfg = GlobalConfig()
 
     # Verify the dataclass is declared frozen.
-    # NOTE: dataclasses.is_frozen() does not exist in the standard library
-    # (checked on Python 3.14); the canonical way to inspect the frozen flag
-    # is via the private __dataclass_params__ attribute.
     assert cfg.__dataclass_params__.frozen is True
 
     # Attempting to set an attribute on a frozen dataclass raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.timestamp_format = "short"  # type: ignore[misc]
 
-    # Mutating new fault-tolerance fields also raises FrozenInstanceError.
+    # Mutating count-based retention fields also raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.snapshot_chain_length = 168  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.target_chain_length = 100  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.target_keep_generations = 3  # type: ignore[misc]
+
+    # Mutating fault-tolerance fields also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.auto_cleanup = False  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -37,7 +98,7 @@ def test_global_config_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.deep_check_schedule = "weekly"  # type: ignore[misc]
 
-    # Mutating new FULL verification fields also raises FrozenInstanceError.
+    # Mutating FULL verification fields also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.full_verify_after_create = "off"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -54,15 +115,20 @@ def test_global_config_immutable():
         cfg.backup_stall_timeout = "1h"  # type: ignore[misc]
 
 
+# ---------------------------------------------------------------------------
+# Scenario 5: GlobalConfig defaults
+# ---------------------------------------------------------------------------
+
+
 def test_global_config_defaults():
     """GlobalConfig() with no arguments uses documented defaults."""
     cfg = GlobalConfig()
     assert cfg.timestamp_format == "long"
-    assert cfg.preserve_day_of_week == "monday"
     assert cfg.state_dir == "/var/lib/qsnap/state"
     assert cfg.lockfile is None
-    assert cfg.snapshot_preserve is None
-    assert cfg.target_preserve is None
+    assert cfg.snapshot_chain_length is None
+    assert cfg.target_chain_length is None
+    assert cfg.target_keep_generations is None
     assert cfg.deferred_warn_count == "5"
     assert cfg.deferred_crit_count == "10"
     assert cfg.deferred_warn_age == "7d"
@@ -75,7 +141,7 @@ def test_global_config_defaults():
     assert cfg.deep_check_schedule == "off"
     # Compress full backups defaults to True.
     assert cfg.compress is True
-    # Compression algorithm defaults to zstd (11x faster than zlib).
+    # Compression algorithm defaults to zstd.
     assert cfg.compression_type == "zstd"
     # Stall detection timeout for data-transfer commands defaults to 30m.
     assert cfg.backup_stall_timeout == "30m"
@@ -83,6 +149,34 @@ def test_global_config_defaults():
     assert cfg.full_verify_after_create == "check"
     assert cfg.full_verify_before_delete == "check"
     assert cfg.deep_check_targets is False
+    # Default backup_create is "always".
+    assert cfg.backup_create == "always"
+    # Default full_transfer_engine is "qemu-img-convert".
+    assert cfg.full_transfer_engine == "qemu-img-convert"
+    # Default convert_parallel is 4.
+    assert cfg.convert_parallel == 4
+    # Default convert_out_of_order is True.
+    assert cfg.convert_out_of_order is True
+    # Default transaction_log is None.
+    assert cfg.transaction_log is None
+
+
+# ---------------------------------------------------------------------------
+# Scenario 9: GlobalConfig chain_length defaults are None
+# ---------------------------------------------------------------------------
+
+
+def test_global_chain_length_defaults_none():
+    """GlobalConfig().snapshot_chain_length is None (not overridden)."""
+    cfg = GlobalConfig()
+    assert cfg.snapshot_chain_length is None
+    assert cfg.target_chain_length is None
+    assert cfg.target_keep_generations is None
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6: VMConfig required fields
+# ---------------------------------------------------------------------------
 
 
 def test_vm_config_required_fields():
@@ -97,8 +191,17 @@ def test_vm_config_required_fields():
     assert vm.snapshot_dir == Path("/var/lib/libvirt/images/snapshots")
     assert vm.snapshot_create == "always"
     assert vm.targets == []
+    # Count-based retention fields default to None (not overridden).
+    assert vm.snapshot_chain_length is None
+    assert vm.target_chain_length is None
+    assert vm.target_keep_generations is None
     # Deep verification fields (T2) default to False.
     assert vm.blockcommit_deep_verify is False
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: VMConfig with targets
+# ---------------------------------------------------------------------------
 
 
 def test_vm_config_with_targets():
@@ -110,13 +213,6 @@ def test_vm_config_with_targets():
     a shallow copy of the list passed to the constructor (defensive copy on
     construction).  This means that mutating the *original* list after the
     VMConfig has been created does NOT affect the VMConfig's internal ``targets``.
-
-    Trade-off: the list returned by ``vm.targets`` is still the *same* list
-    object stored internally -- appending to it directly WILL mutate internal
-    state.  Full immutability would require a property returning a copy on
-    every access, which is out of scope for the current design.  The defensive
-    copy on construction is sufficient to protect against the common pattern of
-    reusing a list variable across multiple VMConfig constructions.
     """
     target1 = TargetConfig(path=Path("/backup/testvm"))
     target2 = TargetConfig(path=Path("/backup2/testvm"))
@@ -142,7 +238,12 @@ def test_vm_config_with_targets():
     assert len(vm.targets) == 2
 
 
-def test_target_config_incremental():
+# ---------------------------------------------------------------------------
+# Scenario 8: TargetConfig with incremental
+# ---------------------------------------------------------------------------
+
+
+def test_target_config_with_incremental():
     """TargetConfig with incremental=True; the default is also True."""
     target = TargetConfig(path=Path("/backup/testvm"), incremental=True)
     assert target.incremental is True
@@ -155,30 +256,17 @@ def test_target_config_incremental():
     assert default_target.backup_retry_max == 3
     assert default_target.backup_retry_base == "2s"
 
-    # Compress defaults to True in the bucket-driven model.
+    # Compress defaults to True.
     assert default_target.compress is True
 
-
-def test_retention_policy_hourly_daily():
-    """RetentionPolicy with hourly=24, daily=7; other counts default to 0, preserve_min to 'all'."""
-    policy = RetentionPolicy(hourly=24, daily=7)
-    assert policy.hourly == 24
-    assert policy.daily == 7
-    assert policy.weekly == 0
-    assert policy.monthly == 0
-    assert policy.yearly == 0
-    assert policy.preserve_min == "all"
+    # Count-based retention fields default to None (not overridden).
+    assert default_target.target_chain_length is None
+    assert default_target.target_keep_generations is None
 
 
-def test_retention_policy_defaults():
-    """RetentionPolicy() with no arguments defaults all counts to 0 and preserve_min to 'all'."""
-    policy = RetentionPolicy()
-    assert policy.hourly == 0
-    assert policy.daily == 0
-    assert policy.weekly == 0
-    assert policy.monthly == 0
-    assert policy.yearly == 0
-    assert policy.preserve_min == "all"
+# ---------------------------------------------------------------------------
+# VMConfig.disks
+# ---------------------------------------------------------------------------
 
 
 def test_vm_config_disks_default_none_auto_discovery():
@@ -297,37 +385,7 @@ def test_vm_config_lifecycle_mode_qemu_img():
 
 
 # ---------------------------------------------------------------------------
-# RetentionPolicy.preserve_min — minimum preservation duration
-# ---------------------------------------------------------------------------
-
-
-def test_retention_policy_preserve_min_latest():
-    """RetentionPolicy(preserve_min='latest') stores 'latest'."""
-    policy = RetentionPolicy(preserve_min="latest")
-    assert policy.preserve_min == "latest"
-
-
-# ---------------------------------------------------------------------------
-# GlobalConfig.snapshot_preserve_min / target_preserve_min
-# ---------------------------------------------------------------------------
-
-
-def test_global_config_preserve_min_defaults_none(make_global_config):
-    """GlobalConfig() has snapshot_preserve_min=None and target_preserve_min=None by default."""
-    cfg = make_global_config()
-    assert cfg.snapshot_preserve_min is None
-    assert cfg.target_preserve_min is None
-
-
-def test_global_config_preserve_min_set_from_constructor(make_global_config):
-    """GlobalConfig(snapshot_preserve_min='2h', target_preserve_min='4h') sets the values."""
-    cfg = make_global_config(snapshot_preserve_min="2h", target_preserve_min="4h")
-    assert cfg.snapshot_preserve_min == "2h"
-    assert cfg.target_preserve_min == "4h"
-
-
-# ---------------------------------------------------------------------------
-# TargetConfig.compress — bucket-driven backup fields
+# TargetConfig.compress
 # ---------------------------------------------------------------------------
 
 
@@ -362,18 +420,6 @@ def test_target_inherits_compress_from_global():
     # Default target inherits nothing directly; ConfigFacade wires inheritance.
     target_default = TargetConfig(path=Path("/backup/testvm"))
     assert target_default.compress is True
-
-
-# ---------------------------------------------------------------------------
-# VMConfig.snapshot_preserve_min / target_preserve_min
-# ---------------------------------------------------------------------------
-
-
-def test_vm_config_preserve_min_fields_exist(make_vm_config):
-    """VMConfig has snapshot_preserve_min and target_preserve_min fields, defaulting to None."""
-    vm = make_vm_config()
-    assert vm.snapshot_preserve_min is None
-    assert vm.target_preserve_min is None
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +458,7 @@ def test_global_config_has_deferred_threshold_fields():
     assert "deferred_crit_age" in field_names
 
 
-# Fixture support — make_global_config / make_target accept new kwargs
+# Fixture support — make_global_config accepts count-based kwargs
 
 
 def test_make_global_config_accepts_deferred_kwargs(make_global_config):
@@ -427,6 +473,18 @@ def test_make_global_config_accepts_deferred_kwargs(make_global_config):
     assert cfg.deferred_crit_count == "20"
     assert cfg.deferred_warn_age == "1d"
     assert cfg.deferred_crit_age == "30d"
+
+
+def test_make_global_config_accepts_chain_length_kwargs(make_global_config):
+    """make_global_config fixture forwards count-based retention kwargs."""
+    cfg = make_global_config(
+        snapshot_chain_length=168,
+        target_chain_length=100,
+        target_keep_generations=2,
+    )
+    assert cfg.snapshot_chain_length == 168
+    assert cfg.target_chain_length == 100
+    assert cfg.target_keep_generations == 2
 
 
 # Fault-tolerance safety fields — standalone default value tests
@@ -483,50 +541,6 @@ def test_target_config_default_retry_values():
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.backup_retry_max == 3
     assert target.backup_retry_base == "2s"
-
-
-# ---------------------------------------------------------------------------
-# RetentionPolicy anchor fields — multi-level FULL anchors
-# ---------------------------------------------------------------------------
-
-
-def test_retention_policy_anchor_fields_default_false():
-    """RetentionPolicy(hourly=24, daily=7) — all anchor_* fields default to False."""
-    policy = RetentionPolicy(hourly=24, daily=7)
-    assert policy.anchor_hourly is False
-    assert policy.anchor_daily is False
-    assert policy.anchor_weekly is False
-    assert policy.anchor_monthly is False
-    assert policy.anchor_yearly is False
-
-
-def test_retention_policy_anchor_fields_explicit():
-    """RetentionPolicy(daily=7, anchor_daily=True, weekly=4, anchor_weekly=True)
-    stores the explicit True values and leaves others as False."""
-    policy = RetentionPolicy(daily=7, anchor_daily=True, weekly=4, anchor_weekly=True)
-    assert policy.anchor_daily is True
-    assert policy.anchor_weekly is True
-    assert policy.anchor_hourly is False
-    assert policy.anchor_monthly is False
-    assert policy.anchor_yearly is False
-
-
-def test_retention_policy_anchor_fields_immutable():
-    """RetentionPolicy with anchor_daily=True is frozen;
-    mutating anchor_daily raises FrozenInstanceError."""
-    policy = RetentionPolicy(anchor_daily=True)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        policy.anchor_daily = False  # type: ignore[misc]
-
-
-def test_retention_policy_preserve_min_latest_with_f_anchors():
-    """RetentionPolicy(preserve_min='latest', anchor_daily=True, daily=0)
-    stores anchor_daily=True even when daily count is zero.
-    (Parsing-time rejection of zero F is done at ConfigFacade level, not model.)"""
-    policy = RetentionPolicy(preserve_min="latest", anchor_daily=True, daily=0)
-    assert policy.preserve_min == "latest"
-    assert policy.anchor_daily is True
-    assert policy.daily == 0
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +646,7 @@ def test_transaction_log_validates_absolute_path():
 
 
 def test_global_config_compression_type_default():
-    """GlobalConfig().compression_type defaults to 'zstd' (11x faster than zlib)."""
+    """GlobalConfig().compression_type defaults to 'zstd'."""
     assert GlobalConfig().compression_type == "zstd"
 
 
@@ -672,11 +686,7 @@ def test_global_config_backup_stall_timeout_immutable():
 
 
 def test_target_config_compression_type_inherits():
-    """TargetConfig().compression_type defaults to 'zstd' (dataclass-level default).
-
-    ConfigFacade resolves inheritance at a higher layer; this test verifies
-    the dataclass field default is correct.
-    """
+    """TargetConfig().compression_type defaults to 'zstd' (dataclass-level default)."""
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.compression_type == "zstd"
 
@@ -688,17 +698,12 @@ def test_target_config_compression_type_overrides():
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.backup_stall_timeout — inherited from GlobalConfig via
-# ConfigFacade
+# TargetConfig.backup_stall_timeout
 # ---------------------------------------------------------------------------
 
 
 def test_target_config_backup_stall_timeout_inherits():
-    """TargetConfig().backup_stall_timeout defaults to '30m' (dataclass-level default).
-
-    ConfigFacade resolves inheritance at a higher layer; this test verifies
-    the dataclass field default is correct.
-    """
+    """TargetConfig().backup_stall_timeout defaults to '30m' (dataclass-level default)."""
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.backup_stall_timeout == "30m"
 
@@ -792,7 +797,7 @@ def test_global_config_full_transfer_engine_set_to_libnbd():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.convert_parallel — qemu-img convert -m flag (parallel coroutines)
+# GlobalConfig.convert_parallel — qemu-img convert -m flag
 # ---------------------------------------------------------------------------
 
 
@@ -809,7 +814,7 @@ def test_global_config_convert_parallel_is_immutable():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.convert_out_of_order — qemu-img convert -W flag (out-of-order writes)
+# GlobalConfig.convert_out_of_order — qemu-img convert -W flag
 # ---------------------------------------------------------------------------
 
 
@@ -826,33 +831,29 @@ def test_global_config_convert_out_of_order_is_immutable():
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.full_transfer_engine — inherited from GlobalConfig via ConfigFacade
+# TargetConfig.full_transfer_engine
 # ---------------------------------------------------------------------------
 
 
 def test_target_config_full_transfer_engine_default():
-    """TargetConfig().full_transfer_engine defaults to 'qemu-img-convert' (dataclass-level default).
-
-    ConfigFacade resolves inheritance at a higher layer; this test verifies
-    the dataclass field default is correct.
-    """
+    """TargetConfig().full_transfer_engine defaults to 'qemu-img-convert'."""
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.full_transfer_engine == "qemu-img-convert"
 
 
 def test_target_config_full_transfer_engine_overrides():
-    """TargetConfig(full_transfer_engine='libnbd') overrides the default 'qemu-img-convert'."""
+    """TargetConfig(full_transfer_engine='libnbd') overrides the default."""
     target = TargetConfig(path=Path("/backup/testvm"), full_transfer_engine="libnbd")
     assert target.full_transfer_engine == "libnbd"
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.convert_parallel — qemu-img convert -m flag
+# TargetConfig.convert_parallel
 # ---------------------------------------------------------------------------
 
 
 def test_target_config_convert_parallel_default():
-    """TargetConfig().convert_parallel defaults to 4 (dataclass-level default)."""
+    """TargetConfig().convert_parallel defaults to 4."""
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.convert_parallel == 4
 
@@ -864,12 +865,12 @@ def test_target_config_convert_parallel_overrides():
 
 
 # ---------------------------------------------------------------------------
-# TargetConfig.convert_out_of_order — qemu-img convert -W flag
+# TargetConfig.convert_out_of_order
 # ---------------------------------------------------------------------------
 
 
 def test_target_config_convert_out_of_order_default():
-    """TargetConfig().convert_out_of_order defaults to True (dataclass-level default)."""
+    """TargetConfig().convert_out_of_order defaults to True."""
     target = TargetConfig(path=Path("/backup/testvm"))
     assert target.convert_out_of_order is True
 

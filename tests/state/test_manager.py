@@ -393,7 +393,7 @@ def test_record_and_get_full_backups(tmp_path: Path) -> None:
     name = "full-2024-01-01"
     ts = datetime(2024, 1, 1, 12, 0, 0)
 
-    manager.record_full_backup(target, name, ts, "monthly")
+    manager.record_full_backup(target, name, ts)
 
     backups = manager.get_full_backups(target)
 
@@ -402,7 +402,6 @@ def test_record_and_get_full_backups(tmp_path: Path) -> None:
     assert backups[0].name == name
     assert backups[0].timestamp == ts
     assert backups[0].path == Path(target) / name
-    assert backups[0].bucket_level == "monthly"
 
 
 def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
@@ -414,9 +413,9 @@ def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
     ts2 = datetime(2024, 2, 1, 12, 0, 0)
     ts3 = datetime(2024, 3, 1, 12, 0, 0)
 
-    manager.record_full_backup(target, "full-2024-01-01", ts1, "monthly")
-    manager.record_full_backup(target, "full-2024-02-01", ts2, "monthly")
-    manager.record_full_backup(target, "full-2024-03-01", ts3, "monthly")
+    manager.record_full_backup(target, "full-2024-01-01", ts1)
+    manager.record_full_backup(target, "full-2024-02-01", ts2)
+    manager.record_full_backup(target, "full-2024-03-01", ts3)
 
     backups = manager.get_full_backups(target)
 
@@ -424,25 +423,6 @@ def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
     assert backups[0].name == "full-2024-01-01"
     assert backups[1].name == "full-2024-02-01"
     assert backups[2].name == "full-2024-03-01"
-
-
-def test_full_recorded_with_bucket_level(tmp_path: Path) -> None:
-    """FULL recorded with a specific bucket_level preserves the value."""
-    manager = JsonStateManager(state_dir=tmp_path)
-
-    target = "/mnt/backup/testvm"
-    ts = datetime(2024, 1, 1, 12, 0, 0)
-
-    manager.record_full_backup(target, "full-2024-01-01", ts, "weekly")
-
-    backups = manager.get_full_backups(target)
-    assert len(backups) == 1
-    assert backups[0].bucket_level == "weekly"
-
-    # Verify that get_last_full_backup also returns the correct bucket_level.
-    last = manager.get_last_full_backup(target)
-    assert last is not None
-    assert last.bucket_level == "weekly"
 
 
 # ── incremental-to-FULL dependency tracking tests ──────────────────
@@ -750,8 +730,6 @@ def test_full_backups_json_old_format_auto_migrated(tmp_path: Path) -> None:
     assert backups[0].name == "full-2024-01-01"
     assert backups[0].timestamp == datetime(2024, 1, 1, 12, 0, 0)
     assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01")
-    # Old format had no bucket_level — should default to "monthly".
-    assert backups[0].bucket_level == "monthly"
 
     # get_last_full_backup should also work (returns last from list).
     last = manager.get_last_full_backup("/mnt/backup/testvm")
@@ -787,9 +765,7 @@ def test_full_backups_json_new_format_loaded_as_is(tmp_path: Path) -> None:
     backups = manager.get_full_backups("/mnt/backup/testvm")
     assert len(backups) == 2
     assert backups[0].name == "full-2024-01-01"
-    assert backups[0].bucket_level == "monthly"
     assert backups[1].name == "full-2024-03-01"
-    assert backups[1].bucket_level == "weekly"
 
 
 # ── Fault tolerance & safety: state file corruption and rotation ──────────

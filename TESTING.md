@@ -34,11 +34,11 @@ tests/
 ├── core/                           # Unit tests: Core orchestration
 │   ├── test_engine.py              # Core.run(), Core._execute_pipeline()
 │   ├── test_pipeline.py            # Step ordering, error handling per step
-│   ├── test_full_anchor.py         # Bucket-driven FULL backup strategy (delegates to IBucketFullStrategy)
+│   ├── test_full_anchor.py         # Count-based FULL backup decision
 │   ├── test_full_verification_pipeline.py  # FULL backup verification tiers (M1/M2/M3)
 │   ├── test_deferred.py            # Deferred snapshot threshold logic
 │   ├── test_fork.py                # Fork/snapshot-creation logic
-│   ├── test_preserve.py           # Preserve-string parsing
+│   ├── test_retention_policy.py    # Count-based retention policy
 │   ├── test_schedule_summary.py    # Schedule summary output
 │   ├── test_state_check.py        # State consistency checks
 │   ├── test_validation.py          # Config validation
@@ -91,7 +91,7 @@ tests/
 │   ├── mock_modules.py             # Consolidated domain mocks: MockSnapshotProvider,
 │   │                                #   MockBackupProvider, MockBitmapBackupProvider,
 │   │                                #   MockRetentionEngine, MockChangeDetector,
-│   │                                #   MockLifecycleManager, MockBucketFullStrategy
+│   │                                #   MockLifecycleManager
 │   ├── mock_config.py              # MockConfigFacade — in-memory config
 │   └── mock_state.py               # InMemoryStateManager
 │
@@ -107,14 +107,11 @@ tests/
 │   │   ├── multi_vm.toml           # Multiple VMs
 │   │   ├── inheritance.toml        # Option cascading
 │   │   ├── invalid.toml            # Malformed config
-│   │   ├── bucket_driven.toml      # Bucket-driven FULL backup retention
-│   │   ├── full_backup.toml        # FULL backup anchor configuration
+│   │   ├── chain_length.toml       # Count-based chain_length retention
+│   │   ├── keep_generations.toml    # Count-based keep_generations retention
 │   │   ├── deferred_thresholds.toml  # Deferred snapshot thresholds
 │   │   ├── safety_fields.toml      # Fault-tolerance safety controls
 │   │   ├── global_fields.toml      # Global config defaults
-│   │   ├── preserve_min.toml       # Preserve-min floor logic
-│   │   ├── preserve_dow_valid.toml  # Preserve day-of-week (valid)
-│   │   ├── preserve_dow_invalid.toml  # Preserve day-of-week (invalid)
 │   │   └── deprecated_fields.toml  # Deprecated field handling
 │   ├── shell_outputs/              # Canned virsh/qemu-img output
 │   │   ├── domblklist.txt
@@ -122,8 +119,7 @@ tests/
 │   │   ├── qemu_img_info.json
 │   │   └── backing_chain.txt
 │   └── timestamps/                 # Fixed timestamp sets for retention tests
-│       ├── hourly_set.json
-│       ├── daily_set.json
+│       ├── count_set.json
 │       └── mixed_set.json
 │
 ├── integration/                    # Integration: real virsh/qemu-img on test VMs
@@ -162,12 +158,13 @@ tests/
 **Example — retention engine unit test (pure logic, no I/O):**
 
 ```python
-def test_retention_hourly_policy():
-    engine = TimeBasedRetention(policy=RetentionPolicy(hourly=24, daily=0, weekly=0))
-    items = load_timestamp_fixture("hourly_set.json")  # 48 snapshots, 1 per hour
-    decision = engine.evaluate(items)
-    assert len(decision.keep) == 24
-    assert decision.keep[0].timestamp > decision.keep[-1].timestamp
+def test_retention_chain_length():
+    engine = TimeBasedRetention()
+    policy = RetentionPolicy(chain_length=24, keep_generations=1)
+    items = load_timestamp_fixture("count_set.json")  # 48 snapshots
+    result = engine.evaluate(items, policy, datetime.now())
+    assert len(result.keep) == 24
+    assert len(result.remove) == 24
 ```
 
 **Example — snapshot module unit test (mocked shell):**
@@ -198,7 +195,7 @@ def test_mock_factory_returns_interface_types():
     factory = MockVMModuleFactory()
     assert isinstance(factory.create_snapshot_provider(make_vm_config()), ISnapshotProvider)
     assert isinstance(factory.create_backup_provider(make_vm_config(), make_target()), IBackupProvider)
-    assert isinstance(factory.create_bucket_full_strategy(), IBucketFullStrategy)
+    assert isinstance(factory.create_retention_engine(policy), IRetentionEngine)
 ```
 
 ### 3. Contract Tests (`interfaces/`)
@@ -279,7 +276,6 @@ def test_create_external_snapshot(test_vm):
 | `IShell` wraps `subprocess` | `MockShell` returns fixture outputs |
 | `IStateManager` writes to JSON files | `InMemoryStateManager` stores in `dict` |
 | `Core` coordinates pipeline | `test_pipeline.py` verifies step order |
-| `IBucketFullStrategy` decides FULL creation | `MockBucketFullStrategy` returns configurable `(bool, str)` |
 | Modules implement ABC directly (no Core inheritance) | Tests mock the ABC; no `ModuleTestCase(Core)` base needed |
 | Result objects carry success/error | Tests assert on `.success`, `.error`, `.path` |
 

@@ -266,19 +266,18 @@ class Core:
         """
         vms = self._filter_vms(vm_filter)
         results: dict[str, ScheduleResult] = {}
-        dow = self._config.get_global().preserve_day_of_week
         for vm in vms:
             # Snapshot retention
             snapshots = self._state.get_snapshots(vm.name)
             if not snapshots:
                 snap_retention = RetentionResult(keep=[], remove=[])
             else:
-                policy = self._parse_preserve(vm.snapshot_preserve, vm.snapshot_preserve_min)
+                policy = RetentionPolicy(
+                    chain_length=vm.snapshot_chain_length or 0, keep_generations=1
+                )
                 engine = self._factory.create_retention_engine(policy)
                 items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
-                snap_retention = engine.evaluate(
-                    items, policy, datetime.now(), preserve_day_of_week=dow
-                )
+                snap_retention = engine.evaluate(items, policy, datetime.now())
 
             # Per-target backup retention
             backup_retentions: dict[str, RetentionResult] = {}
@@ -286,13 +285,14 @@ class Core:
                 provider = self._factory.create_backup_provider(vm, target)
                 backups = provider.list(target)
                 if backups:
-                    policy = self._parse_preserve(
-                        target.target_preserve, target.target_preserve_min
+                    policy = RetentionPolicy(
+                        chain_length=0,
+                        keep_generations=target.target_keep_generations or 1,
                     )
                     engine = self._factory.create_retention_engine(policy)
                     items = [RetentionItem(name=b.name, timestamp=b.timestamp) for b in backups]
                     backup_retentions[str(target.path)] = engine.evaluate(
-                        items, policy, datetime.now(), preserve_day_of_week=dow
+                        items, policy, datetime.now()
                     )
                 else:
                     backup_retentions[str(target.path)] = RetentionResult(keep=[], remove=[])
@@ -304,21 +304,15 @@ class Core:
         return results
 
     def schedule_summary(self, vm_filter: str | None = None) -> str:
-        """Produce a human-readable retention preview.
+        """Produce a human-readable count-based retention preview.
 
-        Simulates the retention engine against a synthetic timestamp
-        distribution (one per hour for the configured retention window
-        + 50% margin) and returns a formatted string showing expected
-        chain length and bucket breakdown for each VM and each target.
-
-        Logs only factual data: base image actual-size (from
-        ``qemu-img info``) and compression_type (from config).  No
-        size projections — the ``base_size × 0.3`` formula was removed
-        because it cannot predict data compressibility.
+        Displays ``chain_length``, ``keep_generations``, current
+        snapshot/chain counts, and real size data (base image
+        actual-size from ``qemu-img info``, average incremental size
+        from state history).  No synthetic timestamps or retention
+        windows.
         """
         vms = self._filter_vms(vm_filter)
-        dow = self._config.get_global().preserve_day_of_week
-        now = datetime.now()
 
         lines: list[str] = []
 
@@ -342,64 +336,38 @@ class Core:
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
-            lines.append(f"  Base image actual-size: {base_size} B")
+            base_gb = base_size / (1024**3)
+            lines.append(f"  Current allocated: ~{base_gb:.1f} GB")
 
             # Snapshot retention
-            snap_policy = self._parse_preserve(vm.snapshot_preserve, vm.snapshot_preserve_min)
-            snap_window = self._retention_window(snap_policy)
-            snap_items = self._generate_synthetic_items(now, snap_window, "snap")
-            snap_engine = self._factory.create_retention_engine(snap_policy)
-            snap_result = snap_engine.evaluate(
-                snap_items, snap_policy, now, preserve_day_of_week=dow
-            )
-            snap_explain = snap_engine.explain(
-                snap_items, snap_policy, now, preserve_day_of_week=dow
-            )
-
+            snap_chain_length = vm.snapshot_chain_length or 0
+            snapshots = self._state.get_snapshots(vm.name)
+            snap_count = len(snapshots)
             lines.append("  Snapshots:")
-            lines.append(
-                f"    Policy: hourly={snap_policy.hourly} daily={snap_policy.daily} "
-                f"weekly={snap_policy.weekly} monthly={snap_policy.monthly} "
-                f"yearly={snap_policy.yearly} preserve_min={snap_policy.preserve_min}"
-            )
-            lines.append(f"    Simulated items: {len(snap_items)}")
-            lines.append(f"    Expected kept:   {len(snap_result.keep)}")
-            lines.append(f"    Expected remove: {len(snap_result.remove)}")
-            for bucket in ("preserve_min", "hourly", "daily", "weekly", "monthly", "yearly"):
-                info = snap_explain.get(bucket, {})
-                count = info.get("count", 0)
-                if count > 0:
-                    lines.append(f"    {bucket}: {count}")
+            lines.append(f"    chain_length: {snap_chain_length}")
+            lines.append("    keep_generations: 1")
+            lines.append(f"    Current chain: {snap_count} snapshots")
+
+            # Average incremental size from history (last 7 snapshots).
+            if snapshots:
+                recent = sorted(snapshots, key=lambda s: s.timestamp)[-7:]
+                avg_alloc = sum(s.allocation for s in recent) / len(recent)
+                avg_gb = avg_alloc / (1024**3)
+                lines.append(
+                    f"    Avg incremental: ~{avg_gb:.1f} GB (last {len(recent)} snapshots)"
+                )
 
             # Per-target backup retention
             for target in vm.targets:
-                tgt_policy = self._parse_preserve(
-                    target.target_preserve, target.target_preserve_min
-                )
-                tgt_window = self._retention_window(tgt_policy)
-                tgt_items = self._generate_synthetic_items(now, tgt_window, "backup")
-                tgt_engine = self._factory.create_retention_engine(tgt_policy)
-                tgt_result = tgt_engine.evaluate(
-                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
-                )
-                tgt_explain = tgt_engine.explain(
-                    tgt_items, tgt_policy, now, preserve_day_of_week=dow
-                )
+                tgt_chain_length = target.target_chain_length or 0
+                tgt_keep_gens = target.target_keep_generations or 1
+                all_fulls = self._state.get_full_backups(str(target.path))
+                chain_count = len(all_fulls)
 
                 lines.append(f"  Backups [{target.path}]:")
-                lines.append(
-                    f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
-                    f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
-                    f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}"
-                )
-                lines.append(f"    Simulated items: {len(tgt_items)}")
-                lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
-                lines.append(f"    Expected remove: {len(tgt_result.remove)}")
-                for bucket in ("preserve_min", "hourly", "daily", "weekly", "monthly", "yearly"):
-                    info = tgt_explain.get(bucket, {})
-                    count = info.get("count", 0)
-                    if count > 0:
-                        lines.append(f"    {bucket}: {count}")
+                lines.append(f"    chain_length: {tgt_chain_length}")
+                lines.append(f"    keep_generations: {tgt_keep_gens}")
+                lines.append(f"    Current chains: {chain_count}")
                 lines.append(
                     f"    Compression: {target.compression_type} (compress={target.compress})"
                 )
@@ -411,13 +379,10 @@ class Core:
     def estimate(self, vm_filter: str | None = None) -> str:
         """Produce a human-readable size estimation report.
 
-        Prints only factual data: base image actual-size (from
-        ``qemu-img info``), compression_type, and compress enabled/
-        disabled.  No projections — the ``base_size × 0.3`` formula
-        was removed because it cannot predict data compressibility.
+        Prints factual data: base image actual-size, compression_type,
+        compress enabled/disabled, and count-based retention config.
         """
         vms = self._filter_vms(vm_filter)
-        now = datetime.now()
 
         lines: list[str] = []
 
@@ -441,31 +406,20 @@ class Core:
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
-            lines.append(f"  Base image actual-size: {base_size} B")
+            base_gb = base_size / (1024**3)
+            lines.append(f"  Current allocated: ~{base_gb:.1f} GB")
 
             # Per-target factual data.
             for target in vm.targets:
-                tgt_policy = self._parse_preserve(
-                    target.target_preserve, target.target_preserve_min
-                )
-                tgt_window = self._retention_window(tgt_policy)
-                tgt_items = self._generate_synthetic_items(now, tgt_window, "backup")
-                tgt_engine = self._factory.create_retention_engine(tgt_policy)
-                tgt_result = tgt_engine.evaluate(
-                    tgt_items,
-                    tgt_policy,
-                    now,
-                    preserve_day_of_week=self._config.get_global().preserve_day_of_week,
-                )
+                tgt_chain_length = target.target_chain_length or 0
+                tgt_keep_gens = target.target_keep_generations or 1
+                all_fulls = self._state.get_full_backups(str(target.path))
+                chain_count = len(all_fulls)
 
                 lines.append(f"  Backups [{target.path}]:")
-                lines.append(
-                    f"    Policy: hourly={tgt_policy.hourly} daily={tgt_policy.daily} "
-                    f"weekly={tgt_policy.weekly} monthly={tgt_policy.monthly} "
-                    f"yearly={tgt_policy.yearly} preserve_min={tgt_policy.preserve_min}"
-                )
-                lines.append(f"    Expected kept:   {len(tgt_result.keep)}")
-                lines.append(f"    Expected remove: {len(tgt_result.remove)}")
+                lines.append(f"    chain_length: {tgt_chain_length}")
+                lines.append(f"    keep_generations: {tgt_keep_gens}")
+                lines.append(f"    Current chains: {chain_count}")
                 lines.append(
                     f"    Compression: {target.compression_type} (compress={target.compress})"
                 )
@@ -473,56 +427,6 @@ class Core:
             lines.append("")
 
         return "\n".join(lines)
-
-    @staticmethod
-    def _retention_window(policy: RetentionPolicy) -> timedelta:
-        """Calculate the total retention window from a policy.
-
-        Returns the maximum duration across all configured buckets.
-        """
-        windows: list[timedelta] = []
-
-        if policy.preserve_min not in ("all", "latest"):
-            match = re.match(r"(\d+)([hdwmy])", policy.preserve_min)
-            if match:
-                count = int(match.group(1))
-                unit = match.group(2)
-                unit_hours = {"h": 1, "d": 24, "w": 168, "m": 720, "y": 8760}
-                windows.append(timedelta(hours=count * unit_hours[unit]))
-        elif policy.preserve_min == "all":
-            windows.append(timedelta(days=365))
-
-        if policy.hourly > 0:
-            windows.append(timedelta(hours=policy.hourly))
-        if policy.daily > 0:
-            windows.append(timedelta(days=policy.daily))
-        if policy.weekly > 0:
-            windows.append(timedelta(weeks=policy.weekly))
-        if policy.monthly > 0:
-            windows.append(timedelta(days=policy.monthly * 30))
-        if policy.yearly > 0:
-            windows.append(timedelta(days=policy.yearly * 365))
-
-        if not windows:
-            return timedelta(days=7)
-
-        return max(windows)
-
-    @staticmethod
-    def _generate_synthetic_items(
-        now: datetime, window: timedelta, prefix: str = "item"
-    ) -> list[RetentionItem]:
-        """Generate synthetic RetentionItems, one per hour for window + 50% margin."""
-        total_hours = int(window.total_seconds() / 3600)
-        total_hours = int(total_hours * 1.5)
-        total_hours = max(total_hours, 1)
-
-        items: list[RetentionItem] = []
-        for i in range(total_hours):
-            ts = now - timedelta(hours=total_hours - i)
-            items.append(RetentionItem(name=f"{prefix}_{i:04d}", timestamp=ts))
-
-        return items
 
     def check(
         self,
@@ -2649,11 +2553,12 @@ class Core:
         if not snapshots:
             return None
 
-        policy = self._parse_preserve(vm_config.snapshot_preserve, vm_config.snapshot_preserve_min)
+        policy = RetentionPolicy(
+            chain_length=vm_config.snapshot_chain_length or 0, keep_generations=1
+        )
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
-        dow = self._config.get_global().preserve_day_of_week
-        result = engine.evaluate(items, policy, datetime.now(), preserve_day_of_week=dow)
+        result = engine.evaluate(items, policy, datetime.now())
 
         # Oldest-prefix post-processing (spec: snapshot-oldest-prefix).
         sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
@@ -3702,22 +3607,24 @@ class Core:
         # back to fixed-timeout shell.run().
         stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
+        full_verification_failed = False
         if not skip_transfer:
-            # Check for bucket-driven FULL backup necessity (design D1)
+            # Count-based FULL backup decision (design D2).
+            # The decision is a simple count check: create a new
+            # FULL when the incremental count in the newest chain
+            # exceeds target_chain_length, or when no FULLs exist
+            # (first backup to target).
             if snapshots:
                 all_fulls = self._state.get_full_backups(str(target.path))
                 # Filter out phantom FULLs — entries in state whose files
                 # no longer exist (deleted externally, disk failure, etc.).
-                # Phantom FULLs block bucket-driven FULL creation because
-                # the bucket strategy sees an existing FULL for the
-                # period and skips creation.
                 filtered_fulls: list[FullBackupInfo] = []
                 for full in all_fulls:
                     if os.path.exists(str(full.path)):
                         filtered_fulls.append(full)
                     else:
                         # Cascade cleanup: remove FULL + all linked
-                        # dependencies (design D2 — phantom cascade).
+                        # dependencies (phantom cascade).
                         self._state.remove_full_backup(str(target.path), full.name)
                         removed = self._state.remove_all_incremental_dependencies(
                             str(target.path), full.name
@@ -3736,11 +3643,10 @@ class Core:
                         target.path,
                     )
                 all_fulls = filtered_fulls
-                # Check force-full flag (auto-recovery set this at
-                # startup when no valid FULL remained — spec: auto-recovery).
+
+                # Determine whether a new FULL is needed.
                 if str(target.path) in self._force_full_targets:
                     should_full = True
-                    bucket_level = "force-recovery"
                     self._force_full_targets.discard(str(target.path))
                     logger.info(
                         "[backup] %s: force-full flag active for target %s — "
@@ -3748,42 +3654,67 @@ class Core:
                         vm_config.name,
                         target.path,
                     )
+                elif not all_fulls:
+                    # First backup to target — always create a FULL.
+                    should_full = True
                 else:
-                    policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
-                    strategy = self._factory.create_bucket_full_strategy()
-                    should_full, bucket_level = strategy.should_create_full(
-                        target, policy, all_fulls, snapshots[-1].timestamp, datetime.now()
+                    # Count incrementals in the newest chain.
+                    newest_full = max(all_fulls, key=lambda f: f.timestamp)
+                    deps = self._state.get_incremental_dependencies(
+                        str(target.path), newest_full.name
                     )
+                    incremental_count = len(deps)
+                    chain_length = target.target_chain_length or 0
+                    should_full = incremental_count > chain_length
+
                 if should_full:
                     if self._dry_run:
-                        # Log FULL-would-be-created without executing (design D7).
-                        # Single NBD path — no direct-convert fallback, so no
-                        # method selection (live-vm-full-backup delta).
+                        # Log FULL-would-be-created without executing.
                         vm_state = (
                             "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
                         )
+                        chain_length = target.target_chain_length or 0
                         logger.info(
-                            "[dry-run] Would create FULL backup (bucket=%s, method=NBD, VM=%s)",
-                            bucket_level,
+                            "[dry-run] Would create FULL backup "
+                            "(chain_length=%d, method=NBD, VM=%s)",
+                            chain_length,
                             vm_state,
                         )
                     else:
                         most_recent = max(snapshots, key=lambda s: s.timestamp)
-                        full_result = provider.create_full_backup(
-                            vm_config.name,
-                            most_recent,
-                            target,
-                            compress=target.compress,
-                            bucket_level=bucket_level,
-                            compression_type=target.compression_type,
-                            stall_timeout=stall_timeout,
-                            full_transfer_engine=target.full_transfer_engine,
-                            convert_parallel=target.convert_parallel,
-                            convert_out_of_order=target.convert_out_of_order,
-                        )
-                        if full_result.success:
+                        global_cfg = self._config.get_global()
+                        max_retries = target.backup_retry_max
+                        base_seconds = parse_retry_duration(target.backup_retry_base)
+                        full_created = False
+                        for attempt in range(1, max_retries + 1):
+                            full_result = provider.create_full_backup(
+                                vm_config.name,
+                                most_recent,
+                                target,
+                                compress=target.compress,
+                                compression_type=target.compression_type,
+                                stall_timeout=stall_timeout,
+                                full_transfer_engine=target.full_transfer_engine,
+                                convert_parallel=target.convert_parallel,
+                                convert_out_of_order=target.convert_out_of_order,
+                            )
+                            if not full_result.success:
+                                logger.warning(
+                                    "Full backup failed for VM %s target %s "
+                                    "(attempt %d/%d): %s",
+                                    vm_config.name,
+                                    target.path,
+                                    attempt,
+                                    max_retries,
+                                    full_result.error,
+                                )
+                                if attempt < max_retries:
+                                    backoff = compute_backoff(base_seconds, attempt)
+                                    time.sleep(backoff)
+                                continue
+
                             # ── Post-create FULL backup verification ────
-                            global_cfg = self._config.get_global()
+                            # (verify-before-delete gate — design D3).
                             verify_error = verify_full_backup(
                                 self._shell,
                                 full_result.target_path,
@@ -3791,52 +3722,70 @@ class Core:
                                 source_path=most_recent.path,
                             )
                             if verify_error is not None:
+                                # Rollback: delete FULL file + checkpoint +
+                                # state records (design D4).
                                 self._shell.run(
                                     ["rm", "-f", str(full_result.target_path)],
                                     timeout=10,
                                 )
-                                backup_failed = True
+                                self._cleanup_failed_checkpoint(
+                                    vm_config, target, full_result
+                                )
+                                full_name = full_result.target_path.stem
+                                self._state.remove_full_backup(
+                                    str(target.path), f"{full_name}.qcow2"
+                                )
                                 logger.warning(
                                     "FULL backup verification failed for VM %s "
-                                    "target %s — file deleted: %s",
+                                    "target %s (attempt %d/%d) — rolled back: %s",
                                     vm_config.name,
                                     target.path,
+                                    attempt,
+                                    max_retries,
                                     verify_error,
                                 )
-                            else:
-                                full_name = full_result.target_path.stem
-                                # Record FULL in state (caller's responsibility
-                                # after verification — per core-orchestrator spec).
-                                self._state.record_full_backup(
-                                    str(target.path),
-                                    f"{full_name}.qcow2",
-                                    most_recent.timestamp,
-                                    bucket_level,
+                                if attempt < max_retries:
+                                    backoff = compute_backoff(base_seconds, attempt)
+                                    time.sleep(backoff)
+                                continue
+
+                            # Verification passed — record + log.
+                            full_name = full_result.target_path.stem
+                            self._state.record_full_backup(
+                                str(target.path),
+                                f"{full_name}.qcow2",
+                                most_recent.timestamp,
+                            )
+                            self._actions.append(
+                                ActionRecord(
+                                    action="backup_full",
+                                    vm_name=vm_config.name,
+                                    name=full_name,
+                                    path=full_result.target_path,
+                                    size=full_result.bytes_transferred,
                                 )
-                                # Audit trail + btrbk-style INFO log (design D4, D5).
-                                self._actions.append(
-                                    ActionRecord(
-                                        action="backup_full",
-                                        vm_name=vm_config.name,
-                                        name=full_name,
-                                        path=full_result.target_path,
-                                        size=full_result.bytes_transferred,
-                                    )
-                                )
-                                logger.info(
-                                    "[backup] %s: created FULL %s (%d B)",
-                                    vm_config.name,
-                                    full_name,
-                                    full_result.bytes_transferred,
-                                )
-                        else:
-                            logger.warning(
-                                "Full backup failed for VM %s target %s: %s",
+                            )
+                            logger.info(
+                                "[backup] %s: created FULL %s (%d B)",
+                                vm_config.name,
+                                full_name,
+                                full_result.bytes_transferred,
+                            )
+                            full_created = True
+                            break
+
+                        if not full_created:
+                            # All retries exhausted — CRITICAL, keep old
+                            # generations (verify-before-delete gate).
+                            full_verification_failed = True
+                            backup_failed = True
+                            logger.critical(
+                                "FULL backup creation exhausted all %d retries for "
+                                "VM %s target %s — old generations preserved",
+                                max_retries,
                                 vm_config.name,
                                 target.path,
-                                full_result.error,
                             )
-                            backup_failed = True
 
             # Transfer missing snapshots (with retry when configured)
             if not self._dry_run:
@@ -3912,13 +3861,60 @@ class Core:
                             anchor,
                         )
 
-        # Backup retention + cleanup — always runs, even when transfer
-        # is skipped (gate/retention separation: expired backups must be
-        # cleaned regardless of new data availability).
-        backups, retention_result = self._evaluate_backup_retention(vm_config, target)
-        self._cleanup_backups(vm_config, target, backups, retention_result)
+        # Backup retention + cleanup — runs unless FULL verification
+        # failed (verify-before-delete gate: old generations must not
+        # be deleted when the new FULL is unverified).  When transfer
+        # is skipped, retention + cleanup still runs to clean expired
+        # backups.
+        if not full_verification_failed:
+            backups, retention_result = self._evaluate_backup_retention(vm_config, target)
+            self._cleanup_backups(vm_config, target, backups, retention_result)
 
         return backup_failed
+
+    def _cleanup_failed_checkpoint(
+        self,
+        vm_config: VMConfig,
+        target: TargetConfig,
+        full_result: BackupResult,
+    ) -> None:
+        """Delete libvirt checkpoints created during a failed FULL attempt.
+
+        Lists checkpoints via ``virsh checkpoint-list --name``, filters
+        for ``qsnap-{target_hash}-*`` prefix, and deletes each via
+        ``virsh checkpoint-delete --metadata``.  Non-fatal — logs
+        warnings on failure (spec: core-orchestrator).
+        """
+        provider = self._factory.create_backup_provider(vm_config, target)
+        target_hash = provider.target_hash(str(target.path))
+        prefix = f"qsnap-{target_hash}-"
+        checkpoints = provider.list_checkpoints(vm_config.name)
+        failed_checkpoints = [cp for cp in checkpoints if cp.startswith(prefix)]
+        if not failed_checkpoints:
+            return
+        for cp in failed_checkpoints:
+            cmd = [
+                "virsh",
+                "checkpoint-delete",
+                "--metadata",
+                "--domain",
+                vm_config.name,
+                cp,
+            ]
+            result = self._shell.run(cmd, timeout=30, check=True)
+            if result.success:
+                logger.info(
+                    "[backup] %s: deleted checkpoint %s after failed FULL",
+                    vm_config.name,
+                    cp,
+                )
+            else:
+                logger.warning(
+                    "[backup] %s: failed to delete checkpoint %s after failed FULL: %s",
+                    vm_config.name,
+                    cp,
+                    result.error,
+                )
 
     def _resolve_chain_full_anchor(self, backup_path: Path) -> str | None:
         """Walk a backup's backing chain to its FULL anchor (bitmap mode).
@@ -4041,11 +4037,12 @@ class Core:
                 RetentionItem(name=chain_id, timestamp=representative.timestamp)
             )
 
-        policy = self._parse_preserve(target.target_preserve, target.target_preserve_min)
+        policy = RetentionPolicy(
+            chain_length=0, keep_generations=target.target_keep_generations or 1
+        )
         engine = self._factory.create_retention_engine(policy)
-        dow = self._config.get_global().preserve_day_of_week
         chain_result = engine.evaluate(
-            chain_items, policy, datetime.now(), preserve_day_of_week=dow
+            chain_items, policy, datetime.now()
         )
 
         # Expand chain-level results to individual items.
@@ -4118,7 +4115,7 @@ class Core:
           remove_all_incremental_dependencies).
         - Incrementals: resolve FULL anchor before deletion, then
           delete + state cleanup (remove_incremental_dependency).
-        - No ghost-retention, no cascade-deletion, no backing_refs.
+        - No cascade-deletion, no backing_refs.
         - Post-cleanup: verify chain integrity of all keep-set items.
         """
         if not retention_result or not retention_result.remove:
@@ -4300,68 +4297,6 @@ class Core:
             name = f"{base_name}_{counter}"
             counter += 1
         return name
-
-    @staticmethod
-    def _parse_preserve(
-        preserve_str: str | None,
-        preserve_min_str: str | None = None,
-    ) -> RetentionPolicy:
-        """Parse a preserve string like ``"24h 2d"`` into a RetentionPolicy.
-
-        If *preserve_str* is None, returns the default policy (all zeros,
-        ``preserve_min="all"`` — keep everything).
-
-        If *preserve_min_str* is non-None, it overrides the default
-        ``preserve_min`` value in the returned policy.
-        """
-        # Determine the effective preserve_min.
-        if preserve_min_str is not None:
-            effective_min = preserve_min_str
-        elif preserve_str is None:
-            effective_min = "all"
-        elif preserve_str == "latest":
-            effective_min = "latest"
-        elif preserve_str == "all":
-            effective_min = "all"
-        else:
-            effective_min = "0h"
-
-        if preserve_str is None or preserve_str in ("latest", "all"):
-            return RetentionPolicy(preserve_min=effective_min)
-
-        counts: dict[str, int] = {
-            "hourly": 0,
-            "daily": 0,
-            "weekly": 0,
-            "monthly": 0,
-            "yearly": 0,
-        }
-        anchors: dict[str, bool] = {
-            "anchor_hourly": False,
-            "anchor_daily": False,
-            "anchor_weekly": False,
-            "anchor_monthly": False,
-            "anchor_yearly": False,
-        }
-        unit_map = {"h": "hourly", "d": "daily", "w": "weekly", "m": "monthly", "y": "yearly"}
-        anchor_map = {
-            "h": "anchor_hourly",
-            "d": "anchor_daily",
-            "w": "anchor_weekly",
-            "m": "anchor_monthly",
-            "y": "anchor_yearly",
-        }
-        # Regex: count, optional F prefix, bucket char.
-        # Tokens like "7Fx" that don't match [hdwmy] are silently ignored.
-        for match in re.finditer(r"(\d+)(F?)([hdwmy])", preserve_str):
-            count = int(match.group(1))
-            is_anchor = match.group(2) == "F"
-            unit = match.group(3)
-            counts[unit_map[unit]] = count
-            if is_anchor:
-                anchors[anchor_map[unit]] = True
-
-        return RetentionPolicy(**counts, **anchors, preserve_min=effective_min)
 
     @staticmethod
     def _format_age(age: timedelta) -> str:

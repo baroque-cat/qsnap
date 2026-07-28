@@ -613,7 +613,7 @@ def test_create_full_backup_unified_engine_succeeds(mock_shell, make_target, tmp
     ):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -681,7 +681,7 @@ def test_create_full_backup_with_compression(mock_shell, make_target, tmp_path, 
     ):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True, bucket_level="monthly"
+            "testvm", snapshot, target, compress=True
         )
 
     assert result.success is True
@@ -754,7 +754,7 @@ def test_create_full_backup_no_compress_driver_when_compress_false(
     ):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -798,7 +798,7 @@ def test_bitmap_full_backup_does_not_raise_not_implemented(mock_shell, make_targ
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     from qsnap.models.results import BackupResult as _BR
@@ -831,7 +831,7 @@ def test_create_full_backup_atomic_rename_tmp_to_final(mock_shell, make_target, 
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -877,7 +877,7 @@ def test_create_full_backup_failure_removes_tmp(mock_shell, make_target, tmp_pat
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is False
@@ -919,7 +919,7 @@ def test_bitmap_full_socket_cleanup(mock_shell, make_target, tmp_path):
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -974,7 +974,7 @@ def test_bitmap_full_socket_cleanup(mock_shell, make_target, tmp_path):
     with patch.object(fail_shell, "run", wraps=fail_shell.run) as fail_spy:
         provider_fail = BitmapBackupProvider(fail_shell, nbd=None)
         result_fail = provider_fail.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result_fail.success is False
@@ -987,36 +987,6 @@ def test_bitmap_full_socket_cleanup(mock_shell, make_target, tmp_path):
     assert len(abort_fail) >= 1
     cp_delete_fail = [cmd for cmd in all_cmds_fail if "checkpoint-delete" in cmd]
     assert len(cp_delete_fail) == 1, "Successor checkpoint should be deleted best-effort on failure"
-
-
-def test_bitmap_bucket_driven_full_no_longer_crashes(mock_shell, make_target, tmp_path):
-    """create_full_backup works with different bucket_level values via qemu-img convert."""
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    _setup_convert_expectations(mock_shell, target)
-
-    mock_shell.expect("virsh --version").returns(_ok_version_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("backup-begin").returns(_ok_result())
-
-    original_run = mock_shell.run
-
-    def spied_run(cmd, timeout, **kwargs):
-        cmd_str = " ".join(cmd)
-        if cmd_str.startswith("mv "):
-            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
-        return original_run(cmd, timeout)
-
-    with patch.object(mock_shell, "run", side_effect=spied_run):
-        provider = BitmapBackupProvider(mock_shell, nbd=None)
-        for bl in ("monthly", "weekly", "daily", "yearly"):
-            result = provider.create_full_backup(
-                "testvm", snapshot, target, compress=False, bucket_level=bl
-            )
-            assert result.success is True, f"create_full_backup failed for bucket_level={bl}"
-            assert result.snapshot_name == snapshot.name
 
 
 def test_create_full_backup_returns_standalone_qcow2(mock_shell, make_target, tmp_path):
@@ -1042,7 +1012,7 @@ def test_create_full_backup_returns_standalone_qcow2(mock_shell, make_target, tm
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -1088,7 +1058,7 @@ def test_create_full_backup_dotted_vm_name_passed_untruncated(mock_shell, make_t
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "3.Projects_opencode", snapshot, target, compress=False, bucket_level="monthly"
+            "3.Projects_opencode", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -1184,7 +1154,7 @@ def test_full_pull_lifecycle_shared_by_both_paths(
     ) as mock_helper2:
         provider2 = BitmapBackupProvider(shell2, nbd=MockNbdClient())
         result = provider2.create_full_backup(
-            "testvm", snapshot, target_cfb, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target_cfb, compress=False
         )
 
     assert result.success is True
@@ -1216,7 +1186,7 @@ def test_bitmap_nbd_job_terminated_after_transfer(mock_shell, make_target, tmp_p
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -1267,7 +1237,7 @@ def test_bitmap_socket_cleanup_after_job_abort(mock_shell, make_target, tmp_path
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -1328,7 +1298,7 @@ def test_bitmap_first_full_pull_via_unified_engine(mock_shell, make_target, tmp_
     with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -1522,7 +1492,7 @@ def test_create_full_backup_does_not_self_record(mock_shell, mock_state, make_ta
         with patch.object(mock_shell, "run", side_effect=spied_run):
             provider = BitmapBackupProvider(mock_shell, state=mock_state, nbd=None)
             result = provider.create_full_backup(
-                "testvm", snapshot, target, compress=False, bucket_level="weekly"
+                "testvm", snapshot, target, compress=False
             )
     assert result.success is True
     state_spy.assert_not_called()
@@ -1550,7 +1520,7 @@ def test_create_full_backup_skips_state_when_none(mock_shell, make_target, tmp_p
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -2139,7 +2109,7 @@ def test_new_checkpoint_name_bumps_on_collision():
 
         # Mock secrets.token_hex to return a predictable value so the
         # first-iteration name collides with the taken set, forcing a bump.
-        with patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe") as mock_hex:
+        with patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"):
             collision_candidate = (
                 f"qsnap-{target_hash}-"
                 f"{frozen_time.strftime('%Y%m%dT%H%M%S')}"
@@ -2343,7 +2313,7 @@ def test_create_full_backup_stopped_vm_returns_error(mock_shell, make_target, tm
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is False
@@ -2533,7 +2503,7 @@ def test_create_full_backup_defaults_to_qemu_img_convert(mock_shell, make_target
     with patch.object(mock_shell, "run", side_effect=spied_run):
         provider = BitmapBackupProvider(mock_shell, nbd=None)
         result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False, bucket_level="monthly"
+            "testvm", snapshot, target, compress=False
         )
 
     assert result.success is True
@@ -2569,7 +2539,6 @@ def test_create_full_backup_libnbd_engine_selected(mock_shell, make_target, tmp_
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             full_transfer_engine="libnbd",
         )
 
@@ -2689,7 +2658,6 @@ def test_create_full_backup_custom_convert_parallel(mock_shell, make_target, tmp
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             convert_parallel=2,
         )
 
@@ -2731,7 +2699,6 @@ def test_create_full_backup_convert_out_of_order_disabled(mock_shell, make_targe
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             convert_out_of_order=False,
         )
 
@@ -2777,7 +2744,6 @@ def test_qemu_img_convert_uses_stall_detection(mock_shell, make_target, tmp_path
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             stall_timeout=1800,
         )
 
@@ -2816,7 +2782,6 @@ def test_libnbd_full_uses_stall_detection(mock_shell, make_target, tmp_path):
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             full_transfer_engine="libnbd",
             stall_timeout=900,
         )
@@ -2857,7 +2822,6 @@ def test_stall_timeout_disabled_falls_back_to_fixed_timeout(mock_shell, make_tar
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             stall_timeout=0,
         )
 
@@ -2909,8 +2873,7 @@ def test_create_full_backup_stopped_vm_custom_flags(mock_shell, make_target, tmp
                 snapshot,
                 target,
                 compress=False,
-                bucket_level="monthly",
-                convert_parallel=2,
+                    convert_parallel=2,
                 convert_out_of_order=False,
             )
 
@@ -2965,8 +2928,7 @@ def test_create_full_backup_stopped_vm_no_compression(mock_shell, make_target, t
                 snapshot,
                 target,
                 compress=False,
-                bucket_level="monthly",
-            )
+                )
 
     assert result.success is True
 
@@ -3016,8 +2978,7 @@ def test_create_full_backup_stopped_vm_direct_convert(mock_shell, make_target, t
                 snapshot,
                 target,
                 compress=False,
-                bucket_level="monthly",
-            )
+                )
 
     assert result.success is True
 
@@ -3064,7 +3025,6 @@ def test_create_full_backup_libnbd_with_zstd_compression(mock_shell, make_target
             snapshot,
             target,
             compress=True,
-            bucket_level="monthly",
             compression_type="zstd",
             full_transfer_engine="libnbd",
         )
@@ -3105,7 +3065,6 @@ def test_create_full_backup_libnbd_no_compression(mock_shell, make_target, tmp_p
             snapshot,
             target,
             compress=False,
-            bucket_level="monthly",
             full_transfer_engine="libnbd",
         )
 
@@ -3404,8 +3363,10 @@ def test_previous_backup_vanished_retryable_failure(
 
     nbd = MockNbdClient(size=65536)
 
-    with patch.object(mock_shell, "run", side_effect=counting_run):
-        with patch.object(BitmapBackupProvider, "list", return_value=backups):
+    with (
+        patch.object(mock_shell, "run", side_effect=counting_run),
+        patch.object(BitmapBackupProvider, "list", return_value=backups),
+    ):
             provider = BitmapBackupProvider(mock_shell, nbd=nbd)
             result = provider._copy_dirty_blocks(
                 vm_name=vm_config.name,

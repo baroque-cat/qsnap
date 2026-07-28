@@ -117,7 +117,7 @@ def test_socket_and_tmp_cleanup(test_vm):
             source,
             target,
             compress=False,
-            bucket_level="monthly",
+
         )
 
         # Source NBD socket must be gone.
@@ -143,7 +143,7 @@ def test_socket_and_tmp_cleanup(test_vm):
             source,
             target,
             compress=False,
-            bucket_level="monthly",
+
         )
         assert result.success or result.error is not None, f"Stopped-VM path failed: {result.error}"
         assert not tmp_file.exists(), f"Tmp file {tmp_file} must be cleaned up"
@@ -196,7 +196,6 @@ def test_domjobabort_after_backup(test_vm):
         source,
         target,
         compress=False,
-        bucket_level="monthly",
     )
     assert result.success, f"FULL backup failed: {result.error}"
 

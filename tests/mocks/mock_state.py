@@ -123,7 +123,7 @@ class InMemoryStateManager(IStateManager):
         return entries[-1]
 
     def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
-        self.record_full_backup(target_path, name, timestamp, "monthly")
+        self.record_full_backup(target_path, name, timestamp)
 
     def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
         return list(self._full_backups.get(target_path, []))
@@ -133,7 +133,6 @@ class InMemoryStateManager(IStateManager):
         target_path: str,
         name: str,
         timestamp: datetime,
-        bucket_level: str,
     ) -> None:
         from pathlib import Path
 
@@ -143,7 +142,6 @@ class InMemoryStateManager(IStateManager):
                 name=name,
                 path=Path(target_path) / name,
                 timestamp=timestamp,
-                bucket_level=bucket_level,
             )
         )
 

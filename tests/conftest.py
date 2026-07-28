@@ -218,13 +218,11 @@ def make_global_config():
 
     def _make(
         timestamp_format: str = "long",
-        preserve_day_of_week: str = "monday",
         state_dir: str = "/var/lib/qsnap/state",
         lockfile: str | None = None,
-        snapshot_preserve: str | None = None,
-        target_preserve: str | None = None,
-        snapshot_preserve_min: str | None = None,
-        target_preserve_min: str | None = None,
+        snapshot_chain_length: int | None = None,
+        target_chain_length: int | None = None,
+        target_keep_generations: int | None = None,
         deferred_warn_count: str = "5",
         deferred_crit_count: str = "10",
         deferred_warn_age: str = "7d",
@@ -248,13 +246,11 @@ def make_global_config():
     ) -> GlobalConfig:
         return GlobalConfig(
             timestamp_format=timestamp_format,
-            preserve_day_of_week=preserve_day_of_week,
             state_dir=state_dir,
             lockfile=lockfile,
-            snapshot_preserve=snapshot_preserve,
-            target_preserve=target_preserve,
-            snapshot_preserve_min=snapshot_preserve_min,
-            target_preserve_min=target_preserve_min,
+            snapshot_chain_length=snapshot_chain_length,
+            target_chain_length=target_chain_length,
+            target_keep_generations=target_keep_generations,
             deferred_warn_count=deferred_warn_count,
             deferred_crit_count=deferred_crit_count,
             deferred_warn_age=deferred_warn_age,

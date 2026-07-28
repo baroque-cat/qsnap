@@ -279,10 +279,12 @@ class JsonStateManager(IStateManager):
         """Load full-backups data, auto-migrating old single-dict format.
 
         Old format: ``{target_path: {name, path, timestamp}}``
-        New format: ``{target_path: [{name, path, timestamp, bucket_level}, ...]}``
+        New format: ``{target_path: [{name, path, timestamp}, ...]}``
 
         If a value is a dict (not a list), it is wrapped in a single-element
-        list for backward compatibility.
+        list for backward compatibility.  Old entries containing extra
+        deprecated keys are read-tolerantly — unknown fields are silently
+        ignored.
 
         Deduplication migration (design D4): entries with duplicate
         ``(name, target_path)`` tuples are removed on load, keeping the
@@ -349,6 +351,8 @@ class JsonStateManager(IStateManager):
 
         Uses the new multi-FULL format.  ``set_last_full_backup`` still
         works for backward compatibility but now appends to the list.
+        Old entries with extra deprecated fields are read-tolerantly —
+        unknown fields are silently ignored.
         """
         data = self._load_full_backups()
         entries = data.get(target_path)
@@ -359,12 +363,11 @@ class JsonStateManager(IStateManager):
             name=str(entry["name"]),
             path=Path(str(entry["path"])),
             timestamp=datetime.fromisoformat(str(entry["timestamp"])),
-            bucket_level=str(entry.get("bucket_level", "monthly")),
         )
 
     def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
         """Record a full backup (backward-compatible, appends to list)."""
-        self.record_full_backup(target_path, name, timestamp, "monthly")
+        self.record_full_backup(target_path, name, timestamp)
 
     def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
         """Return all recorded full backups for *target_path*, oldest first."""
@@ -375,7 +378,6 @@ class JsonStateManager(IStateManager):
                 name=str(e["name"]),
                 path=Path(str(e["path"])),
                 timestamp=datetime.fromisoformat(str(e["timestamp"])),
-                bucket_level=str(e.get("bucket_level", "monthly")),
             )
             for e in entries
         ]
@@ -385,7 +387,6 @@ class JsonStateManager(IStateManager):
         target_path: str,
         name: str,
         timestamp: datetime,
-        bucket_level: str,
     ) -> None:
         """Append a full backup record for *target_path*."""
         data = self._load_full_backups()
@@ -395,7 +396,6 @@ class JsonStateManager(IStateManager):
                 "name": name,
                 "path": str(Path(target_path) / name),
                 "timestamp": timestamp.isoformat(),
-                "bucket_level": bucket_level,
             }
         )
         data[target_path] = entries

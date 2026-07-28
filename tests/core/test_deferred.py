@@ -368,7 +368,7 @@ def test_risk_deferred_queue_grows_across_runs(
     vm = make_vm_config(
         name="testvm",
         disks=["vda"],
-        snapshot_preserve="24h",
+        snapshot_chain_length=24,
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(

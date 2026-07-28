@@ -81,9 +81,9 @@ class IStateManager(ABC):
 
     @abstractmethod
     def record_full_backup(
-        self, target_path: str, name: str, timestamp: datetime, bucket_level: str
+        self, target_path: str, name: str, timestamp: datetime
     ) -> None:
-        """Append a full backup record for *target_path* with bucket level."""
+        """Append a full backup record for *target_path*."""
         ...
 
     @abstractmethod

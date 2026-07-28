@@ -203,7 +203,6 @@ def test_full_backup_compression_modes(test_vm):
         ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
     )
     assert result_none.success, f"Uncompressed FULL failed: {result_none.error}"
     _assert_standalone_qcow2(shell, result_none.target_path)
@@ -224,7 +223,6 @@ def test_full_backup_compression_modes(test_vm):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
-        bucket_level="monthly",
     )
     assert result_zstd.success, f"zstd FULL failed: {result_zstd.error}"
     _assert_standalone_qcow2(shell, result_zstd.target_path)
@@ -243,7 +241,6 @@ def test_full_backup_compression_modes(test_vm):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
-        bucket_level="monthly",
     )
     assert result_zlib.success, f"zlib FULL failed: {result_zlib.error}"
     _assert_standalone_qcow2(shell, result_zlib.target_path)
@@ -321,7 +318,7 @@ def test_full_backup_speed_comparison(test_vm):
         ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
     )
     t_none = time.monotonic() - t0
     assert r_none.success, f"Uncompressed FULL failed: {r_none.error}"
@@ -340,7 +337,7 @@ def test_full_backup_speed_comparison(test_vm):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
-        bucket_level="monthly",
+
     )
     t_zstd = time.monotonic() - t0
     assert r_zstd.success, f"zstd FULL failed: {r_zstd.error}"
@@ -360,7 +357,7 @@ def test_full_backup_speed_comparison(test_vm):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
-        bucket_level="monthly",
+
     )
     t_zlib = time.monotonic() - t0
     assert r_zlib.success, f"zlib FULL failed: {r_zlib.error}"
@@ -415,7 +412,7 @@ def test_full_backup_stopped_vm(test_vm, caplog):
         ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
     )
 
     assert result.success, f"Stopped-VM FULL must succeed, got: {result.error}"
@@ -491,7 +488,7 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
     )
 
     assert result.success, f"Running-VM NBD FULL must succeed, got: {result.error}"
@@ -596,7 +593,7 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
         full_transfer_engine="qemu-img-convert",
     )
 
@@ -690,7 +687,7 @@ def test_full_backup_libnbd_engine(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
         full_transfer_engine="libnbd",
     )
 
@@ -771,7 +768,7 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
         full_transfer_engine="qemu-img-convert",
         convert_parallel=2,
         convert_out_of_order=False,
@@ -876,7 +873,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         ),
         TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
         compress=False,
-        bucket_level="monthly",
+
         full_transfer_engine="libnbd",
     )
     t_none = time.monotonic() - t0
@@ -902,7 +899,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
-        bucket_level="monthly",
+
         full_transfer_engine="libnbd",
     )
     t_zstd = time.monotonic() - t0
@@ -926,7 +923,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
-        bucket_level="monthly",
+
         full_transfer_engine="libnbd",
     )
     t_zlib = time.monotonic() - t0

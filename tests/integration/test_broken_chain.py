@@ -160,7 +160,7 @@ def _build_core(
 ) -> tuple[Core, VMConfig, InMemoryStateManager]:
     """Build a Core instance with InMemoryStateManager and DefaultFactory.
 
-    Includes ``target_preserve="monthly=1"`` so the bucket strategy
+    Includes ``target_chain_length=24`` so the count-based strategy
     triggers FULL backup creation.
     """
     state = InMemoryStateManager()
@@ -168,7 +168,7 @@ def _build_core(
         name=vm_name,
         base_image=base_image,
         snapshot_dir=snapshot_dir,
-        snapshot_preserve="7d",
+        snapshot_chain_length=7,
         targets=[
             TargetConfig(
                 path=target_dir,
@@ -176,7 +176,7 @@ def _build_core(
                 compress=False,
                 verify="off",
                 # Bucket-driven FULL requires a non-zero retention bucket.
-                target_preserve="monthly=1",
+                target_chain_length=24,
             )
         ],
     )
@@ -258,7 +258,7 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-        bucket_level="monthly",
+
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
@@ -271,7 +271,6 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         str(target_dir),
         f"{full_name}.qcow2",
         source_snap.timestamp,
-        "monthly",
     )
 
     # ── Step 2: Create manual backing-chained incrementals ──────────
@@ -423,12 +422,12 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False, bucket_level="monthly"
+        vm_name, source_snap, target, compress=False,
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly")
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
 
     # ── Step 2: Create backing-chained incrementals ─────────────────
     incr1_name = f"{vm_name}.20250201_vda_incr1"
@@ -594,12 +593,12 @@ def test_check_state_detects_broken_chains(test_vm):
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False, bucket_level="monthly"
+        vm_name, source_snap, target, compress=False,
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly")
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
 
     # ── Step 2: Create incremental and break its chain ───────────────
     broken_name = f"{vm_name}.20250301_vda_broken"
@@ -707,12 +706,12 @@ def test_reconcile_detects_and_cleans_broken_chains(test_vm, caplog):
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False, bucket_level="monthly"
+        vm_name, source_snap, target, compress=False,
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, "monthly")
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
 
     # ── Step 2: Create an untracked broken-chain file ────────────────
     orphan_name = f"{vm_name}.20250401_vda_broken_orphan"

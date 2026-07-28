@@ -7,7 +7,6 @@ from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBackupProvider,
     MockBitmapBackupProvider,
-    MockBucketFullStrategy,
     MockChangeDetector,
     MockLifecycleManager,
     MockRetentionEngine,
@@ -21,7 +20,6 @@ __all__ = [
     "InMemoryStateManager",
     "MockBackupProvider",
     "MockBitmapBackupProvider",
-    "MockBucketFullStrategy",
     "MockChangeDetector",
     "MockConfigFacade",
     "MockLifecycleManager",

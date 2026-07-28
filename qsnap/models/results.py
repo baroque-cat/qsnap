@@ -146,15 +146,11 @@ class FullBackupInfo:
     Used by ``IStateManager`` to track when the last full backup was
     created for a given target, so that incremental backups can rebase
     to the correct anchor.
-
-    ``bucket_level`` records which retention bucket triggered the FULL
-    creation (e.g. ``"yearly"``, ``"monthly"``, ``"weekly"``).
     """
 
     name: str
     path: Path
     timestamp: datetime
-    bucket_level: str = "monthly"
 
 
 # ── Retention ────────────────────────────────────────────────────────────

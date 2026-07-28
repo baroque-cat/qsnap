@@ -34,7 +34,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockBucketFullStrategy, MockConfigFacade
+from tests.mocks import MockConfigFacade
 
 pytestmark = pytest.mark.unit
 
@@ -331,52 +331,6 @@ def test_core_timestamp_format_long_iso_produces_iso_name(
     assert name.endswith("_vda")
 
 
-# ── test_core_passes_preserve_day_of_week_to_retention_engine ─────────────
-
-
-def test_core_passes_preserve_day_of_week_to_retention_engine(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core passes ``preserve_day_of_week`` from GlobalConfig to the retention engine."""
-    vm = make_vm_config(
-        name="testvm",
-        targets=[make_target()],
-        snapshot_preserve="24h",
-    )
-    config = MockConfigFacade(
-        global_config=GlobalConfig(preserve_day_of_week="tuesday"),
-        vms=[vm],
-    )
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    with patch.object(
-        mock_factory._retention_engine,
-        "evaluate",
-        wraps=mock_factory._retention_engine.evaluate,
-    ) as eval_spy:
-        core.run()
-
-    assert eval_spy.called
-    assert eval_spy.call_args.kwargs["preserve_day_of_week"] == "tuesday"
-
-
 # ── test_core_restore_from_snapshot_returns_restore_result ────────────────
 
 
@@ -670,7 +624,8 @@ def test_pipeline_all_backups_succeed_exit_code_not_10(
         shell=mock_shell,
     )
 
-    result = core.run()
+    with patch("qsnap.core.verify_full_backup", return_value=None):
+        result = core.run()
 
     assert len(result.results) == 1
     assert result.results[0].backup_failed is False
@@ -949,7 +904,7 @@ def test_action_appended_on_snapshot_delete(
     vm = make_vm_config(
         name="testvm",
         disks=["vda"],
-        snapshot_preserve="0h",
+        snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1055,7 +1010,7 @@ def test_action_appended_on_full_backup(
     mock_shell,
 ):
     """Run core.run() with FULL backup; verify actions contains backup_full ActionRecord."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1073,8 +1028,7 @@ def test_action_appended_on_full_backup(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to trigger FULL creation.
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     # Spy on create_full_backup to verify new kwargs are passed by Core.
     bitmap_provider = mock_factory._bitmap_backup_provider
@@ -1097,7 +1051,7 @@ def test_action_appended_on_full_backup(
     assert full_spy.called
     assert full_spy.call_args.kwargs["compression_type"] == "zstd"
     assert full_spy.call_args.kwargs["stall_timeout"] == 1800
-    assert full_spy.call_args.kwargs["bucket_level"] == "monthly"
+    # bucket_level is not passed in count-based FULL (Core calls create_full_backup without it).
     assert full_spy.call_args.kwargs["compress"] is True
 
 
@@ -1112,7 +1066,7 @@ def test_action_appended_on_backup_delete(
     mock_shell,
 ):
     """Run core.run() with backup retention; verify actions contains backup_delete ActionRecord."""
-    target = make_target(target_preserve="0h")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1130,12 +1084,17 @@ def test_action_appended_on_backup_delete(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Mock backup provider list to return a backup that retention will remove.
+    # Pre-populate a backup that retention will remove.
     backup = SnapshotInfo(
         name="backup1",
         path=target.path / "backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
+    )
+
+    # Ensure auto-recovery does not delete backup1 (valid backing chain).
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout="{}", stderr="", returncode=0, error=None)
     )
 
     with (
@@ -1145,6 +1104,7 @@ def test_action_appended_on_backup_delete(
             "evaluate",
             return_value=RetentionResult(keep=[], remove=["backup1"]),
         ),
+        patch("qsnap.core.verify_full_backup", return_value=None),
     ):
         result = core.run()
 
@@ -1372,7 +1332,8 @@ def test_no_backup_failed_warning_when_all_succeed(
 
     caplog.set_level(logging.WARNING)
 
-    result = core.run()
+    with patch("qsnap.core.verify_full_backup", return_value=None):
+        result = core.run()
 
     assert result.results[0].backup_failed is False
     # No "Backup transfer failed" warning should be logged.
@@ -1470,7 +1431,7 @@ def test_snapshot_delete_info_log(
     vm = make_vm_config(
         name="testvm",
         disks=["vda"],
-        snapshot_preserve="0h",
+        snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1573,7 +1534,7 @@ def test_full_backup_create_info_log(
     caplog,
 ):
     """Verify [backup] FULL creation info log is emitted for FULL creation."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1591,7 +1552,7 @@ def test_full_backup_create_info_log(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     caplog.set_level(logging.INFO)
     with patch("qsnap.core.verify_full_backup", return_value=None):
@@ -1605,7 +1566,7 @@ def test_full_backup_create_info_log(
     )
     assert "testvm" in full_lines[0]
     assert "FULL" in full_lines[0]
-    assert "monthly" in full_lines[0], "Bucket level should be in the log"
+    # Count-based log: no bucket level.
     assert "1048576" in full_lines[0], "Log should include bytes_transferred"
 
 
@@ -1621,7 +1582,7 @@ def test_backup_delete_info_log(
     caplog,
 ):
     """Verify [delete] info log is emitted for each deleted backup."""
-    target = make_target(target_preserve="0h")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1646,6 +1607,11 @@ def test_backup_delete_info_log(
         allocation=1000,
     )
 
+    # Ensure auto-recovery does not delete backup1 (valid backing chain).
+    mock_shell.expect("qemu-img info --backing-chain").returns(
+        ShellResult(success=True, stdout="{}", stderr="", returncode=0, error=None)
+    )
+
     caplog.set_level(logging.INFO)
 
     with (
@@ -1655,6 +1621,7 @@ def test_backup_delete_info_log(
             "evaluate",
             return_value=RetentionResult(keep=[], remove=["backup1"]),
         ),
+        patch("qsnap.core.verify_full_backup", return_value=None),
     ):
         core.run()
 

@@ -170,7 +170,7 @@ def test_reconcile_command(test_vm, caplog):
                 pytest.skip(f"Core.run failed: {vm_result.error}")
             elif vm_result.backup_failed:
                 pytest.skip("Backup transfer failed — cannot test reconcile")
-        pytest.skip("No FULL backup created — bucket strategy may have been suppressed")
+        pytest.skip("No FULL backup created — chain_length may have been suppressed")
 
     # Verify there is at least one FULL recorded in state.
     assert len(fulls_before) > 0, "Expected at least one FULL backup in state after core.run()"

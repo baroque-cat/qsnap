@@ -2,7 +2,8 @@
 
 Covers the ``conftest-fixtures`` group from the test plan:
 - ``make_target`` fixture defaults and overrides for ``compress``.
-- ``make_global_config`` fixture defaults and overrides for ``compress``.
+- ``make_global_config`` fixture defaults and overrides for ``compress``
+  and count-based retention fields.
 - Test fixture TOML files parse correctly through ``ConfigFacade``.
 """
 
@@ -75,6 +76,72 @@ def test_make_global_config_compress_false(
     assert cfg.compress is False
 
 
+@pytest.mark.unit
+def test_make_global_config_chain_length_defaults(
+    make_global_config,
+) -> None:
+    """make_global_config() has snapshot_chain_length=None by default."""
+    cfg = make_global_config()
+    assert cfg.snapshot_chain_length is None
+    assert cfg.target_chain_length is None
+    assert cfg.target_keep_generations is None
+
+
+@pytest.mark.unit
+def test_make_global_config_overrides_chain_length(
+    make_global_config,
+) -> None:
+    """make_global_config(snapshot_chain_length=168) overrides the default."""
+    cfg = make_global_config(
+        snapshot_chain_length=168,
+        target_chain_length=100,
+        target_keep_generations=2,
+    )
+    assert cfg.snapshot_chain_length == 168
+    assert cfg.target_chain_length == 100
+    assert cfg.target_keep_generations == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario 1: qsnap.toml.example is parseable with all new fields
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_example_config_parseable() -> None:
+    """The project's qsnap.toml.example is parseable with all count-based
+    retention fields."""
+    example_path = Path(__file__).resolve().parent.parent.parent / "qsnap.toml.example"
+    facade = ConfigFacade(example_path)
+
+    # Should have at least one VM (debiantest).
+    vms = facade.get_vms()
+    assert len(vms) >= 1
+
+    # Verify global defaults.
+    global_cfg = facade.get_global()
+    assert global_cfg.timestamp_format == "long"
+    # Count-based retention fields default to None in the example (commented out).
+    assert global_cfg.snapshot_chain_length is None
+    assert global_cfg.target_chain_length is None
+    assert global_cfg.target_keep_generations is None
+
+    # Verify VM de facto.
+    vm = facade.get_vm("debiantest")
+    assert vm.name == "debiantest"
+    assert len(vm.targets) >= 1
+    target = vm.targets[0]
+    assert target.path == Path("/mnt/backup/debiantest")
+    # Defaults.
+    assert target.incremental is True
+    assert target.compress is True
+    # Count-based retention fields default to None on the VM (inherited from global).
+    assert vm.snapshot_chain_length is None
+    assert vm.target_chain_length is None
+    assert vm.target_keep_generations is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # TOML fixture: bucket_driven.toml
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -505,8 +572,6 @@ def test_engine_config_toml_parses_correctly() -> None:
     target_convert = next(
         t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_convert")
     )
-    # Overrides global "libnbd" → "qemu-img-convert", parallel 2→8,
-    # out_of_order false→true.
     assert target_convert.full_transfer_engine == "qemu-img-convert"
     assert target_convert.convert_parallel == 8
     assert target_convert.convert_out_of_order is True
@@ -514,8 +579,6 @@ def test_engine_config_toml_parses_correctly() -> None:
     target_inh = next(
         t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_inherit")
     )
-    # Inherits full_transfer_engine="libnbd", convert_parallel=2,
-    # convert_out_of_order=false from global.
     assert target_inh.full_transfer_engine == "libnbd"
     assert target_inh.convert_parallel == 2
     assert target_inh.convert_out_of_order is False

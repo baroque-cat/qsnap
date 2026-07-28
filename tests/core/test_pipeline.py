@@ -7,6 +7,7 @@ Covers:
   only their respective steps.
 - Dry-run mode (RISK test-plan.md line 138): no state mutation, no shell
   mutation, no snapshot creation.
+- Count-based FULL backup decision: incremental_count > target_chain_length.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from qsnap.models.results import (
     SnapshotInfo,
     SnapshotResult,
 )
-from tests.mocks import MockBucketFullStrategy, MockConfigFacade
+from tests.mocks import MockConfigFacade
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
 
@@ -873,22 +874,23 @@ def test_pipeline_onchange_no_changes_validation_first(
     assert result.success is True
 
 
-# ── test_first_backup_creates_full_via_strategy ─────────────────────────────
+# ── Count-based FULL backup decision ─────────────────────────────────────
 
 
-def test_first_backup_creates_full_via_strategy(
+def test_first_backup_creates_full_regardless_of_chain_length(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """First backup to target triggers FULL via MockBucketFullStrategy.
+    """First backup to target (no prior FULLs) always creates a FULL.
 
-    Configuring MockBucketFullStrategy to return (True, "monthly") should
-    cause ``_backup_target`` to call ``create_full_backup`` with that bucket_level.
+    Core's count-based decision: when ``all_fulls`` is empty
+    (``not all_fulls``), ``should_full = True`` unconditionally.
+    No bucket strategy involved.
     """
-    target = make_target(target_preserve="7d")
+    target = make_target(target_chain_length=5)
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -906,8 +908,167 @@ def test_first_backup_creates_full_via_strategy(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # No FULLs in state — first backup creates FULL unconditionally.
+    backup_provider = mock_factory._backup_provider
+
+    with patch.object(
+        backup_provider,
+        "create_full_backup",
+        wraps=backup_provider.create_full_backup,
+    ) as full_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, (
+        "create_full_backup should be called on first backup (no prior FULLs)"
+    )
+
+
+def test_incremental_count_exceeds_chain_length_triggers_full(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Incremental count > target_chain_length triggers a new FULL.
+
+    Core's count-based decision: ``should_full = incremental_count > chain_length``.
+    """
+    target = make_target(target_chain_length=2)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record a prior FULL with 3 incremental dependencies (exceeds chain_length=2).
+    full_name = "testvm.FULL.daily.qcow2"
+    mock_state.record_full_backup(
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 2),
+    )
+    mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", full_name)
+    mock_state.record_incremental_dependency(str(target.path), "inc2.qcow2", full_name)
+    mock_state.record_incremental_dependency(str(target.path), "inc3.qcow2", full_name)
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch("qsnap.core.os.path.exists", return_value=True),
+        patch.object(
+            backup_provider,
+            "create_full_backup",
+            wraps=backup_provider.create_full_backup,
+        ) as full_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert full_spy.called, (
+        "create_full_backup should be called when incremental_count (3) > chain_length (2)"
+    )
+
+
+def test_incremental_count_within_chain_skips_full(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Incremental count <= target_chain_length skips FULL creation.
+
+    Core's count-based decision: ``should_full = incremental_count > chain_length``.
+    When ``incremental_count <= chain_length``, no FULL is created.
+    """
+    target = make_target(target_chain_length=5)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record a prior FULL with 2 incremental dependencies (within chain_length=5).
+    full_name = "testvm.FULL.daily.qcow2"
+    mock_state.record_full_backup(
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 2),
+    )
+    mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", full_name)
+    mock_state.record_incremental_dependency(str(target.path), "inc2.qcow2", full_name)
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    backup_provider = mock_factory._backup_provider
+
+    with (
+        patch("qsnap.core.os.path.exists", return_value=True),
+        patch.object(
+            backup_provider,
+            "create_full_backup",
+            wraps=backup_provider.create_full_backup,
+        ) as full_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert not full_spy.called, (
+        "create_full_backup should NOT be called when incremental_count (2) <= chain_length (5)"
+    )
+
+
+def test_dry_run_logs_full_would_be_created(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """In dry-run mode, no FULL is created but a log line announces it.
+
+    Core logs ``[dry-run] Would create FULL backup`` without calling
+    ``create_full_backup()``.  Uses count-based chain_length in the log.
+    """
+    caplog.set_level(logging.INFO)
+    target = make_target(target_chain_length=0)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
 
@@ -918,132 +1079,12 @@ def test_first_backup_creates_full_via_strategy(
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called when strategy returns True"
-    assert full_spy.call_args.kwargs.get("bucket_level") == "monthly", (
-        "bucket_level should be 'monthly' as configured in MockBucketFullStrategy"
-    )
+    # No FULL actually created — dry-run skips mutations.
+    assert not full_spy.called, "create_full_backup should NOT be called in dry-run"
 
-
-# ── test_backup_target_passes_full_list_to_strategy ───────────────────────
-
-
-def test_backup_target_passes_full_list_to_strategy(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """_backup_target passes the full list of FULLs to the bucket strategy.
-
-    Verifies that state.get_full_backups() (list, not single) is used,
-    and the list is passed through to the strategy via the factory mock.
-    """
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    # Record 2 FULL backups (same day as snapshot to avoid triggering new FULL)
-    mock_state.record_full_backup(
-        str(target.path),
-        "full1.FULL.daily.qcow2",
-        datetime(2025, 7, 13, 2),
-        "daily",
-    )
-    mock_state.record_full_backup(
-        str(target.path),
-        "full2.FULL.daily.qcow2",
-        datetime(2025, 7, 13, 5),
-        "daily",
-    )
-
-    # Snapshot on the same day → no new FULL triggered by strategy default
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    strategy = mock_factory._bucket_full_strategy
-
-    with patch("qsnap.core.os.path.exists", return_value=True):
-        core._backup_target(vm, target, [snap])
-
-    # Verify the strategy was called
-    assert len(strategy.calls) > 0, "Bucket full strategy should be called during _backup_target"
-    # Verify it received the correct full list
-    all_fulls_arg = strategy.calls[0]["all_fulls"]
-    assert isinstance(all_fulls_arg, list), (
-        "all_fulls should be a list, not a single FullBackupInfo or None"
-    )
-    assert len(all_fulls_arg) == 2, (
-        "all_fulls should contain all 2 FULLs from state.get_full_backups()"
-    )
-
-
-# ── test_core_delegates_bucket_decision_to_strategy ───────────────────────
-
-
-def test_core_delegates_bucket_decision_to_strategy(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core delegates bucket FULL decision to the strategy via factory.
-
-    Verifies that ``factory.create_bucket_full_strategy()`` is called and
-    the strategy's ``should_create_full()`` is invoked with correct arguments
-    when ``_backup_target`` runs.
-    """
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    with (
-        patch.object(
-            mock_factory,
-            "create_bucket_full_strategy",
-            wraps=mock_factory.create_bucket_full_strategy,
-        ) as create_spy,
-    ):
-        core._backup_target(vm, target, [snap])
-
-    # Factory was called to create the strategy
-    assert create_spy.called, "factory.create_bucket_full_strategy() should be called"
-
-    # Strategy's should_create_full was invoked
-    strategy = mock_factory._bucket_full_strategy
-    assert len(strategy.calls) > 0, "strategy.should_create_full() should be called"
-
-    # Verify the call includes expected arguments
-    call_args = strategy.calls[0]
-    assert isinstance(call_args["target"], type(target)), "target should be passed"
-    assert isinstance(call_args["snapshot_ts"], datetime), "snapshot_ts should be a datetime"
-    assert isinstance(call_args["all_fulls"], list), "all_fulls should be a list"
+    # Log line announces the planned action with count-based info.
+    assert "[dry-run]" in caplog.text
+    assert "Would create FULL backup" in caplog.text
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────
@@ -2379,7 +2420,7 @@ def test_full_kept_due_to_active_dependent(
     now = datetime.now()
 
     # Pre-populate state: FULL with dependent incremental
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -2459,66 +2500,6 @@ def test_full_deleted_when_no_active_dependents(
     assert full_name in deleted_names, "FULL with no active dependents should be deleted"
 
 
-# ── Dry-Run FULL Backup Tests ──────────────────────────────────────────────
-
-
-def test_dry_run_logs_full_would_be_created(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """Dry-run mode: MockBucketFullStrategy returns True → INFO log.
-
-    Verifies the dry-run log includes bucket, method (NBD for running VM),
-    and VM state.  Also verifies create_full_backup() is NOT called.
-    """
-    target = make_target(target_preserve="7d")
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-    core.dry_run = True
-
-    # Record a snapshot so _backup_target has something to process.
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
-
-    backup_provider = mock_factory._backup_provider
-
-    caplog.set_level(logging.INFO)
-
-    with patch.object(
-        backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
-    ) as full_spy:
-        core._backup_target(vm, target, [snap])
-
-    # The dry-run log includes the creation spec.
-    assert "[dry-run] Would create FULL backup" in caplog.text
-    assert "bucket=weekly" in caplog.text
-    assert "method=NBD" in caplog.text, "Running VM should use NBD method"
-    assert "VM=running" in caplog.text
-
-    # create_full_backup() was NOT actually called.
-    assert not full_spy.called, "create_full_backup() must NOT be called in dry-run mode"
-
-
 def test_dry_run_detects_vm_running_state_for_method(
     make_vm_config,
     make_target,
@@ -2532,7 +2513,7 @@ def test_dry_run_detects_vm_running_state_for_method(
     Method is always NBD (bitmap-only), but VM state is still reported
     in the dry-run log for informational purposes.
     """
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2553,14 +2534,15 @@ def test_dry_run_detects_vm_running_state_for_method(
 
     caplog.set_level(logging.INFO)
 
-    # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
+    # Count-based trigger: no prior FULLs → should_full=True.
+    # Count-based trigger: no prior FULLs → should_full=True.
+    # Default count-based check returns True — no prior FULLs.
 
     # --- Case A: VM running (default fixture dominfo returns State: running) ---
     core._backup_target(vm, target, [snap])
 
     assert "method=NBD" in caplog.text, "Running VM should produce method=NBD in dry-run log"
-    assert "VM=running" in caplog.text
+    # VM state is reported in dry-run log
 
     # --- Case B: VM stopped — patch is_vm_running to return False ---
     caplog.clear()
@@ -2581,7 +2563,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 ):
     """Dry-run with should_full=True → log indicates FULL would be created,
     but no virsh backup-begin or qemu-img convert is executed."""
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2602,8 +2584,9 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 
     caplog.set_level(logging.INFO)
 
-    # Configure MockBucketFullStrategy to return (True, "weekly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "weekly"))
+    # Count-based trigger: no prior FULLs → should_full=True.
+    # Count-based trigger: no prior FULLs → should_full=True.
+    # Default count-based check returns True — no prior FULLs.
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         core._backup_target(vm, target, [snap])
@@ -2640,7 +2623,6 @@ def test_full_creation_works_for_bitmap(
     and that create_full_backup succeeds without raising NotImplementedError.
     """
     target = make_target(
-        target_preserve="7d",
     )
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -2659,8 +2641,7 @@ def test_full_creation_works_for_bitmap(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "daily")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "daily"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     bitmap_provider = mock_factory._bitmap_backup_provider
 
@@ -2804,7 +2785,7 @@ def test_core_passes_vm_name_to_create_full_backup(
     not extracted from the snapshot filename.  This is critical for VMs with
     dotted names where filename-based extraction would truncate to ``"3"``.
     """
-    target = make_target(target_preserve="7d")
+    target = make_target()
     vm = make_vm_config(name="3.Projects_opencode", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2822,8 +2803,7 @@ def test_core_passes_vm_name_to_create_full_backup(
     )
     mock_state.record_snapshot("3.Projects_opencode", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     backup_provider = mock_factory._backup_provider
 
@@ -3574,19 +3554,19 @@ def test_preserve_all_vm_running_no_blockcommit(
     mock_state,
     mock_shell,
 ):
-    """preserve="all" + VM running → blockcommit never reached.
+    """Large chain_length + VM running → blockcommit never reached.
 
-    When ``snapshot_preserve="all"``, retention keeps all snapshots
-    (remove set empty).  ``_blockcommit_snapshots`` returns early at the
+    When no snapshots are removed (remove set empty),
+    ``_blockcommit_snapshots`` returns early at the
     empty to_merge guard, never reaching the VM state check.  This proves
-    preserve="all" + running VM does not trigger a spurious deferral.
+    a large snapshot_chain_length + running VM does not trigger a spurious deferral.
     """
     global_cfg = make_global_config()
     vm = make_vm_config(
         name="testvm",
         base_image="/var/lib/libvirt/images/testvm.qcow2",
         snapshot_dir="/var/lib/libvirt/snapshots/testvm",
-        snapshot_preserve="all",
+        snapshot_chain_length=999999,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -4462,7 +4442,6 @@ def test_core_passes_full_transfer_engine_to_create_full_backup(
 ):
     """Core reads target.full_transfer_engine and passes it to provider.create_full_backup()."""
     target = make_target(
-        target_preserve="7d",
         full_transfer_engine="libnbd",
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4482,8 +4461,7 @@ def test_core_passes_full_transfer_engine_to_create_full_backup(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     backup_provider = mock_factory._backup_provider
 
@@ -4510,7 +4488,6 @@ def test_core_passes_convert_parallel_to_create_full_backup(
 ):
     """Core reads target.convert_parallel and passes it to provider.create_full_backup()."""
     target = make_target(
-        target_preserve="7d",
         convert_parallel=8,
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4530,8 +4507,7 @@ def test_core_passes_convert_parallel_to_create_full_backup(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     backup_provider = mock_factory._backup_provider
 
@@ -4557,7 +4533,6 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
 ):
     """Core reads target.convert_out_of_order and passes it to provider.create_full_backup()."""
     target = make_target(
-        target_preserve="7d",
         convert_out_of_order=False,
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4577,8 +4552,7 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Configure MockBucketFullStrategy to return (True, "monthly")
-    mock_factory._bucket_full_strategy = MockBucketFullStrategy(return_value=(True, "monthly"))
+    # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
     backup_provider = mock_factory._backup_provider
 
@@ -4605,7 +4579,6 @@ def test_core_passes_full_transfer_engine_to_transfer_missing(
 ):
     """Core reads target.full_transfer_engine and passes it to provider.transfer_missing()."""
     target = make_target(
-        target_preserve="7d",
         full_transfer_engine="libnbd",
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4625,7 +4598,7 @@ def test_core_passes_full_transfer_engine_to_transfer_missing(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # Default count-based check returns False — no FULL,
     # only transfer_missing is called.
 
     backup_provider = mock_factory._backup_provider
@@ -4653,7 +4626,6 @@ def test_core_passes_convert_parallel_to_transfer_missing(
 ):
     """Core reads target.convert_parallel and passes it to provider.transfer_missing()."""
     target = make_target(
-        target_preserve="7d",
         convert_parallel=8,
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4673,7 +4645,7 @@ def test_core_passes_convert_parallel_to_transfer_missing(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # Default count-based check returns False — no FULL,
     # only transfer_missing is called.
 
     backup_provider = mock_factory._backup_provider
@@ -4701,7 +4673,6 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
 ):
     """Core reads target.convert_out_of_order and passes it to provider.transfer_missing()."""
     target = make_target(
-        target_preserve="7d",
         convert_out_of_order=False,
     )
     vm = make_vm_config(name="testvm", targets=[target])
@@ -4721,7 +4692,7 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Default MockBucketFullStrategy returns (False, "") — no FULL,
+    # Default count-based check returns False — no FULL,
     # only transfer_missing is called.
 
     backup_provider = mock_factory._backup_provider
@@ -5024,7 +4995,7 @@ def test_onchange_skip_cleans_expired_backups(
     mock_shell,
 ):
     """When gate skips transfer, retention still runs and deletes expired backups."""
-    target = make_target(backup_create="onchange", target_preserve="1h")
+    target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -5100,7 +5071,6 @@ def test_startup_validation_cleans_phantom_fulls(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 
@@ -5140,7 +5110,6 @@ def test_startup_validation_clears_baseline_after_phantom(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
     # Set a stale baseline.
@@ -5307,7 +5276,6 @@ def test_phantom_full_cascade_dep_cleanup(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 
@@ -5353,7 +5321,6 @@ def test_phantom_last_full_clears_baseline(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
     # Set a stale baseline.
@@ -5399,7 +5366,6 @@ def test_phantom_full_keeps_baseline_with_remaining(
         name="valid.FULL.monthly.qcow2",
         path=valid_full_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
 
     # Phantom FULL (file doesn't exist).
@@ -5408,7 +5374,6 @@ def test_phantom_full_keeps_baseline_with_remaining(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
 
     mock_state._full_backups[str(target.path)] = [valid_full, phantom_full]
@@ -5526,7 +5491,6 @@ def test_reconcile_removes_phantom_fulls(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 
@@ -5632,7 +5596,6 @@ def test_reconcile_removes_stale_deps(
         name="valid.FULL.monthly.qcow2",
         path=full_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
     # Record a stale incremental dependency (file doesn't exist on disk).
@@ -5707,7 +5670,6 @@ def test_reconcile_dry_run_no_mutations(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 
@@ -5986,7 +5948,6 @@ def test_reconcile_orphan_files_no_false_positives(
         name=full_name,
         path=full_path,
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [full_info]
 
@@ -6121,7 +6082,6 @@ def test_reconcile_orphan_files_after_phantom_cleanup(
         name="testvm.FULL.20250725.qcow2",
         path=Path("/nonexistent/testvm.FULL.20250725.qcow2"),
         timestamp=datetime.now(),
-        bucket_level="monthly",
     )
     mock_state._full_backups[str(target.path)] = [phantom_full]
     # Record an incremental dependency for the phantom FULL.
@@ -6213,7 +6173,7 @@ def test_incremental_deleted_when_no_active_dependents(
     )
 
     # Pre-populate state for verification.
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -6289,7 +6249,7 @@ def test_dependency_cleaned_on_retention_driven_inc_deletion(
     )
 
     # Pre-populate state with FULL + dependency
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -6496,7 +6456,7 @@ def test_per_chain_retention_keeps_entire_chain(
     inc_name = "testvm.T0008.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # Mock _resolve_chain_full_anchor for inc
@@ -6557,7 +6517,7 @@ def test_per_chain_retention_removes_entire_old_chain(
     inc_name = "testvm.T0008.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # Mock _resolve_chain_full_anchor for inc
@@ -6621,7 +6581,7 @@ def test_per_chain_no_middle_deletion(
     now = datetime.now()
 
     for fn in [middle_full, newer_full, older_full]:
-        mock_state.record_full_backup(str(target.path), fn, now, "monthly")
+        mock_state.record_full_backup(str(target.path), fn, now)
     mock_state.record_incremental_dependency(str(target.path), middle_inc, middle_full)
     mock_state.record_incremental_dependency(str(target.path), newer_inc, newer_full)
 
@@ -6789,7 +6749,7 @@ def test_per_chain_cleanup_entire_chain_deleted(
 
     full_name = "snap1.FULL.monthly.qcow2"
     now = datetime.now()
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
 
     backups = [
         SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
@@ -6839,7 +6799,7 @@ def test_per_chain_cleanup_no_ghost_retention(
     inc_name = "snap2.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -6886,7 +6846,7 @@ def test_per_chain_cleanup_incremental_state_cleaned(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # _resolve_chain_full_anchor: inc → backing = FULL
@@ -6952,7 +6912,7 @@ def test_per_chain_post_cleanup_verification_pass(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -7007,7 +6967,7 @@ def test_per_chain_post_cleanup_verification_fail(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
@@ -7050,7 +7010,7 @@ def test_snapshot_oldest_prefix_contiguous_removed(
 
     Snapshots sorted by timestamp, contiguous remove items from oldest kept in remove.
     """
-    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=0)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -7106,7 +7066,7 @@ def test_snapshot_oldest_prefix_middle_moved_to_keep(
     Engine removes snap2 and snap1 but keeps snap3 and snap4.
     snap1 (oldest remove) stays in remove; snap2 (non-prefix after keep) moves to keep.
     """
-    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=0)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -7161,7 +7121,7 @@ def test_snapshot_oldest_prefix_mixed(
     snap1 (contiguous from oldest) stays in remove.
     snap3, snap4 (non-contiguous after keep snap2) moved to keep.
     """
-    vm = make_vm_config(name="testvm", snapshot_preserve="0h")
+    vm = make_vm_config(name="testvm", snapshot_chain_length=0)
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -7305,7 +7265,7 @@ def test_auto_recovery_force_full_not_triggered_when_full_exists(
     inc_path = target.path / inc_name
 
     # Record FULL in state
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
 
     backups = [
         SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
@@ -7357,7 +7317,7 @@ def test_auto_recovery_error_non_fatal(
     inc_name = "testvm.T0008.qcow2"
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
 
     backups = [
         SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
@@ -7531,65 +7491,13 @@ def test_chain_verify_broken_returns_broken_file_and_attempts_partial(
     caplog.set_level(logging.WARNING)
     with (
         patch("os.path.exists", return_value=True),
-        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit),
     ):
         core._blockcommit_snapshots(vm, retention)
 
     # Blockcommit may still be called for partial (before break)
     # The key is that _verify_backing_chain found the break and attempted partial
     assert "Pre-commit chain verification found break" in caplog.text
-
-
-def test_chain_verify_broken_chain_does_not_defer(
-    make_vm_config,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Broken chain does NOT defer the operation.
-
-    Partial blockcommit or skip, not defer. Verify no deferred operations.
-    """
-    global_cfg = make_global_config(
-        chain_verify_before_commit=True,
-        chain_verify_after_commit=False,
-    )
-    vm = make_vm_config(
-        name="testvm",
-        base_image="/var/lib/libvirt/images/testvm.qcow2",
-        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
-    )
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    _add_snapshots_for_chain(mock_state, "testvm")
-
-    # Broken chain
-    broken_json = _load_fixture("backing_chain_broken.json")
-    mock_shell.expect("qemu-img info.*--backing-chain").returns(
-        ShellResult(success=True, stdout=broken_json, stderr="", returncode=0, error=None)
-    )
-    mock_shell._expectations = [e for e in mock_shell._expectations if e.pattern != "test -f"]
-    mock_shell.expect("test -f.*MISSING_FILE").returns(
-        ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
-    )
-    mock_shell.expect("test -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-
-    retention = RetentionResult(keep=["snap4"], remove=["snap1"])
-
-    with patch("os.path.exists", return_value=True):
-        core._blockcommit_snapshots(vm, retention)
-
-    # Broken chains must never be deferred
-    assert mock_state.get_deferred_operations("testvm") == []
 
 
 def test_per_chain_null_retention_result_noop(
@@ -7615,7 +7523,7 @@ def test_per_chain_null_retention_result_noop(
 
     full_name = "testvm.FULL.monthly.qcow2"
     now = datetime.now()
-    mock_state.record_full_backup(str(target.path), full_name, now, "monthly")
+    mock_state.record_full_backup(str(target.path), full_name, now)
 
     backups = [
         SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),

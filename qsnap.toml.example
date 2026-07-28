@@ -24,10 +24,6 @@
 #   long-iso → 20250713T153123+0200
 timestamp_format = "long"
 
-# Day on which the weekly retention bucket boundary falls.
-# One of: monday, tuesday, wednesday, thursday, friday, saturday, sunday
-preserve_day_of_week = "monday"
-
 # Directory for persistent state files (per-VM JSON).
 state_dir = "/var/lib/qsnap/state"
 
@@ -35,31 +31,21 @@ state_dir = "/var/lib/qsnap/state"
 # running.  Set to a path or leave unset to disable locking.
 # lockfile = "/run/qsnap.lock"
 
-# Default retention policy for snapshots (applies to all VMs unless
-# overridden at the VM level).
-# Format: "<count>h <count>d <count>w <count>m <count>y"
-# F-syntax: prefix a count with "F" to mark a bucket as a FULL anchor.
-#   "24h 7Fd 4w" — keep 24 hourly, 7 daily (FULL at day boundaries), 4 weekly
-#   "24Fh 7Fd 4Fw 12Fm 1Fy" — FULL at every bucket boundary
-# When any F-anchor is present, FULLs are created ONLY at F-marked levels.
-# Without F-anchors, FULLs are created at ALL active bucket boundaries.
-# Examples:
-#   "24h 7d 4w 12m 0y" — keep 24 hourly, 7 daily, 4 weekly, 12 monthly
-#   "all"              — keep everything (default)
-snapshot_preserve = "24h 7d 4w 12m 1y"
+# Default snapshot chain length for all VMs (applies unless overridden
+# at the VM level).  When the snapshot chain exceeds this count, qsnap
+# triggers a blockcommit to merge snapshots back into the base image.
+# Set to 0 to disable blockcommit (keep all snapshots).
+# snapshot_chain_length = 168
 
-# Default retention policy for backup targets.
-# Same format and F-syntax as snapshot_preserve.
-target_preserve = "48h 14d 8w 12m 1y"
+# Default target chain length for all backup targets (applies unless
+# overridden at the VM or target level).  When the incremental backup
+# chain for a target exceeds this count, qsnap creates a new FULL backup.
+# target_chain_length = 100
 
-# Minimum retention period for snapshots.  Snapshots younger than this
-# are never removed regardless of bucket policy.  Duration string like
-# "6h", "2d", "1w", or "all" (default — keep everything).
-# snapshot_preserve_min = "all"
-
-# Minimum retention period for backup targets.  Same format as
-# snapshot_preserve_min.
-# target_preserve_min = "all"
+# Default number of FULL backup generations to keep per target.
+# After creating a new FULL, older generations beyond this count are
+# removed.  Minimum: 1.
+# target_keep_generations = 2
 
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
@@ -157,17 +143,14 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # qsnap auto-discovers all disks via virsh domblklist.
 # disks = ["vda"]
 
-# Override snapshot retention for this VM
-# snapshot_preserve = "48h 14d 8w 12m 1y"
+# Override snapshot chain length for this VM
+# snapshot_chain_length = 336
 
-# Override backup retention for this VM's targets
-# target_preserve = "96h 30d 16w 12m 2y"
+# Override target chain length for this VM's targets
+# target_chain_length = 200
 
-# Override minimum snapshot retention for this VM
-# snapshot_preserve_min = "6h"
-
-# Override minimum backup retention for this VM's targets
-# target_preserve_min = "12h"
+# Override number of FULL backup generations to keep for this VM's targets
+# target_keep_generations = 3
 
 # ── Fault-tolerance & safety controls (per-VM) ──────────────────────────
 # T2: Heavy operations, OFF by default — enable per-VM for critical VMs.
@@ -185,11 +168,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   path = "/mnt/backup/debiantest"
   incremental = true
 
-  # Override backup retention for this target only
-  # target_preserve = "72h 21d 12w 18m 3y"
+  # Override target chain length for this target only
+  # target_chain_length = 150
 
-  # Override minimum backup retention for this target only
-  # target_preserve_min = "6h"
+  # Override number of FULL backup generations to keep for this target only
+  # target_keep_generations = 4
 
   # Compress full backups.  When true, FULL backups are created via
   # qemu-img convert with compression.  Default: true (inherited from
@@ -263,5 +246,5 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #
 # qsnap deploy creates a VM from a backup (same as fork, resolves from
 # backup targets):
-#   qsnap deploy vm.FULL.20250701.monthly --as-vm recovered-vm
+#   qsnap deploy vm.FULL.20250701T1200 --as-vm recovered-vm
 #   qsnap deploy backup.20250715T1200 --as-vm recovered-vm --storage /mnt/vms

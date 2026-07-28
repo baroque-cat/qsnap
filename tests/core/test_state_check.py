@@ -58,7 +58,7 @@ def test_check_state_all_snapshots_exist_clean(
     full_path.touch()
 
     mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0)
     )
 
     # Record incremental dependency with existing file (check_state adds .qcow2)
@@ -148,7 +148,7 @@ def test_check_state_phantom_full_detected(
     # Do NOT create the file on disk
 
     mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0)
     )
 
     config = MockConfigFacade(vms=[vm])
@@ -187,7 +187,7 @@ def test_check_state_orphaned_dependency_detected(
     full_path = backup_dir / full_name
     full_path.touch()
     mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0)
     )
 
     # Record an incremental dependency but do NOT create its file
@@ -235,7 +235,7 @@ def test_check_state_detached_dependency_detected(
     full_name = "full.FULL.monthly"
     # Do NOT create the file
     mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "monthly"
+        str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0)
     )
 
     # Record an incremental dependency referencing that phantom FULL

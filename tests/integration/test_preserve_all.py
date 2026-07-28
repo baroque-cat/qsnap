@@ -1,11 +1,11 @@
-"""Integration tests for the D1 fix: ``preserve_all`` retention.
+"""Integration tests for chain_length=0 retention (keep everything via count-based).
 
-Verifies that ``Core._parse_preserve("all")`` returns ``RetentionPolicy``
-with ``preserve_min="all"`` and all bucket counts 0 (the bug
-previously returned ``preserve_min="0h"``, causing silent data loss).
+In the count-based retention model, setting ``chain_length=0`` with
+``keep_generations=1`` causes the retention engine to fall back to
+``keep_generations`` as the keep count.  ``chain_length=0`` with
+``keep_generations=0`` causes all items to be marked for removal.
 
-Also verifies end-to-end that a pipeline with ``snapshot_preserve="all"``
-keeps all snapshots and defers blockcommit on a running VM (D2 fix).
+This replaces the old ``_parse_preserve("all")`` string-based approach.
 
 All tests require a running libvirt daemon and are marked
 ``@pytest.mark.integration``.  Run only when explicitly requested::
@@ -28,53 +28,55 @@ from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 1: _parse_preserve("all") produces correct RetentionPolicy
+# Test 1: chain_length=0 with keep_generations=1 keeps newest 1
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_parse_preserve_all_produces_correct_policy():
-    """Verify ``Core._parse_preserve("all")`` returns the correct policy.
+def test_chain_length_zero_keeps_one():
+    """Verify chain_length=0 falls back to keep_generations=1.
 
-    The D1 fix changed ``_parse_preserve`` so that ``"all"`` returns
-    ``RetentionPolicy(preserve_min="all")`` with all bucket counts 0.
-    Previously it returned ``preserve_min="0h"`` — a silent data-loss
-    bug that caused retention to delete everything.
+    When chain_length is 0 and keep_generations is 1, the retention
+    engine keeps exactly the newest 1 snapshot and removes the rest.
+    This is the minimal-count retention — the opposite of "all".
     """
-    policy = Core._parse_preserve("all")
+    from datetime import datetime, timedelta
 
-    assert isinstance(policy, RetentionPolicy), (
-        f"Expected RetentionPolicy, got {type(policy).__name__}"
+    from qsnap.models.results import RetentionItem
+    from qsnap.retention.time_based import TimeBasedRetention
+
+    now = datetime.now()
+    items = [
+        RetentionItem(name="old", timestamp=now - timedelta(hours=3)),
+        RetentionItem(name="mid", timestamp=now - timedelta(hours=2)),
+        RetentionItem(name="new", timestamp=now - timedelta(hours=1)),
+    ]
+    policy = RetentionPolicy(chain_length=0, keep_generations=1)
+    engine = TimeBasedRetention()
+    result = engine.evaluate(items, policy, now)
+
+    assert set(result.keep) == {"new"}, (
+        f"Expected only 'new' kept, got: keep={result.keep}, remove={result.remove}"
     )
-    assert policy.preserve_min == "all", f"Expected preserve_min='all', got {policy.preserve_min!r}"
-    assert policy.hourly == 0, f"hourly should be 0, got {policy.hourly}"
-    assert policy.daily == 0, f"daily should be 0, got {policy.daily}"
-    assert policy.weekly == 0, f"weekly should be 0, got {policy.weekly}"
-    assert policy.monthly == 0, f"monthly should be 0, got {policy.monthly}"
-    assert policy.yearly == 0, f"yearly should be 0, got {policy.yearly}"
-    assert policy.anchor_hourly is False
-    assert policy.anchor_daily is False
-    assert policy.anchor_weekly is False
-    assert policy.anchor_monthly is False
-    assert policy.anchor_yearly is False
+    assert "old" in result.remove
+    assert "mid" in result.remove
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 2: preserve_all keeps all snapshots — integration
+# Test 2: Large chain_length keeps all snapshots — integration
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_preserve_all_keeps_all_backups_integration(test_vm):
-    """Verify that ``snapshot_preserve="all"`` keeps all snapshots.
+def test_large_chain_length_keeps_all_backups_integration(test_vm):
+    """Verify that a large ``snapshot_chain_length`` keeps all snapshots.
 
     1. Start the test VM.
-    2. Build Core with a VMConfig using ``snapshot_preserve="all"``,
+    2. Build Core with a VMConfig using ``snapshot_chain_length=999999``,
        real shell, ``InMemoryStateManager``, and ``DefaultFactory``.
     3. Create 3 snapshots via ``core._create_snapshot()``.
     4. Evaluate snapshot retention — it MUST keep all 3 and remove none.
     5. Verify all snapshot files still exist on disk.
-    6. Verify ``Core._parse_preserve("all").preserve_min == "all"``.
 
     Additionally, run the pipeline to verify that snapshot preservation
     works end-to-end without errors.
@@ -96,7 +98,7 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
     assert domstate.success, f"domstate failed: {domstate.error}"
     assert "running" in domstate.stdout.lower(), f"VM should be running, got: {domstate.stdout!r}"
 
-    # Step 2: Build Core with snapshot_preserve="all" and a target.
+    # Step 2: Build Core with a very large chain_length and a target.
     state = InMemoryStateManager()
     target = TargetConfig(
         path=target_dir,
@@ -108,7 +110,7 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
         name=vm_name,
         base_image=base_image,
         snapshot_dir=snapshot_dir,
-        snapshot_preserve="all",
+        snapshot_chain_length=999999,
         targets=[target],
     )
     config = MockConfigFacade(
@@ -129,7 +131,6 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
         results = core._create_snapshot(vm_config)
         assert len(results) >= 1, f"Snapshot {i + 1} creation returned no results"
         assert results[0].success, f"Snapshot {i + 1} creation failed: {results[0].error}"
-        # Small sleep to ensure distinct timestamps in snapshot names.
         time.sleep(1.1)
 
     # Verify 3 snapshots recorded in state.
@@ -142,7 +143,7 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
     for snap in snapshots_in_state:
         assert snap.path.exists(), f"Snapshot file should exist: {snap.path}"
 
-    # Step 4: Evaluate snapshot retention — "all" should keep everything.
+    # Step 4: Evaluate snapshot retention — large chain_length should keep everything.
     retention = core._evaluate_snapshot_retention(vm_config)
     assert retention is not None, "Retention result should not be None"
     assert len(retention.keep) == 3, (
@@ -152,11 +153,7 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
         f"Expected 0 snapshots removed, got {len(retention.remove)}: {retention.remove}"
     )
 
-    # Step 5: Double-check parse_preserve is correct.
-    policy = Core._parse_preserve("all")
-    assert policy.preserve_min == "all"
-
-    # Step 6: Run the full pipeline — with "all" retention, nothing
+    # Step 5: Run the full pipeline — with large chain_length, nothing
     # gets removed.  Blockcommit on a running VM gets deferred (D2 fix)
     # so no error should occur.
     pipeline_result = core.run()
@@ -166,13 +163,10 @@ def test_preserve_all_keeps_all_backups_integration(test_vm):
     )
 
     # All original snapshots should still be present in state.
-    # Note: core.run() may create an additional snapshot because
-    # snapshot_create defaults to "always", so the count may be >= 3.
     snapshots_after = state.get_snapshots(vm_name)
     assert len(snapshots_after) >= 3, (
         f"At least 3 snapshots should remain in state after run, got {len(snapshots_after)}"
     )
-    # The 3 originally created snapshots should all still be present.
     original_names = {s.name for s in snapshots_in_state}
     remaining_names = {s.name for s in snapshots_after}
     assert original_names <= remaining_names, (

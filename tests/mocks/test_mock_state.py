@@ -190,7 +190,7 @@ def test_mock_state_get_full_backups():
     # Record one full backup.
     ts = datetime(2025, 1, 15, 12, 0, 0)
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250115.qcow2", ts, "monthly"
+        "/mnt/backup/testvm", "testvm.FULL.20250115.qcow2", ts
     )
 
     fulls = state_manager.get_full_backups("/mnt/backup/testvm")
@@ -198,7 +198,6 @@ def test_mock_state_get_full_backups():
     assert isinstance(fulls[0], FullBackupInfo)
     assert fulls[0].name == "testvm.FULL.20250115.qcow2"
     assert fulls[0].timestamp == ts
-    assert fulls[0].bucket_level == "monthly"
     assert fulls[0].path == Path("/mnt/backup/testvm") / "testvm.FULL.20250115.qcow2"
 
 
@@ -206,8 +205,7 @@ def test_mock_state_record_full_backup():
     """record_full_backup appends to the list for a target.
 
     Recording multiple full backups accumulates them.  The returned
-    list preserves insertion order (oldest → newest).  bucket_level
-    is stored correctly for each entry.
+    list preserves insertion order (oldest → newest).
     """
     state_manager = InMemoryStateManager()
 
@@ -216,23 +214,20 @@ def test_mock_state_record_full_backup():
     ts3 = datetime(2025, 3, 1, 0, 0, 0)
 
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250101.qcow2", ts1, "monthly"
+        "/mnt/backup/testvm", "testvm.FULL.20250101.qcow2", ts1
     )
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250201.qcow2", ts2, "monthly"
+        "/mnt/backup/testvm", "testvm.FULL.20250201.qcow2", ts2
     )
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250301.qcow2", ts3, "yearly"
+        "/mnt/backup/testvm", "testvm.FULL.20250301.qcow2", ts3
     )
 
     fulls = state_manager.get_full_backups("/mnt/backup/testvm")
     assert len(fulls) == 3
     assert fulls[0].name == "testvm.FULL.20250101.qcow2"
-    assert fulls[0].bucket_level == "monthly"
     assert fulls[1].name == "testvm.FULL.20250201.qcow2"
-    assert fulls[1].bucket_level == "monthly"
     assert fulls[2].name == "testvm.FULL.20250301.qcow2"
-    assert fulls[2].bucket_level == "yearly"
 
     # Verify get_full_backups returns a copy — mutations don't affect state.
     fulls.append(None)  # type: ignore[arg-type]
@@ -314,10 +309,10 @@ def test_mock_state_multiple_fulls():
     ts2 = datetime(2025, 6, 1, 0, 0, 0)
 
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250101.qcow2", ts1, "monthly"
+        "/mnt/backup/testvm", "testvm.FULL.20250101.qcow2", ts1
     )
     state_manager.record_full_backup(
-        "/mnt/backup/testvm", "testvm.FULL.20250601.qcow2", ts2, "monthly"
+        "/mnt/backup/testvm", "testvm.FULL.20250601.qcow2", ts2
     )
 
     # get_full_backups returns both.
@@ -330,11 +325,10 @@ def test_mock_state_multiple_fulls():
     assert last.name == "testvm.FULL.20250601.qcow2"
     assert last.timestamp == ts2
 
-    # set_last_full_backup delegates to record_full_backup (bucket_level="monthly").
+    # set_last_full_backup delegates to record_full_backup.
     ts3 = datetime(2025, 7, 1, 0, 0, 0)
     state_manager.set_last_full_backup("/mnt/backup/testvm", "testvm.FULL.20250701.qcow2", ts3)
 
     fulls = state_manager.get_full_backups("/mnt/backup/testvm")
     assert len(fulls) == 3
     assert fulls[2].name == "testvm.FULL.20250701.qcow2"
-    assert fulls[2].bucket_level == "monthly"

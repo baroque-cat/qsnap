@@ -75,13 +75,6 @@ def test_config_parser_reads_timestamp_format_field() -> None:
 
 
 @pytest.mark.unit
-def test_config_parser_reads_preserve_day_of_week_field() -> None:
-    """The top-level ``preserve_day_of_week`` key is parsed into GlobalConfig."""
-    facade = ConfigFacade(FIXTURES / "global_fields.toml")
-    assert facade.get_global().preserve_day_of_week == "wednesday"
-
-
-@pytest.mark.unit
 def test_config_parser_lockfile_defaults_to_none() -> None:
     """When no ``lockfile`` is set, GlobalConfig.lockfile defaults to None."""
     facade = ConfigFacade(FIXTURES / "minimal.toml")
@@ -140,7 +133,7 @@ def test_full_every_deprecation_warning(caplog: pytest.LogCaptureFixture) -> Non
     with caplog.at_level(logging.WARNING, logger="qsnap.config"):
         ConfigFacade(FIXTURES / "deprecated_fields.toml")
 
-    assert "full_every is deprecated and ignored" in caplog.text
+    assert "full_every is deprecated" in caplog.text
 
 
 @pytest.mark.unit

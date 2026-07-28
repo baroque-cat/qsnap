@@ -53,7 +53,7 @@ def _build_core(
         name=vm_name,
         base_image=base_image,
         snapshot_dir=snapshot_dir,
-        snapshot_preserve="24h",
+        snapshot_chain_length=24,
         lifecycle_mode="qemu-img",
         targets=[
             TargetConfig(

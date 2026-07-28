@@ -1,0 +1,32 @@
+# chain_length config — tests snapshot_chain_length and target_chain_length inheritance
+
+# Global defaults
+snapshot_chain_length = 72
+target_chain_length = 100
+
+[[vm]]
+name = "vm_override"
+base_image = "/var/lib/libvirt/images/vm_override.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+# VM overrides global chain_length values
+snapshot_chain_length = 144
+target_chain_length = 200
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_inherit"
+  # Target inherits VM's target_chain_length (no override)
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_override_override"
+  # Target overrides VM's target_chain_length
+  target_chain_length = 300
+
+[[vm]]
+name = "vm_inherit"
+base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+# VM inherits global chain_length values (no override)
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_inherit"
+  # Target inherits global target_chain_length (via VM inheritance)

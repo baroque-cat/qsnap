@@ -306,53 +306,62 @@ Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(
 - **WHEN** target has `verify = "metadata"` and verification detects format mismatch
 - **THEN** `backup_failed` flag is set to True in the pipeline result
 
-### Requirement: Core._parse_preserve accepts optional preserve_min parameter
+### Requirement: Core._evaluate_snapshot_retention uses count-based policy
 
-`Core._parse_preserve(preserve_str, preserve_min_str=None)` SHALL accept an optional `preserve_min_str` parameter. When provided and non-None, it SHALL override the default `preserve_min` value. When `None`, existing behavior SHALL be preserved.
+`Core._evaluate_snapshot_retention(vm_config, snapshots)` SHALL construct a `RetentionPolicy(chain_length=vm_config.snapshot_chain_length or 0, keep_generations=1)` and pass it to `IRetentionEngine.evaluate()`. The method SHALL NOT call `_parse_preserve()`. The oldest-prefix post-processing SHALL remain as a safety net for blockcommit.
 
-#### Scenario: Explicit preserve_min overrides default
-- **WHEN** `_parse_preserve("24h 2d", "3h")` is called
-- **THEN** returns `RetentionPolicy(hourly=24, daily=2, preserve_min="3h")`
+#### Scenario: Snapshot retention with chain_length
+- **WHEN** VM has `snapshot_chain_length = 168` and 200 snapshots exist
+- **THEN** the retention engine keeps the newest 168 snapshots and marks the oldest 32 for removal
 
-#### Scenario: No preserve_min uses existing default
-- **WHEN** `_parse_preserve("24h 2d", None)` is called
-- **THEN** returns `RetentionPolicy(hourly=24, daily=2, preserve_min="0h")`
+#### Scenario: Snapshot retention with no chain_length
+- **WHEN** VM has `snapshot_chain_length = None` (unset)
+- **THEN** the retention engine uses `chain_length=0` and marks all snapshots for removal
 
-### Requirement: Core._evaluate_snapshot_retention uses vm_config.snapshot_preserve_min
+### Requirement: Core._evaluate_backup_retention uses count-based policy
 
-`Core._evaluate_snapshot_retention(vm_config, snapshots)` SHALL pass `vm_config.snapshot_preserve_min` to `_parse_preserve()`.
+`Core._evaluate_backup_retention(vm_config, target, backups)` SHALL group backups by chain via `_group_backups_by_chain()` (unchanged), construct a `RetentionPolicy(chain_length=0, keep_generations=target.keep_generations or 1)`, and pass chain-level items to `IRetentionEngine.evaluate()`. The method SHALL NOT call `_parse_preserve()`.
 
-#### Scenario: Snapshot retention with preserve_min
-- **WHEN** VM has `snapshot_preserve_min = "3h"`
-- **THEN** `_parse_preserve()` is called with that value
-
-### Requirement: Core._evaluate_backup_retention uses target.target_preserve_min
-
-`Core._evaluate_backup_retention(vm_config, target, backups)` SHALL pass `target.target_preserve_min` to `_parse_preserve()`.
-
-#### Scenario: Backup retention with preserve_min
-- **WHEN** target has `target_preserve_min = "6h"`
-- **THEN** `_parse_preserve()` is called with that value
+#### Scenario: Backup retention with keep_generations
+- **WHEN** target has `target_keep_generations = 2` and 3 chains exist
+- **THEN** the retention engine keeps the 2 newest chains and marks the oldest for removal
 
 ### Requirement: Core._backup_target triggers full backup when due
 
-`Core._backup_target(vm_config, target, snapshots)` SHALL, before the incremental transfer loop, call `state.get_full_backups(target.path)` to retrieve ALL full backups for the target. It SHALL obtain an `IBucketFullStrategy` via `self._factory.create_bucket_full_strategy()` and call `strategy.should_create_full(target, policy, all_fulls, snapshot_ts, now)` with the complete list of `FullBackupInfo` objects and the most recent snapshot's timestamp. Core SHALL NOT contain private methods `_should_create_bucket_full`, `_active_buckets`, `_f_anchor_buckets`, or `_period_key`.
+`Core._backup_target(vm_config, target, snapshots)` SHALL, before the incremental transfer loop, count the incrementals in the newest chain by calling `state.get_full_backups(target.path)` and `state.get_incremental_dependencies(target_path, newest_full.name)`. When `incremental_count > target.chain_length` (or no FULLs exist), Core SHALL create a new FULL backup via `provider.create_full_backup()`. Core SHALL NOT obtain an `IBucketFullStrategy` from the factory. Core SHALL NOT contain private methods `_should_create_bucket_full`, `_active_buckets`, `_f_anchor_buckets`, `_period_key`, or `_parse_preserve`.
 
-#### Scenario: Full backup list passed to bucket strategy
-- **WHEN** `_backup_target()` is called and the target has 2 existing FULL records
-- **THEN** `state.get_full_backups(target.path)` returns a list of 2 `FullBackupInfo` objects
-- **THEN** the list is passed to `strategy.should_create_full(target, policy, all_fulls, snapshot_ts, now)`
+After FULL creation, Core SHALL verify it (M1/M2 per `full_verify_after_create`). Only after verification succeeds SHALL Core record the FULL in state and evaluate retention + cleanup old generations. If verification fails, Core SHALL rollback (delete FULL file + checkpoint + state records) and retry up to `backup_retry_max` times. If retries are exhausted, Core SHALL log CRITICAL and keep old generations.
 
-#### Scenario: First run creates full backup via strategy
+#### Scenario: Incremental count exceeds chain length triggers FULL
+- **WHEN** the newest chain has 169 incrementals and `target.chain_length = 168`
+- **THEN** a FULL backup is created via `provider.create_full_backup()`
+
+#### Scenario: First run creates full backup
 - **WHEN** `get_full_backups(target.path)` returns an empty list (no previous FULLs)
-- **THEN** `strategy.should_create_full(...)` returns `(True, bucket_level)` for the first active/F-marked bucket
 - **THEN** a FULL is created
 
-#### Scenario: Strategy obtained via factory
+#### Scenario: Verified FULL triggers retention + cleanup
+- **WHEN** a FULL is created and passes M1/M2 verification
+- **THEN** Core records it via `state.record_full_backup()`
+- **AND** evaluates retention (keep newest `keep_generations` chains)
+- **AND** deletes old generations via `_cleanup_backups()`
+
+#### Scenario: Failed FULL verification triggers rollback
+- **WHEN** a FULL is created but fails M1/M2 verification
+- **THEN** Core deletes the broken FULL file from disk via `provider.delete()`
+- **AND** deletes the checkpoint via `_cleanup_failed_checkpoint()`
+- **AND** removes any state records via `state.remove_full_backup()`
+- **AND** retries FULL creation (up to `backup_retry_max`)
+
+#### Scenario: Retries exhausted keeps old generations
+- **WHEN** all retry attempts fail verification
+- **THEN** Core logs CRITICAL
+- **AND** old generations are NOT deleted (verify-before-delete gate)
+
+#### Scenario: No bucket strategy obtained from factory
 - **WHEN** `_backup_target()` runs
-- **THEN** it calls `self._factory.create_bucket_full_strategy()` exactly once
-- **AND** the resulting strategy object is used for the bucket decision
-- **AND** no private bucket-related methods exist on Core
+- **THEN** it does NOT call `self._factory.create_bucket_full_strategy()`
+- **AND** no `IBucketFullStrategy` is used
 
 ### Requirement: Core imports shared utilities from qsnap.utils
 
@@ -364,9 +373,9 @@ Core SHALL import `is_vm_running`, `nbd_full_export` from `qsnap.utils.nbd`, `ve
 - **AND** there is NO `from qsnap.modules.snapshot` import
 - **AND** all utility imports come from `qsnap.utils`
 
-### Requirement: Core.schedule_summary produces retention simulation
+### Requirement: Core.schedule_summary produces count-based summary
 
-`Core.schedule_summary(vm_filter=None) -> str` SHALL generate synthetic timestamp data for each VM, pass it through `TimeBasedRetention.evaluate()` and `explain()`, and format a human-readable summary showing expected chain length, bucket breakdown, and estimated storage for snapshots and per-target backups.
+`Core.schedule_summary(vm_filter=None) -> str` SHALL display count-based retention information for each VM and each target. The output SHALL show `chain_length`, `keep_generations`, current snapshot/chain counts, and real size projections. The method SHALL NOT generate synthetic timestamps or compute retention windows. The methods `_retention_window()` and `_generate_synthetic_items()` SHALL NOT exist.
 
 #### Scenario: Summary includes all VMs when no filter
 - **WHEN** `schedule_summary()` is called with no filter
@@ -573,10 +582,6 @@ Core SHALL emit `logger.info` messages in btrbk-style format for each pipeline o
 - **WHEN** `_cleanup_backups()` successfully deletes a backup file
 - **THEN** an INFO message is logged: `"[delete] <vm_name>: removed backup <backup_name> from <target_path>"`
 
-#### Scenario: Ghost retention INFO
-- **WHEN** `_cleanup_backups()` ghost-retains a FULL with dependents in keep-set
-- **THEN** an INFO message is logged: `"[delete] <vm_name>: ghost-retained FULL <full_name> (<N> dependent(s) in keep-set)"`
-
 ### Requirement: Per-target backup onchange gate
 
 When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._backup_target()` SHALL call `_should_backup_onchange(vm_config, target, snapshots)` before proceeding with backup transfer. If `_should_backup_onchange()` returns `False`, the backup transfer SHALL be skipped for this target. The skip SHALL be logged at INFO level. If `_should_backup_onchange()` returns `True`, the existing backup logic SHALL proceed unchanged. See `specs/change-detection/spec.md` for the gate's Approach B logic and retention separation behavior.
@@ -591,3 +596,12 @@ When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._back
 - **THEN** `_should_backup_onchange()` returns `False` (nothing to transfer)
 - **AND** the backup transfer is skipped
 - **AND** an INFO log message is emitted
+
+### Requirement: Core._cleanup_failed_checkpoint rollback method
+
+Core SHALL provide a private method `_cleanup_failed_checkpoint(vm_config, target, full_result)` that deletes the libvirt checkpoint created during a failed FULL attempt. The method SHALL list checkpoints via `virsh checkpoint-list --name --domain <vm>`, filter for `qsnap-{target_hash}-*` prefix, and delete each via `virsh checkpoint-delete --domain <vm> <checkpoint>`.
+
+#### Scenario: Checkpoint cleaned up after failed FULL
+- **WHEN** FULL verification fails and `_cleanup_failed_checkpoint()` is called
+- **THEN** the checkpoint created by `virsh backup-begin` is deleted
+- **AND** no orphaned checkpoint remains for the next `transfer_missing()` call

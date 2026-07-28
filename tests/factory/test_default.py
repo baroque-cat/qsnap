@@ -10,7 +10,6 @@ import pytest
 
 from qsnap.factory.default import DefaultFactory
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
@@ -18,7 +17,6 @@ from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import CommitResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
-from qsnap.modules.backup.bucket_strategy import BucketFullStrategy
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.change.map_detector import MapChangeDetector
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
@@ -383,21 +381,6 @@ def test_factory_bitmap_mode_without_libnbd_raises_actionable_error(
         pytest.raises(RuntimeError, match="python3-libnbd"),
     ):
         factory.create_backup_provider(make_vm_config(), target)
-
-
-def test_create_bucket_full_strategy_returns_bucketfullstrategy(
-    mock_shell,
-    mock_state,
-):
-    """DefaultFactory.create_bucket_full_strategy() returns BucketFullStrategy.
-
-    Verifies the factory method returns an instance that implements both
-    ``IBucketFullStrategy`` and the concrete ``BucketFullStrategy``.
-    """
-    factory = DefaultFactory(shell=mock_shell, state=mock_state)
-    strategy = factory.create_bucket_full_strategy()
-    assert isinstance(strategy, IBucketFullStrategy)
-    assert isinstance(strategy, BucketFullStrategy)
 
 
 # ── deep_verify factory test ──────────────────────────────────────────

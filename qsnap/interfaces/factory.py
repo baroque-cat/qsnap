@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.interfaces.bucket_strategy import IBucketFullStrategy
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
@@ -56,16 +55,5 @@ class IVMModuleFactory(ABC):
 
         ``mode`` selects the merge strategy: ``"virsh"`` (blockcommit,
         default) or ``"qemu-img"`` (commit).
-        """
-        ...
-
-    @abstractmethod
-    def create_bucket_full_strategy(self) -> IBucketFullStrategy:
-        """Create a bucket FULL backup strategy.
-
-        The strategy decides whether a new FULL backup should be created
-        for a given snapshot timestamp based on bucket/anchor retention
-        policy.  Used by ``Core._backup_target()`` to delegate the bucket
-        decision out of the orchestrator.
         """
         ...
