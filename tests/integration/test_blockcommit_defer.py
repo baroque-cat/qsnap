@@ -55,7 +55,7 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-                incremental=True,
+                
                 compress=False,
                 verify="off",
             )

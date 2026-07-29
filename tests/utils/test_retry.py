@@ -120,3 +120,77 @@ def test_compute_backoff_invalid_attempt():
     """``compute_backoff(base_seconds=2, attempt=0)`` raises ValueError."""
     with pytest.raises(ValueError):
         compute_backoff(2, 0)
+
+
+# ── Content comparison mismatch retry ─────────────────────────────────────
+
+
+def test_content_comparison_mismatch_retried():
+    """``is_retryable("verification failed: content comparison mismatch")`` returns True.
+
+    Content comparison mismatches may indicate transient transfer
+    corruption that a retry can fix — they are the only verification
+    errors that ARE retryable.
+    """
+    assert is_retryable("verification failed: content comparison mismatch") is True
+
+
+# ── Format verification error not retried ──────────────────────────────────
+
+
+def test_format_verification_error_not_retried():
+    """``is_retryable("verification failed: format mismatch")`` returns False.
+
+    Format verification errors are deterministic — no amount of retrying
+    will fix a format-type mismatch, so they must NOT be retried.
+    The word "mismatch" without the "content comparison" prefix does NOT
+    match the retryable pattern.
+    """
+    assert is_retryable("verification failed: format mismatch") is False
+
+
+# ── Retry disabled when backup_retry_max is zero ──────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_retry_disabled_when_backup_retry_max_zero(
+    make_vm_config,
+    make_target,
+    mock_shell,
+    mock_state,
+    mock_factory,
+):
+    """When ``backup_retry_max=0``, ``_execute_with_retry`` calls the operation
+    exactly once — no retry loop is entered.
+
+    This verifies the fast-path: ``_execute_with_retry`` checks
+    ``max_retries <= 0`` and returns ``operation()`` immediately without
+    entering the retry loop, regardless of the error type.
+    """
+    from qsnap.core import Core
+    from tests.mocks import MockConfigFacade
+
+    target = make_target(backup_retry_max=0, backup_retry_base="2s")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    call_count = 0
+
+    def operation():
+        nonlocal call_count
+        call_count += 1
+        # Return a failure — but max_retries=0 means no retry should happen
+        from types import SimpleNamespace
+        return SimpleNamespace(success=False, error="Connection refused")
+
+    core._execute_with_retry(operation, target)
+
+    # Operation is called exactly once — no retry loop
+    assert call_count == 1

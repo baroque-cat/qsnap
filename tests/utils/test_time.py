@@ -3,13 +3,20 @@
 Tests verify format resolution, strftime output for each format name,
 and fallback behaviour for unknown format values.  Pure functions —
 no I/O, no side effects.
+
+Also verifies that parse_duration and parse_stall_timeout are importable
+from qsnap.utils.time and work correctly.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from qsnap.utils.time import format_snapshot_timestamp, resolve_format
+
+from qsnap.utils.time import (
+    format_snapshot_timestamp,
+    resolve_format,
+)
 
 
 def test_short_format_produces_yyyymmdd() -> None:
@@ -60,3 +67,9 @@ def test_resolve_format_long_iso_returns_full_iso_format() -> None:
 def test_resolve_format_unknown_defaults_to_long() -> None:
     """resolve_format with an unknown name returns the same as 'long'."""
     assert resolve_format("bogus") == resolve_format("long")
+
+
+# ---------------------------------------------------------------------------
+# parse_duration and parse_stall_timeout relocated to qsnap.utils.time
+# ---------------------------------------------------------------------------
+

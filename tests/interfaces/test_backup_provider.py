@@ -17,7 +17,7 @@ from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
-from tests.mocks.mock_modules import MockBackupProvider, MockBitmapBackupProvider
+from tests.mocks.mock_modules import MockBitmapBackupProvider
 from tests.mocks.mock_shell import MockShell
 
 
@@ -46,10 +46,9 @@ def test_bitmap_backup_provider_no_core_inheritance():
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, init_kwargs):
     """transfer_missing() returns a list whose elements are all BackupResult."""
@@ -78,10 +77,9 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     """list() returns a list whose elements are all SnapshotInfo."""
@@ -97,10 +95,9 @@ def test_backup_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
     """delete() returns a ShellResult."""
@@ -168,24 +165,23 @@ def test_ibackup_provider_create_full_backup_abstract():
         )
 
     # Concrete implementations that override it expose the method.
-    assert callable(MockBackupProvider.create_full_backup)
+    assert callable(MockBitmapBackupProvider.create_full_backup)
 
 
 @pytest.mark.parametrize(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwargs):
     """create_full_backup() returns a BackupResult instance.
 
     ``BitmapBackupProvider`` with bare ``MockShell`` fails on the NBD
     export step but returns a ``BackupResult(success=False)``.
-    ``MockBackupProvider`` returns a successful ``BackupResult``.
+    ``MockBitmapBackupProvider`` returns a successful ``BackupResult``.
     """
     provider = cls(**init_kwargs)
     source_snapshot = SnapshotInfo(
@@ -206,10 +202,9 @@ def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwar
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_accepts_full_transfer_engine(
     cls,
@@ -247,10 +242,9 @@ def test_backup_provider_create_full_backup_accepts_full_transfer_engine(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_accepts_convert_parallel(
     cls,
@@ -286,10 +280,9 @@ def test_backup_provider_create_full_backup_accepts_convert_parallel(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_create_full_backup_accepts_convert_out_of_order(
     cls,
@@ -325,10 +318,9 @@ def test_backup_provider_create_full_backup_accepts_convert_out_of_order(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_accepts_full_transfer_engine(
     cls,
@@ -365,10 +357,9 @@ def test_backup_provider_transfer_missing_accepts_full_transfer_engine(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_accepts_convert_parallel(
     cls,
@@ -403,10 +394,9 @@ def test_backup_provider_transfer_missing_accepts_convert_parallel(
     "cls,init_kwargs",
     [
         (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBackupProvider, {}),
         (MockBitmapBackupProvider, {}),
     ],
-    ids=["bitmap", "mock", "mock_bitmap"],
+    ids=["bitmap", "mock_bitmap"],
 )
 def test_backup_provider_transfer_missing_accepts_convert_out_of_order(
     cls,

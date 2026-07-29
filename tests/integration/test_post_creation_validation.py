@@ -366,7 +366,7 @@ def test_incremental_post_transfer_validation(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     result_full = provider.create_full_backup(
         vm_name,
@@ -531,7 +531,7 @@ def test_full_post_creation_validation(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     result = provider.create_full_backup(vm_name, source, target, compress=False)
     assert result.success, (

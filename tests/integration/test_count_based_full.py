@@ -105,7 +105,7 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-                incremental=True,
+                
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
@@ -365,7 +365,7 @@ def test_first_backup_to_target_always_creates_full(test_vm, caplog):
     state.record_snapshot(vm_name, snap)
 
     # Step 2: Build Core with an empty target (no prior FULLs in state).
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -447,7 +447,7 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
     state.record_snapshot(vm_name, snap)
 
     # Steps 2-3: Build Core with dry_run=True.
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,

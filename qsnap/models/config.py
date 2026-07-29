@@ -102,10 +102,6 @@ class GlobalConfig:
     #   ``"check"`` (M1 + M2), ``"off"`` (M1 only — M1 is ALWAYS enforced
     #   regardless of this setting and is non-configurable).
     full_verify_before_delete: str = "check"
-    # ``deep_check_targets``: when True, ``qsnap check --deep`` additionally
-    #   verifies FULL and incremental backup files on backup target
-    #   directories (not just snapshot files).
-    deep_check_targets: bool = False
     # ``transaction_log``: optional absolute path to a btrbk-compatible
     #   transaction log file.  When ``None`` (default), no transaction
     #   log is written.  When set, one line per ``ActionRecord`` is
@@ -155,7 +151,6 @@ class TargetConfig:
     """
 
     path: Path
-    incremental: bool = True
     target_chain_length: int | None = None
     target_keep_generations: int | None = None
     verify: str = "metadata"

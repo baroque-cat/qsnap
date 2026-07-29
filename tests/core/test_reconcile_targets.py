@@ -19,34 +19,11 @@ import pytest
 from qsnap.core import Core
 from qsnap.models.results import (
     FullBackupInfo,
-    ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
 
 # ── shared helpers ────────────────────────────────────────────────────────
-
-
-def _success_result(stdout: str = "") -> ShellResult:
-    """Return a successful ShellResult."""
-    return ShellResult(
-        success=True,
-        stdout=stdout,
-        stderr="",
-        returncode=0,
-        error=None,
-    )
-
-
-def _failure_result(stderr: str = "qemu-img: Could not open") -> ShellResult:
-    """Return a failed ShellResult."""
-    return ShellResult(
-        success=False,
-        stdout="",
-        stderr=stderr,
-        returncode=1,
-        error="qemu-img failed",
-    )
 
 
 def _anchor_json(orphan_path: Path, full_path: Path) -> str:
@@ -191,6 +168,7 @@ def test_reconcile_orphan_backup_recorded(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """State: FULL + inc1; Disk: FULL + inc1 + inc2 (inc2 not in state);
     inc2 chain intact → FULL → ``record_incremental_dependency``,
@@ -240,11 +218,13 @@ def test_reconcile_orphan_backup_recorded(
         name=inc2_name, path=inc2_path, timestamp=datetime.now(), allocation=0,
     )
 
-    # Broken-chain detection on inc2: mock intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    # Broken-chain detection on inc2: mock intact chain with valid JSON.
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(inc2_path) + '"}]'
+    ))
     # Anchor resolution on inc2: return JSON with backing-filename → FULL.
     mock_shell.expect("qemu-img info --output=json").returns(
-        _success_result(_anchor_json(inc2_path, full_path))
+        success_result(_anchor_json(inc2_path, full_path))
     )
 
     with patch.object(
@@ -275,6 +255,7 @@ def test_reconcile_orphan_broken_chain_critical_not_deleted(
     mock_shell,
     tmp_path,
     caplog,
+    failure_result,
 ):
     """State: FULL + inc1; Disk: FULL + inc1 + inc2 (inc2 not in state);
     inc2 backing chain broken → CRITICAL log, ``broken_chains=["inc2"]``,
@@ -323,7 +304,7 @@ def test_reconcile_orphan_broken_chain_critical_not_deleted(
     )
 
     # Broken-chain detection on inc2: mock FAILED chain.
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list",
@@ -359,6 +340,7 @@ def test_reconcile_orphan_checkpoint_deleted(
     mock_state,
     mock_shell,
     caplog,
+    success_result,
 ):
     """Checkpoint-list has orphan checkpoint (wrong target_hash) →
     ``virsh checkpoint-delete --metadata`` called,
@@ -380,7 +362,7 @@ def test_reconcile_orphan_checkpoint_deleted(
     orphan_checkpoint = f"qsnap-{orphan_hash}-testvm.20250726_vda"
 
     # Mock checkpoint-delete to succeed.
-    mock_shell.expect("checkpoint-delete").returns(_success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list_checkpoints",
@@ -445,6 +427,7 @@ def test_reconcile_orphan_no_anchor_deleted(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """State: FULL + inc1; Disk: FULL + inc1 + inc2 (inc2 not in state);
     inc2 chain intact but anchor resolution returns None (no .FULL. in
@@ -492,12 +475,14 @@ def test_reconcile_orphan_no_anchor_deleted(
         name=inc2_name, path=inc2_path, timestamp=datetime.now(), allocation=0,
     )
 
-    # Broken-chain detection on inc2: mock intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    # Broken-chain detection on inc2: mock intact chain with valid JSON.
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(inc2_path) + '"}]'
+    ))
     # Anchor resolution on inc2: return JSON with NO backing-filename
     # (standalone file — no chain to a FULL).
     mock_shell.expect("qemu-img info --output=json").returns(
-        _success_result(_no_backing_json(inc2_path))
+        success_result(_no_backing_json(inc2_path))
     )
 
     with patch.object(
@@ -597,6 +582,7 @@ def test_reconcile_dry_run_targets(
     mock_shell,
     tmp_path,
     caplog,
+    success_result,
 ):
     """In dry-run mode, phantom FULL, stale dep, and orphan file are
     all reported but no real state changes or file deletions occur."""
@@ -648,11 +634,13 @@ def test_reconcile_dry_run_targets(
         name=orphan_name, path=orphan_path, timestamp=datetime.now(), allocation=0,
     )
 
-    # Broken-chain detection on orphan: mock intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    # Broken-chain detection on orphan: mock intact chain with valid JSON.
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(orphan_path) + '"}]'
+    ))
     # Anchor resolution: return FULL anchor.
     mock_shell.expect("qemu-img info --output=json").returns(
-        _success_result(_anchor_json(orphan_path, full2_path))
+        success_result(_anchor_json(orphan_path, full2_path))
     )
 
     # Pre-reconcile state counts.
@@ -693,3 +681,4 @@ def test_reconcile_dry_run_targets(
     assert any(
         "dry-run reconcile" in r.message for r in caplog.records
     ), "Should log dry-run reconcile messages"
+

@@ -220,6 +220,26 @@ class DeferredSummary:
 
 
 @dataclass(frozen=True)
+class ChainScanResult:
+    """Detailed outcome of a backing-chain scan via ``qemu-img info
+    --backing-chain``.
+
+    Consolidates 4 independent chain-verification implementations into a
+    single reusable result.  ``paths`` collects every file path found in
+    the chain.  ``broken_files`` lists files with issues (missing,
+    non-qcow2, cycle, backing-filename mismatch).  ``success`` is False
+    only when the ``qemu-img info`` command itself fails or JSON parsing
+    fails — individual file issues are reported in ``broken_files`` with
+    ``success`` remaining True (detection succeeded, chain has issues).
+    """
+
+    paths: set[str]
+    broken_files: list[str]
+    success: bool
+    error: str | None
+
+
+@dataclass(frozen=True)
 class ChainVerifyResult:
     """Outcome of a backing-chain integrity verification.
 

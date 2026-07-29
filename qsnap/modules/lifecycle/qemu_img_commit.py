@@ -21,6 +21,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
 from qsnap.utils.mac import detect_mac_denial
+from qsnap.utils.verification import deep_verify_base_image
 
 logger = logging.getLogger(__name__)
 
@@ -134,45 +135,9 @@ class QemuImgCommitManager(ILifecycleManager):
 
         # Deep verify: run qemu-img check on base image after commit
         if deep_verify:
-            chk = self._shell.run(
-                ["qemu-img", "check", "--output=json", str(vm_config.base_image)],
-                timeout=3600,
-            )
-            if not chk.success:
-                return CommitResult(
-                    success=False,
-                    committed_snapshot="",
-                    error=f"deep verify: qemu-img check failed: {chk.error}",
-                )
-            try:
-                data = json.loads(chk.stdout)
-                corruptions = data.get("corruptions", 0)
-                if corruptions > 0:
-                    return CommitResult(
-                        success=False,
-                        committed_snapshot="",
-                        error=f"deep verify: {corruptions} corruptions in base image",
-                    )
-                errors = data.get("errors", 0)
-                if errors > 0:
-                    return CommitResult(
-                        success=False,
-                        committed_snapshot="",
-                        error=f"deep verify: {errors} errors in base image",
-                    )
-                leaks = data.get("leaks", 0)
-                if leaks > 0:
-                    return CommitResult(
-                        success=False,
-                        committed_snapshot="",
-                        error=f"deep verify: {leaks} leaks in base image",
-                    )
-            except json.JSONDecodeError:
-                return CommitResult(
-                    success=False,
-                    committed_snapshot="",
-                    error="deep verify: failed to parse qemu-img check output",
-                )
+            fail = deep_verify_base_image(self._shell, vm_config.base_image)
+            if fail is not None:
+                return fail
 
         return CommitResult(
             success=True,

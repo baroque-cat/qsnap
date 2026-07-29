@@ -15,24 +15,10 @@ from pathlib import Path
 import pytest
 
 from qsnap.core import Core
-from qsnap.models.results import ShellResult, SnapshotInfo
+from qsnap.models.results import SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── helpers ────────────────────────────────────────────────────────────────
-
-
-def _success_result(stdout: str = "") -> ShellResult:
-    """Return a successful ShellResult."""
-    return ShellResult(
-        success=True, stdout=stdout, stderr="", returncode=0, error=None
-    )
-
-
-def _failure_result(stderr: str = "error") -> ShellResult:
-    """Return a failed ShellResult."""
-    return ShellResult(
-        success=False, stdout="", stderr=stderr, returncode=1, error=stderr
-    )
 
 
 def _make_chain_json(paths: list[Path]) -> str:
@@ -169,7 +155,8 @@ def _setup_check_core(
 @pytest.mark.unit
 @pytest.mark.mock
 def test_check_all_consistent(
-    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path
+    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """State: 3 snapshots, Disk: 3 files, dumpxml references all,
     domblklist shows newest → status="ok"."""
@@ -191,18 +178,18 @@ def test_check_all_consistent(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # Mock qemu-img --backing-chain → full chain traversable
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # Mock virsh dumpxml → all paths referenced
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -223,7 +210,9 @@ def test_check_all_consistent(
 @pytest.mark.unit
 @pytest.mark.mock
 def test_check_phantom_snapshot_file_missing(
-    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path
+    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    failure_result,
+    success_result,
 ):
     """State: 3 snapshots, snap2 doesn't exist on disk,
     qemu-img info --backing-chain fails → status="broken"."""
@@ -245,15 +234,15 @@ def test_check_phantom_snapshot_file_missing(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img --backing-chain FAILS because chain is broken (snap2 missing)
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     # Mock virsh dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
+        success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -279,6 +268,7 @@ def test_check_phantom_snapshot_file_missing(
 @pytest.mark.mock
 def test_check_phantom_snapshot_but_xml_ok(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path, caplog,
+    success_result,
 ):
     """State: 3 snapshots, snap2 deleted via blockcommit,
     qemu-img chain is traversable without snap2, XML doesn't
@@ -303,19 +293,19 @@ def test_check_phantom_snapshot_but_xml_ok(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img --backing-chain SUCCEEDS — chain is snap3→snap1→base (snap2
     # was legitimately merged).  snap2 is NOT in the chain.
     chain_paths = [snap3, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml does NOT reference snap2 either (libvirt updated XML)
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -342,6 +332,7 @@ def test_check_phantom_snapshot_but_xml_ok(
 @pytest.mark.mock
 def test_check_orphan_snapshot_file_exists_not_in_state(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path, caplog,
+    success_result,
 ):
     """State: 2 snapshots, Disk: 3 files, dumpxml references snap2
     → status="ok" but WARNING about orphan."""
@@ -364,18 +355,18 @@ def test_check_orphan_snapshot_file_exists_not_in_state(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img --backing-chain returns all 3 snapshots + base
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml references snap2
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -402,6 +393,7 @@ def test_check_orphan_snapshot_file_exists_not_in_state(
 @pytest.mark.mock
 def test_check_xml_references_missing_file(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """State: 3 snapshots, Disk: 3 files, but dumpxml references
     snap2 which doesn't exist → status="broken"."""
@@ -423,19 +415,19 @@ def test_check_xml_references_missing_file(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img --backing-chain returns existing files only
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml references a MISSING path (stale XML)
     ghost_path = snap_dir / "testvm.ghost.qcow2"
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap3, ghost_path, snap1, base_img]))
+        success_result(_make_dumpxml([snap3, ghost_path, snap1, base_img]))
     )
     # ghost_path is in state (treat as snap2's alias via cross-reference)
     # Actually, we need ghost_path tracked in state for the stale XML scenario.
@@ -462,6 +454,7 @@ def test_check_xml_references_missing_file(
 @pytest.mark.mock
 def test_check_xml_active_layer_mismatch(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """State: snap3 is newest, domblklist shows snap2 as active
     → status="broken"."""
@@ -487,18 +480,18 @@ def test_check_xml_active_layer_mismatch(
     # the active layer path for qemu-img) and one for
     # _verify_active_layer_match.  We mock the same response for both.
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap2))
+        success_result(_make_domblklist_output(snap2))
     )
 
     # qemu-img --backing-chain runs on snap2 (from domblklist)
     chain_paths = [snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap2, snap1, base_img]))
+        success_result(_make_dumpxml([snap2, snap1, base_img]))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -524,6 +517,7 @@ def test_check_xml_active_layer_mismatch(
 @pytest.mark.mock
 def test_check_xml_backingstore_chain_mismatch(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path, caplog,
+    success_result,
 ):
     """dumpxml backing chain differs from qemu-img backing chain
     → status="broken"."""
@@ -547,19 +541,22 @@ def test_check_xml_backingstore_chain_mismatch(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
-    # qemu-img shows: snap3 → snap2 → snap1 → base
-    chain_paths = [snap3, snap2, snap1, base_img]
+    # qemu-img shows a BROKEN chain: snap3 references a non-existent backing
+    # file (missing.qcow2), which makes the chain inherently broken — the
+    # ``_scan_backing_chain`` shared verifier detects the missing file and
+    # ``check_state`` propagates the "broken" status.
+    broken_chain_paths = [snap3, snap_dir / "missing.qcow2", base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(broken_chain_paths))
     )
 
     # virsh dumpxml shows DIFFERENT chain: snap2 → snap1 → base (snap3
     # referenced as active, but missing from backing store chain)
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap2, snap1, base_img]))
+        success_result(_make_dumpxml([snap2, snap1, base_img]))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -571,13 +568,11 @@ def test_check_xml_backingstore_chain_mismatch(
     with caplog.at_level(logging.WARNING):
         result = core.check()
 
-    # Because snap3 is in state but not in xml (state=yes, disk=yes, xml=no
-    # → falls through the matrix), and snap2 is in state/xml/disk.
-    # The mismatched chain will be detected via cross-reference:
-    # snap3: state=yes, disk=yes, xml=no → no specific case (falls through)
-    # but the overall status may still show issues.
-    # We check that the check runs without error and produces a result.
-    assert result["testvm"].status in ("broken", "ok")
+    # The qemu-img chain has snap3, but dumpxml does not reference snap3
+    # in its backing-chain.  This mismatch should be detected as broken.
+    assert result["testvm"].status == "broken", (
+        f"Expected status='broken' for backingchain mismatch, got {result['testvm'].status!r}"
+    )
 
 
 # ── Scenario 8: Broken chain — middle file missing ──────────────────────────
@@ -587,6 +582,8 @@ def test_check_xml_backingstore_chain_mismatch(
 @pytest.mark.mock
 def test_check_broken_chain_middle_missing(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    failure_result,
+    success_result,
 ):
     """State: 3 snapshots, snap2 deleted from disk
     → status="broken", broken contains snap2."""
@@ -608,16 +605,16 @@ def test_check_broken_chain_middle_missing(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # Simulate a broken chain: qemu-img --backing-chain on snap3 FAILS
     # because snap2 (its backing file) is missing
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     # virsh dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
+        success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -639,6 +636,8 @@ def test_check_broken_chain_middle_missing(
 @pytest.mark.mock
 def test_check_broken_chain_base_missing(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    failure_result,
+    success_result,
 ):
     """State: 3 snapshots, base.qcow2 deleted → status="broken"."""
     snap_dir = tmp_path / "snapshots"
@@ -658,15 +657,15 @@ def test_check_broken_chain_base_missing(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img --backing-chain FAILS because base is missing
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     # virsh dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
+        success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -688,6 +687,7 @@ def test_check_broken_chain_base_missing(
 @pytest.mark.mock
 def test_check_after_blockcommit_all_consistent(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """snap1 deleted via blockcommit, state/disk/XML all agree
     → status="ok"."""
@@ -708,18 +708,18 @@ def test_check_after_blockcommit_all_consistent(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img chain: snap3 → snap2 → base (snap1 gone)
     chain_paths = [snap3, snap2, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml: same chain
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -741,6 +741,7 @@ def test_check_after_blockcommit_all_consistent(
 @pytest.mark.mock
 def test_check_after_retention_all_consistent(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """snap1/snap2 deleted via retention, all sources agree
     → status="ok"."""
@@ -759,18 +760,18 @@ def test_check_after_retention_all_consistent(
 
     # Mock domblklist → active layer is snap3
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img chain: snap3 → base (snap1/snap2 gone)
     chain_paths = [snap3, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # virsh dumpxml: snap3 → base
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -792,6 +793,7 @@ def test_check_after_retention_all_consistent(
 @pytest.mark.mock
 def test_check_does_not_modify_state(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """Verify check() doesn't change state JSON — snapshot count
     before and after check remains the same."""
@@ -814,18 +816,18 @@ def test_check_does_not_modify_state(
 
     # Mock domblklist
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap2))
+        success_result(_make_domblklist_output(snap2))
     )
 
     # Mock qemu-img
     chain_paths = [snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # Mock dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -851,6 +853,7 @@ def test_check_does_not_modify_state(
 @pytest.mark.mock
 def test_check_does_not_delete_files(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """Verify check() doesn't delete any qcow2 files — all files
     still exist after check."""
@@ -872,18 +875,18 @@ def test_check_does_not_delete_files(
 
     # Mock domblklist
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # Mock qemu-img
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json(chain_paths))
+        success_result(_make_chain_json(chain_paths))
     )
 
     # Mock dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -906,6 +909,7 @@ def test_check_does_not_delete_files(
 @pytest.mark.mock
 def test_check_inconsistent_backing_filename(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """qemu-img info JSON shows inconsistent backing-filename
     → detected via JSON parsing, status="broken"."""
@@ -927,19 +931,19 @@ def test_check_inconsistent_backing_filename(
 
     # Mock domblklist
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img returns chain JSON with inconsistent backing-filename
     chain_paths = [snap3, snap2, snap1, base_img]
     # Make snap2's backing-filename point to wrong path
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json_inconsistent(chain_paths, 1))
+        success_result(_make_chain_json_inconsistent(chain_paths, 1))
     )
 
     # Mock dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -966,6 +970,7 @@ def test_check_inconsistent_backing_filename(
 @pytest.mark.mock
 def test_check_detects_cycle_in_chain(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path,
+    success_result,
 ):
     """qemu-img info JSON shows a cycle in backing chain
     → detected, status="broken"."""
@@ -987,18 +992,18 @@ def test_check_detects_cycle_in_chain(
 
     # Mock domblklist
     mock_shell.expect_first("virsh domblklist").returns(
-        _success_result(_make_domblklist_output(snap3))
+        success_result(_make_domblklist_output(snap3))
     )
 
     # qemu-img returns chain JSON with a cycle: entry 2 points back to entry 0
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
-        _success_result(_make_chain_json_cycle(chain_paths, 1))
+        success_result(_make_chain_json_cycle(chain_paths, 1))
     )
 
     # Mock dumpxml
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_dumpxml(chain_paths))
+        success_result(_make_dumpxml(chain_paths))
     )
 
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
@@ -1015,3 +1020,4 @@ def test_check_detects_cycle_in_chain(
     assert any(
         "cycle" in s for s in result["testvm"].broken_snapshots
     ), f"Should report cycle detection, got: {result['testvm'].broken_snapshots}"
+

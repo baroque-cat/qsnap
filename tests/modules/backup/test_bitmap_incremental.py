@@ -28,13 +28,11 @@ pytestmark = pytest.mark.unit
 # the same regardless of disk size, and one window avoids multiplying extents.
 _TINY_DISK = 65536
 
+# Module-level result factory for helper functions (not pytest fixtures).
+_ok = lambda: ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _ok_result() -> ShellResult:
-    """A generic successful ShellResult."""
-    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
 def _make_snapshot() -> SnapshotInfo:
@@ -106,14 +104,14 @@ def _setup_full_copy_loop_expectations(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_path}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_path}").returns(_ok())
+    mock_shell.expect("qemu-img create").returns(_ok())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok())
+    mock_shell.expect("qemu-nbd --fork").returns(_ok())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("^mv ").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(_ok())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok())
+    mock_shell.expect("^mv ").returns(_ok())
 
     return nbd
 
@@ -160,7 +158,7 @@ def _setup_verify_bitmap_incremental_expectations(
     )
 
     if verify_mode == "compare":
-        mock_shell.expect("qemu-img compare").returns(_ok_result())
+        mock_shell.expect("qemu-img compare").returns(_ok())
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
@@ -168,6 +166,7 @@ def _setup_verify_bitmap_incremental_expectations(
 
 def test_copy_loop_reads_only_dirty_extents(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """block_status has dirty + clean extents; pread covers exactly
     dirty ∩ allocated ranges.  bytes_read == dirty total."""
@@ -197,7 +196,7 @@ def test_copy_loop_reads_only_dirty_extents(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -207,10 +206,10 @@ def test_copy_loop_reads_only_dirty_extents(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     # Mock for Step 5b: chain-to-FULL traversability verification
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
@@ -250,6 +249,7 @@ def test_copy_loop_reads_only_dirty_extents(
 
 def test_first_incremental_backing_is_full(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """qemu-img create -b names the FULL backup; final qemu-img info
     shows backing-filename == FULL path → verify pass."""
@@ -279,7 +279,7 @@ def test_first_incremental_backing_is_full(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -289,10 +289,10 @@ def test_first_incremental_backing_is_full(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     # Mock for Step 5b: chain-to-FULL traversability verification
     # (expect_first needed because verify mocks use expect_first for qemu-img info too)
@@ -328,6 +328,7 @@ def test_first_incremental_backing_is_full(
 
 def test_previous_backup_vanished_retryable_failure(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """test -f fails → is_retryable(error) is True; successor checkpoint
     deleted, prior preserved."""
@@ -363,12 +364,12 @@ def test_previous_backup_vanished_retryable_failure(
     )
     # Backing-chain validation (new in fix-broken-backing-chain): the
     # walk validates non-FULL backups via qemu-img info --backing-chain.
-    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(_ok_result())
+    mock_shell.expect_first(r"qemu-img info.*--backing-chain").returns(success_result())
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -378,13 +379,13 @@ def test_previous_backup_vanished_retryable_failure(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
 
     # Custom run wrapper: the first test -f on the PREVIOUS BACKUP
     # (during the backwards walk) succeeds; the second test -f on the
@@ -401,7 +402,7 @@ def test_previous_backup_vanished_retryable_failure(
         if cmd_str.startswith("test -f") and str(prev_backup) in cmd_str:
             prev_test_f_count += 1
             if prev_test_f_count == 1:
-                return _ok_result()
+                return success_result()
             return ShellResult(
                 success=False, stdout="", stderr="", returncode=1, error="test -f failed"
             )
@@ -437,6 +438,7 @@ def test_previous_backup_vanished_retryable_failure(
 
 def test_previous_existence_rechecked_before_create(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Assert a test -f <prev> command appears BEFORE the qemu-img create command."""
     vm_config = make_vm_config()
@@ -456,7 +458,7 @@ def test_previous_existence_rechecked_before_create(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -466,10 +468,10 @@ def test_previous_existence_rechecked_before_create(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     # Mock for Step 5b: chain-to-FULL traversability verification
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
@@ -511,6 +513,7 @@ def test_previous_existence_rechecked_before_create(
 
 def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """fail_pread after first extent → result failure, rm -f <tmp> issued,
     write socket rm issued, qemu-nbd kill issued, domjobabort issued,
@@ -558,19 +561,19 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -580,11 +583,11 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())
-    mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())
+    mock_shell.expect(f"rm -f {delta_file}").returns(success_result())
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -621,6 +624,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
 
 def test_successful_transfer_no_tmp_or_socket_remain(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """On success: final rm -f sweep includes tmp file and write socket;
     mv tmp→final issued."""
@@ -645,7 +649,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -655,10 +659,10 @@ def test_successful_transfer_no_tmp_or_socket_remain(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     # Mock for Step 5b: chain-to-FULL traversability verification
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
@@ -700,6 +704,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
 
 def test_stall_watchdog_aborts_with_correct_error_string(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """sleeping pread_handler + small stall_timeout; exact string match
     'Stall detected: no progress for {N}s'; failure path ran."""
@@ -751,19 +756,19 @@ def test_stall_watchdog_aborts_with_correct_error_string(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # .tmp removal in finally
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # .tmp removal in finally
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -773,11 +778,11 @@ def test_stall_watchdog_aborts_with_correct_error_string(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # successor
-    mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())  # _cleanup_partial_file
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # successor
+    mock_shell.expect(f"rm -f {delta_file}").returns(success_result())  # _cleanup_partial_file
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -805,6 +810,7 @@ def test_stall_watchdog_aborts_with_correct_error_string(
 
 def test_slow_progressing_loop_not_killed(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Short sleeps per chunk, generous timeout; success."""
     vm_config = make_vm_config()
@@ -853,19 +859,19 @@ def test_slow_progressing_loop_not_killed(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("^mv ").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("^mv ").returns(success_result())
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -875,10 +881,10 @@ def test_slow_progressing_loop_not_killed(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -906,6 +912,7 @@ def test_slow_progressing_loop_not_killed(
 
 def test_zero_stall_timeout_disables_watchdog(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """stall_timeout=0 + sleeping pread → success (watchdog disabled)."""
     vm_config = make_vm_config()
@@ -954,19 +961,19 @@ def test_zero_stall_timeout_disables_watchdog(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("^mv ").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("^mv ").returns(success_result())
 
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -976,10 +983,10 @@ def test_zero_stall_timeout_disables_watchdog(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1007,6 +1014,7 @@ def test_zero_stall_timeout_disables_watchdog(
 
 def test_incremental_uses_unified_engine_no_convert(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """No 'qemu-img convert' in shell history when prior checkpoint exists;
     unified NBD engine (pread/pwrite) used instead.  mock connect called
@@ -1028,7 +1036,7 @@ def test_incremental_uses_unified_engine_no_convert(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1038,10 +1046,10 @@ def test_incremental_uses_unified_engine_no_convert(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1082,6 +1090,7 @@ def test_incremental_uses_unified_engine_no_convert(
 
 def test_qemu_img_info_shows_backing_filename(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Verify path asserts backing-filename; wrong backing → verify failure."""
     vm_config = make_vm_config()
@@ -1126,14 +1135,14 @@ def test_qemu_img_info_shows_backing_filename(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("^mv ").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("^mv ").returns(success_result())
 
     source_info = json.dumps(
         {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 1048576}
@@ -1158,7 +1167,7 @@ def test_qemu_img_info_shows_backing_filename(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1168,14 +1177,14 @@ def test_qemu_img_info_shows_backing_filename(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # successor
-    mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())  # _cleanup_partial_file
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # successor
+    mock_shell.expect(f"rm -f {delta_file}").returns(success_result())  # _cleanup_partial_file
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run),
@@ -1195,6 +1204,7 @@ def test_qemu_img_info_shows_backing_filename(
 
 def test_restore_chain_resolved_without_bitmap_specific_logic(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """The delta's backing-filename points to previous backup so the
     EXISTING restore flow works — assert create -b chain + final backing
@@ -1225,7 +1235,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1235,10 +1245,10 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     # Mock for Step 5b: chain-to-FULL traversability verification
     # (expect_first needed because verify mocks use expect_first for qemu-img info too)
@@ -1277,6 +1287,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
 
 def test_bitmap_incremental_ignores_compress_setting(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
+, success_result
 ) -> None:
     """target.compress=True; assert INFO log line and no '-c' in any
     issued command on the incremental path."""
@@ -1297,7 +1308,7 @@ def test_bitmap_incremental_ignores_compress_setting(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1307,10 +1318,10 @@ def test_bitmap_incremental_ignores_compress_setting(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1384,6 +1395,7 @@ def test_missing_libnbd_fails_factory_construction(make_target, tmp_path) -> Non
 
 def test_full_size_verify_failure_triggers_cleanup(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """qemu-img info actual-size > dirty_bytes*2+64MiB → verification
     failed error; final file rm'd; successor checkpoint deleted;
@@ -1430,14 +1442,14 @@ def test_full_size_verify_failure_triggers_cleanup(
             error=None,
         )
     )
-    mock_shell.expect_first(f"test -f {prev_backup}").returns(_ok_result())
-    mock_shell.expect("qemu-img create").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("qemu-nbd --fork").returns(_ok_result())
+    mock_shell.expect_first(f"test -f {prev_backup}").returns(success_result())
+    mock_shell.expect("qemu-img create").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("qemu-nbd --fork").returns(success_result())
     Path(pid_file).write_text("99999")
-    mock_shell.expect("kill 99999").returns(_ok_result())
-    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
-    mock_shell.expect("^mv ").returns(_ok_result())
+    mock_shell.expect("kill 99999").returns(success_result())
+    mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
+    mock_shell.expect("^mv ").returns(success_result())
 
     source_info = json.dumps(
         {"format": "qcow2", "virtual-size": _TINY_DISK, "actual-size": 1048576}
@@ -1462,7 +1474,7 @@ def test_full_size_verify_failure_triggers_cleanup(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1472,14 +1484,14 @@ def test_full_size_verify_failure_triggers_cleanup(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())
-    mock_shell.expect(f"rm -f {delta_file}").returns(_ok_result())
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())
+    mock_shell.expect(f"rm -f {delta_file}").returns(success_result())
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -1515,6 +1527,7 @@ def test_full_size_verify_failure_triggers_cleanup(
 
 def test_incremental_unaffected_by_full_transfer_engine(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Incremental transfers ignore full_transfer_engine — always use
     pread/pwrite unified NBD engine regardless of engine setting."""
@@ -1535,7 +1548,7 @@ def test_incremental_unaffected_by_full_transfer_engine(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1545,10 +1558,10 @@ def test_incremental_unaffected_by_full_transfer_engine(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1589,7 +1602,7 @@ def test_incremental_unaffected_by_full_transfer_engine(
     assert len(pread_calls) > 0, "pread should be called for incremental transfer"
 
 
-def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tmp_path) -> None:
+def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tmp_path, success_result) -> None:
     """Incremental _transfer is called with zero_skip=False — copies only
     dirty∩allocated extents, never performs zero-skip optimization."""
     vm_config = make_vm_config()
@@ -1609,7 +1622,7 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1619,10 +1632,10 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1663,6 +1676,7 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
 
 def test_temporal_mismatch_snapshot_predates_checkpoint(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Snapshot predating checkpoint is skipped with temporal mismatch error.
     The prior checkpoint timestamp (2025-02-01) is newer than the snapshot
@@ -1681,7 +1695,7 @@ def test_temporal_mismatch_snapshot_predates_checkpoint(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1718,6 +1732,7 @@ def test_temporal_mismatch_snapshot_predates_checkpoint(
 
 def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """Snapshot after checkpoint proceeds normally (no temporal mismatch).
     The prior checkpoint timestamp (2024-12-30) is before the snapshot
@@ -1740,7 +1755,7 @@ def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1750,10 +1765,10 @@ def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1783,6 +1798,7 @@ def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
 
 def test_size_sanity_check_warns_on_large_transfer(
     mock_shell, make_vm_config, make_target, tmp_path, caplog
+, success_result
 ) -> None:
     """Large transfer triggers WARNING but does NOT fail the backup.
     dirty_bytes (700000) > snapshot.allocation (65536) * 10 → WARNING logged,
@@ -1813,7 +1829,7 @@ def test_size_sanity_check_warns_on_large_transfer(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -1823,10 +1839,10 @@ def test_size_sanity_check_warns_on_large_transfer(
             error=None,
         )
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
         ShellResult(
@@ -1867,6 +1883,7 @@ def test_size_sanity_check_warns_on_large_transfer(
 
 def test_temporal_mismatch_no_checkpoint_proceeds(
     mock_shell, make_vm_config, make_target, tmp_path
+, success_result
 ) -> None:
     """No prior checkpoint exists (checkpoint-list is empty) → backup
     proceeds normally without any temporal check (full export)."""
@@ -1879,13 +1896,13 @@ def test_temporal_mismatch_no_checkpoint_proceeds(
     mock_shell.expect("virsh --version").returns(
         ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("rm -f").returns(_ok_result())  # stale source socket
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    mock_shell.expect("backup-begin").returns(_ok_result())
-    mock_shell.expect("domjobabort").returns(_ok_result())
-    mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -1910,4 +1927,190 @@ def test_temporal_mismatch_no_checkpoint_proceeds(
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
+    assert len(backup_cmds) == 1, (
+        f"backup-begin should be called when no temporal check applies, "
+        f"got: {[cmd for cmd in all_run_cmds if 'backup-begin' in cmd]}"
+    )
+
+
+def test_transfer_missing_normal_prior_always_set(
+    mock_shell, make_vm_config, make_target, tmp_path,
+    success_result,
+):
+    """Normal path: prior checkpoint exists → incremental transfer via copy_loop.
+
+    Core._backup_target() creates a FULL before transfer_missing(), so
+    prior is always set.  This test verifies that when a prior checkpoint
+    and prior backup file exist, the incremental NBD copy loop is used
+    (not a full export via _full_pull_lifecycle).
+    """
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_full_copy_loop_expectations(mock_shell, target, prev_backup, disk_target="vda")
+
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(success_result())  # stale source socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(success_result())
+    mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # source socket cleanup
+
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with (
+        patch.object(BitmapBackupProvider, "_full_pull_lifecycle") as mock_fpl,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+    # Prior is set → incremental copy_loop used, NOT _full_pull_lifecycle
+    assert mock_fpl.call_count == 0, (
+        "_full_pull_lifecycle should NOT be called when prior exists (normal path)"
+    )
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    # qemu-img create -b is used for incremental
+    create_cmds = [cmd for cmd in all_run_cmds if "qemu-img create" in cmd]
+    assert len(create_cmds) == 1, "qemu-img create -b should be used for incremental"
+
+
+def test_transfer_missing_safety_net_prior_none_full_export(
+    mock_shell, make_vm_config, make_target, tmp_path,
+    success_result,
+):
+    """Safety net: prior=None triggers full export via _full_pull_lifecycle.
+
+    When transfer_missing() is called with no prior checkpoint (checkpoint-list
+    is empty) and no prior backup file on the target, a full NBD export is
+    performed via _full_pull_lifecycle and verify_full_backup() is called
+    on the exported file.
+    """
+    vm_config = make_vm_config()
+    target = make_target(path=str(tmp_path / "nonexistent_target"), verify="metadata")
+    snapshot = _make_snapshot()
+
+    # No prior checkpoint
+    mock_shell.expect("virsh --version").returns(
+        ShellResult(success=True, stdout="virsh 8.2.0\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("rm -f").returns(success_result())  # stale socket
+    mock_shell.expect_first("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("backup-begin").returns(success_result())
+
+    # domblklist for disk target resolution during full export
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img convert via run_with_stall_detection
+    mock_shell.expect_first("qemu-img convert").returns(success_result())
+    # mv .tmp → final
+    mock_shell.expect("^mv ").returns(success_result())
+    # finally cleanup: domjobabort, rm .tmp, rm socket
+    mock_shell.expect("domjobabort").returns(success_result())
+    mock_shell.expect("rm -f").returns(success_result())  # .tmp
+    mock_shell.expect("rm -f").returns(success_result())  # socket
+
+    # Post-export verify_full_backup (verify="metadata"):
+    # uses qemu-img info --output=json (without --force-share)
+    mock_shell.expect_first(r"qemu-img info --output=json").returns(
+        ShellResult(
+            success=True,
+            stdout='{"format": "qcow2", "virtual-size": 65536, "actual-size": 65536}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Post-export checkpoint-list and backing-chain verification
+    import hashlib
+    target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=f"qsnap-{target_hash}-99991231T000000-deadbe\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with (
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+        patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as stall_spy,
+        patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
+        patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
+    ):
+        mock_wbxml.return_value = tmp_path / "backup-test.xml"
+        mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True, (
+        f"Safety net full export should succeed, got error: {results[0].error}"
+    )
+
+    # qemu-img convert IS called via run_with_stall_detection for the safety-net full export
+    convert_calls = [
+        " ".join(call.args[0]) for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
+    ]
+    assert len(convert_calls) >= 1, "Safety net full export should use qemu-img convert"
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 1
+    assert "qsnap-checkpoint-" in backup_cmds[0]

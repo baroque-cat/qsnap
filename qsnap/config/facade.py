@@ -15,7 +15,7 @@ from typing import cast
 
 from qsnap.interfaces.config import IConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
-from qsnap.retention.time_based import parse_stall_timeout
+from qsnap.utils.time import parse_stall_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +151,6 @@ class ConfigFacade(IConfigFacade):
             global_kwargs["full_verify_after_create"] = str(raw["full_verify_after_create"])
         if "full_verify_before_delete" in raw:
             global_kwargs["full_verify_before_delete"] = str(raw["full_verify_before_delete"])
-        if "deep_check_targets" in raw:
-            global_kwargs["deep_check_targets"] = bool(raw["deep_check_targets"])
 
         # Transaction log (optional absolute path).
         if "transaction_log" in raw:
@@ -416,11 +414,15 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError("Missing required target field: 'path'")
 
         path = Path(str(tgt_raw["path"]))
-        incremental = bool(tgt_raw.get("incremental", True))
 
         # Removed fields (removed backup strategy) — log a deprecation
         # WARNING naming the field and ignore the value (design D3,
         # same mechanism as the full_every deprecation below).
+        if "incremental" in tgt_raw:
+            logging.getLogger("qsnap.config").warning(
+                "incremental is deprecated and ignored — all backups are "
+                "now bitmap-based. Remove incremental from your config."
+            )
         if "incremental_mode" in tgt_raw:
             logging.getLogger("qsnap.config").warning(
                 "incremental_mode is deprecated and ignored — NBD bitmap "
@@ -574,7 +576,6 @@ class ConfigFacade(IConfigFacade):
 
         return TargetConfig(
             path=path,
-            incremental=incremental,
             target_chain_length=target_chain_length,
             target_keep_generations=target_keep_generations,
             verify=verify,

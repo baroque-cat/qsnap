@@ -324,7 +324,7 @@ def test_stale_state_self_healing(test_vm):
 
     # Run transfer_missing.
     provider = BitmapBackupProvider(shell, state=state)
-    target = TargetConfig(path=target_dir, incremental=True, verify="off")
+    target = TargetConfig(path=target_dir, verify="off")
     vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
 
     results = provider.transfer_missing(

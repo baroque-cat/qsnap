@@ -17,7 +17,6 @@ from qsnap.models.results import (
 )
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
-    MockBackupProvider,
     MockBitmapBackupProvider,
     MockChangeDetector,
     MockLifecycleManager,
@@ -128,10 +127,10 @@ def test_mock_backup_provider_has_create_full_backup(make_vm_config, make_target
 
 
 def test_mock_backup_provider_create_full_backup_accepts_new_params(make_vm_config, make_target):
-    """MockBackupProvider.create_full_backup() accepts the new
+    """MockBitmapBackupProvider.create_full_backup() accepts the new
     ``compression_type`` and ``stall_timeout`` keyword arguments
     without error and still passes isinstance(..., IBackupProvider)."""
-    provider = MockBackupProvider()
+    provider = MockBitmapBackupProvider()
     assert isinstance(provider, IBackupProvider)
 
     source_snapshot = SnapshotInfo(
@@ -152,10 +151,10 @@ def test_mock_backup_provider_create_full_backup_accepts_new_params(make_vm_conf
 
 
 def test_mock_backup_provider_transfer_missing_accepts_new_params(make_vm_config, make_target):
-    """MockBackupProvider.transfer_missing() accepts the new
+    """MockBitmapBackupProvider.transfer_missing() accepts the new
     ``compression_type`` and ``stall_timeout`` keyword arguments
     without error."""
-    provider = MockBackupProvider()
+    provider = MockBitmapBackupProvider()
     assert isinstance(provider, IBackupProvider)
 
     snapshots = [
@@ -236,7 +235,7 @@ def test_mock_bitmap_backup_provider_transfer_missing_accepts_new_params(
 
 
 def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_target):
-    """Both MockBackupProvider and MockBitmapBackupProvider default
+    """Both MockBitmapBackupProvider and MockBitmapBackupProvider default
     ``compression_type`` to ``"zstd"`` on both create_full_backup() and
     transfer_missing(), matching IBackupProvider defaults."""
     source_snapshot = SnapshotInfo(
@@ -247,7 +246,7 @@ def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_tar
     )
     snapshots = [source_snapshot]
 
-    for provider in [MockBackupProvider(), MockBitmapBackupProvider()]:
+    for provider in [MockBitmapBackupProvider(), MockBitmapBackupProvider()]:
         assert isinstance(provider, IBackupProvider)
 
         # create_full_backup with default compression_type

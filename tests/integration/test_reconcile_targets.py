@@ -135,7 +135,7 @@ def test_reconcile_real_phantom_full(test_vm, caplog):
 
     # Build Core and run pipeline to create a FULL backup.
     target = TargetConfig(
-        path=target_dir, incremental=True, compress=False, verify="off"
+        path=target_dir, compress=False, verify="off"
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -247,7 +247,7 @@ def test_reconcile_real_orphan_backup_recorded(test_vm, caplog):
     state.record_snapshot(vm_name, snap_info)
 
     target = TargetConfig(
-        path=target_dir, incremental=True, compress=False, verify="off"
+        path=target_dir, compress=False, verify="off"
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -365,7 +365,7 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
     state.record_snapshot(vm_name, snap_info)
 
     target = TargetConfig(
-        path=target_dir, incremental=True, compress=False, verify="off"
+        path=target_dir, compress=False, verify="off"
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -412,7 +412,7 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
 
     target2 = TargetConfig(
         path=different_target_dir,
-        incremental=True,
+        
         compress=False,
         verify="off",
     )
@@ -489,7 +489,7 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
     state = InMemoryStateManager()
 
     target = TargetConfig(
-        path=target_dir, incremental=True, compress=False, verify="off"
+        path=target_dir, compress=False, verify="off"
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -626,7 +626,7 @@ def test_reconcile_real_dry_run_targets(test_vm, caplog):
     state.record_snapshot(vm_name, snap_info)
 
     target = TargetConfig(
-        path=target_dir, incremental=True, compress=False, verify="off"
+        path=target_dir, compress=False, verify="off"
     )
     vm_config = VMConfig(
         name=vm_name,

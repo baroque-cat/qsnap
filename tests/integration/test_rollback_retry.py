@@ -130,7 +130,7 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -238,7 +238,7 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     # Step 1: Build Core with retry enabled.
     target = TargetConfig(
         path=target_dir,
-        incremental=True,
+        
         compress=False,
         verify="off",
         backup_retry_max=3,

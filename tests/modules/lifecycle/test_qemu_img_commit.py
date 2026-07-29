@@ -662,3 +662,4 @@ def test_qemu_img_commit_deep_verify(
     check_cmd = next(c for c in cmds if "qemu-img check" in c)
     assert "--output=json" in check_cmd
     assert str(vm_config.base_image) in check_cmd
+

@@ -15,6 +15,7 @@ The system SHALL ship a `qsnap-check.timer` systemd timer unit that triggers `qs
 - **WHEN** the system was off during the scheduled deep check
 - **THEN** `Persistent=True` causes the service to run immediately on next boot
 
+
 ### Requirement: qsnap check --deep enhanced with per-image verification
 
 The `qsnap check --deep` command SHALL, for each VM: (a) run `qemu-img check --output=json` on every snapshot in `IStateManager.get_snapshots()`, (b) run `qemu-img check --output=json` on every backup file on each target, (c) compare snapshot files on disk vs state records (orphan detection), (d) report `corruptions`, `errors`, AND `leaks` count per image, (e) aggregate per-VM status: OK (0 corruptions, 0 errors, 0 leaks), WARNING (>0 in any field but recoverable), CRITICAL (images missing/unreadable). The `qemu-img check` command SHALL use a timeout of 7200 seconds (2 hours) to accommodate large disks.
@@ -53,6 +54,7 @@ The `qsnap check --deep` command SHALL, for each VM: (a) run `qemu-img check --o
 - **THEN** the timeout is 7200 seconds (2 hours)
 - **AND** the command is not prematurely killed for large disks
 
+
 ### Requirement: deep_check_schedule config field
 `GlobalConfig` SHALL include a `deep_check_schedule: str` field with default `"off"`. Accepted values: `"off"`, `"weekly"`, `"monthly"`. This field SHALL NOT control the systemd timer schedule (that is in the timer unit file). It SHALL be used by `qsnap check` to report whether the current deep check is on schedule.
 
@@ -64,6 +66,7 @@ The `qsnap check --deep` command SHALL, for each VM: (a) run `qemu-img check --o
 - **WHEN** `qsnap check` runs and `deep_check_schedule = "weekly"`
 - **AND** the last deep check was 8 days ago
 - **THEN** the output includes: "Last deep check: 8 days ago (expected: weekly) — OVERDUE"
+
 
 ### Requirement: BlockCommitManager deep_verify flag
 
@@ -89,9 +92,12 @@ The `qsnap check --deep` command SHALL, for each VM: (a) run `qemu-img check --o
 - **WHEN** `blockcommit(deep_verify=True)` succeeds but `qemu-img check` reports `leaks: 3`
 - **THEN** `CommitResult(success=False, error="deep verify: 3 leaks in base image")` is returned
 
+
 ### Requirement: VMConfig deep verification fields
 
 `VMConfig` SHALL include `blockcommit_deep_verify: bool` (default `False`). The `snapshot_deep_verify` field is REMOVED — it was parsed and stored but never consumed by any code path. Only `blockcommit_deep_verify` is wired into the lifecycle manager via the `deep_verify` keyword argument on `ILifecycleManager.blockcommit()`.
+
+When `blockcommit_deep_verify = True`, the `deep_verify` keyword SHALL be passed to `manager.blockcommit()` in BOTH the deferred-commit path AND the main blockcommit path in `Core._blockcommit_snapshots()`. Previously, the main path silently omitted the `deep_verify` keyword, causing `blockcommit_deep_verify = True` to only take effect for deferred operations.
 
 #### Scenario: Deep verify defaults to off
 
@@ -99,8 +105,16 @@ The `qsnap check --deep` command SHALL, for each VM: (a) run `qemu-img check --o
 - **THEN** `blockcommit_deep_verify` is `False`
 - **AND** `snapshot_deep_verify` does not exist on the dataclass
 
-#### Scenario: Deep verify enabled for critical VM
+#### Scenario: Deep verify enabled for critical VM — main blockcommit path
 
 - **WHEN** `blockcommit_deep_verify = true`
-- **AND** deferred blockcommit executes while VM is shut off
-- **THEN** `BlockCommitManager.blockcommit()` is called with `deep_verify=True`
+- **AND** Core executes the main blockcommit path in `_blockcommit_snapshots()`
+- **THEN** `manager.blockcommit(vm_config, committable, deep_verify=True)` is called
+- **AND** the lifecycle manager executes `qemu-img check` on the base image after commit
+
+#### Scenario: Deep verify enabled for critical VM — deferred path
+
+- **WHEN** `blockcommit_deep_verify = true`
+- **AND** Core executes a deferred blockcommit
+- **THEN** `manager.blockcommit(vm_config, committable, deep_verify=True)` is called
+- **AND** behavior is unchanged from the previous deferred path

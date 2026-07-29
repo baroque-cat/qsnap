@@ -485,3 +485,54 @@ def test_deferred_thresholds_overridden() -> None:
     assert global_cfg.deferred_crit_count == "10"
     assert global_cfg.deferred_warn_age == "7d"
     assert global_cfg.deferred_crit_age == "30d"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# incremental deprecation WARNING
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_incremental_toml_key_logs_deprecation_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Parse a TOML config with ``incremental = true`` in a target; verify a
+    WARNING is logged with message containing 'deprecated' and 'bitmap-based',
+    the config parses successfully (no error raised), and the target is created
+    without an ``incremental`` attribute."""
+    import logging
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "  incremental = true\n"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
+        facade = ConfigFacade(config_file)
+
+    # Verify deprecation WARNING was emitted.
+    warnings_text = " ".join(caplog.messages)
+    assert "incremental is deprecated" in warnings_text, (
+        f"Expected 'incremental is deprecated' in WARNINGs, got: {warnings_text!r}"
+    )
+    assert "bitmap-based" in warnings_text, (
+        f"Expected 'bitmap-based' in WARNINGs, got: {warnings_text!r}"
+    )
+
+    # Verify parsing succeeds — no error raised.
+    vm = facade.get_vm("testvm")
+    assert vm.name == "testvm"
+    assert len(vm.targets) == 1
+    target = vm.targets[0]
+    assert target.path == Path("/mnt/backup/testvm")
+
+    # Verify the target has no 'incremental' attribute.
+    with pytest.raises(AttributeError):
+        _ = target.incremental

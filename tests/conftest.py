@@ -133,6 +133,18 @@ def _setup_validation_expectations(shell: MockShell) -> None:
     shell.expect("qemu-nbd --image-opts").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
+    # Default backing-chain scan: return valid JSON for an intact single-file chain.
+    # Tests that need broken-chain behavior override with
+    # expect_first("qemu-img info --force-share --backing-chain").
+    shell.expect("qemu-img info --force-share --backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"format": "qcow2", "filename": "/var/lib/libvirt/images/testvm.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
 
 @pytest.fixture
@@ -141,6 +153,28 @@ def mock_shell() -> MockShell:
     shell = MockShell()
     _setup_validation_expectations(shell)
     return shell
+
+
+@pytest.fixture
+def success_result():
+    """Factory fixture for ShellResult(success=True, ...)."""
+    def _make(stdout="", stderr="", returncode=0, error=None):
+        return ShellResult(success=True, stdout=stdout, stderr=stderr, returncode=returncode, error=error)
+    return _make
+
+
+@pytest.fixture
+def failure_result():
+    """Factory fixture for ShellResult(success=False, ...)."""
+    def _make(stdout="", stderr="", returncode=1, error="error"):
+        return ShellResult(success=False, stdout=stdout, stderr=stderr, returncode=returncode, error=error)
+    return _make
+
+
+@pytest.fixture
+def clean_shell() -> MockShell:
+    """A MockShell instance without validation expectations."""
+    return MockShell()
 
 
 @pytest.fixture
@@ -188,7 +222,6 @@ def make_target():
 
     def _make(
         path: str = "/mnt/backup/testvm",
-        incremental: bool = True,
         compress: bool = True,
         compression_type: str = "zstd",
         full_transfer_engine: str = "qemu-img-convert",
@@ -200,7 +233,6 @@ def make_target():
     ) -> TargetConfig:
         defaults: dict[str, object] = {
             "path": Path(path),
-            "incremental": incremental,
             "compress": compress,
             "compression_type": compression_type,
             "full_transfer_engine": full_transfer_engine,
@@ -243,7 +275,6 @@ def make_global_config():
         backup_stall_timeout: str = "30m",
         full_verify_after_create: str = "check",
         full_verify_before_delete: str = "check",
-        deep_check_targets: bool = False,
         transaction_log: str | None = None,
         backup_create: str = "always",
     ) -> GlobalConfig:
@@ -271,7 +302,6 @@ def make_global_config():
             backup_stall_timeout=backup_stall_timeout,
             full_verify_after_create=full_verify_after_create,
             full_verify_before_delete=full_verify_before_delete,
-            deep_check_targets=deep_check_targets,
             transaction_log=transaction_log,
             backup_create=backup_create,
         )

@@ -26,6 +26,7 @@ The system SHALL scan the `target.path` directory for `.qcow2` files. For each f
 - **WHEN** `target.path` exists but contains no `.qcow2` files
 - **THEN** `list()` returns an empty list
 
+
 ### Requirement: Delete backup from target
 
 The system SHALL delete a backup file via `rm -f`. The method accepts a `SnapshotInfo` and returns a `ShellResult`.
@@ -41,6 +42,7 @@ The system SHALL delete a backup file via `rm -f`. The method accepts a `Snapsho
 - **THEN** `rm -f` returns success
 - **AND** the module returns `ShellResult(success=True)`
 
+
 ### Requirement: BitmapBackupProvider implements IBackupProvider
 The system SHALL provide a `BitmapBackupProvider` class in `qsnap/modules/backup/bitmap.py` that implements `IBackupProvider`. It SHALL accept `IShell` and an optional `state: IStateManager | None = None` as constructor parameters. It SHALL use the `virsh backup-begin` NBD pull-model API.
 
@@ -49,9 +51,10 @@ The system SHALL provide a `BitmapBackupProvider` class in `qsnap/modules/backup
 - **THEN** `isinstance(provider, IBackupProvider)` is True
 - **THEN** the provider is ready for transfer operations
 
+
 ### Requirement: Transfer missing snapshots via dirty bitmap extraction
 
-The system SHALL determine which snapshots are missing on the target and for each SHALL use `virsh backup-begin` with NBD export to transfer data. On first backup (no prior checkpoint), a full export is performed via the engine selected by `full_transfer_engine`: when `"qemu-img-convert"` (default), `qemu-img convert` is used; when `"libnbd"`, the unified NBD transfer engine is used with `meta_contexts=["base:allocation"]` and `zero_skip=True`. On subsequent backups, only dirty blocks since the last checkpoint are exported via the unified engine with `meta_contexts=["base:allocation", "qemu:dirty-bitmap:backup-<disk>"]` and `zero_skip=False`. Every `backup-begin` SHALL receive a checkpoint XML as its third positional argument so the successor checkpoint is created atomically at the export's freeze point. The `full_transfer_engine` setting SHALL NOT affect incremental transfers — incrementals always use the `pread`/`pwrite` engine. The `full_verify_before_rebase` parameter is REMOVED from the `transfer_missing()` signature — it was dead plumbing (rebase died with file-copy).
+The system SHALL determine which snapshots are missing on the target and for each SHALL use `virsh backup-begin` with NBD export to transfer data. On first backup (no prior checkpoint), a full export is performed via the engine selected by `full_transfer_engine`: when `"qemu-img-convert"` (default), `qemu-img convert` is used; when `"libnbd"`, the unified NBD transfer engine is used with `meta_contexts=["base:allocation"]` and `zero_skip=True`. On subsequent backups, only dirty blocks since the last checkpoint are exported via the unified engine with `meta_contexts=["base:allocation", "qemu:dirty-bitmap:backup-<disk>"]` and `zero_skip=False`. Every `backup-begin` SHALL receive a checkpoint XML as its third positional argument so the successor checkpoint is created atomically at the export's freeze point. The `full_transfer_engine` setting SHALL NOT affect incremental transfers — incrementals always use the `pread`/`pwrite` engine. The `full_verify_before_rebase` parameter is REMOVED from the `transfer_missing()` signature — it was dead plumbing (rebase died with file-copy). When `prior` is `None` (no prior checkpoint exists for this VM+target), `transfer_missing()` SHALL perform a full export as a safety-net — this ensures data is transferred even if Core's FULL-creation path was skipped or failed. The resulting backup is a standalone qcow2 with no backing file.
 
 #### Scenario: First backup — full NBD export via qemu-img convert (default engine)
 
@@ -99,12 +102,14 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **AND** the helper branches on `full_transfer_engine`: `"qemu-img-convert"` → `_qemu_img_convert_transfer()`, `"libnbd"` → `_full_transfer_via_libnbd()`
 - **AND** the helper handles: transfer, mv .tmp → final, finally cleanup
 
+
 ### Requirement: List checkpoints for target
 `BitmapBackupProvider` SHALL provide a method `list_checkpoints(vm_name: str) -> list[str]` that discovers existing qsnap-owned checkpoints via `virsh checkpoint-list --name`. Only checkpoints with the `qsnap-` prefix SHALL be returned.
 
 #### Scenario: Existing qsnap checkpoints found
 - **WHEN** `virsh checkpoint-list --name VM` returns `["qsnap-target1-20250101", "manual-checkpoint", "qsnap-target1-20250102"]`
 - **THEN** `list_checkpoints("VM")` returns `["qsnap-target1-20250101", "qsnap-target1-20250102"]`
+
 
 ### Requirement: NBD pull-model backup via virsh backup-begin
 `BitmapBackupProvider` v2 SHALL use the libvirt pull-model backup API: (1) create backup XML with NBD Unix socket at `/tmp/qsnap-backup-{pid}.sock` and a checkpoint XML naming the successor checkpoint, (2) `virsh backup-begin --domain VM backup.xml checkpoint.xml` to start the NBD export and atomically create the successor checkpoint at the export's freeze point, (3) `qemu-img convert -n nbd:unix:<socket> <target>` to pull dirty blocks, (4) remove socket. Checkpoints SHALL persist for subsequent incremental runs. This replaces the previous `qemu-img convert --bitmap` direct-access approach.
@@ -119,6 +124,7 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **THEN** `virsh backup-begin` exports only blocks changed since the checkpoint
 - **THEN** the resulting backup file is smaller than a full copy
 - **AND** a new successor checkpoint is created atomically at this export's freeze point
+
 
 ### Requirement: Backup verification step
 `BitmapBackupProvider.transfer_missing()` SHALL perform post-transfer verification according to `target.verify`. `"off"` skips verification. Every verification failure SHALL produce `BackupResult(success=False, error="verification failed: ...")`. For incrementals, verification SHALL use `verify_bitmap_incremental()`. For full pulls (no prior checkpoint), verification SHALL use `verify_full_backup()`. The verify modes are `"off"`, `"metadata"`, `"compare"` (was `"hash"`/`"full"` — both ran `qemu-img compare`; now unified to `"compare"`). Existing configs with `verify="hash"` or `verify="full"` SHALL log a deprecation WARNING and be treated as `"compare"`.
@@ -140,6 +146,7 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **THEN** a WARNING is logged naming the deprecated value
 - **AND** `"compare"` behavior is applied (qemu-img compare)
 
+
 ### Requirement: Backup providers remain retry-unaware
 `BitmapBackupProvider` SHALL NOT implement any retry logic internally. It SHALL return `BackupResult(success=False, error=...)` for any failure. The retry logic SHALL be handled by Core's `_backup_target()` method, which wraps the provider's `transfer_missing()` call.
 
@@ -153,21 +160,22 @@ The system SHALL determine which snapshots are missing on the target and for eac
 - **THEN** the `BackupResult.error` string contains the underlying error from `ShellResult.error`
 - **AND** Core's retry logic can pattern-match against it to determine retryability
 
+
 ### Requirement: BitmapBackupProvider.create_full_backup implemented via configurable engine
 
-`BitmapBackupProvider` SHALL override `create_full_backup(vm_name: str, source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False, bucket_level: str = "monthly", compression_type: str = "zstd", stall_timeout: int = 1800, full_transfer_engine: str = "qemu-img-convert", convert_parallel: int = 4, convert_out_of_order: bool = True) -> BackupResult` to create a standalone FULL backup via the selected transfer engine. When `full_transfer_engine == "qemu-img-convert"`, the method SHALL use `qemu-img convert` via `_qemu_img_convert_transfer()`. When `full_transfer_engine == "libnbd"`, the method SHALL use the libnbd pread/pwrite engine via `_full_transfer_via_libnbd()`. The method SHALL NOT raise `NotImplementedError`. The result SHALL be a standalone qcow2 file on the target. The method SHALL pass a `checkpoint_name` to `_full_pull_lifecycle()` so that a baseline checkpoint is created **atomically** with the FULL's `backup-begin` (named `qsnap-{target_hash}-{yyyymmddTHHMMSS}`); a bitmap-mode FULL therefore always leaves a checkpoint baseline anchored at the FULL's freeze point.
+`BitmapBackupProvider` SHALL override `create_full_backup(vm_name: str, source_snapshot: SnapshotInfo, target: TargetConfig, compress: bool = False, compression_type: str = "zstd", stall_timeout: int = 1800, full_transfer_engine: str = "qemu-img-convert", convert_parallel: int = 4, convert_out_of_order: bool = True) -> BackupResult` to create a standalone FULL backup via the selected transfer engine. The `bucket_level` parameter is REMOVED from the method signature — it was a legacy parameter from the time-bucket retention system that is no longer used. When `full_transfer_engine == "qemu-img-convert"`, the method SHALL use `qemu-img convert` via `_qemu-img_convert_transfer()`. When `full_transfer_engine == "libnbd"`, the method SHALL use the libnbd pread/pwrite engine via `_full_transfer_via_libnbd()`. The method SHALL NOT raise `NotImplementedError`. The result SHALL be a standalone qcow2 file on the target. The method SHALL pass a `checkpoint_name` to `_full_pull_lifecycle()` so that a baseline checkpoint is created **atomically** with the FULL's `backup-begin` (named `qsnap-{target_hash}-{yyyymmddTHHMMSS}`); a bitmap-mode FULL therefore always leaves a checkpoint baseline anchored at the FULL's freeze point.
 
 The method SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after post-create verification passes.
 
 #### Scenario: Bitmap FULL with zstd compression via qemu-img convert
 
-- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", bucket_level="monthly", full_transfer_engine="qemu-img-convert")` is called
+- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", full_transfer_engine="qemu-img-convert")` is called
 - **THEN** `qemu-img convert -c -O qcow2 -o compression_type=zstd -m 4 -W -p <source> <target>.tmp` is executed via `run_with_stall_detection()`
 - **AND** the resulting FULL is compressed with zstd
 
 #### Scenario: Bitmap FULL with zstd compression via libnbd
 
-- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", bucket_level="monthly", full_transfer_engine="libnbd")` is called
+- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", full_transfer_engine="libnbd")` is called
 - **THEN** `qemu-img create -f qcow2 -o compression_type=zstd <tmp_file> <virtual_size>` is executed
 - **AND** `_start_write_server(..., compress=True)` is called
 - **AND** `_transfer(..., zero_skip=True, compress=True)` is called
@@ -177,26 +185,11 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 
 - **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=True, compression_type="zstd", full_transfer_engine="qemu-img-convert", convert_parallel=2)` is called
 - **THEN** `qemu-img convert -c -O qcow2 -o compression_type=zstd -m 2 -W -p <source> <target>.tmp` is executed
-- **AND** the `-m` flag has value `2`
 
-#### Scenario: Bitmap FULL with convert_out_of_order disabled
+#### Scenario: Bitmap FULL creates atomically with checkpoint
 
-- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=False, full_transfer_engine="qemu-img-convert", convert_out_of_order=False)` is called
-- **THEN** `qemu-img convert -O qcow2 -m 4 -p <source> <target>.tmp` is executed
-- **AND** the `-W` flag is NOT present
-
-#### Scenario: Bitmap FULL no longer raises NotImplementedError
-
-- **WHEN** `BitmapBackupProvider.create_full_backup("myvm", snapshot, target, compress=False, bucket_level="monthly")` is called
-- **THEN** the method does NOT raise `NotImplementedError`
-- **AND** `virsh backup-begin` is called without any `--incremental` CLI flag
-- **AND** the default `full_transfer_engine="qemu-img-convert"` is used
-
-#### Scenario: Bitmap FULL creates checkpoint atomically
-
-- **WHEN** `create_full_backup()` is called for a running VM
-- **THEN** `virsh backup-begin` receives a checkpoint XML as the third positional argument
-- **AND** on success a checkpoint named `qsnap-{target_hash}-{yyyymmddTHHMMSS}` exists
+- **WHEN** `BitmapBackupProvider.create_full_backup()` completes successfully
+- **THEN** a backup-begin/freeze checkpoint named `qsnap-{target_hash}-{yyyymmddTHHMMSS}` exists
 - **AND** its baseline equals the FULL export's freeze point
 - **AND** no standalone `virsh checkpoint-create-as` call is made by the provider
 
@@ -208,12 +201,14 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 
 #### Scenario: Bitmap FULL with dotted VM name
 
-- **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False, bucket_level="monthly")` is called
+- **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False)` is called
 - **THEN** the FULL backup file is named `3.Projects_opencode.FULL.YYYYMMDD.qcow2`
+
 
 ### Requirement: transfer_missing SHALL NOT create FULL backups
 
 `BitmapBackupProvider.transfer_missing()` SHALL NOT call `create_full_backup()` under any circumstances. FULL backup creation is the sole responsibility of `Core._backup_target()` via the bucket-driven mechanism, ensuring every FULL passes through Core's verification pipeline before state recording.
+
 
 ### Requirement: BitmapBackupProvider domjobabort after NBD incremental transfer
 
@@ -233,6 +228,7 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 - **WHEN** `virsh domjobabort` returns a non-zero exit code
 - **THEN** a WARNING is logged with the error message
 - **AND** execution continues to socket cleanup
+
 
 ### Requirement: BitmapBackupProvider accepts IStateManager
 
@@ -258,6 +254,7 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 - **THEN** no error is raised
 - **AND** the method returns `BackupResult(success=True)` without recording in state
 
+
 ### Requirement: Factory passes IStateManager to BitmapBackupProvider
 
 `DefaultFactory.create_backup_provider(vm_config, target)` SHALL pass `self._state` as the `state` parameter when constructing `BitmapBackupProvider`. `BitmapBackupProvider` is the single backup provider — there is no `incremental_mode` branch.
@@ -265,6 +262,7 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 #### Scenario: Factory constructs BitmapBackupProvider with state
 - **WHEN** factory has `self._state`
 - **THEN** `BitmapBackupProvider(shell=self._shell, state=self._state)` is returned
+
 
 ### Requirement: Immediate deletion of failed backup files after verification failure
 
@@ -289,6 +287,7 @@ When verification returns a non-None error string in `BitmapBackupProvider.trans
 - **WHEN** `qemu-img convert` from NBD fails in `BitmapBackupProvider.transfer_missing()`
 - **THEN** the partial target file SHALL be deleted via `rm -f` before appending `BackupResult(success=False)`
 - **AND** the NBD socket is cleaned up in the `finally` block (existing behavior)
+
 
 ### Requirement: Compression type parameter for backup providers
 
@@ -315,6 +314,7 @@ When `full_transfer_engine == "libnbd"` and `compress=True`, the `compression_ty
 - **THEN** `qemu-img convert -O qcow2 -m 4 -W -p <source> <target>.tmp` is executed (no `-c` flag)
 - **AND** the `compression_type` parameter is ignored
 
+
 ### Requirement: Stall detection for data transfer commands
 
 `BitmapBackupProvider.transfer_missing()` SHALL use `IShell.run_with_stall_detection()` instead of `IShell.run()` for the NBD convert step (when `full_transfer_engine == "qemu-img-convert"`) and for the libnbd transfer step (when `full_transfer_engine == "libnbd"`). The `output_file` parameter SHALL be the target file path. The `stall_timeout` parameter SHALL be passed from `target.backup_stall_timeout` (parsed to seconds). If `backup_stall_timeout` is `"0s"`, the method SHALL fall back to `IShell.run()` with a fixed timeout of 3600s (backward compatibility).
@@ -333,6 +333,7 @@ When `full_transfer_engine == "libnbd"` and `compress=True`, the `compression_ty
 
 - **WHEN** `target.backup_stall_timeout = "0s"`
 - **THEN** `shell.run(cmd, timeout=3600)` is used (existing behavior, no stall detection)
+
 
 ### Requirement: Full transfer engine parameters for backup providers
 
@@ -362,6 +363,7 @@ When `full_transfer_engine == "libnbd"` and `compress=True`, the `compression_ty
 - **THEN** FULL transfers within `transfer_missing()` use the libnbd pread/pwrite engine
 - **AND** incremental transfers are unaffected (always use pread/pwrite)
 
+
 ### Requirement: Post-transfer chain-to-FULL verification
 
 After `BitmapBackupProvider.transfer_missing()` successfully creates an incremental backup (atomic rename complete), the provider SHALL verify the backing chain from the incremental to the FULL anchor is traversable via `qemu-img info --force-share --backing-chain --output=json <incremental_path>`. If the chain is broken (any file in the chain missing), the provider SHALL log CRITICAL and return `BackupResult(success=False, error="chain-to-FULL not traversable")`.
@@ -378,6 +380,7 @@ After `BitmapBackupProvider.transfer_missing()` successfully creates an incremen
 - **AND** `qemu-img info --backing-chain` fails or shows a broken chain
 - **THEN** a CRITICAL log is emitted
 - **AND** `BackupResult(success=False, error="chain-to-FULL not traversable")` is returned
+
 
 ### Requirement: Post-creation FULL backup verification
 
@@ -401,3 +404,20 @@ After `BitmapBackupProvider.create_full_backup()` successfully creates a FULL ba
 - **WHEN** `create_full_backup()` creates a FULL backup
 - **AND** `virsh checkpoint-list` returns no `qsnap-` checkpoints
 - **THEN** `BackupResult(success=False, error="checkpoint missing — next incremental impossible")` is returned
+
+### Requirement: transfer_missing safety net when prior is None
+
+`BitmapBackupProvider.transfer_missing()` SHALL create a FULL export via `_full_pull_lifecycle()` when `prior is None` (no prior snapshot or checkpoint exists on the target). This is a **safety net** for the edge case where `Core._backup_target()` bypasses FULL creation (e.g., during `--preserve` mode or after a configuration change). The primary path (FULL created by `Core._backup_target()` before `transfer_missing()`) ensures `prior` is always set in normal operation. When the safety net is triggered, the provider SHALL internally call `verify_full_backup()` on the exported file before returning `BackupResult`. Core SHALL then record an incremental dependency for the export (since it came through `transfer_missing()`, not `create_full_backup()`).
+
+#### Scenario: Normal path — prior is always set
+
+- **WHEN** `Core._backup_target()` creates a FULL via `create_full_backup()` then calls `transfer_missing()`
+- **THEN** `prior` is the most recent snapshot on the source
+- **AND** `transfer_missing()` performs incremental transfer via `_copy_dirty_blocks()`
+
+#### Scenario: Safety net — prior is None triggers full export
+
+- **WHEN** `transfer_missing()` is called with `prior = None`
+- **THEN** a full NBD export is performed via `_full_pull_lifecycle()` using `qemu-img convert`
+- **AND** `verify_full_backup()` is called on the exported file
+- **AND** a `BackupResult` is returned with the full export result

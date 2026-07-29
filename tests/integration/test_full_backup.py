@@ -201,7 +201,7 @@ def test_full_backup_compression_modes(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
     )
     assert result_none.success, f"Uncompressed FULL failed: {result_none.error}"
@@ -220,7 +220,7 @@ def test_full_backup_compression_modes(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
     )
@@ -238,7 +238,7 @@ def test_full_backup_compression_modes(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
     )
@@ -316,7 +316,7 @@ def test_full_backup_speed_comparison(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.speed-none", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
     )
@@ -334,7 +334,7 @@ def test_full_backup_speed_comparison(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.speed-zstd", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
 
@@ -354,7 +354,7 @@ def test_full_backup_speed_comparison(test_vm):
         SnapshotInfo(
             name=f"{vm_name}.speed-zlib", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
 
@@ -410,7 +410,7 @@ def test_full_backup_stopped_vm(test_vm, caplog):
         SnapshotInfo(
             name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
     )
@@ -486,7 +486,7 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         snapshot,
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
     )
@@ -591,7 +591,7 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         snapshot,
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
         full_transfer_engine="qemu-img-convert",
@@ -685,7 +685,7 @@ def test_full_backup_libnbd_engine(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         snapshot,
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
         full_transfer_engine="libnbd",
@@ -766,7 +766,7 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         snapshot,
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
         full_transfer_engine="qemu-img-convert",
@@ -871,7 +871,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         SnapshotInfo(
             name=f"{vm_name}.libnbd-none", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=False, verify="off"),
+        TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
 
         full_transfer_engine="libnbd",
@@ -896,7 +896,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         SnapshotInfo(
             name=f"{vm_name}.libnbd-zstd", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zstd",
 
@@ -920,7 +920,7 @@ def test_full_backup_libnbd_compression_and_speed(test_vm, caplog):
         SnapshotInfo(
             name=f"{vm_name}.libnbd-zlib", path=base_image, timestamp=datetime.now(), allocation=0
         ),
-        TargetConfig(path=target_dir, incremental=True, compress=True, verify="off"),
+        TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
         compression_type="zlib",
 

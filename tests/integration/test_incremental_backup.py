@@ -259,7 +259,7 @@ def test_incremental_after_full(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     result_full = provider_full.create_full_backup(
         vm_name,
@@ -435,7 +435,7 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=True, verify="off")
+    target = TargetConfig(path=target_dir, compress=True, verify="off")
 
     r_full = provider.create_full_backup(
         vm_name,
@@ -579,7 +579,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     r_full = provider.create_full_backup(
         vm_name,
@@ -714,7 +714,7 @@ def test_incremental_after_libnbd_full(test_vm):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     result_full = provider_full.create_full_backup(
         vm_name,

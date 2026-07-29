@@ -135,7 +135,7 @@ def test_check_real_targets_all_consistent(test_vm):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -225,7 +225,7 @@ def test_check_real_targets_broken_chain(test_vm):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -343,7 +343,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -388,7 +388,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
     different_target = tmpdir / "different_backup"
     different_target.mkdir(parents=True, exist_ok=True)
 
-    new_target = TargetConfig(path=different_target, incremental=True, compress=False, verify="off")
+    new_target = TargetConfig(path=different_target, compress=False, verify="off")
     new_vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -472,7 +472,7 @@ def test_check_real_deep_targets(test_vm):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -552,7 +552,7 @@ def test_check_real_targets_after_retention(test_vm):
     state.record_snapshot(vm_name, snap1)
 
     # Use a short chain_length to trigger retention quickly
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,

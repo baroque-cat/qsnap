@@ -160,7 +160,7 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-                incremental=True,
+                
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
@@ -750,7 +750,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
         timestamp=datetime.now(),
         allocation=0,
     )
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     caplog.clear()
     caplog.set_level(logging.DEBUG)

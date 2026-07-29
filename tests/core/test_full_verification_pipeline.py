@@ -16,8 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import (
+    BackupResult,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
@@ -1716,3 +1719,255 @@ def test_checkpoint_cleaned_up_after_failed_full(
     assert len(checkpoint_delete_calls) >= 1, (
         "checkpoint-delete should be called to clean up failed FULL checkpoint"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FULL backup creation retry via _execute_with_retry
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── test_full_backup_creation_retried_transient ──────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_backup_creation_retried_transient(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """FULL creation fails with transient ``"Connection refused"`` on attempt 1,
+    retried via ``_execute_with_retry``, succeeds on attempt 2.  Verification
+    passes and the FULL is recorded in state.
+
+    This test verifies that ``_backup_target()`` delegates FULL creation
+    retry to ``_execute_with_retry()`` with ``backup_retry_max=3``.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=3, backup_retry_base="0s")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # No prior FULLs → first backup triggers FULL creation (count-based).
+    full_calls = 0
+
+    def full_side_effect(*args, **kwargs):
+        nonlocal full_calls
+        full_calls += 1
+        if full_calls == 1:
+            return BackupResult(
+                success=False,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=0,
+                error="Connection refused",
+            )
+        return BackupResult(
+            success=True,
+            snapshot_name="snap1",
+            source_path=Path("/tmp/snap1.qcow2"),
+            target_path=target.path / "testvm.FULL.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+        )
+
+    with (
+        patch.object(
+            mock_factory._backup_provider,
+            "create_full_backup",
+            side_effect=full_side_effect,
+        ),
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch("time.sleep"),
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert full_calls == 2, (
+        f"create_full_backup should be called twice (retried after transient error), "
+        f"got {full_calls}"
+    )
+    # FULL was recorded after successful retry + verification.
+    assert record_spy.called, "record_full_backup should be called after verify passes"
+
+    # Verify FULL was recorded
+    fulls = mock_state.get_full_backups(str(target.path))
+    assert len(fulls) == 1, "One FULL should be recorded after successful retry"
+
+
+# ── test_full_backup_creation_not_retried_no_space ───────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_backup_creation_not_retried_no_space(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """FULL creation fails with ``"No space left on device"`` → NOT retried.
+
+    ``is_retryable("No space left on device")`` returns ``False``, so
+    ``_execute_with_retry`` returns the failure immediately without entering
+    the retry loop.  Core sets ``full_verification_failed = True`` and
+    ``backup_failed = True``, and logs a CRITICAL message preserving old
+    generations.
+    """
+    import logging
+
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=3, backup_retry_base="0s")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # No prior FULLs → first backup triggers FULL creation (count-based).
+    full_calls = 0
+
+    def full_side_effect(*args, **kwargs):
+        nonlocal full_calls
+        full_calls += 1
+        return BackupResult(
+            success=False,
+            snapshot_name="snap1",
+            source_path=Path("/tmp/snap1.qcow2"),
+            target_path=target.path / "testvm.FULL.qcow2",
+            bytes_transferred=0,
+            error="No space left on device",
+        )
+
+    caplog.set_level(logging.CRITICAL)
+
+    with (
+        patch.object(
+            mock_factory._backup_provider,
+            "create_full_backup",
+            side_effect=full_side_effect,
+        ),
+        patch("time.sleep"),
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+    ):
+        result = core._backup_target(vm, target, [snap])
+
+    # create_full_backup called exactly once — no retry
+    assert full_calls == 1, (
+        f"create_full_backup should be called exactly once (non-retryable), "
+        f"got {full_calls}"
+    )
+    # FULL was NOT recorded in state
+    assert not record_spy.called, "record_full_backup should NOT be called when FULL fails"
+    # backup_failed is True
+    assert result is True, "backup_failed should be True"
+    # CRITICAL log about preserving old generations
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "CRITICAL log should be emitted"
+    assert "old generations preserved" in critical_logs[0].message.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Verified FULL triggers retention + cleanup (verify-before-delete gate)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_verified_full_triggers_retention(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """FULL passes M1/M2 verification → retention evaluation + cleanup triggered.
+
+    After verification succeeds, Core must:
+    1. Record the FULL in state via record_full_backup()
+    2. Evaluate backup retention via _evaluate_backup_retention()
+    3. Trigger cleanup of old generations via _cleanup_backups()
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # No prior FULLs → first backup triggers FULL creation (count-based).
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+        patch.object(
+            mock_state,
+            "record_full_backup",
+            wraps=mock_state.record_full_backup,
+        ) as record_spy,
+        patch.object(
+            core,
+            "_evaluate_backup_retention",
+            wraps=core._evaluate_backup_retention,
+        ) as retention_spy,
+        patch.object(
+            core,
+            "_cleanup_backups",
+            wraps=core._cleanup_backups,
+        ) as cleanup_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Verification was called.
+    assert verify_spy.called, "verify_full_backup should be called"
+    # FULL was recorded after verification passed.
+    assert record_spy.called, "record_full_backup should be called after verification passes"
+    # Retention was evaluated because full_verification_failed is False.
+    assert retention_spy.called, (
+        "_evaluate_backup_retention should be called after successful FULL verification"
+    )
+    # Cleanup was triggered.
+    assert cleanup_spy.called, "_cleanup_backups should be called after retention evaluation"

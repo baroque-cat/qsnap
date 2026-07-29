@@ -145,7 +145,7 @@ def test_reconcile_command(test_vm, caplog):
     state.record_snapshot(vm_name, snap_info)
 
     # Build Core with a target that creates FULL + incremental backups.
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -311,7 +311,7 @@ def test_reconcile_removes_orphan_backup_files(test_vm, caplog):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
@@ -417,7 +417,7 @@ def test_reconcile_removes_orphan_snapshot_files(test_vm, caplog):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
 
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,

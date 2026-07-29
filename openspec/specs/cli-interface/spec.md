@@ -232,11 +232,11 @@ The system SHALL provide a `qsnap list deferred [vm...]` subcommand. It SHALL ac
 - **THEN** output is in `key=value` format
 
 ### Requirement: list config shows per-VM safety settings
-`qsnap list config` SHALL display per-VM safety columns: `blockcommit_deep_verify` (ON/OFF) and `snapshot_deep_verify` (ON/OFF). Global safety settings (`auto_cleanup`, `chain_verify_before_commit`, `chain_verify_after_commit`, `deep_check_schedule`) SHALL be shown in a header or summary section.
+`qsnap list config` SHALL display per-VM safety column: `blockcommit_deep_verify` (ON/OFF). Global safety settings (`auto_cleanup`, `chain_verify_before_commit`, `chain_verify_after_commit`, `deep_check_schedule`) SHALL be shown in a header or summary section.
 
 #### Scenario: list config shows OFF for default deep verify
 - **WHEN** `qsnap list config` is executed and no VM has deep verify enabled
-- **THEN** each VM shows `blockcommit_deep_verify: OFF`, `snapshot_deep_verify: OFF`
+- **THEN** each VM shows `blockcommit_deep_verify: OFF`
 
 #### Scenario: list config shows ON for enabled deep verify
 - **WHEN** VM "critical-db" has `blockcommit_deep_verify = true`

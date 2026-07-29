@@ -59,67 +59,6 @@ class MockSnapshotProvider(ISnapshotProvider):
         )
 
 
-class MockBackupProvider(IBackupProvider):
-    """Mock backup provider returning valid result types."""
-
-    def transfer_missing(
-        self,
-        vm_config: VMConfig,
-        target: TargetConfig,
-        snapshots: list[SnapshotInfo],
-        *,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-    ) -> list[BackupResult]:
-        return [
-            BackupResult(
-                success=True,
-                snapshot_name=s.name,
-                source_path=s.path,
-                target_path=target.path / s.name,
-                bytes_transferred=1048576,
-                error=None,
-            )
-            for s in snapshots
-        ]
-
-    def list(self, target: TargetConfig) -> list[SnapshotInfo]:
-        return []
-
-    def delete(self, backup: SnapshotInfo) -> ShellResult:
-        return ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-
-    def create_full_backup(
-        self,
-        vm_name: str,
-        source_snapshot: SnapshotInfo,
-        target: TargetConfig,
-        compress: bool = False,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-    ) -> BackupResult:
-        return BackupResult(
-            success=True,
-            snapshot_name=source_snapshot.name,
-            source_path=source_snapshot.path,
-            target_path=target.path / f"{vm_name}.FULL.qcow2",
-            bytes_transferred=1048576,
-            error=None,
-        )
-
-
 class MockBitmapBackupProvider(IBackupProvider):
     """Mock bitmap backup provider returning valid result types.
 

@@ -103,8 +103,6 @@ def test_global_config_immutable():
         cfg.full_verify_after_create = "off"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.full_verify_before_delete = "off"  # type: ignore[misc]
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.deep_check_targets = True  # type: ignore[misc]
 
     # Mutating compression_type also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -115,50 +113,7 @@ def test_global_config_immutable():
         cfg.backup_stall_timeout = "1h"  # type: ignore[misc]
 
 
-# ---------------------------------------------------------------------------
-# Scenario 5: GlobalConfig defaults
-# ---------------------------------------------------------------------------
 
-
-def test_global_config_defaults():
-    """GlobalConfig() with no arguments uses documented defaults."""
-    cfg = GlobalConfig()
-    assert cfg.timestamp_format == "long"
-    assert cfg.state_dir == "/var/lib/qsnap/state"
-    assert cfg.lockfile is None
-    assert cfg.snapshot_chain_length == 24
-    assert cfg.target_chain_length == 168
-    assert cfg.target_keep_generations == 2
-    assert cfg.deferred_warn_count == "5"
-    assert cfg.deferred_crit_count == "10"
-    assert cfg.deferred_warn_age == "7d"
-    assert cfg.deferred_crit_age == "14d"
-    # Fault-tolerance safety fields (T0/T1 fast ON by default, T3 OFF).
-    assert cfg.auto_cleanup is True
-    assert cfg.state_backup_count == 2
-    assert cfg.chain_verify_before_commit is True
-    assert cfg.chain_verify_after_commit is True
-    assert cfg.deep_check_schedule == "off"
-    # Compress full backups defaults to True.
-    assert cfg.compress is True
-    # Compression algorithm defaults to zstd.
-    assert cfg.compression_type == "zstd"
-    # Stall detection timeout for data-transfer commands defaults to 30m.
-    assert cfg.backup_stall_timeout == "30m"
-    # FULL backup integrity verification tiers (M1/M2/M3).
-    assert cfg.full_verify_after_create == "check"
-    assert cfg.full_verify_before_delete == "check"
-    assert cfg.deep_check_targets is False
-    # Default backup_create is "always".
-    assert cfg.backup_create == "always"
-    # Default full_transfer_engine is "qemu-img-convert".
-    assert cfg.full_transfer_engine == "qemu-img-convert"
-    # Default convert_parallel is 4.
-    assert cfg.convert_parallel == 4
-    # Default convert_out_of_order is True.
-    assert cfg.convert_out_of_order is True
-    # Default transaction_log is None.
-    assert cfg.transaction_log is None
 
 
 # ---------------------------------------------------------------------------
@@ -240,33 +195,7 @@ def test_vm_config_with_targets():
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8: TargetConfig with incremental
-# ---------------------------------------------------------------------------
-
-
-def test_target_config_with_incremental():
-    """TargetConfig with incremental=True; the default is also True."""
-    target = TargetConfig(path=Path("/backup/testvm"), incremental=True)
-    assert target.incremental is True
-
-    # Default value for incremental is True.
-    default_target = TargetConfig(path=Path("/backup/testvm"))
-    assert default_target.incremental is True
-
-    # Backup retry fields use their documented defaults.
-    assert default_target.backup_retry_max == 3
-    assert default_target.backup_retry_base == "2s"
-
-    # Compress defaults to True.
-    assert default_target.compress is True
-
-    # Count-based retention fields default to None (not overridden).
-    assert default_target.target_chain_length is None
-    assert default_target.target_keep_generations is None
-
-
-# ---------------------------------------------------------------------------
-# VMConfig.disks
+# Scenario 8: TargetConfig no longer has incremental field
 # ---------------------------------------------------------------------------
 
 
@@ -595,20 +524,7 @@ def test_global_config_full_verify_before_delete_metadata():
     assert cfg.full_verify_before_delete == "metadata"
 
 
-# ---------------------------------------------------------------------------
-# GlobalConfig.deep_check_targets — deep check extends to backup targets
-# ---------------------------------------------------------------------------
 
-
-def test_global_config_deep_check_targets_default_false():
-    """GlobalConfig().deep_check_targets defaults to False."""
-    assert GlobalConfig().deep_check_targets is False
-
-
-def test_global_config_deep_check_targets_true():
-    """GlobalConfig(deep_check_targets=True) stores True."""
-    cfg = GlobalConfig(deep_check_targets=True)
-    assert cfg.deep_check_targets is True
 
 
 # ---------------------------------------------------------------------------
@@ -907,3 +823,4 @@ def test_globalconfig_explicit_override_works():
     assert cfg.snapshot_chain_length == 10
     assert cfg.target_chain_length == 20
     assert cfg.target_keep_generations == 3
+

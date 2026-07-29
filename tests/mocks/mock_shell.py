@@ -2,8 +2,7 @@
 
 Supports ``.expect("pattern").returns(ShellResult(...))`` and
 ``.expect("pattern").raises(exception)`` for preconfigured command
-responses.  Also supports ``.expect_ordered()`` for verifying command
-execution order and ``.call_history`` for inspecting all calls made.
+responses.  Also supports ``.call_history`` for inspecting all calls made.
 """
 
 from __future__ import annotations
@@ -49,17 +48,12 @@ class MockShell(IShell):
     """Mock shell that returns preconfigured ``ShellResult`` objects.
 
     Tracks every command in ``call_history`` for post-run assertions
-    (e.g. "qemu-img rebase was NOT called").  Supports ordered
-    expectations via ``expect_ordered()`` for verifying command
-    execution order.
+    (e.g. "qemu-img rebase was NOT called").
     """
 
     def __init__(self) -> None:
         self._expectations: list[_Expectation] = []
         self._call_history: list[str] = []
-        self._ordered_expectations: list[list[str]] = []
-        # Per-ordered-expectation cursor: which index we are at.
-        self._ordered_cursors: list[int] = []
 
     @property
     def call_history(self) -> list[str]:
@@ -82,32 +76,9 @@ class MockShell(IShell):
         self._expectations.insert(0, exp)
         return exp
 
-    def expect_ordered(self, patterns: list[str]) -> None:
-        """Register an ordered expectation.
-
-        Commands must match ``patterns`` in the given order.  Each
-        pattern is matched as a regex against the full command string.
-        Multiple ordered expectations can be registered; each is
-        tracked independently.
-
-        Usage::
-
-            shell.expect_ordered(["test -f", "qemu-img info", "virsh dumpxml"])
-        """
-        self._ordered_expectations.append(list(patterns))
-        self._ordered_cursors.append(0)
-
-    def _match_ordered(self, cmd_str: str) -> None:
-        """Check *cmd_str* against all ordered expectations."""
-        for i, patterns in enumerate(self._ordered_expectations):
-            cursor = self._ordered_cursors[i]
-            if cursor < len(patterns) and re.search(patterns[cursor], cmd_str):
-                self._ordered_cursors[i] = cursor + 1
-
     def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         cmd_str = " ".join(cmd)
         self._call_history.append(cmd_str)
-        self._match_ordered(cmd_str)
         for exp in self._expectations:
             if re.search(exp.pattern, cmd_str):
                 return exp.execute()
@@ -137,7 +108,6 @@ class MockShell(IShell):
         """
         cmd_str = " ".join(cmd)
         self._call_history.append(cmd_str)
-        self._match_ordered(cmd_str)
         for exp in self._expectations:
             if re.search(exp.pattern, cmd_str):
                 return exp.execute()

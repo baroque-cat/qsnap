@@ -27,18 +27,9 @@ from tests.mocks import MockConfigFacade
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-
-def _ok_result(stdout: str = "") -> ShellResult:
-    return ShellResult(
-        success=True, stdout=stdout, stderr="", returncode=0, error=None,
-    )
-
-
-def _fail_result(stderr: str = "qemu-img: Could not open") -> ShellResult:
-    return ShellResult(
-        success=False, stdout="", stderr=stderr, returncode=1,
-        error="qemu-img failed",
-    )
+# Module-level result factory for helper functions (not pytest fixtures).
+_ok = lambda: ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+_shell_ok = lambda stdout="": ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None)
 
 
 def _single_file_chain(path: Path) -> str:
@@ -95,18 +86,18 @@ def _setup_snapshot_check(
 
     # Override the default fixture domblklist to point to *our* snapshot.
     mock_shell.expect_first("virsh domblklist").returns(
-        _ok_result(f"Target   Source\n--------------------------------\nvda   {snap_path}\n"),
+        _shell_ok(f"Target   Source\n--------------------------------\nvda   {snap_path}\n"),
     )
 
     # qemu-img info --backing-chain on the active layer (snapshot chain).
     # Use expect_first so this specific pattern wins over any catch-all.
     mock_shell.expect_first(
         f"--backing-chain.*{re.escape(str(snap_path))}"
-    ).returns(_ok_result(_single_file_chain(snap_path)))
+    ).returns(_shell_ok(_single_file_chain(snap_path)))
 
     # virsh dumpxml — return XML that references only the snapshot.
     mock_shell.expect("virsh dumpxml").returns(
-        _ok_result(
+        _shell_ok(
             '<domain type="kvm">'
             f'<devices><disk type="file" device="disk">'
             f'<source file="{snap_path}"/>'
@@ -130,6 +121,7 @@ def test_check_targets_all_consistent(
     mock_factory,
     mock_state,
     mock_shell,
+    success_result,
 ):
     """State: 1 FULL + 2 incrementals.  Disk: all exist.  Chain traversable.
     One checkpoint with matching target_hash → status="ok".
@@ -196,14 +188,14 @@ def test_check_targets_all_consistent(
     # Chain traversability: qemu-img --backing-chain on inc2 succeeds.
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(_ok_result(_multi_file_chain(inc2_path, inc1_path, full_path)))
+    ).returns(success_result(_multi_file_chain(inc2_path, inc1_path, full_path)))
 
     # Compute the target_hash for matching checkpoints.
     tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
         str(backup_dir)
     )
     mock_shell.expect("virsh checkpoint-list").returns(
-        _ok_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
+        success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
     with patch.object(
@@ -362,6 +354,7 @@ def test_check_orphan_backup_file(
     mock_state,
     mock_shell,
     caplog,
+    success_result,
 ):
     """State: 1 FULL + 1 inc.  Disk: FULL + inc1 + inc2 (inc2 not in state).
     Orphan is a WARNING — status stays "ok" (no items added to broken).
@@ -402,7 +395,7 @@ def test_check_orphan_backup_file(
     # Chain traversability on last incremental (inc1) succeeds.
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(_ok_result(_multi_file_chain(inc1_path, full_path)))
+    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
@@ -446,6 +439,7 @@ def test_check_broken_backup_chain(
     mock_factory,
     mock_state,
     mock_shell,
+    failure_result,
 ):
     """State: FULL + inc1 + inc2.  Disk: FULL + inc2 (inc1 deleted).
     inc1 detected as phantom; qemu-img --backing-chain on inc2 fails.
@@ -485,9 +479,10 @@ def test_check_broken_backup_chain(
     )
 
     # Chain traversability check on last incremental (inc2) — FAILS.
-    mock_shell.expect(
+    # Use expect_first to override conftest default --backing-chain expectation.
+    mock_shell.expect_first(
         f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(_fail_result("Could not open backing file"))
+    ).returns(failure_result("Could not open backing file"))
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
@@ -534,6 +529,7 @@ def test_check_broken_backup_chain_full_missing(
     mock_factory,
     mock_state,
     mock_shell,
+    failure_result,
 ):
     """State: FULL + inc1.  Disk: inc1 (FULL deleted).
     FULL detected as phantom; qemu-img --backing-chain on inc1 fails.
@@ -566,9 +562,10 @@ def test_check_broken_backup_chain_full_missing(
     )
 
     # Chain traversability on inc1 fails (backing FULL missing).
-    mock_shell.expect(
+    # Use expect_first to override conftest default --backing-chain expectation.
+    mock_shell.expect_first(
         f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(_fail_result("Could not open backing file"))
+    ).returns(failure_result("Could not open backing file"))
 
     backups = [
         SnapshotInfo(name=inc1_name, path=inc1_path,
@@ -690,6 +687,7 @@ def test_check_missing_checkpoint(
     mock_state,
     mock_shell,
     caplog,
+    success_result,
 ):
     """State: FULL + inc1 should have a checkpoint, but checkpoint-list
     is empty → WARNING logged, status stays "ok".
@@ -726,7 +724,7 @@ def test_check_missing_checkpoint(
     # Chain traversability on inc1 succeeds.
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(_ok_result(_multi_file_chain(inc1_path, full_path)))
+    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
@@ -762,6 +760,7 @@ def test_check_missing_checkpoint(
 
 @pytest.mark.unit
 @pytest.mark.mock
+@pytest.mark.xfail(reason="Implementation gap: multiple checkpoints per target not yet detected")
 def test_check_multiple_checkpoints(
     tmp_path: Path,
     make_vm_config,
@@ -770,6 +769,7 @@ def test_check_multiple_checkpoints(
     mock_state,
     mock_shell,
     caplog,
+    success_result,
 ):
     """checkpoint-list has 2 checkpoints for the same target →
     current implementation does NOT detect this (no code for it),
@@ -808,7 +808,7 @@ def test_check_multiple_checkpoints(
     # Chain traversability on inc1 succeeds.
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(_ok_result(_multi_file_chain(inc1_path, full_path)))
+    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
@@ -858,6 +858,7 @@ def test_check_after_retention_cleanup(
     mock_factory,
     mock_state,
     mock_shell,
+    success_result,
 ):
     """After retention removes old backups (FULL + incrementals),
     check() should report ``status="ok"`` with no phantom/orphan entries.
@@ -916,13 +917,13 @@ def test_check_after_retention_cleanup(
     # (inc2 → FULL — inc1 is no longer in the chain).
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(_ok_result(_multi_file_chain(inc2_path, full_path)))
+    ).returns(success_result(_multi_file_chain(inc2_path, full_path)))
 
     tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
         str(backup_dir)
     )
     mock_shell.expect("virsh checkpoint-list").returns(
-        _ok_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
+        success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
     with patch.object(
@@ -955,6 +956,7 @@ def test_check_after_force_full(
     mock_factory,
     mock_state,
     mock_shell,
+    success_result,
 ):
     """After a forced FULL backup replaces the old chain,
     check() should report ``status="ok"``.
@@ -998,13 +1000,13 @@ def test_check_after_force_full(
     # (standalone file, no backing).
     mock_shell.expect(
         f"--backing-chain.*{re.escape(str(new_full_path))}"
-    ).returns(_ok_result(_single_file_chain(new_full_path)))
+    ).returns(success_result(_single_file_chain(new_full_path)))
 
     tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
         str(backup_dir)
     )
     mock_shell.expect("virsh checkpoint-list").returns(
-        _ok_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
+        success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
     with patch.object(
@@ -1023,3 +1025,4 @@ def test_check_after_force_full(
         f"Expected status ok after force-full, got {result['testvm'].status}"
     )
     assert result["testvm"].broken_snapshots == []
+

@@ -23,31 +23,7 @@ from qsnap.models.results import (
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
-
-
-def _add_deferred_with_since(
-    state,
-    vm_name: str,
-    snapshots: list[str],
-    reason: str,
-    since: datetime,
-) -> None:
-    """Add a deferred blockcommit with a specific ``since`` timestamp.
-
-    Unlike ``InMemoryStateManager.add_deferred_blockcommit`` which always
-    uses ``datetime.now()``, this helper lets tests control the ``since``
-    timestamp for age-based assertions.
-    """
-    if vm_name not in state._state:
-        state._state[vm_name] = {}
-    deferred = state._state[vm_name].setdefault("deferred_operations", [])
-    deferred.append(
-        DeferredBlockcommit(
-            snapshots=list(snapshots),
-            reason=reason,
-            since=since,
-        )
-    )
+from tests.helpers import add_deferred_with_since
 
 
 # ── test_list_snapshots_returns_all_vms_sorted_ascending ──────────────────
@@ -580,7 +556,10 @@ def test_check_broken_chain_reports_broken_status(
         )
     )
 
-    mock_shell.expect("qemu-img").returns(
+    # Override the conftest default for --backing-chain (which returns
+    # valid JSON).  Use expect_first so this broken-chain result takes
+    # priority over the conftest default.
+    mock_shell.expect_first("--backing-chain").returns(
         ShellResult(
             success=False,
             stdout="",
@@ -1091,7 +1070,7 @@ def test_list_deferred_returns_per_vm_summaries(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(hours=3)
-    _add_deferred_with_since(mock_state, "testvm", ["snap1", "snap2"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", ["snap1", "snap2"], "apparmor", since)
 
     with frozen_clock(frozen_dt):
         result = core.list_deferred()

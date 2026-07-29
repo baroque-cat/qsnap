@@ -28,17 +28,6 @@ from tests.mocks import MockConfigFacade
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-def _success_result(stdout: str = "") -> ShellResult:
-    """Return a successful ShellResult."""
-    return ShellResult(
-        success=True,
-        stdout=stdout,
-        stderr="",
-        returncode=0,
-        error=None,
-    )
-
-
 def _make_xml(vm_name: str, *source_paths: str) -> str:
     """Build a minimal libvirt domain XML with the given <source file=...> paths.
 
@@ -96,6 +85,7 @@ def test_reconcile_phantom_snapshot_removed_from_state(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap1, snap2, snap3.  Disk: snap1, snap3 (snap2 missing).
     XML does NOT reference snap2 → snap2 removed from state,
@@ -117,7 +107,7 @@ def test_reconcile_phantom_snapshot_removed_from_state(
 
     # XML only references snap1 and snap3 (not snap2).
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
+        success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
     )
 
     vm = make_vm_config(
@@ -162,6 +152,7 @@ def test_reconcile_orphan_snapshot_recorded_in_state(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap1, snap3.  Disk: snap1, snap2, snap3.
     XML references snap2 → record_snapshot(snap2),
@@ -183,7 +174,7 @@ def test_reconcile_orphan_snapshot_recorded_in_state(
 
     # XML references snap1, snap2, and snap3.
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(
+        success_result(
             _make_xml("testvm", str(snap3.path), str(snap2.path), str(snap1.path))
         )
     )
@@ -234,6 +225,7 @@ def test_reconcile_orphan_snapshot_deleted(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap1, snap3.  Disk: snap1, snap2, snap3.
     XML does NOT reference snap2 → rm -f snap2,
@@ -255,11 +247,11 @@ def test_reconcile_orphan_snapshot_deleted(
 
     # XML only references snap1 and snap3, NOT snap2.
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
+        success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
     )
 
     # Add rm -f expectation.
-    mock_shell.expect("rm -f").returns(_success_result())
+    mock_shell.expect("rm -f").returns(success_result())
 
     vm = make_vm_config(
         name="testvm",
@@ -299,6 +291,7 @@ def test_reconcile_stale_xml_refreshed(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap2, snap3 (snap1 deleted via blockcommit).
     Disk: snap2, snap3 (snap1 deleted).
@@ -322,7 +315,7 @@ def test_reconcile_stale_xml_refreshed(
     # Step 1: Parse domain XML — references snap1 (stale), snap2, snap3.
     # The stale path is snap1_path (doesn't exist on disk).
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(
+        success_result(
             _make_xml(
                 "testvm",
                 str(snap3.path),
@@ -335,7 +328,7 @@ def test_reconcile_stale_xml_refreshed(
     # _refresh_domain_backing_store() does its own dumpxml + virsh define.
     # Re-use the same XML for the refresh dumpxml call.
     # The method strips <backingStore> elements and calls virsh define.
-    mock_shell.expect("virsh define").returns(_success_result())
+    mock_shell.expect("virsh define").returns(success_result())
 
     vm = make_vm_config(
         name="testvm",
@@ -374,6 +367,7 @@ def test_reconcile_broken_chain_no_auto_rebase(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap1, snap2, snap3.  Disk: snap1, snap3 (snap2 missing
     from middle of chain).  XML references snap2 → stale XML path.
@@ -401,7 +395,7 @@ def test_reconcile_broken_chain_no_auto_rebase(
 
     # XML references all three (including missing snap2).
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(
+        success_result(
             _make_xml(
                 "testvm",
                 str(snap3.path),
@@ -412,7 +406,7 @@ def test_reconcile_broken_chain_no_auto_rebase(
     )
 
     # _refresh_domain_backing_store() needs virsh define.
-    mock_shell.expect("virsh define").returns(_success_result())
+    mock_shell.expect("virsh define").returns(success_result())
 
     vm = make_vm_config(
         name="testvm",
@@ -461,13 +455,11 @@ def test_reconcile_last_allocation_mismatch(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """State: last_allocation=1000.  qemu-img info: actual-size=2000.
 
-    Note: The current reconcile() implementation does NOT detect or fix
-    last_allocation mismatches (the ``allocation_fixed`` field is
-    declared on ``ReconcileResult`` but is never set to True in
-    ``reconcile()``).  This test documents the current behavior."""
+    reconcile() detects the mismatch and sets allocation_fixed=True."""
     snap_dir = _snap_dir(tmp_path, "testvm")
 
     snap1 = _snap("testvm", snap_dir, "snap1")
@@ -477,8 +469,24 @@ def test_reconcile_last_allocation_mismatch(
     mock_state.set_last_allocation("testvm", 1000)
 
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap1.path)))
+        success_result(_make_xml("testvm", str(snap1.path)))
     )
+
+    # Intercept shell.run for qemu-img info call (MockShell.expect ordering
+    # can be fragile with conftest defaults).
+    _orig_run = mock_shell.run
+
+    def _patch_run(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if "qemu-img info" in cmd_str and "--output=json" in cmd_str:
+            return ShellResult(
+                success=True,
+                stdout='{"actual-size": 2000, "format": "qcow2"}',
+                stderr="", returncode=0, error=None,
+            )
+        return _orig_run(cmd, timeout, check)
+
+    mock_shell.run = _patch_run
 
     vm = make_vm_config(
         name="testvm",
@@ -496,19 +504,9 @@ def test_reconcile_last_allocation_mismatch(
     result = core.reconcile()
 
     r = result["testvm"]
-    # Current implementation does NOT fix allocation mismatch.
-    # allocation_fixed remains False.
-    assert r.allocation_fixed is False, (
-        "Currently reconcile() does NOT check last_allocation mismatch "
-        "(gap between spec and implementation)"
+    assert r.allocation_fixed is True, (
+        f"Expected allocation_fixed=True, got {r.allocation_fixed!r}"
     )
-    # The last_allocation in state remains unchanged.
-    assert mock_state.get_last_allocation("testvm") == 1000, (
-        "last_allocation should remain unchanged in current implementation"
-    )
-
-
-# ── 7. After legitimate blockcommit — no action ────────────────────────────
 
 
 @pytest.mark.unit
@@ -520,6 +518,7 @@ def test_reconcile_after_blockcommit_no_action(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """State: snap2, snap3 (snap1 legitimately blockcommitted, state
     already updated).  Disk: snap2, snap3.  XML: snap2 → base (snap1
@@ -538,7 +537,7 @@ def test_reconcile_after_blockcommit_no_action(
 
     # XML: snap3 → snap2 → base (no snap1, legitimate).
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap3.path), str(snap2.path)))
+        success_result(_make_xml("testvm", str(snap3.path), str(snap2.path)))
     )
 
     vm = make_vm_config(
@@ -582,6 +581,7 @@ def test_reconcile_dry_run_no_modifications(
     mock_shell,
     caplog,
     tmp_path,
+    success_result,
 ):
     """Phantom scenario with ``core.dry_run = True``.
     Verify no real changes are made and messages are prefixed
@@ -600,7 +600,7 @@ def test_reconcile_dry_run_no_modifications(
     mock_state.record_snapshot("testvm", snap3)
 
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
+        success_result(_make_xml("testvm", str(snap3.path), str(snap1.path)))
     )
 
     vm = make_vm_config(
@@ -650,6 +650,7 @@ def test_reconcile_returns_structured_result(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """Verify reconcile() returns ``dict[str, ReconcileResult]`` with
     all fields populated."""
@@ -661,7 +662,7 @@ def test_reconcile_returns_structured_result(
     mock_state.record_snapshot("testvm", snap1)
 
     mock_shell.expect_first("virsh dumpxml").returns(
-        _success_result(_make_xml("testvm", str(snap1.path)))
+        success_result(_make_xml("testvm", str(snap1.path)))
     )
 
     vm = make_vm_config(
@@ -710,6 +711,7 @@ def test_reconcile_with_vm_filter(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """``reconcile(vm_filter="vm1")`` only processes vm1, not vm2."""
     snap_dir1 = _snap_dir(tmp_path, "vm1")
@@ -727,10 +729,10 @@ def test_reconcile_with_vm_filter(
     # Since _parse_domain_xml_source_paths is called per-VM on the
     # filtered set, only vm1's should be hit.  We mock both for safety.
     mock_shell.expect("virsh dumpxml.*vm1").returns(
-        _success_result(_make_xml("vm1", str(snap1.path)))
+        success_result(_make_xml("vm1", str(snap1.path)))
     )
     mock_shell.expect("virsh dumpxml.*vm2").returns(
-        _success_result(_make_xml("vm2", str(snap2.path)))
+        success_result(_make_xml("vm2", str(snap2.path)))
     )
 
     vm1 = make_vm_config(
@@ -756,3 +758,4 @@ def test_reconcile_with_vm_filter(
     assert "vm1" in result, "vm1 should be in results"
     assert "vm2" not in result, "vm2 should NOT be in results when filtered"
     assert len(result) == 1, f"Only one VM should be in results, got {list(result.keys())}"
+

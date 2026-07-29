@@ -936,6 +936,60 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def test_blockcommit_deep_verify_graceful_qemu_img_failure(
+    clean_shell, make_vm_config, success_result, failure_result
+):
+    """When qemu-img check command itself fails (non-zero exit),
+    BlockCommitManager returns a graceful CommitResult(success=False) without crashing.
+
+    - domblklist and blockcommit both succeed.
+    - qemu-img check returns ShellResult(success=False, error=<crash error>).
+    - Result: ``CommitResult(success=False, error="deep verify: qemu-img check failed: ...")``.
+    - No exception propagates from the manager.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    clean_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    clean_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img check command itself fails (non-zero exit code)
+    clean_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open base.qcow2",
+            returncode=1,
+            error="qemu-img: Could not open base.qcow2",
+        )
+    )
+
+    manager = BlockCommitManager(shell=clean_shell)
+    # This must NOT raise — graceful failure via CommitResult
+    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+
+    assert isinstance(result, CommitResult)
+    assert result.success is False
+    assert "deep verify" in result.error
+    assert "qemu-img check failed" in result.error
+    assert "Could not open base.qcow2" in result.error
+
+
 def test_blockcommit_no_cross_domain_imports():
     """``qsnap.modules.lifecycle.blockcommit_manager`` does NOT import
     anything from ``qsnap.modules.backup`` (cross-domain import violation
@@ -951,3 +1005,4 @@ def test_blockcommit_no_cross_domain_imports():
         "blockcommit_manager.py must not import from qsnap.modules.backup "
         "(shared utilities live in qsnap.utils.*)"
     )
+

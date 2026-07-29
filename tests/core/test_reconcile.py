@@ -24,34 +24,11 @@ import pytest
 from qsnap.core import Core
 from qsnap.models.results import (
     FullBackupInfo,
-    ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
 
 # ── shared helpers ────────────────────────────────────────────────────────
-
-
-def _success_result(stdout: str = "") -> ShellResult:
-    """Return a successful ShellResult."""
-    return ShellResult(
-        success=True,
-        stdout=stdout,
-        stderr="",
-        returncode=0,
-        error=None,
-    )
-
-
-def _failure_result(stderr: str = "qemu-img: Could not open") -> ShellResult:
-    """Return a failed ShellResult."""
-    return ShellResult(
-        success=False,
-        stdout="",
-        stderr=stderr,
-        returncode=1,
-        error="qemu-img failed",
-    )
 
 
 def _anchor_json(orphan_path: Path, full_path: Path) -> str:
@@ -77,6 +54,7 @@ def test_reconcile_skips_non_qsnap_files_on_target(
     mock_state,
     mock_shell,
     caplog,
+    success_result,
 ):
     """A ``.qcow2`` file on target not matching ``{vm_name}.*`` pattern
     is NOT deleted and a WARNING is logged.
@@ -105,7 +83,7 @@ def test_reconcile_skips_non_qsnap_files_on_target(
     # Broken-chain detection runs on non-FULL backups before orphan
     # classification.  The non-qsnap file name does NOT contain ".FULL."
     # so it passes through the check.  We mock the chain as intact.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    mock_shell.expect_first("--backing-chain").returns(success_result())
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[non_qsnap]
@@ -136,6 +114,7 @@ def test_reconcile_removes_orphan_snapshot_files(
     mock_factory,
     mock_state,
     mock_shell,
+    success_result,
 ):
     """A ``.qcow2`` file on target not tracked in state, matching the
     qsnap pattern ``{vm_name}.*``, is deleted and counted in
@@ -170,10 +149,12 @@ def test_reconcile_removes_orphan_snapshot_files(
         allocation=0,
     )
 
-    # Broken-chain detection: mock intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    # Broken-chain detection: mock intact chain with valid JSON.
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(orphan_backup.path) + '"}]'
+    ))
     # Anchor resolution (runs during orphan classification): return no anchor.
-    mock_shell.expect("qemu-img info --output=json").returns(_success_result("{}"))
+    mock_shell.expect("qemu-img info --output=json").returns(success_result("{}"))
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
@@ -221,11 +202,17 @@ def test_reconcile_orphan_file_cleanup_non_fatal(
         shell=mock_shell,
     )
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list",
-        side_effect=OSError("target directory not accessible"),
-    ), caplog.at_level(logging.WARNING):
-        result = core.reconcile()
+    # _detect_broken_chains() calls provider.list() BEFORE the orphan file
+    # processing loop.  Since list() raises OSError and _detect_broken_chains
+    # is NOT wrapped in try/except, we bypass it.  The orphan processing
+    # loop's own list() call will still raise OSError, which IS caught at
+    # line 2071.
+    with patch.object(core, "_detect_broken_chains", return_value=[]):
+        with patch.object(
+            mock_factory._bitmap_backup_provider, "list",
+            side_effect=OSError("target directory not accessible"),
+        ), caplog.at_level(logging.WARNING):
+            result = core.reconcile()
 
     # Error recorded in the ReconcileResult, no exception raised.
     assert len(result["testvm"].errors) > 0
@@ -250,6 +237,7 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     mock_factory,
     mock_state,
     mock_shell,
+    success_result,
 ):
     """Orphan file on target with intact chain to a tracked FULL →
     state is supplemented (record_incremental_dependency called),
@@ -288,12 +276,14 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
         datetime.now(),
     )
 
-    # Broken-chain detection: mock intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    # Broken-chain detection: mock intact chain with valid JSON.
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(orphan_path) + '"}]'
+    ))
     # Anchor resolution: return JSON with FULL backing (contains .FULL.)
     # so _resolve_chain_full_anchor finds the anchor.
     mock_shell.expect("qemu-img info --output=json").returns(
-        _success_result(
+        success_result(
             json.dumps({
                 "filename": str(orphan_path),
                 "format": "qcow2",
@@ -346,6 +336,7 @@ def test_reconcile_detects_broken_chain_before_orphan(
     mock_state,
     mock_shell,
     caplog,
+    failure_result,
 ):
     """Non-FULL backup has broken backing chain →
     CRITICAL logged, backup name in ``broken_chains``,
@@ -375,7 +366,7 @@ def test_reconcile_detects_broken_chain_before_orphan(
     )
 
     # Broken-chain detection: mock FAILED chain.
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
@@ -419,6 +410,7 @@ def test_reconcile_intact_chains_no_broken_chains(
     mock_state,
     mock_shell,
     tmp_path,
+    success_result,
 ):
     """All non-FULL backups have intact backing chains →
     ``broken_chains`` is an empty list.
@@ -475,7 +467,9 @@ def test_reconcile_intact_chains_no_broken_chains(
 
     # Broken-chain detection runs on non-FULL files only.  The
     # incremental has an intact chain.
-    mock_shell.expect_first("--backing-chain").returns(_success_result())
+    mock_shell.expect_first("--backing-chain").returns(success_result(
+        '[{"format": "qcow2", "filename": "' + str(inc_path) + '"}]'
+    ))
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list",
@@ -519,6 +513,7 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(
     mock_state,
     mock_shell,
     caplog,
+    failure_result,
 ):
     """``--dry-run`` mode: broken chain detected and reported in
     ``broken_chains``, but the file is NOT deleted.
@@ -548,7 +543,7 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(
     )
 
     # Broken-chain detection: mock FAILED chain.
-    mock_shell.expect_first("--backing-chain").returns(_failure_result())
+    mock_shell.expect_first("--backing-chain").returns(failure_result())
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
@@ -578,3 +573,4 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(
     assert any(
         "broken chain" in r.message for r in critical_logs
     ), "CRITICAL log should mention broken chain in dry-run mode"
+

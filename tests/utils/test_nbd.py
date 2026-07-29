@@ -24,11 +24,6 @@ from qsnap.utils.nbd import (
 # ── Shared test helpers ─────────────────────────────────────────────────
 
 
-def _ok_result() -> ShellResult:
-    """A generic successful ShellResult."""
-    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-
-
 def _ok_version_result(version: str = "8.2.0") -> ShellResult:
     """A successful ``virsh --version`` ShellResult."""
     return ShellResult(

@@ -31,7 +31,6 @@ from tests.mocks import (
 def _make_bitmap_target(path: str = "/mnt/backup/testvm") -> TargetConfig:
     return TargetConfig(
         path=Path(path),
-        incremental=True,
         compress=True,
         compression_type="zstd",
         backup_stall_timeout="30m",

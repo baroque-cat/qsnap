@@ -991,7 +991,7 @@ def test_action_appended_on_backup_transfer(
     assert len(transfer_actions) == 1, "Should contain one backup_transfer action"
     assert transfer_actions[0].vm_name == "testvm"
     assert transfer_actions[0].name == "snap1"
-    assert transfer_actions[0].size == 1048576  # MockBackupProvider default
+    assert transfer_actions[0].size == 1048576  # MockBitmapBackupProvider default
 
     # Verify Core passes compression_type and stall_timeout to transfer_missing.
     assert transfer_spy.called
@@ -1045,7 +1045,7 @@ def test_action_appended_on_full_backup(
     full_actions = [a for a in result.actions if a.action == "backup_full"]
     assert len(full_actions) == 1, "Should contain one backup_full action"
     assert full_actions[0].vm_name == "testvm"
-    assert full_actions[0].size == 1048576  # MockBackupProvider default
+    assert full_actions[0].size == 1048576  # MockBitmapBackupProvider default
 
     # Verify Core passes compression_type and stall_timeout to create_full_backup.
     assert full_spy.called

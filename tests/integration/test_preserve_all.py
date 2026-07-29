@@ -102,7 +102,7 @@ def test_large_chain_length_keeps_all_backups_integration(test_vm):
     state = InMemoryStateManager()
     target = TargetConfig(
         path=target_dir,
-        incremental=True,
+        
         compress=False,
         verify="off",
     )

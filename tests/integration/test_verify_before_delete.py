@@ -135,7 +135,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
 
     # Step 2: Create a FULL backup manually and record in state.
     provider = BitmapBackupProvider(shell)
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     source_snap = SnapshotInfo(
         name=f"{vm_name}.vbd-gen1",
         path=base_image,
@@ -167,7 +167,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[TargetConfig(
             path=target_dir,
-            incremental=True,
+            
             compress=False,
             verify="off",
             target_keep_generations=1,
@@ -278,7 +278,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
 
     # Step 2: Create a valid FULL backup (generation 1).
     provider = BitmapBackupProvider(shell)
-    target = TargetConfig(path=target_dir, incremental=True, compress=False, verify="off")
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     source_snap = SnapshotInfo(
         name=f"{vm_name}.vbd-gen1-pass",
         path=base_image,
@@ -309,7 +309,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[TargetConfig(
             path=target_dir,
-            incremental=True,
+            
             compress=False,
             verify="off",
             target_keep_generations=1,

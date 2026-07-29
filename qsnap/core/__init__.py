@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from xml.etree import ElementTree as ET
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -48,7 +48,7 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.retention.time_based import parse_duration, parse_stall_timeout
+from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import get_first_disk_target, is_vm_running, write_backup_xml
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import (
@@ -59,7 +59,7 @@ from qsnap.utils.parsing import (
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
-from qsnap.utils.verification import verify_full_backup
+from qsnap.utils.verification import scan_backing_chain, verify_full_backup
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,21 @@ class _CommitPlan:
     deferrable: list[SnapshotInfo]
     effective_mode: str | None  # "virsh" | "qemu-img" | None (nothing committable)
     defer_reason: str | None  # "vm_running" | "active_layer" | None
+
+
+@dataclass(frozen=True)
+class _RetryResult:
+    """Internal wrapper for _execute_with_retry operations that return
+    aggregate results (e.g., transfer_missing returns list[BackupResult]).
+
+    Carries a ``.success`` flag and ``.error`` string for
+    _execute_with_retry's retryability check, plus a ``.payload`` with
+    the actual operation output.
+    """
+
+    success: bool
+    error: str | None
+    payload: Any = None
 
 
 def _same_file(path: Path, other: str | None) -> bool:
@@ -608,68 +623,24 @@ class Core:
         vm: VMConfig,
         broken: list[str],
     ) -> set[str]:
-        """Run ``qemu-img info --backing-chain`` on the active layer.
+        """Scan the backing chain of the active layer via ``scan_backing_chain``.
 
-        Parses JSON output (not just exit code) and verifies:
-        (a) every file in the chain exists, (b) every file has format
-        ``"qcow2"``, (c) ``backing-filename`` references are consistent,
-        (d) no cycles.
-
-        Returns the set of file paths found on disk.
+        Delegates to :func:`scan_backing_chain` instead of inline JSON
+        parsing.  Returns ``ChainScanResult.paths`` as the set of file
+        paths found on disk, and appends ``ChainScanResult.broken_files``
+        items to the *broken* side-effect parameter.  When the scan
+        command itself fails (``success is False``), the active layer
+        name is appended to *broken* so the caller can report the issue.
         """
-        disk_paths: set[str] = set()
         active_layer = self._detect_active_layer_path(vm)
         if not active_layer:
-            return disk_paths
+            return set()
 
-        result = self._shell.run(
-            ["qemu-img", "info", "--force-share", "--backing-chain", "--output=json", active_layer],
-            timeout=30,
-            check=True,
-        )
-        if not result.success:
+        scan = scan_backing_chain(self._shell, Path(active_layer))
+        if not scan.success:
             broken.append(Path(active_layer).name)
-            return disk_paths
-
-        try:
-            chain_data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            broken.append(Path(active_layer).name)
-            return disk_paths
-
-        # qemu-img info --backing-chain --output=json returns a JSON array
-        # (one object per chain member, from active layer down to base).
-        chain_list = chain_data if isinstance(chain_data, list) else [chain_data]
-
-        seen: set[str] = set()
-        for i, item in enumerate(chain_list):
-            fname = item.get("filename", "")
-            if not fname:
-                continue
-            disk_paths.add(fname)
-
-            # (a) file exists
-            if not os.path.exists(fname):
-                broken.append(Path(fname).name)
-
-            # (b) format qcow2
-            if item.get("format") != "qcow2":
-                broken.append(Path(fname).name)
-
-            # (d) no cycles
-            if fname in seen:
-                broken.append(f"cycle detected at {Path(fname).name}")
-            seen.add(fname)
-
-            # (c) backing-filename consistency — the backing-filename of
-            #     member i should match the filename of member i+1
-            backing = item.get("backing-filename")
-            if backing and i + 1 < len(chain_list):
-                next_file = chain_list[i + 1].get("filename", "")
-                if backing != next_file:
-                    broken.append(f"backing-filename mismatch in {Path(fname).name}")
-
-        return disk_paths
+        broken.extend(scan.broken_files)
+        return scan.paths
 
     def _parse_domain_xml_source_paths(self, vm_name: str) -> set[str]:
         """Parse ``virsh dumpxml`` for all ``<source file="...">`` paths.
@@ -868,17 +839,18 @@ class Core:
             if deps:
                 last_dep = deps[-1]
                 last_dep_path = target.path / f"{last_dep}.qcow2"
-                chain_result = self._shell.run(
-                    [
-                        "qemu-img", "info", "--force-share",
-                        "--backing-chain", "--output=json",
-                        str(last_dep_path),
-                    ],
-                    timeout=30,
-                    check=True,
-                )
-                if not chain_result.success:
+                scan = scan_backing_chain(self._shell, last_dep_path)
+                if not scan.success:
+                    logger.error(
+                        "chain scan failed for %s on target %s: %s",
+                        last_dep,
+                        target_str,
+                        scan.error,
+                    )
                     broken.append(f"backup chain broken at {last_dep}")
+                if scan.broken_files:
+                    for bf in scan.broken_files:
+                        broken.append(f"backup chain broken at {Path(bf).name}")
 
     def _get_last_deep_check_time(self) -> datetime | None:
         """Read the last deep check timestamp from the state directory."""
@@ -1424,6 +1396,69 @@ class Core:
 
     # ── state consistency check ─────────────────────────────────────────
 
+    def _detect_phantom_snapshots(self, vm: VMConfig) -> list[SnapshotInfo]:
+        """Return snapshots in state whose files don't exist on disk.
+
+        Pure data — no state mutation, no file deletion, no dry-run
+        gating.  Shared by :meth:`check_state` (reporting) and
+        :meth:`reconcile` (repair).
+        """
+        snapshots = self._state.get_snapshots(vm.name)
+        return [sn for sn in snapshots if not os.path.exists(str(sn.path))]
+
+    def _detect_phantom_fulls(self, vm: VMConfig) -> list[tuple[TargetConfig, FullBackupInfo]]:
+        """Return FULLs in state whose files don't exist on disk.
+
+        Returns ``(TargetConfig, FullBackupInfo)`` tuples.  Pure data —
+        no state mutation, no file deletion, no dry-run gating.
+        """
+        result: list[tuple[TargetConfig, FullBackupInfo]] = []
+        for target in vm.targets:
+            fulls = self._state.get_full_backups(str(target.path))
+            for full in fulls:
+                if not os.path.exists(str(full.path)):
+                    result.append((target, full))
+        return result
+
+    def _detect_stale_deps(self, vm: VMConfig) -> list[tuple[str, str, TargetConfig]]:
+        """Return incremental dependencies whose files don't exist on disk.
+
+        Returns ``(dep_name, full_name, TargetConfig)`` tuples.  Pure
+        data — no state mutation, no file deletion, no dry-run gating.
+        """
+        result: list[tuple[str, str, TargetConfig]] = []
+        for target in vm.targets:
+            target_path = str(target.path)
+            fulls = self._state.get_full_backups(target_path)
+            for full in fulls:
+                deps = self._state.get_incremental_dependencies(target_path, full.name)
+                for dep_name in deps:
+                    dep_path = target.path / f"{dep_name}.qcow2"
+                    if not os.path.exists(str(dep_path)):
+                        result.append((dep_name, full.name, target))
+        return result
+
+    def _detect_broken_chains(self, vm: VMConfig) -> list[str]:
+        """Return non-FULL backup names with broken backing chains.
+
+        Uses :func:`scan_backing_chain` to verify chain integrity.
+        Only checks qsnap-pattern files (``vm.name.*``).  Pure data —
+        no state mutation, no file deletion, no dry-run gating.
+        """
+        result: list[str] = []
+        for target in vm.targets:
+            provider = self._factory.create_backup_provider(vm, target)
+            backups = provider.list(target)
+            for backup in backups:
+                if ".FULL." in backup.name:
+                    continue
+                if not backup.name.startswith(f"{vm.name}."):
+                    continue
+                scan = scan_backing_chain(self._shell, backup.path)
+                if scan.success is False or scan.broken_files:
+                    result.append(backup.name)
+        return result
+
     def check_state(
         self,
         vm_filter: str | None = None,
@@ -1446,55 +1481,33 @@ class Core:
             status_parts: list[str] = []
 
             # ── Phantom snapshots ────────────────────────────────────
-            snapshots = self._state.get_snapshots(vm.name)
-            for sn in snapshots:
-                if not os.path.exists(str(sn.path)):
-                    phantom_snapshots.append(f"{sn.name} (expected: {sn.path})")
+            phantom_snaps = self._detect_phantom_snapshots(vm)
+            phantom_snapshots = [
+                f"{sn.name} (expected: {sn.path})" for sn in phantom_snaps
+            ]
             if phantom_snapshots:
                 status_parts.append("stale_snapshots")
 
             # ── Phantom FULLs ────────────────────────────────────────
-            for target in vm.targets:
-                fulls = self._state.get_full_backups(str(target.path))
-                for full in fulls:
-                    if not os.path.exists(str(full.path)):
-                        phantom_fulls.append(f"{full.name} (target: {target.path})")
-                # ── Stale dependencies ───────────────────────────────
-                for full in fulls:
-                    deps = self._state.get_incremental_dependencies(str(target.path), full.name)
-                    for dep_name in deps:
-                        dep_path = target.path / f"{dep_name}.qcow2"
-                        if not os.path.exists(str(dep_path)):
-                            stale_deps.append(f"{dep_name} → {full.name} (target: {target.path})")
+            phantom_full_pairs = self._detect_phantom_fulls(vm)
+            phantom_fulls = [
+                f"{full.name} (target: {target.path})"
+                for target, full in phantom_full_pairs
+            ]
             if phantom_fulls:
                 status_parts.append("stale_fulls")
+
+            # ── Stale dependencies ───────────────────────────────────
+            stale_dep_tuples = self._detect_stale_deps(vm)
+            stale_deps = [
+                f"{dep_name} → {full_name} (target: {target.path})"
+                for dep_name, full_name, target in stale_dep_tuples
+            ]
             if stale_deps:
                 status_parts.append("stale_deps")
 
             # ── Broken backing chains ───────────────────────────────
-            # For each target, validate backing-chain integrity of
-            # non-FULL backup files via qemu-img info --backing-chain.
-            # FULLs are standalone (no backing) and skipped.
-            for target in vm.targets:
-                provider = self._factory.create_backup_provider(vm, target)
-                backups = provider.list(target)
-                for backup in backups:
-                    if ".FULL." in backup.name:
-                        continue
-                    result = self._shell.run(
-                        [
-                            "qemu-img",
-                            "info",
-                            "--force-share",
-                            "--backing-chain",
-                            "--output=json",
-                            str(backup.path),
-                        ],
-                        timeout=30,
-                        check=True,
-                    )
-                    if not result.success:
-                        broken_chains.append(f"{backup.name} (target: {target.path})")
+            broken_chains = self._detect_broken_chains(vm)
             if broken_chains:
                 status_parts.append("broken_chains")
 
@@ -1666,37 +1679,36 @@ class Core:
 
             # 1. Phantom snapshots (state has, disk doesn't, XML doesn't)
             try:
-                snapshots = self._state.get_snapshots(vm.name)
-                for sn in snapshots:
-                    if not os.path.exists(str(sn.path)):
-                        # Check if XML still references this file
-                        if str(sn.path) in xml_paths:
-                            # Stale domain XML — don't remove from state,
-                            # will be refreshed in step 3
-                            logger.warning(
-                                "[reconcile] %s: stale domain XML references "
-                                "missing file %s — will refresh XML",
-                                vm.name,
-                                sn.path,
-                            )
-                            continue
-                        # Phantom in state — remove
-                        if self._dry_run:
-                            logger.info(
-                                "[dry-run reconcile] %s: would remove phantom snapshot %s",
-                                vm.name,
-                                sn.name,
-                            )
-                            phantom_snapshots += 1
-                        else:
-                            self._state.remove_snapshot(vm.name, sn.name)
-                            logger.warning(
-                                "[reconcile] %s: removed phantom snapshot %s (file not found: %s)",
-                                vm.name,
-                                sn.name,
-                                sn.path,
-                            )
-                            phantom_snapshots += 1
+                phantom_snaps = self._detect_phantom_snapshots(vm)
+                for sn in phantom_snaps:
+                    # Check if XML still references this file
+                    if str(sn.path) in xml_paths:
+                        # Stale domain XML — don't remove from state,
+                        # will be refreshed in step 3
+                        logger.warning(
+                            "[reconcile] %s: stale domain XML references "
+                            "missing file %s — will refresh XML",
+                            vm.name,
+                            sn.path,
+                        )
+                        continue
+                    # Phantom in state — remove
+                    if self._dry_run:
+                        logger.info(
+                            "[dry-run reconcile] %s: would remove phantom snapshot %s",
+                            vm.name,
+                            sn.name,
+                        )
+                        phantom_snapshots += 1
+                    else:
+                        self._state.remove_snapshot(vm.name, sn.name)
+                        logger.warning(
+                            "[reconcile] %s: removed phantom snapshot %s (file not found: %s)",
+                            vm.name,
+                            sn.name,
+                            sn.path,
+                        )
+                        phantom_snapshots += 1
             except Exception as exc:
                 errors.append(f"phantom snapshots: {exc}")
                 logger.warning(
@@ -1848,47 +1860,43 @@ class Core:
                     exc,
                 )
 
-            # 2-4. Per-target: phantom FULLs, stale deps, stale baselines
+            # 2. Phantom FULLs with cascade cleanup
+            try:
+                phantom_full_pairs = self._detect_phantom_fulls(vm)
+                for target, full in phantom_full_pairs:
+                    target_path = str(target.path)
+                    if self._dry_run:
+                        logger.info(
+                            "[dry-run reconcile] %s: would remove phantom FULL %s "
+                            "(cascade deps)",
+                            vm.name,
+                            full.name,
+                        )
+                        phantom_fulls += 1
+                    else:
+                        self._state.remove_full_backup(target_path, full.name)
+                        removed = self._state.remove_all_incremental_dependencies(
+                            target_path, full.name
+                        )
+                        logger.warning(
+                            "[reconcile] %s: removed phantom FULL %s "
+                            "(cascade: %d deps cleaned)",
+                            vm.name,
+                            full.name,
+                            removed,
+                        )
+                        phantom_fulls += 1
+            except Exception as exc:
+                errors.append(f"phantom FULLs: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking phantom FULLs: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 3. Clear stale baseline if no FULLs remain
             for target in vm.targets:
                 target_path = str(target.path)
-                try:
-                    all_fulls = self._state.get_full_backups(target_path)
-                except Exception as exc:
-                    errors.append(f"full backups for {target_path}: {exc}")
-                    logger.warning(
-                        "[reconcile] %s: error loading FULLs for target %s: %s",
-                        vm.name,
-                        target_path,
-                        exc,
-                    )
-                    continue
-
-                # 2. Phantom FULLs with cascade cleanup
-                for full in all_fulls:
-                    if not os.path.exists(str(full.path)):
-                        if self._dry_run:
-                            logger.info(
-                                "[dry-run reconcile] %s: would remove phantom FULL %s "
-                                "(cascade deps)",
-                                vm.name,
-                                full.name,
-                            )
-                            phantom_fulls += 1
-                        else:
-                            self._state.remove_full_backup(target_path, full.name)
-                            removed = self._state.remove_all_incremental_dependencies(
-                                target_path, full.name
-                            )
-                            logger.warning(
-                                "[reconcile] %s: removed phantom FULL %s "
-                                "(cascade: %d deps cleaned)",
-                                vm.name,
-                                full.name,
-                                removed,
-                            )
-                            phantom_fulls += 1
-
-                # 3. Clear stale baseline if no FULLs remain
                 try:
                     remaining = self._state.get_full_backups(target_path)
                     if (
@@ -1921,43 +1929,40 @@ class Core:
                         exc,
                     )
 
-                # 4. Stale incremental dependencies (incremental file missing)
-                try:
-                    fulls_after = self._state.get_full_backups(target_path)
-                    for full in fulls_after:
-                        deps = self._state.get_incremental_dependencies(target_path, full.name)
-                        for dep_name in deps:
-                            dep_path = target.path / f"{dep_name}.qcow2"
-                            if not os.path.exists(str(dep_path)):
-                                if self._dry_run:
-                                    logger.info(
-                                        "[dry-run reconcile] %s: would remove stale dep %s → %s",
-                                        vm.name,
-                                        dep_name,
-                                        full.name,
-                                    )
-                                    stale_deps += 1
-                                else:
-                                    self._state.remove_incremental_dependency(
-                                        target_path, dep_name, full.name
-                                    )
-                                    logger.warning(
-                                        "[reconcile] %s: removed stale dependency "
-                                        "%s → %s (file not found: %s)",
-                                        vm.name,
-                                        dep_name,
-                                        full.name,
-                                        dep_path,
-                                    )
-                                    stale_deps += 1
-                except Exception as exc:
-                    errors.append(f"stale deps for {target_path}: {exc}")
-                    logger.warning(
-                        "[reconcile] %s: error checking stale deps for target %s: %s",
-                        vm.name,
-                        target_path,
-                        exc,
-                    )
+            # 4. Stale incremental dependencies (incremental file missing)
+            try:
+                stale_dep_tuples = self._detect_stale_deps(vm)
+                for dep_name, full_name, target in stale_dep_tuples:
+                    target_path = str(target.path)
+                    dep_path = target.path / f"{dep_name}.qcow2"
+                    if self._dry_run:
+                        logger.info(
+                            "[dry-run reconcile] %s: would remove stale dep %s → %s",
+                            vm.name,
+                            dep_name,
+                            full_name,
+                        )
+                        stale_deps += 1
+                    else:
+                        self._state.remove_incremental_dependency(
+                            target_path, dep_name, full_name
+                        )
+                        logger.warning(
+                            "[reconcile] %s: removed stale dependency "
+                            "%s → %s (file not found: %s)",
+                            vm.name,
+                            dep_name,
+                            full_name,
+                            dep_path,
+                        )
+                        stale_deps += 1
+            except Exception as exc:
+                errors.append(f"stale deps: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking stale deps: %s",
+                    vm.name,
+                    exc,
+                )
 
             # 5. Orphan checkpoint auto-cleanup
             try:
@@ -1974,6 +1979,17 @@ class Core:
             # 6. Orphan files on target directories — supplement state
             #    for intact chains, log CRITICAL for broken chains, delete
             #    truly orphan files.
+            broken_chain_names = set(self._detect_broken_chains(vm))
+            for name in broken_chain_names:
+                broken_chains.append(name)
+                logger.critical(
+                    "[reconcile] %s: broken chain at %s — "
+                    "blockcommit impossible, restore from "
+                    "backup target",
+                    vm.name,
+                    name,
+                )
+
             for target in vm.targets:
                 target_path = str(target.path)
                 try:
@@ -2002,33 +2018,12 @@ class Core:
                             )
                             continue
 
-                        # Check backing chain integrity for non-FULL files
-                        if ".FULL." not in backup.name:
-                            chain_result = self._shell.run(
-                                [
-                                    "qemu-img",
-                                    "info",
-                                    "--force-share",
-                                    "--backing-chain",
-                                    "--output=json",
-                                    str(backup.path),
-                                ],
-                                timeout=30,
-                                check=True,
-                            )
-                            if not chain_result.success:
-                                # Broken chain — CRITICAL log, do NOT delete
-                                broken_chains.append(backup.name)
-                                logger.critical(
-                                    "[reconcile] %s: broken chain at %s — "
-                                    "blockcommit impossible, restore from "
-                                    "backup target",
-                                    vm.name,
-                                    backup.name,
-                                )
-                                continue
+                        # Skip broken chains (already logged CRITICAL above)
+                        if backup.name in broken_chain_names:
+                            continue
 
-                            # Check if chain leads to a FULL tracked in state
+                        # Check if chain leads to a FULL tracked in state
+                        if ".FULL." not in backup.name:
                             anchor = self._resolve_chain_full_anchor(backup.path)
                             if anchor is not None:
                                 # Supplement state — record dependency
@@ -3044,11 +3039,10 @@ class Core:
     def _verify_backing_chain(self, vm_config: VMConfig) -> ChainVerifyResult:
         """Verify backing chain integrity of the active disk image.
 
-        Calls ``qemu-img info --backing-chain --output=json`` on the
-        most recent snapshot (or base image if no snapshots).  Verifies:
-        (a) every file referenced in the chain exists, (b) every file
-        has format ``"qcow2"``, (c) backing-filename references are
-        consistent, (d) no file appears twice (no cycles).
+        Calls :func:`scan_backing_chain` on the most recent snapshot
+        (or base image if no snapshots).  Converts ``ChainScanResult``
+        → ``ChainVerifyResult``, mapping ``broken_files[0]`` to
+        ``broken_file`` when non-empty.
 
         Returns ``ChainVerifyResult`` — never raises.
         """
@@ -3060,122 +3054,28 @@ class Core:
         else:
             active_path = vm_config.base_image
 
-        result = self._shell.run(
-            [
-                "qemu-img",
-                "info",
-                "--force-share",
-                "--backing-chain",
-                "--output=json",
-                str(active_path),
-            ],
-            timeout=30,
-            check=True,
-        )
-        if not result.success:
-            # qemu-img info --backing-chain failed — likely a missing
-            # backing file.  Walk the chain one hop at a time to find
-            # the broken file so partial blockcommit can proceed
+        scan = scan_backing_chain(self._shell, active_path)
+
+        if not scan.success:
+            # scan_backing_chain failed (command or parse error) — try
+            # to find the broken file for partial blockcommit recovery
             # (spec: blockcommit-recovery).
             broken = self._find_broken_chain_file(active_path)
             return ChainVerifyResult(
                 success=False,
-                error=f"qemu-img info failed: {result.error}",
+                error=scan.error or "scan_backing_chain failed",
                 broken_file=broken,
             )
 
-        try:
-            chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
-        except json.JSONDecodeError as exc:
+        if scan.broken_files:
+            # Chain has integrity issues (missing files, wrong format,
+            # cycles, etc.) — report the first broken file.
+            first = scan.broken_files[0]
             return ChainVerifyResult(
                 success=False,
-                error=f"Failed to parse qemu-img output: {exc}",
-                broken_file=None,
+                error=f"Backing chain broken: {', '.join(scan.broken_files)}",
+                broken_file=Path(first),
             )
-
-        if not isinstance(chain_data, list) or not chain_data:  # type: ignore[reportUnnecessaryIsInstance]
-            return ChainVerifyResult(
-                success=False,
-                error="Empty or invalid backing chain data",
-                broken_file=None,
-            )
-
-        seen_files: set[str] = set()
-        for i, item in enumerate(chain_data):
-            # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-            image = cast(str, item.get("image") or item.get("filename", ""))
-            if not image:
-                return ChainVerifyResult(
-                    success=False,
-                    error=f"Missing 'image' field in chain entry {i}",
-                    broken_file=None,
-                )
-
-            image_path = Path(image)
-
-            # (d) Check for cycles
-            if str(image_path) in seen_files:
-                return ChainVerifyResult(
-                    success=False,
-                    error=f"Backing chain contains a cycle at {image_path}",
-                    broken_file=image_path,
-                )
-            seen_files.add(str(image_path))
-
-            # (a) Check file exists (via IShell for mockability)
-            existence = self._shell.run(
-                ["test", "-f", str(image_path)],
-                timeout=10,
-                check=True,
-            )
-            if not existence.success:
-                return ChainVerifyResult(
-                    success=False,
-                    error=f"Backing chain broken: missing file {image_path}",
-                    broken_file=image_path,
-                )
-
-            # (b) Check format is qcow2
-            fmt = cast(str, item.get("format", ""))
-            if fmt != "qcow2":
-                return ChainVerifyResult(
-                    success=False,
-                    error=(f"Unexpected format '{fmt}' for {image_path} (expected 'qcow2')"),
-                    broken_file=image_path,
-                )
-
-            # (c) Check backing-filename consistency
-            backing = cast(str | None, item.get("backing-filename"))
-            if backing is not None:
-                backing_path = Path(backing)
-                backing_existence = self._shell.run(
-                    ["test", "-f", str(backing_path)],
-                    timeout=10,
-                    check=True,
-                )
-                if not backing_existence.success:
-                    return ChainVerifyResult(
-                        success=False,
-                        error=(f"Backing chain broken: backing file {backing_path} does not exist"),
-                        broken_file=backing_path,
-                    )
-
-                # Cross-check: backing-filename must match the next
-                # entry's image in the chain array.
-                if i + 1 < len(chain_data):
-                    # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-                    next_image = cast(
-                        str, chain_data[i + 1].get("image") or chain_data[i + 1].get("filename", "")
-                    )
-                    if next_image and str(backing_path) != next_image:
-                        return ChainVerifyResult(
-                            success=False,
-                            error=(
-                                f"Backing-filename mismatch for {image_path}: "
-                                f"expected {next_image}, got {backing_path}"
-                            ),
-                            broken_file=image_path,
-                        )
 
         return ChainVerifyResult(success=True, error=None, broken_file=None)
 
@@ -3611,7 +3511,10 @@ class Core:
         manager = self._factory.create_lifecycle_manager(
             mode=effective_mode,
         )
-        result = manager.blockcommit(vm_config, committable)
+        result = manager.blockcommit(
+            vm_config, committable,
+            deep_verify=vm_config.blockcommit_deep_verify,
+        )
 
         # Check for MAC denial — defer if blocked by AppArmor/SELinux
         if (
@@ -3919,6 +3822,76 @@ class Core:
                 backup_failed = True
         return backup_failed
 
+    def _execute_with_retry(
+        self,
+        operation: Callable[[], Any],
+        target: TargetConfig,
+        *,
+        is_retryable_fn: Callable[[str], bool] = is_retryable,
+    ) -> Any:
+        """Execute *operation* with exponential backoff retry.
+
+        When ``target.backup_retry_max <= 0``, executes *operation*
+        exactly once (no retry loop).  When ``> 0``, loops up to
+        ``target.backup_retry_max`` times.  On each attempt:
+
+        1. Call ``operation()`` and check ``result.success``.
+        2. If ``True``, return *result* immediately.
+        3. If ``False``, check ``is_retryable_fn(result.error or "")``.
+        4. If not retryable, return *result* immediately.
+        5. If retryable and more attempts remain, compute backoff via
+           ``compute_backoff(base_seconds, attempt)`` and sleep.
+        6. If all attempts exhausted, return the last *result*.
+
+        The *operation* callable must return an object with a
+        ``success`` boolean attribute and an ``error`` string attribute
+        (non-None iff success is False).
+        """
+        max_retries = target.backup_retry_max
+        base_seconds = parse_retry_duration(target.backup_retry_base)
+
+        if max_retries <= 0:
+            return operation()
+
+        result: Any = None
+        for attempt in range(1, max_retries + 1):
+            result = operation()
+            if getattr(result, "success", True):
+                if attempt > 1:
+                    logger.info(
+                        "Operation for target %s succeeded on retry "
+                        "attempt %d/%d",
+                        target.path,
+                        attempt,
+                        max_retries,
+                    )
+                return result
+
+            error = getattr(result, "error", None) or ""
+            if not is_retryable_fn(error):
+                return result
+
+            if attempt >= max_retries:
+                logger.warning(
+                    "Operation for target %s failed after %d retries",
+                    target.path,
+                    max_retries,
+                )
+                return result
+
+            backoff = compute_backoff(base_seconds, attempt)
+            logger.info(
+                "Retrying operation for target %s (attempt %d/%d, "
+                "backoff %.1fs)",
+                target.path,
+                attempt + 1,
+                max_retries,
+                backoff,
+            )
+            time.sleep(backoff)
+
+        return result
+
     def _transfer_with_retry(
         self,
         provider: IBackupProvider,
@@ -3934,10 +3907,9 @@ class Core:
     ) -> list[BackupResult]:
         """Transfer missing snapshots with exponential backoff retry.
 
-        When ``target.backup_retry_max > 0``, wraps the provider's
-        ``transfer_missing()`` call in a retry loop.  Only retries on
-        transient errors (determined by ``is_retryable()``).  Non-
-        retryable errors fail immediately.
+        Delegates the retry loop to :meth:`_execute_with_retry`.  Only
+        retries on transient errors (determined by ``is_retryable()``).
+        Non-retryable errors fail immediately.
 
         ``compression_type`` and ``stall_timeout`` are threaded from
         ``TargetConfig`` to the provider's ``transfer_missing()``.
@@ -3945,23 +3917,7 @@ class Core:
         Returns the list of ``BackupResult`` objects from the last
         attempt.
         """
-        max_retries = target.backup_retry_max
-        base_seconds = parse_retry_duration(target.backup_retry_base)
-
-        if max_retries <= 0:
-            return provider.transfer_missing(
-                vm_config,
-                target,
-                snapshots,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-                full_transfer_engine=full_transfer_engine,
-                convert_parallel=convert_parallel,
-                convert_out_of_order=convert_out_of_order,
-            )
-
-        results: list[BackupResult] = []
-        for attempt in range(1, max_retries + 1):
+        def operation() -> _RetryResult:
             results = provider.transfer_missing(
                 vm_config,
                 target,
@@ -3972,50 +3928,17 @@ class Core:
                 convert_parallel=convert_parallel,
                 convert_out_of_order=convert_out_of_order,
             )
-
-            # Check if all transfers succeeded
             failed = [r for r in results if not r.success]
             if not failed:
-                if attempt > 1:
-                    logger.info(
-                        "Backup transfer for VM %s target %s succeeded on retry attempt %d/%d",
-                        vm_config.name,
-                        target.path,
-                        attempt,
-                        max_retries,
-                    )
-                return results
+                return _RetryResult(success=True, error=None, payload=results)
+            # Combine all failure errors — if any is non-retryable,
+            # the combined string will contain a non-retryable pattern
+            # and _execute_with_retry will short-circuit.
+            combined_error = "; ".join(r.error or "" for r in failed)
+            return _RetryResult(success=False, error=combined_error, payload=results)
 
-            # Check if any failure is retryable
-            non_retryable = [r for r in failed if r.error and not is_retryable(r.error)]
-
-            # If any non-retryable error, fail immediately
-            if non_retryable:
-                return results
-
-            # If this was the last attempt, log exhaustion
-            if attempt >= max_retries:
-                logger.warning(
-                    "Backup transfer for VM %s target %s failed after %d retries",
-                    vm_config.name,
-                    target.path,
-                    max_retries,
-                )
-                return results
-
-            # Sleep and retry
-            backoff = compute_backoff(base_seconds, attempt)
-            logger.info(
-                "Retrying backup transfer for VM %s target %s (attempt %d/%d, backoff %.1fs)",
-                vm_config.name,
-                target.path,
-                attempt + 1,
-                max_retries,
-                backoff,
-            )
-            time.sleep(backoff)
-
-        return results
+        result = self._execute_with_retry(operation, target)
+        return cast(_RetryResult, result).payload  # type: ignore[return-value]
 
     def _should_backup_onchange(
         self,
@@ -4128,8 +4051,8 @@ class Core:
                         str(target.path), newest_full.name
                     )
                     incremental_count = len(deps)
-                    chain_length = target.target_chain_length or 0
-                    should_full = incremental_count > chain_length
+                    chain_length = target.target_chain_length
+                    should_full = chain_length is not None and incremental_count > chain_length
 
                 if should_full:
                     if self._dry_run:
@@ -4147,10 +4070,9 @@ class Core:
                     else:
                         most_recent = max(snapshots, key=lambda s: s.timestamp)
                         global_cfg = self._config.get_global()
-                        max_retries = target.backup_retry_max
-                        base_seconds = parse_retry_duration(target.backup_retry_base)
-                        full_created = False
-                        for attempt in range(1, max_retries + 1):
+
+                        def _create_full_operation() -> BackupResult:
+                            """Create FULL backup, verify, record — or rollback on failure."""
                             full_result = provider.create_full_backup(
                                 vm_config.name,
                                 most_recent,
@@ -4163,19 +4085,7 @@ class Core:
                                 convert_out_of_order=target.convert_out_of_order,
                             )
                             if not full_result.success:
-                                logger.warning(
-                                    "Full backup failed for VM %s target %s "
-                                    "(attempt %d/%d): %s",
-                                    vm_config.name,
-                                    target.path,
-                                    attempt,
-                                    max_retries,
-                                    full_result.error,
-                                )
-                                if attempt < max_retries:
-                                    backoff = compute_backoff(base_seconds, attempt)
-                                    time.sleep(backoff)
-                                continue
+                                return full_result
 
                             # ── Post-create FULL backup verification ────
                             # (verify-before-delete gate — design D3).
@@ -4201,17 +4111,20 @@ class Core:
                                 )
                                 logger.warning(
                                     "FULL backup verification failed for VM %s "
-                                    "target %s (attempt %d/%d) — rolled back: %s",
+                                    "target %s — rolled back: %s",
                                     vm_config.name,
                                     target.path,
-                                    attempt,
-                                    max_retries,
                                     verify_error,
                                 )
-                                if attempt < max_retries:
-                                    backoff = compute_backoff(base_seconds, attempt)
-                                    time.sleep(backoff)
-                                continue
+                                return BackupResult(
+                                    success=False,
+                                    snapshot_name=full_result.snapshot_name,
+                                    source_path=full_result.source_path,
+                                    target_path=full_result.target_path,
+                                    bytes_transferred=full_result.bytes_transferred,
+                                    error=verify_error,
+                                    duration=full_result.duration,
+                                )
 
                             # Verification passed — record + log.
                             full_name = full_result.target_path.stem
@@ -4235,18 +4148,20 @@ class Core:
                                 full_name,
                                 full_result.bytes_transferred,
                             )
-                            full_created = True
-                            break
+                            return full_result
 
-                        if not full_created:
-                            # All retries exhausted — CRITICAL, keep old
-                            # generations (verify-before-delete gate).
+                        full_result = self._execute_with_retry(
+                            _create_full_operation, target
+                        )
+                        if not full_result.success:
+                            # All retries exhausted or non-retryable
+                            # failure — CRITICAL, keep old generations
+                            # (verify-before-delete gate).
                             full_verification_failed = True
                             backup_failed = True
                             logger.critical(
-                                "FULL backup creation exhausted all %d retries for "
-                                "VM %s target %s — old generations preserved",
-                                max_retries,
+                                "FULL backup creation failed for VM %s "
+                                "target %s — old generations preserved",
                                 vm_config.name,
                                 target.path,
                             )
@@ -4525,43 +4440,6 @@ class Core:
 
         return backups, RetentionResult(keep=final_keep, remove=final_remove)
 
-    def _build_backing_refs(
-        self,
-        backups: list[SnapshotInfo],
-    ) -> dict[str, list[str]]:
-        """Build a reverse backing-chain dependency map.
-
-        Scans ``backing-filename`` of each backup via ``qemu-img info``
-        and returns ``{absolute_backing_path → [dependent_name, ...]}``.
-
-        Relative ``backing-filename`` values are resolved to absolute
-        paths against the backup's parent directory.  Files where
-        ``qemu-img info`` fails or JSON parsing fails are skipped (no
-        entry in the map) — this handles race conditions gracefully
-        (design D2, risk R2).
-        """
-        refs: dict[str, list[str]] = {}
-        for backup in backups:
-            info_result = self._shell.run(
-                ["qemu-img", "info", "--output=json", str(backup.path)],
-                timeout=60,
-                check=True,
-            )
-            if not info_result.success:
-                continue
-            try:
-                info = json.loads(info_result.stdout)
-            except json.JSONDecodeError:
-                continue
-            backing = info.get("backing-filename")
-            if not isinstance(backing, str) or not backing:
-                continue
-            backing_path = Path(backing)
-            if not backing_path.is_absolute():
-                backing_path = backup.path.parent / backing_path
-            refs.setdefault(str(backing_path), []).append(backup.name)
-        return refs
-
     def _cleanup_backups(
         self,
         vm_config: VMConfig,
@@ -4586,25 +4464,9 @@ class Core:
             # Nothing to delete, but still run post-cleanup verification
             # on keep-set items (spec: per-chain-retention).
             if retention_result and retention_result.keep:
-                keep_set_verify = set(retention_result.keep)
-                for backup in backups:
-                    if backup.name in keep_set_verify and ".FULL." not in backup.name:
-                        verify_result = self._shell.run(
-                            [
-                                "qemu-img", "info", "--force-share",
-                                "--backing-chain", "--output=json",
-                                str(backup.path),
-                            ],
-                            timeout=60,
-                            check=True,
-                        )
-                        if not verify_result.success:
-                            logger.critical(
-                                "post-cleanup verification FAILED for %s — "
-                                "backing chain is broken. Run: qsnap check --deep %s",
-                                backup.name,
-                                target.path,
-                            )
+                self._verify_keep_set_chains(
+                    backups, set(retention_result.keep), target
+                )
             return
 
         keep_set = set(retention_result.keep)
@@ -4718,18 +4580,25 @@ class Core:
         # Post-cleanup chain integrity verification (spec:
         # per-chain-retention).  Verify that all keep-set items with
         # backing chains have intact chains.
+        self._verify_keep_set_chains(backups, keep_set, target)
+
+    def _verify_keep_set_chains(
+        self,
+        backups: list[SnapshotInfo],
+        keep_set: set[str],
+        target: TargetConfig,
+    ) -> None:
+        """Verify backing chain integrity of keep-set incremental backups.
+
+        Calls :func:`scan_backing_chain` for each incremental in the
+        keep-set (non-FULL items).  If the scan fails or reports
+        broken files, a CRITICAL log is emitted so the operator can
+        run ``qsnap check --deep`` (spec: per-chain-retention).
+        """
         for backup in backups:
             if backup.name in keep_set and ".FULL." not in backup.name:
-                verify_result = self._shell.run(
-                    [
-                        "qemu-img", "info", "--force-share",
-                        "--backing-chain", "--output=json",
-                        str(backup.path),
-                    ],
-                    timeout=60,
-                    check=True,
-                )
-                if not verify_result.success:
+                scan = scan_backing_chain(self._shell, backup.path)
+                if not scan.success or scan.broken_files:
                     logger.critical(
                         "post-cleanup verification FAILED for %s — "
                         "backing chain is broken. Run: qsnap check --deep %s",

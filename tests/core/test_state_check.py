@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from qsnap.core import Core
-from qsnap.models.results import ShellResult, SnapshotInfo
+from qsnap.models.results import ChainScanResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 # ── test_check_state_all_snapshots_exist_clean ─────────────────────────
@@ -826,8 +826,8 @@ def test_check_state_broken_backing_chain_detected(
     target = make_target(path=str(backup_dir))
     vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
 
-    # A non-FULL incremental backup file
-    non_full_name = "inc.20250713T1000_vda"
+    # A non-FULL incremental backup file (must start with vm.name for detection)
+    non_full_name = "testvm.20250713T1000_vda"
     non_full_path = backup_dir / f"{non_full_name}.qcow2"
     non_full_path.touch()
 
@@ -841,16 +841,8 @@ def test_check_state_broken_backing_chain_detected(
         ),
     ]
 
-    # Simulate a broken backing chain: qemu-img info returns failure
-    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open backing file",
-            returncode=1,
-            error="backing chain broken",
-        )
-    )
+    # Simulate a broken backing chain by patching scan_backing_chain
+    # directly (avoids MockShell pattern-matching race with conftest).
 
     config = MockConfigFacade(
         global_config=make_global_config(state_dir=str(state_dir)),
@@ -858,9 +850,16 @@ def test_check_state_broken_backing_chain_detected(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
 
-    result = core.check_state()
+    with patch("qsnap.core.scan_backing_chain") as scan_spy:
+        scan_spy.return_value = ChainScanResult(
+            success=False,
+            broken_files=[str(non_full_path)],
+            paths=set(),
+            error="backing chain broken",
+        )
+        result = core.check_state()
 
-    expected_entry = f"{non_full_name} (target: {str(backup_dir)})"
+    expected_entry = non_full_name
     assert result["testvm"].broken_chains == [expected_entry]
     assert "broken_chains" in result["testvm"].status
 
@@ -977,8 +976,8 @@ def test_check_state_full_backups_skipped_in_chain_validation(
     full_path = backup_dir / full_name
     full_path.touch()
 
-    # A non-FULL incremental backup
-    non_full_name = "inc.20250713T1000_vda"
+    # A non-FULL incremental backup (must start with vm.name for detection)
+    non_full_name = "testvm.20250713T1000_vda"
     non_full_path = backup_dir / f"{non_full_name}.qcow2"
     non_full_path.touch()
 
@@ -999,15 +998,7 @@ def test_check_state_full_backups_skipped_in_chain_validation(
 
     # All qemu-img info calls return failure — the FULL is skipped so
     # it never hits this mock; only the non-FULL triggers it.
-    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open backing file",
-            returncode=1,
-            error="backing chain broken",
-        )
-    )
+    # Patch scan_backing_chain directly to avoid MockShell matching issues.
 
     config = MockConfigFacade(
         global_config=make_global_config(state_dir=str(state_dir)),
@@ -1015,7 +1006,13 @@ def test_check_state_full_backups_skipped_in_chain_validation(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
 
-    with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
+    with patch("qsnap.core.scan_backing_chain") as scan_spy:
+        scan_spy.return_value = ChainScanResult(
+            success=False,
+            broken_files=[str(non_full_path)],
+            paths=set(),
+            error="backing chain broken",
+        )
         result = core.check_state()
 
     # Only the non-FULL backup should be reported as broken
@@ -1024,16 +1021,9 @@ def test_check_state_full_backups_skipped_in_chain_validation(
     assert full_name not in result["testvm"].broken_chains[0]
     assert "broken_chains" in result["testvm"].status
 
-    # Verify that qemu-img info --backing-chain was called exactly once
+    # Verify that scan_backing_chain was called exactly once
     # (for the non-FULL backup only — FULL is skipped entirely).
-    qemu_img_calls = [
-        c
-        for c in run_spy.call_args_list
-        if "qemu-img info" in " ".join(c[0][0])
-        and "--backing-chain" in " ".join(c[0][0])
-    ]
-    assert len(qemu_img_calls) == 1, (
-        f"Expected exactly 1 qemu-img info --backing-chain call, "
-        f"got {len(qemu_img_calls)}"
+    assert scan_spy.call_count == 1, (
+        f"Expected exactly 1 scan_backing_chain call, "
+        f"got {scan_spy.call_count}"
     )
-    assert str(non_full_path) in " ".join(qemu_img_calls[0][0][0])

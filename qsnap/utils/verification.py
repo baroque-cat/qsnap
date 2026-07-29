@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import cast
 
 from qsnap.interfaces.shell import IShell
+from qsnap.models.results import ChainScanResult, CommitResult
 
 logger = logging.getLogger(__name__)
 
@@ -345,3 +346,189 @@ def verify_bitmap_incremental(
             return f"verification failed: content comparison mismatch: {error_detail}"
 
     return None
+
+
+# ── Shared lifecycle verification helpers ────────────────────────────────
+
+
+def deep_verify_base_image(
+    shell: IShell,
+    base_image: Path,
+) -> CommitResult | None:
+    """Run ``qemu-img check`` on *base_image* after a blockcommit.
+
+    Consolidates the ~44-line identical deep-verify block from
+    ``BlockCommitManager`` and ``QemuImgCommitManager``.  The
+    ``shell.run()`` call does NOT pass ``check=True`` — the function
+    inspects ``chk.success`` and ``chk.error`` directly, consistent with
+    the shell abstraction contract (result objects, not exceptions for
+    expected failures).
+
+    Args:
+        shell: :class:`IShell` instance for running qemu-img commands.
+        base_image: Path to the base qcow2 image to verify.
+
+    Returns:
+        ``None`` on success (zero corruptions/errors/leaks), or a
+        :class:`CommitResult` with ``success=False`` on failure.
+    """
+    chk = shell.run(
+        ["qemu-img", "check", "--output=json", str(base_image)],
+        timeout=3600,
+    )
+    if not chk.success:
+        return CommitResult(
+            success=False,
+            committed_snapshot="",
+            error=f"deep verify: qemu-img check failed: {chk.error}",
+        )
+    try:
+        data = json.loads(chk.stdout)
+    except json.JSONDecodeError:
+        return CommitResult(
+            success=False,
+            committed_snapshot="",
+            error="deep verify: failed to parse qemu-img check output",
+        )
+    for field_name in ("corruptions", "errors", "leaks"):
+        count = int(data.get(field_name, 0))
+        if count > 0:
+            return CommitResult(
+                success=False,
+                committed_snapshot="",
+                error=f"deep verify: {count} {field_name} in base image",
+            )
+    return None
+
+
+def scan_backing_chain(
+    shell: IShell,
+    entry_path: Path,
+) -> ChainScanResult:
+    """Scan a qcow2 backing chain starting from *entry_path*.
+
+    Runs ``qemu-img info --force-share --backing-chain --output=json``
+    and verifies: (a) every file referenced in the chain exists on the
+    filesystem, (b) every file has format ``"qcow2"``, (c) the
+    ``backing-filename`` reference in each image matches the actual next
+    file in the chain, (d) no file appears twice (no cycles).
+
+    The JSON parsing accepts both ``"image"`` (legacy QEMU) and
+    ``"filename"`` (QEMU 11.0+) as the key for the disk image file path.
+    The ``"children"`` nested array is ignored.
+
+    Args:
+        shell: :class:`IShell` instance for running qemu-img commands.
+        entry_path: Path to the entry point of the backing chain
+            (typically the active layer or the last incremental).
+
+    Returns:
+        :class:`ChainScanResult` with ``paths`` containing all file
+        paths found in the chain, ``broken_files`` listing files with
+        issues, ``success`` indicating whether the scan command itself
+        succeeded, and ``error`` describing any command/parse failure.
+    """
+    result = shell.run(
+        [
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--backing-chain",
+            "--output=json",
+            str(entry_path),
+        ],
+        timeout=30,
+    )
+    if not result.success:
+        return ChainScanResult(
+            paths=set(),
+            broken_files=[],
+            success=False,
+            error=f"qemu-img info failed: {result.error}",
+        )
+
+    try:
+        raw_chain = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return ChainScanResult(
+            paths=set(),
+            broken_files=[],
+            success=False,
+            error="failed to parse qemu-img info JSON output",
+        )
+
+    # qemu-img info --backing-chain returns a flat JSON array of
+    # objects, each describing one image in the chain (entry → base).
+    if not isinstance(raw_chain, list):
+        return ChainScanResult(
+            paths=set(),
+            broken_files=[],
+            success=False,
+            error="unexpected qemu-img info JSON structure (expected array)",
+        )
+
+    paths: set[str] = set()
+    broken_files: list[str] = []
+    seen: set[str] = set()
+
+    for i, item in enumerate(raw_chain):
+        if not isinstance(item, dict):
+            continue
+
+        # Accept both "image" (legacy) and "filename" (QEMU 11.0+) keys.
+        file_path = item.get("filename") or item.get("image") or ""
+
+        # Format check.
+        fmt = item.get("format", "")
+        if fmt != "qcow2":
+            broken_files.append(file_path)
+            paths.add(file_path)
+            continue
+
+        # Existence check (via IShell for mockability).
+        existence = shell.run(
+            ["test", "-f", file_path],
+            timeout=10,
+            check=True,
+        )
+        if not existence.success:
+            broken_files.append(file_path)
+            paths.add(file_path)
+            continue
+
+        # Cycle detection.
+        if file_path in seen:
+            broken_files.append(f"cycle detected at {file_path}")
+            paths.add(file_path)
+            continue
+
+        seen.add(file_path)
+        paths.add(file_path)
+
+        # Backing-filename consistency (spec point c): the
+        # backing-filename should match the next entry's filename in
+        # the chain array.  Also verify the referenced file exists.
+        backing = item.get("backing-filename")
+        if backing:
+            backing_existence = shell.run(
+                ["test", "-f", backing],
+                timeout=10,
+                check=True,
+            )
+            if not backing_existence.success:
+                broken_files.append(file_path)
+            if i + 1 < len(raw_chain):
+                next_item = raw_chain[i + 1]
+                if isinstance(next_item, dict):
+                    next_path = next_item.get("filename") or next_item.get("image") or ""
+                    if next_path and backing != next_path:
+                        broken_files.append(
+                            f"backing-filename mismatch in {Path(file_path).name}"
+                        )
+
+    return ChainScanResult(
+        paths=paths,
+        broken_files=broken_files,
+        success=True,
+        error=None,
+    )

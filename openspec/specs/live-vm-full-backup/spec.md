@@ -36,7 +36,7 @@ When `compress=True` and `compression_type="zstd"`, the `qemu-img convert` comma
 
 #### Scenario: Core passes vm_config.name to create_full_backup
 - **WHEN** `Core._backup_target(vm_config, target, snapshots)` is called with `vm_config.name = "3.Projects_opencode"`
-- **AND** `_should_create_bucket_full()` returns `(True, bucket_level)`
+- **AND** the inline FULL-creation logic in `_backup_target()` determines a FULL is needed (when `target.target_chain_length` is not `None` and `incremental_count > target.target_chain_length`)
 - **THEN** `provider.create_full_backup(vm_config.name, most_recent, target, ...)` is called
 - **AND** the full VM name `3.Projects_opencode` is passed as the `vm_name` parameter
 

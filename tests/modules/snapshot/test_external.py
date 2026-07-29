@@ -907,7 +907,9 @@ def test_list_backing_chain_with_snapshots(mock_shell, make_vm_config):
         )
     )
 
-    # Step 2: qemu-img info --backing-chain returns JSON array of 3 elements
+    # Step 2: qemu-img info --backing-chain returns JSON array of 3 elements.
+    # Use expect_first to override conftest's default single-file
+    # backing-chain expectation which would otherwise match first.
     chain = [
         {
             "filename": "/var/lib/libvirt/images/testvm.qcow2",
@@ -922,7 +924,7 @@ def test_list_backing_chain_with_snapshots(mock_shell, make_vm_config):
             "actual-size": 2097152,
         },
     ]
-    mock_shell.expect("qemu-img info.*backing-chain").returns(
+    mock_shell.expect_first("qemu-img info.*backing-chain").returns(
         ShellResult(
             success=True,
             stdout=json.dumps(chain),

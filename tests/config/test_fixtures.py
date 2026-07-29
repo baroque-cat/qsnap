@@ -133,7 +133,6 @@ def test_example_config_parseable() -> None:
     target = vm.targets[0]
     assert target.path == Path("/mnt/backup/debiantest")
     # Defaults.
-    assert target.incremental is True
     assert target.compress is True
     # Count-based retention fields — inherited from global defaults (24/168/2).
     assert vm.snapshot_chain_length == 24
@@ -228,16 +227,28 @@ def test_deprecated_fields_toml_parses_with_logging_warnings(caplog) -> None:
 
 
 @pytest.mark.unit
-def test_deprecated_fields_toml_full_every_ignored_in_behavior() -> None:
-    """full_every in deprecated_fields.toml does not affect compress
-    — it is silently ignored at runtime."""
-    facade = ConfigFacade(FIXTURES / "deprecated_fields.toml")
+def test_deprecated_fields_toml_full_every_ignored_in_behavior(caplog) -> None:
+    """full_every and incremental in deprecated_fields.toml do not affect
+    behavior — they are logged as deprecation WARNINGs and silently ignored
+    at runtime."""
+    import logging
 
-    # Both VMs should parse; the fact that full_every is present
+    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
+        facade = ConfigFacade(FIXTURES / "deprecated_fields.toml")
+
+    # Verify that incremental deprecation WARNING was logged.
+    warnings_text = " ".join(caplog.messages)
+    assert "incremental is deprecated" in warnings_text, (
+        "Expected deprecation warning for incremental"
+    )
+
+    # Both VMs should parse; the fact that deprecated fields are present
     # must not cause errors or change compress defaults.
     vm = facade.get_vm("vm_deprecated")
     target = vm.targets[0]
-    assert target.incremental is True
+    # incremental field is removed — verify it does not exist.
+    with pytest.raises(AttributeError):
+        _ = target.incremental
     assert target.compress is True  # from full_compress mapping
 
 

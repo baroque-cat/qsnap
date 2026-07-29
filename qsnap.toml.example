@@ -34,7 +34,7 @@ state_dir = "/var/lib/qsnap/state"
 # Default snapshot chain length for all VMs (applies unless overridden
 # at the VM level).  When the snapshot chain exceeds this count, qsnap
 # triggers a blockcommit to merge snapshots back into the base image.
-# Set to 0 to disable blockcommit (keep all snapshots).
+# Set to a positive integer. Minimum: 1. Default: 24.
 # snapshot_chain_length = 168
 
 # Default target chain length for all backup targets (applies unless
@@ -158,15 +158,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # T2 — Run qemu-img check after blockcommit on shut-off VMs (deferred).
 # blockcommit_deep_verify = false
 
-# T2 — Run qemu-img check on snapshots during deep check.
-# snapshot_deep_verify = false
-
   # ── Backup targets ───────────────────────────────────────────────────
   # Backups use NBD dirty-block extraction via checkpoint (bitmap mode).
   # libvirt >= 7.2 and python3-libnbd are hard requirements.
   [[vm.target]]
   path = "/mnt/backup/debiantest"
-  incremental = true
 
   # Override target chain length for this target only
   # target_chain_length = 150
@@ -227,11 +223,9 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # snapshot_create = "onchange"
 # snapshot_quiesce = true
 # blockcommit_deep_verify = true
-# snapshot_deep_verify = true
 #
 #   [[vm.target]]
 #   path = "/mnt/backup/critical-db"
-#   incremental = true
 #   verify = "metadata"
 #   compress = true
 #   backup_retry_max = 5

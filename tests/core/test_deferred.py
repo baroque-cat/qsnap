@@ -20,12 +20,12 @@ from unittest.mock import patch
 from qsnap.core import Core
 from qsnap.models.results import (
     CommitResult,
-    DeferredBlockcommit,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import MockConfigFacade
+from tests.helpers import add_deferred_with_since
 
 _OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
@@ -52,31 +52,6 @@ def _set_vm_state(shell, state: str) -> None:
             stderr="",
             returncode=0,
             error=None,
-        )
-    )
-
-
-def _add_deferred_with_since(
-    state,
-    vm_name: str,
-    snapshots: list[str],
-    reason: str,
-    since: datetime,
-) -> None:
-    """Add a deferred blockcommit with a specific ``since`` timestamp.
-
-    Unlike ``InMemoryStateManager.add_deferred_blockcommit`` which always
-    uses ``datetime.now()``, this helper lets tests control the ``since``
-    timestamp for age-based threshold tests.
-    """
-    if vm_name not in state._state:
-        state._state[vm_name] = {}
-    deferred = state._state[vm_name].setdefault("deferred_operations", [])
-    deferred.append(
-        DeferredBlockcommit(
-            snapshots=list(snapshots),
-            reason=reason,
-            since=since,
         )
     )
 
@@ -571,7 +546,7 @@ def test_deferred_age_meets_warn_threshold(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=7)
-    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
 
     caplog.set_level(logging.WARNING)
     with frozen_clock(frozen_dt):
@@ -610,7 +585,7 @@ def test_deferred_age_meets_crit_threshold(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=14)
-    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
 
     caplog.set_level(logging.CRITICAL)
     with frozen_clock(frozen_dt):
@@ -769,7 +744,7 @@ def test_deferred_status_critical_age(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=14)
-    _add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
 
     with frozen_clock(frozen_dt):
         result = core.check()
@@ -1132,3 +1107,4 @@ def test_drain_removes_committed_from_state(
 
     # Queue is empty.
     assert mock_state.get_deferred_operations("testvm") == []
+
