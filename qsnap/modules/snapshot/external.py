@@ -17,7 +17,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
-from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
+from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path, parse_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +43,31 @@ class ExternalSnapshotProvider(ISnapshotProvider):
     ) -> SnapshotResult:
         """Create an external disk-only snapshot.
 
-        1. ``virsh snapshot-create-as --disk-only --atomic --no-metadata``
+        1. ``virsh domblklist`` to capture the previous active layer path
+           (used for backing-filename validation in step 5).
+        2. ``virsh snapshot-create-as --disk-only --atomic --no-metadata``
            (with ``--quiesce`` when *quiesce* is True, timeout 180s)
-        2. ``chmod g+rw,o+r`` on the new snapshot file
-        3. ``qemu-img info --output=json`` to read ``actual-size``
+        3. ``chmod g+rw,o+r`` on the new snapshot file
+        4. ``qemu-img info --force-share --output=json`` to read
+           ``actual-size`` and validate qcow2 metadata.
+        5. Post-creation validation (design D4): file existence, qcow2
+           format, corrupt-bit check, backing-filename matches previous
+           active layer, libvirt pivot confirmed via ``domblklist``.
         """
-        # Step 1: virsh snapshot-create-as
+        # Step 1: Capture previous active layer for backing-filename check.
+        domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
+        domblklist_pre = self._shell.run(domblklist_cmd, timeout=30, check=True)
+        previous_active: str | None = None
+        if domblklist_pre.success:
+            try:
+                for target, source in parse_domblklist_disks(domblklist_pre.stdout):
+                    if target == disk:
+                        previous_active = source
+                        break
+            except ValueError:
+                pass  # Non-fatal — backing-filename check skipped
+
+        # Step 2: virsh snapshot-create-as
         create_cmd = [
             "virsh",
             "snapshot-create-as",
@@ -103,7 +122,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                 error=create_result.error if create_result is not None else "unknown error",
             )
 
-        # Step 2: chmod g+rw,o+r
+        # Step 3: chmod g+rw,o+r
         chmod_cmd = ["chmod", "g+rw,o+r", str(snapshot_path)]
         chmod_result = self._shell.run(chmod_cmd, timeout=30, check=True)
         if not chmod_result.success:
@@ -115,7 +134,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                 error=chmod_result.error,
             )
 
-        # Step 3: qemu-img info to get actual-size
+        # Step 4: qemu-img info to get actual-size and validate metadata
         # --force-share: the snapshot file may be the active layer of a
         # running VM, which has an exclusive write lock.  --force-share
         # requests a shared lock for this metadata-only read (design D5).
@@ -147,6 +166,136 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                 new_allocation=0,
                 error=f"Failed to parse qemu-img info output: {exc}",
             )
+
+        # Step 5: Post-creation validation (design D4).
+        # 5a. File existence — verify the snapshot file landed on disk.
+        test_cmd = ["test", "-f", str(snapshot_path)]
+        test_result = self._shell.run(test_cmd, timeout=10, check=True)
+        if not test_result.success:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error="snapshot file not found on disk after virsh success",
+            )
+
+        # 5b. qcow2 format check.
+        fmt = info.get("format", "")
+        if fmt != "qcow2":
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=f"unexpected image format: expected qcow2, got {fmt}",
+            )
+
+        # 5b-2. virtual-size check — the snapshot's virtual-size must
+        # match the base image's virtual-size (if determinable).  A
+        # mismatch indicates a wrong backing file or a full copy.
+        snap_virtual_size = info.get("virtual-size")
+        if snap_virtual_size is not None and previous_active is not None:
+            base_info_cmd = [
+                "qemu-img", "info", "--force-share",
+                "--output=json", previous_active,
+            ]
+            base_info_result = self._shell.run(
+                base_info_cmd, timeout=30, check=True,
+            )
+            if base_info_result.success:
+                try:
+                    base_info = json.loads(base_info_result.stdout)
+                    base_virtual_size = base_info.get("virtual-size")
+                    if (
+                        base_virtual_size is not None
+                        and base_virtual_size != snap_virtual_size
+                    ):
+                        return SnapshotResult(
+                            success=False,
+                            name=snapshot_name,
+                            path=snapshot_path,
+                            new_allocation=0,
+                            error=(
+                                f"virtual-size mismatch: snapshot has "
+                                f"{snap_virtual_size}, base image has "
+                                f"{base_virtual_size}"
+                            ),
+                        )
+                except json.JSONDecodeError:
+                    pass  # Non-fatal — cannot determine base virtual-size
+
+        # 5b-3. actual-size reasonableness — a new overlay should have
+        # a small actual-size (just metadata).  If actual-size is
+        # approximately equal to virtual-size, it's likely a full
+        # copy instead of an overlay.
+        if snap_virtual_size is not None and actual_size > snap_virtual_size * 0.5:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error=(
+                    f"actual-size {actual_size} is unreasonable for a new "
+                    f"overlay (virtual-size={snap_virtual_size}) — "
+                    f"likely a full copy instead of an overlay"
+                ),
+            )
+
+        # 5c. Corrupt-bit check.
+        incompat_features = info.get("incompatible-features", [])
+        if isinstance(incompat_features, list) and "corrupt" in incompat_features:
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error="snapshot has corrupt bit set",
+            )
+
+        # 5d. Backing-filename check — must point to the previous active
+        # layer (the disk path before the snapshot was created).
+        if previous_active is not None:
+            backing_filename = info.get("backing-filename")
+            if backing_filename != previous_active:
+                return SnapshotResult(
+                    success=False,
+                    name=snapshot_name,
+                    path=snapshot_path,
+                    new_allocation=0,
+                    error=(
+                        f"backing-filename mismatch: "
+                        f"expected {previous_active}, got {backing_filename}"
+                    ),
+                )
+
+        # 5e. libvirt pivot check — domblklist must now show the snapshot
+        # path as the source for the snapshotted disk.
+        pivot_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
+        if pivot_result.success:
+            try:
+                pivot_disks = parse_domblklist_disks(pivot_result.stdout)
+                pivot_confirmed = any(
+                    target == disk and source == str(snapshot_path)
+                    for target, source in pivot_disks
+                )
+                if not pivot_confirmed:
+                    old_path = next(
+                        (s for t, s in pivot_disks if t == disk),
+                        "<unknown>",
+                    )
+                    return SnapshotResult(
+                        success=False,
+                        name=snapshot_name,
+                        path=snapshot_path,
+                        new_allocation=0,
+                        error=(
+                            f"libvirt pivot not confirmed: "
+                            f"domblklist still shows {old_path}"
+                        ),
+                    )
+            except ValueError:
+                pass  # Non-fatal — cannot verify pivot
 
         return SnapshotResult(
             success=True,

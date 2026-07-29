@@ -9,6 +9,7 @@ shell commands, or call lifecycle/backup deletion methods.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -463,8 +464,12 @@ def test_check_healthy_backing_chain_reports_ok(
     mock_factory,
     mock_state,
     mock_shell,
+    tmp_path,
 ):
     """``check()`` reports ``"ok"`` when qemu-img succeeds for all snapshots."""
+    snap_path = tmp_path / "snap1.qcow2"
+    snap_path.write_text("")  # create real file so os.path.exists passes
+
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -476,14 +481,58 @@ def test_check_healthy_backing_chain_reports_ok(
 
     snap = SnapshotInfo(
         name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
+        path=snap_path,
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
     )
     mock_state.record_snapshot("testvm", snap)
 
-    mock_shell.expect("qemu-img").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    # Mock virsh domblklist → active layer is snap1
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {snap_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Mock qemu-img --backing-chain → valid JSON chain
+    chain_json = json.dumps(
+        [
+            {
+                "filename": str(snap_path),
+                "format": "qcow2",
+                "virtual-size": 10737418240,
+                "actual-size": 200704,
+            }
+        ]
+    )
+    mock_shell.expect_first("--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout=chain_json,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Mock virsh dumpxml → references the snapshot path
+    dumpxml = (
+        '<domain type="kvm"><devices><disk>'
+        f'<source file="{snap_path}"/>'
+        "</disk></devices></domain>"
+    )
+    mock_shell.expect_first("virsh dumpxml").returns(
+        ShellResult(
+            success=True,
+            stdout=dumpxml,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
 
     result = core.check()
@@ -520,6 +569,17 @@ def test_check_broken_chain_reports_broken_status(
     )
     mock_state.record_snapshot("testvm", snap)
 
+    # Mock virsh domblklist → active layer is snap1.qcow2 (matches state)
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target   Source\n--------------------------------\nvda   /tmp/snap1.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     mock_shell.expect("qemu-img").returns(
         ShellResult(
             success=False,
@@ -534,7 +594,7 @@ def test_check_broken_chain_reports_broken_status(
 
     assert "testvm" in result
     assert result["testvm"].status == "broken"
-    assert "snap1" in result["testvm"].broken_snapshots
+    assert "snap1.qcow2" in result["testvm"].broken_snapshots
 
 
 # ── test_check_filtered_vm ───────────────────────────────────────────────
@@ -663,7 +723,7 @@ def test_check_deep_finds_corruption_reports_broken(
     mock_shell.expect("qemu-img.*check").returns(
         ShellResult(
             success=True,
-            stdout='{"corruptions": 1, "leaks": 0}',
+            stdout='{"corruptions": 1, "errors": 0, "leaks": 0}',
             stderr="",
             returncode=0,
             error=None,
@@ -686,7 +746,81 @@ def test_check_deep_clean_image_reports_ok(
     mock_state,
     mock_shell,
 ):
-    """check(deep=True) runs qemu-img check, finds 0 corruptions, reports 'ok'."""
+    """check(deep=True) runs qemu-img check, finds 0 corruptions/errors/leaks, reports 'ok'."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Override domblklist so it matches the test snapshot path (avoids
+    # false-positive active layer mismatch from triple-source check).
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout="Target   Source\n--------------------------------\nvda   /tmp/snap1.qcow2\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Mock qemu-img info --backing-chain for the triple-source chain check
+    # so the file is found and no chain break is reported.
+    mock_shell.expect("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(
+                [{"filename": "/tmp/snap1.qcow2", "format": "qcow2"}]
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    mock_shell.expect("qemu-img.*check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0, "errors": 0, "leaks": 0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch("os.path.exists", return_value=True):
+        result = core.check(deep=True)
+
+    assert "testvm" in result
+    assert result["testvm"].status == "ok"
+    assert result["testvm"].broken_snapshots == []
+
+
+# ── test_check_deep_errors_detected ──────────────────────────────────────
+
+
+def test_check_deep_errors_detected(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check(deep=True)`` detects ``errors > 0`` even when corruptions=0 and leaks=0.
+
+    The ``_deep_check_file`` method checks ``corruptions``, ``errors``,
+    AND ``leaks``.  When only ``errors > 0``, the status is ``"corrupted"``.
+    """
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -707,7 +841,7 @@ def test_check_deep_clean_image_reports_ok(
     mock_shell.expect("qemu-img.*check").returns(
         ShellResult(
             success=True,
-            stdout='{"corruptions": 0, "leaks": 0}',
+            stdout='{"corruptions": 0, "errors": 2, "leaks": 0}',
             stderr="",
             returncode=0,
             error=None,
@@ -717,8 +851,101 @@ def test_check_deep_clean_image_reports_ok(
     result = core.check(deep=True)
 
     assert "testvm" in result
-    assert result["testvm"].status == "ok"
-    assert result["testvm"].broken_snapshots == []
+    assert result["testvm"].status == "corrupted"
+    assert "snap1" in result["testvm"].broken_snapshots
+
+
+# ── test_check_deep_leaks_detected ───────────────────────────────────────
+
+
+def test_check_deep_leaks_detected(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check(deep=True)`` detects ``leaks > 0`` even when corruptions=0 and errors=0.
+
+    ``_deep_check_file`` checks all three fields.  When only ``leaks > 0``,
+    the status is ``"corrupted"``.
+    """
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    mock_shell.expect("qemu-img.*check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions": 0, "errors": 0, "leaks": 5}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    result = core.check(deep=True)
+
+    assert "testvm" in result
+    assert result["testvm"].status == "corrupted"
+    assert "snap1" in result["testvm"].broken_snapshots
+
+
+# ── test_check_deep_image_unreadable ──────────────────────────────────────
+
+
+def test_check_deep_image_unreadable(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``check(deep=True)`` reports ``"broken"`` when ``qemu-img check`` fails
+    (image unreadable / cannot open)."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    mock_shell.expect("qemu-img.*check").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="Could not open '/tmp/snap1.qcow2'",
+            returncode=1,
+            error="qemu-img: Could not open",
+        )
+    )
+
+    result = core.check(deep=True)
+
+    assert "testvm" in result
+    assert result["testvm"].status == "broken"
+    assert "snap1" in result["testvm"].broken_snapshots
 
 
 # ── test_list_deferred_returns_all_vm_summaries ───────────────────────────

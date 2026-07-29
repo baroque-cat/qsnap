@@ -333,9 +333,16 @@ class ReconcileResult:
     """Outcome of state reconciliation for a single VM.
 
     Reports counts of items actively fixed by ``Core.reconcile()``.
-    Unlike :class:`StateCheckResult` (read-only), reconcile deletes
-    stale state entries, clears stale baselines, and deletes orphaned
-    checkpoints.
+    Unlike :class:`StateCheckResult` (read-only), reconcile supplements
+    state from disk+XML reality (recording untracked snapshots and
+    backups), refreshes stale domain XML, deletes truly orphan files
+    (on disk but NOT in domain XML), and deletes orphaned checkpoints.
+
+    New fields (D8):
+    - ``state_supplemented``: count of snapshots/backups recorded into
+      state that were present on disk but missing from state JSON.
+    - ``xml_refreshed``: True if stale domain XML was refreshed.
+    - ``allocation_fixed``: True if ``last_allocation`` was corrected.
     """
 
     vm_name: str
@@ -345,6 +352,9 @@ class ReconcileResult:
     baselines_cleared: int = 0
     orphan_checkpoints_deleted: int = 0
     orphan_files_removed: int = 0
+    state_supplemented: int = 0
+    xml_refreshed: bool = False
+    allocation_fixed: bool = False
     errors: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     broken_chains: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 

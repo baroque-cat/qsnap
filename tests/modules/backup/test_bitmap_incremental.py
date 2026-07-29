@@ -212,6 +212,17 @@ def test_copy_loop_reads_only_dirty_extents(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
 
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -282,6 +293,18 @@ def test_first_incremental_backing_is_full(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    # (expect_first needed because verify mocks use expect_first for qemu-img info too)
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -447,6 +470,17 @@ def test_previous_existence_rechecked_before_create(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -625,6 +659,17 @@ def test_successful_transfer_no_tmp_or_socket_remain(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -835,6 +880,16 @@ def test_slow_progressing_loop_not_killed(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket
 
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run),
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -926,6 +981,16 @@ def test_zero_stall_timeout_disables_watchdog(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket
 
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run),
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -977,6 +1042,16 @@ def test_incremental_uses_unified_engine_no_convert(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
@@ -1165,6 +1240,18 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
 
+    # Mock for Step 5b: chain-to-FULL traversability verification
+    # (expect_first needed because verify mocks use expect_first for qemu-img info too)
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -1224,6 +1311,16 @@ def test_bitmap_incremental_ignores_compress_setting(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     caplog.set_level("INFO")
     with (
@@ -1453,6 +1550,16 @@ def test_incremental_unaffected_by_full_transfer_engine(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
 
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -1516,6 +1623,16 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -1638,6 +1755,16 @@ def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
 
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run),
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
@@ -1700,6 +1827,16 @@ def test_size_sanity_check_warns_on_large_transfer(
     mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
     mock_shell.expect("domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # source socket cleanup
+
+    mock_shell.expect_first("qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run),

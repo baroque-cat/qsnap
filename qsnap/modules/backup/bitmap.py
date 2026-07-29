@@ -550,6 +550,85 @@ class BitmapBackupProvider(IBackupProvider):
                     )
                     continue
 
+                # Step 5b: Post-transfer validation for incrementals
+                # (design D5).  Verify chain-to-FULL traversability and
+                # checkpoint existence.  If either fails, log CRITICAL,
+                # clean up, and return failure — Core will NOT call
+                # record_incremental_dependency().
+                if prior is not None:
+                    # Chain-to-FULL traversability: qemu-img info
+                    # --backing-chain follows the entire backing
+                    # chain.  If any file is missing, the command
+                    # fails.  A successful parse with at least one
+                    # element confirms the chain is traversable.
+                    chain_cmd = [
+                        "qemu-img",
+                        "info",
+                        "--force-share",
+                        "--backing-chain",
+                        "--output=json",
+                        str(target_file),
+                    ]
+                    chain_result = self._shell.run(
+                        chain_cmd, timeout=60, check=True,
+                    )
+                    chain_ok = False
+                    if chain_result.success:
+                        try:
+                            chain_data = json.loads(chain_result.stdout)
+                            if isinstance(chain_data, list) and len(chain_data) > 0:
+                                chain_ok = True
+                        except json.JSONDecodeError:
+                            pass
+                    if not chain_ok:
+                        logger.critical(
+                            "chain-to-FULL verification failed for %s",
+                            target_file,
+                        )
+                        self._cleanup_partial_file(target_file)
+                        self._delete_checkpoint_best_effort(
+                            vm_config.name, successor,
+                        )
+                        results.append(
+                            BackupResult(
+                                success=False,
+                                snapshot_name=snapshot.name,
+                                source_path=snapshot.path,
+                                target_path=target_file,
+                                bytes_transferred=0,
+                                error="chain-to-FULL not traversable",
+                            )
+                        )
+                        continue
+
+                    # Checkpoint existence: verify at least one
+                    # qsnap- checkpoint exists for this VM+target
+                    # (dirty-bitmap baseline for next incremental).
+                    checkpoints = self._list_checkpoints_for_target(
+                        vm_config.name, target_hash,
+                    )
+                    if not checkpoints:
+                        logger.critical(
+                            "no checkpoint found after incremental "
+                            "transfer for VM %s",
+                            vm_config.name,
+                        )
+                        self._cleanup_partial_file(target_file)
+                        self._delete_checkpoint_best_effort(
+                            vm_config.name, successor,
+                        )
+                        results.append(
+                            BackupResult(
+                                success=False,
+                                snapshot_name=snapshot.name,
+                                source_path=snapshot.path,
+                                target_path=target_file,
+                                bytes_transferred=0,
+                                error="checkpoint missing — next incremental impossible",
+                            )
+                        )
+                        continue
+
                 # Step 6: Checkpoint rotation (design D3): only after a
                 # successful AND verified export, delete all superseded
                 # (older) qsnap checkpoints for this VM+target.  The
@@ -1599,6 +1678,58 @@ class BitmapBackupProvider(IBackupProvider):
         # create checkpoints, so there's no successor to compare.
         if running:
             self._delete_superseded_checkpoints(vm_name, target_hash, checkpoint_name)
+
+        # Post-creation FULL backup validation (design D5).
+        # (a) No backing file: FULL must be standalone (no
+        #     backing-filename in qemu-img info).
+        # (b) Checkpoint existence: for running VMs, a qsnap- checkpoint
+        #     must exist (baseline for future incrementals).
+        full_info_cmd = [
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--output=json",
+            str(target_file),
+        ]
+        full_info_result = self._shell.run(full_info_cmd, timeout=60, check=True)
+        if full_info_result.success:
+            try:
+                full_info = json.loads(full_info_result.stdout)
+                if "backing-filename" in full_info:
+                    logger.critical(
+                        "FULL backup %s has unexpected backing file: %s",
+                        target_file,
+                        full_info.get("backing-filename"),
+                    )
+                    return BackupResult(
+                        success=False,
+                        snapshot_name=source_snapshot.name,
+                        source_path=source_snapshot.path,
+                        target_path=target_file,
+                        bytes_transferred=0,
+                        error="FULL backup has unexpected backing file",
+                    )
+            except json.JSONDecodeError:
+                pass  # Non-fatal — cannot parse metadata
+
+        if running:
+            checkpoints = self._list_checkpoints_for_target(
+                vm_name, target_hash,
+            )
+            if not checkpoints:
+                logger.critical(
+                    "no checkpoint found after FULL backup creation "
+                    "for VM %s",
+                    vm_name,
+                )
+                return BackupResult(
+                    success=False,
+                    snapshot_name=source_snapshot.name,
+                    source_path=source_snapshot.path,
+                    target_path=target_file,
+                    bytes_transferred=0,
+                    error="checkpoint missing — next incremental impossible",
+                )
 
         # Get file size
         try:

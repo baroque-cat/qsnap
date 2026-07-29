@@ -142,7 +142,16 @@ def test_reconcile_removes_orphan_snapshot_files(
     ``orphan_files_removed``.
 
     The broken-chain check runs first on non-FULL files.  We mock it
-    as intact so the file proceeds to orphan classification.
+    as intact so the file proceeds to orphan classification.  When the
+    chain resolves to no tracked FULL anchor, the file is truly orphan
+    and gets deleted.
+
+    NOTE: In the new reconcile behavior, when ``virsh dumpxml`` does
+    NOT reference the orphan file (the file is NOT in domain XML), the
+    file is deleted.  When the XML DOES reference the file, it would
+    be state-supplemented instead.  This test covers the deletion path
+    for target-backup files where XML is irrelevant (backups are not
+    in domain XML).
     """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -163,7 +172,7 @@ def test_reconcile_removes_orphan_snapshot_files(
 
     # Broken-chain detection: mock intact chain.
     mock_shell.expect_first("--backing-chain").returns(_success_result())
-    # Anchor resolution (runs during deletion): return no anchor.
+    # Anchor resolution (runs during orphan classification): return no anchor.
     mock_shell.expect("qemu-img info --output=json").returns(_success_result("{}"))
 
     with patch.object(
@@ -177,6 +186,13 @@ def test_reconcile_removes_orphan_snapshot_files(
     assert delete_spy.called, "provider.delete() should be called for orphan file"
     assert result["testvm"].orphan_files_removed == 1
     assert result["testvm"].broken_chains == []
+
+    # Verify new ReconcileResult fields (D8) are present and correctly
+    # populated for the target-only scenario:
+    rec = result["testvm"]
+    assert rec.state_supplemented == 0, "no files should be supplemented in this scenario"
+    assert rec.xml_refreshed is False, "XML should not be refreshed in this scenario"
+    assert rec.allocation_fixed is False, "no allocation fix in this scenario"
 
 
 # ── Scenario 3: non-fatal error during orphan detection ───────────────────
@@ -235,9 +251,13 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     mock_state,
     mock_shell,
 ):
-    """Orphan file deleted that has a resolvable FULL anchor →
-    ``remove_incremental_dependency`` is called with target_path,
-    orphan name, and anchor (fix B4).
+    """Orphan file on target with intact chain to a tracked FULL →
+    state is supplemented (record_incremental_dependency called),
+    file is NOT deleted.
+
+    Under the new reconcile behavior (D2/D3), when a file on target has
+    an intact chain to a tracked FULL, reconcile supplements state
+    instead of deleting.  The file stays on disk.
     """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -254,7 +274,6 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     full_name = "testvm.FULL.20250725"
     full_path = target.path / f"{full_name}.qcow2"
 
-
     orphan_backup = SnapshotInfo(
         name=orphan_name,
         path=orphan_path,
@@ -262,21 +281,27 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
         allocation=0,
     )
 
-    # Pre-populate dependency so we can verify removal.
-    mock_state.record_incremental_dependency(
-        str(target.path), orphan_name, full_name
+    # Record the FULL in state so _resolve_chain_full_anchor can match.
+    mock_state.record_full_backup(
+        str(target.path),
+        full_name,
+        datetime.now(),
     )
-    # Verify it was recorded.
-    deps_before = mock_state.get_incremental_dependencies(
-        str(target.path), full_name
-    )
-    assert orphan_name in deps_before, "Dependency should be recorded before reconcile"
 
     # Broken-chain detection: mock intact chain.
     mock_shell.expect_first("--backing-chain").returns(_success_result())
-    # Anchor resolution: return JSON with FULL backing.
+    # Anchor resolution: return JSON with FULL backing (contains .FULL.)
+    # so _resolve_chain_full_anchor finds the anchor.
     mock_shell.expect("qemu-img info --output=json").returns(
-        _success_result(_anchor_json(orphan_path, full_path))
+        _success_result(
+            json.dumps({
+                "filename": str(orphan_path),
+                "format": "qcow2",
+                "virtual-size": 10737418240,
+                "actual-size": 200704,
+                "backing-filename": str(full_path),
+            })
+        )
     )
 
     with patch.object(
@@ -287,16 +312,24 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     ) as delete_spy:
         result = core.reconcile()
 
-    assert delete_spy.called, "Orphan file should be deleted"
-    assert result["testvm"].orphan_files_removed == 1
+    # File is NOT deleted — state is supplemented instead (D2).
+    assert not delete_spy.called, (
+        "Orphan file with intact chain to tracked FULL should NOT be deleted"
+    )
+    assert result["testvm"].orphan_files_removed == 0
 
-    # Verify dependency was cleaned (B4).
-    deps_after = mock_state.get_incremental_dependencies(
+    # State supplementation should have occurred.
+    assert result["testvm"].state_supplemented == 1, (
+        f"state_supplemented should be 1, got {result['testvm'].state_supplemented}"
+    )
+
+    # Verify dependency was recorded in state.
+    deps = mock_state.get_incremental_dependencies(
         str(target.path), full_name
     )
-    assert orphan_name not in deps_after, (
-        f"Dependency {orphan_name} → {full_name} should be removed "
-        "on orphan deletion (B4)"
+    assert orphan_name in deps, (
+        f"Dependency {orphan_name} → {full_name} should have been "
+        "supplemented into state (D2)"
     )
     assert result["testvm"].broken_chains == []
 
@@ -315,12 +348,12 @@ def test_reconcile_detects_broken_chain_before_orphan(
     caplog,
 ):
     """Non-FULL backup has broken backing chain →
-    WARNING logged, backup name in ``broken_chains``,
-    and file still proceeds through orphan classification (deleted).
+    CRITICAL logged, backup name in ``broken_chains``,
+    and file is NOT deleted (left for operator review).
 
-    This tests the B6 fix: broken-chain detection runs BEFORE orphan
-    classification so that broken chains are logged even when the file
-    gets deleted as orphan.
+    This tests the B6 fix and design D3: broken chains are detected,
+    logged at CRITICAL level, added to broken_chains, but the file
+    stays on disk — no deletion, no auto-rebase.
     """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -343,29 +376,35 @@ def test_reconcile_detects_broken_chain_before_orphan(
 
     # Broken-chain detection: mock FAILED chain.
     mock_shell.expect_first("--backing-chain").returns(_failure_result())
-    # Anchor resolution: return no anchor (so dependency cleanup is skipped).
-    mock_shell.expect("qemu-img info --output=json").returns(_success_result("{}"))
 
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
     ), patch.object(
         mock_factory._bitmap_backup_provider, "delete",
         wraps=mock_factory._bitmap_backup_provider.delete,
-    ) as delete_spy, caplog.at_level(logging.WARNING):
+    ) as delete_spy, caplog.at_level(logging.CRITICAL):
         result = core.reconcile()
 
-    # File is still deleted (broken-chain detection doesn't stop orphan logic).
-    assert delete_spy.called, "Orphan file should still be deleted even with broken chain"
-    assert result["testvm"].orphan_files_removed == 1
+    # File is NOT deleted — broken chains are left for operator review.
+    assert not delete_spy.called, "Broken chain files must NOT be deleted"
+    assert result["testvm"].orphan_files_removed == 0
 
     # Broken chain reported in result (B6).
     assert orphan_name in result["testvm"].broken_chains, (
         f"Broken chain for {orphan_name} should be in broken_chains"
     )
-    # WARNING logged about broken chain.
+    # CRITICAL logged about broken chain (not WARNING — raised to CRITICAL).
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "Broken chain must emit CRITICAL log"
     assert any(
-        "broken backing chain" in r.message for r in caplog.records
-    ), "Should log WARNING about broken backing chain"
+        "broken chain" in r.message for r in critical_logs
+    ), "CRITICAL log should mention broken chain"
+
+    # Verify new ReconcileResult fields (D8)
+    rec = result["testvm"]
+    assert rec.state_supplemented == 0, "no files should be supplemented"
+    assert rec.xml_refreshed is False
+    assert rec.allocation_fixed is False
 
 
 # ── Scenario 6: intact chains produce empty broken_chains ─────────────────
@@ -455,6 +494,18 @@ def test_reconcile_intact_chains_no_broken_chains(
         "broken_chains should be empty when all chains are intact"
     )
 
+    # Verify new ReconcileResult fields (D8) are present and correctly populated
+    rec = result["testvm"]
+    assert rec.state_supplemented == 0, (
+        "no state supplementation needed when all files are tracked"
+    )
+    assert rec.xml_refreshed is False, (
+        "XML refresh not triggered when no stale backingStore references"
+    )
+    assert rec.allocation_fixed is False, (
+        "allocation not fixed in this scenario"
+    )
+
 
 # ── Scenario 7: dry-run reports broken chains, no deletion ────────────────
 
@@ -511,16 +562,19 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(
     assert not delete_spy.called, (
         "provider.delete() should NOT be called in dry-run mode"
     )
-    # Orphan is counted (dry-run counts what WOULD happen).
-    assert result["testvm"].orphan_files_removed == 1, (
-        "orphan_files_removed should be counted in dry-run mode"
+    # Broken chain files are NOT counted in orphan_files_removed — they are
+    # a separate category tracked in broken_chains (design D3).
+    assert result["testvm"].orphan_files_removed == 0, (
+        "broken chain files should NOT be counted as orphan_files_removed"
     )
     # Broken chain reported (B6).
     assert orphan_name in result["testvm"].broken_chains, (
         f"Broken chain for {orphan_name} should be in broken_chains "
         "even in dry-run mode"
     )
-    # WARNING logged about broken chain.
+    # CRITICAL logged about broken chain.
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "Broken chain must emit CRITICAL log in dry-run mode"
     assert any(
-        "broken backing chain" in r.message for r in caplog.records
-    ), "Should log WARNING about broken backing chain in dry-run mode"
+        "broken chain" in r.message for r in critical_logs
+    ), "CRITICAL log should mention broken chain in dry-run mode"

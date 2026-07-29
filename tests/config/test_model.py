@@ -126,9 +126,9 @@ def test_global_config_defaults():
     assert cfg.timestamp_format == "long"
     assert cfg.state_dir == "/var/lib/qsnap/state"
     assert cfg.lockfile is None
-    assert cfg.snapshot_chain_length is None
-    assert cfg.target_chain_length is None
-    assert cfg.target_keep_generations is None
+    assert cfg.snapshot_chain_length == 24
+    assert cfg.target_chain_length == 168
+    assert cfg.target_keep_generations == 2
     assert cfg.deferred_warn_count == "5"
     assert cfg.deferred_crit_count == "10"
     assert cfg.deferred_warn_age == "7d"
@@ -162,16 +162,17 @@ def test_global_config_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Scenario 9: GlobalConfig chain_length defaults are None
+# Scenario 9: GlobalConfig chain_length defaults are 24/168/2
 # ---------------------------------------------------------------------------
 
 
-def test_global_chain_length_defaults_none():
-    """GlobalConfig().snapshot_chain_length is None (not overridden)."""
+def test_global_chain_length_defaults_are_sensible():
+    """GlobalConfig().snapshot_chain_length is 24, target_chain_length is 168,
+    target_keep_generations is 2 (not None)."""
     cfg = GlobalConfig()
-    assert cfg.snapshot_chain_length is None
-    assert cfg.target_chain_length is None
-    assert cfg.target_keep_generations is None
+    assert cfg.snapshot_chain_length == 24
+    assert cfg.target_chain_length == 168
+    assert cfg.target_keep_generations == 2
 
 
 # ---------------------------------------------------------------------------
@@ -879,3 +880,30 @@ def test_target_config_convert_out_of_order_overrides():
     """TargetConfig(convert_out_of_order=False) overrides the default True."""
     target = TargetConfig(path=Path("/backup/testvm"), convert_out_of_order=False)
     assert target.convert_out_of_order is False
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig default chain lengths: 24 / 168 / 2
+# ---------------------------------------------------------------------------
+
+
+def test_globalconfig_default_chain_lengths_24_168_2():
+    """GlobalConfig() with no args has snapshot_chain_length=24,
+    target_chain_length=168, target_keep_generations=2."""
+    cfg = GlobalConfig()
+    assert cfg.snapshot_chain_length == 24
+    assert cfg.target_chain_length == 168
+    assert cfg.target_keep_generations == 2
+
+
+def test_globalconfig_explicit_override_works():
+    """GlobalConfig(snapshot_chain_length=10, target_chain_length=20,
+    target_keep_generations=3) uses explicit values, not defaults."""
+    cfg = GlobalConfig(
+        snapshot_chain_length=10,
+        target_chain_length=20,
+        target_keep_generations=3,
+    )
+    assert cfg.snapshot_chain_length == 10
+    assert cfg.target_chain_length == 20
+    assert cfg.target_keep_generations == 3

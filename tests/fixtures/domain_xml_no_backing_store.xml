@@ -1,0 +1,9 @@
+<domain type='kvm'>
+  <name>testvm</name>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/images/testvm.qcow2'/>
+    </disk>
+  </devices>
+</domain>

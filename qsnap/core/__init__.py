@@ -51,7 +51,11 @@ from qsnap.models.results import (
 from qsnap.retention.time_based import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import get_first_disk_target, is_vm_running, write_backup_xml
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
-from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path
+from qsnap.utils.parsing import (
+    parse_domblklist_disks,
+    parse_domblklist_path,
+    parse_timestamp,
+)
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
 from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
@@ -433,18 +437,25 @@ class Core:
         vm_filter: str | None = None,
         deep: bool = False,
     ) -> dict[str, CheckResult]:
-        """Verify backing-chain integrity for each VM.
+        """Verify backing-chain integrity for each VM via triple-source verification.
 
-        When *deep* is False (default), checks backing-file existence via
-        ``qemu-img info --backing-chain``.  When *deep* is True, also runs
-        ``qemu-img check --output=json`` on each snapshot and backup file;
-        files with ``corruptions > 0`` are reported as broken with status
+        Cross-references three sources of truth for snapshots:
+        (1) qsnap state JSON, (2) disk qcow2 files, (3) libvirt domain XML.
+
+        For backup targets, cross-references: (1) state JSON,
+        (2) disk files, (3) libvirt checkpoints.
+
+        When *deep* is True, also runs ``qemu-img check --output=json`` on
+        each snapshot and backup file; files with ``corruptions > 0``,
+        ``errors > 0``, or ``leaks > 0`` are reported as broken with status
         ``"warning"`` (or ``"critical"`` if unreadable).
 
-        Per-VM status aggregation for deep check:
-        - ``"ok"`` — 0 corruptions
-        - ``"warning"`` — >0 corruptions but readable
-        - ``"critical"`` — images missing or unreadable
+        The check is read-only — it never modifies state, disk, or XML.
+
+        Per-VM status aggregation:
+        - ``"ok"`` — 0 corruptions, 0 errors, 0 leaks
+        - ``"corrupted"`` — >0 corruptions/errors/leaks but readable
+        - ``"broken"`` — images missing or unreadable
         """
         vms = self._filter_vms(vm_filter)
         results: dict[str, CheckResult] = {}
@@ -452,28 +463,43 @@ class Core:
             broken: list[str] = []
             corrupted = False
             unreadable = False
+
+            # ── Triple-source snapshot verification ─────────────
+            # 1. State source — snapshots recorded in state JSON
             snapshots = self._state.get_snapshots(vm.name)
-            for snap in snapshots:
-                if deep:
+            state_paths: dict[str, str] = {
+                str(snap.path): snap.name for snap in snapshots
+            }
+
+            # 2. Disk source — qemu-img info --backing-chain on active
+            #    layer (single call traverses entire chain)
+            disk_paths = self._check_snapshot_chain(vm, broken)
+
+            # 3. XML source — virsh dumpxml <disk><source> and
+            #    <backingStore><source> file paths
+            xml_paths = self._parse_domain_xml_source_paths(vm.name)
+
+            # 4. domblklist — verify active layer matches newest snapshot
+            self._verify_active_layer_match(vm, snapshots, broken)
+
+            # 5. Cross-reference all three sources using the matrix
+            self._cross_reference_snapshots(state_paths, disk_paths, xml_paths, broken)
+
+            # ── Deep check on snapshots ────────────────────────
+            if deep:
+                for snap in snapshots:
                     status = self._deep_check_file(snap.path, snap.name, broken)
                     if status == "warning":
                         corrupted = True
                     elif status == "critical":
                         unreadable = True
-                else:
-                    result = self._shell.run(
-                        ["qemu-img", "info", "--force-share", "--backing-chain", str(snap.path)],
-                        timeout=30,
-                        check=True,
-                    )
-                    if not result.success:
-                        broken.append(snap.name)
 
-            # Deep check also inspects backup files on targets
-            if deep:
-                for target in vm.targets:
-                    provider = self._factory.create_backup_provider(vm, target)
-                    backups = provider.list(target)
+            # ── Triple-source target verification ──────────────
+            for target in vm.targets:
+                provider = self._factory.create_backup_provider(vm, target)
+                backups = provider.list(target)
+
+                if deep:
                     for backup in backups:
                         status = self._deep_check_file(backup.path, backup.name, broken)
                         if status == "warning":
@@ -481,6 +507,9 @@ class Core:
                         elif status == "critical":
                             unreadable = True
 
+                self._check_target_consistency(vm, target, provider, backups, broken)
+
+            # ── Status aggregation ──────────────────────────────
             if deep:
                 if unreadable:
                     status = "broken"
@@ -547,11 +576,13 @@ class Core:
 
         Appends *name* to *broken* if the file is corrupt or unreadable.
         Returns ``"ok"`` when clean, ``"warning"`` when ``corruptions > 0``,
-        ``"critical"`` when unreadable.
+        ``errors > 0``, or ``leaks > 0``, ``"critical"`` when unreadable.
+
+        Uses a 7200-second (2-hour) timeout to accommodate large disks.
         """
         chk = self._shell.run(
             ["qemu-img", "check", "--force-share", "--output=json", str(path)],
-            timeout=60,
+            timeout=7200,
             check=True,
         )
         if not chk.success:
@@ -559,13 +590,295 @@ class Core:
             return "critical"
         try:
             data = json.loads(chk.stdout)
-            if data.get("corruptions", 0) > 0:
+            corruptions = data.get("corruptions", 0)
+            errors = data.get("errors", 0)
+            leaks = data.get("leaks", 0)
+            if corruptions > 0 or errors > 0 or leaks > 0:
                 broken.append(name)
                 return "warning"
         except json.JSONDecodeError:
             broken.append(name)
             return "critical"
         return "ok"
+
+    # ── Triple-source check helpers ──────────────────────────────────
+
+    def _check_snapshot_chain(
+        self,
+        vm: VMConfig,
+        broken: list[str],
+    ) -> set[str]:
+        """Run ``qemu-img info --backing-chain`` on the active layer.
+
+        Parses JSON output (not just exit code) and verifies:
+        (a) every file in the chain exists, (b) every file has format
+        ``"qcow2"``, (c) ``backing-filename`` references are consistent,
+        (d) no cycles.
+
+        Returns the set of file paths found on disk.
+        """
+        disk_paths: set[str] = set()
+        active_layer = self._detect_active_layer_path(vm)
+        if not active_layer:
+            return disk_paths
+
+        result = self._shell.run(
+            ["qemu-img", "info", "--force-share", "--backing-chain", "--output=json", active_layer],
+            timeout=30,
+            check=True,
+        )
+        if not result.success:
+            broken.append(Path(active_layer).name)
+            return disk_paths
+
+        try:
+            chain_data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            broken.append(Path(active_layer).name)
+            return disk_paths
+
+        # qemu-img info --backing-chain --output=json returns a JSON array
+        # (one object per chain member, from active layer down to base).
+        chain_list = chain_data if isinstance(chain_data, list) else [chain_data]
+
+        seen: set[str] = set()
+        for i, item in enumerate(chain_list):
+            fname = item.get("filename", "")
+            if not fname:
+                continue
+            disk_paths.add(fname)
+
+            # (a) file exists
+            if not os.path.exists(fname):
+                broken.append(Path(fname).name)
+
+            # (b) format qcow2
+            if item.get("format") != "qcow2":
+                broken.append(Path(fname).name)
+
+            # (d) no cycles
+            if fname in seen:
+                broken.append(f"cycle detected at {Path(fname).name}")
+            seen.add(fname)
+
+            # (c) backing-filename consistency — the backing-filename of
+            #     member i should match the filename of member i+1
+            backing = item.get("backing-filename")
+            if backing and i + 1 < len(chain_list):
+                next_file = chain_list[i + 1].get("filename", "")
+                if backing != next_file:
+                    broken.append(f"backing-filename mismatch in {Path(fname).name}")
+
+        return disk_paths
+
+    def _parse_domain_xml_source_paths(self, vm_name: str) -> set[str]:
+        """Parse ``virsh dumpxml`` for all ``<source file="...">`` paths.
+
+        Extracts file paths from both ``<disk><source>`` (active layer)
+        and ``<backingStore><source>`` (backing chain) elements.
+
+        Returns an empty set on failure (non-fatal).
+        """
+        xml_paths: set[str] = set()
+        result = self._shell.run(
+            ["virsh", "dumpxml", "--domain", vm_name],
+            timeout=30,
+            check=True,
+        )
+        if not result.success:
+            return xml_paths
+        try:
+            root = ET.fromstring(result.stdout)
+        except ET.ParseError:
+            return xml_paths
+
+        for disk_elem in root.iter("disk"):
+            source = disk_elem.find("source")
+            if source is not None:
+                file_attr = source.get("file")
+                if file_attr:
+                    xml_paths.add(file_attr)
+            for backing_store in disk_elem.findall(".//backingStore"):
+                bs_source = backing_store.find("source")
+                if bs_source is not None:
+                    bs_file_attr = bs_source.get("file")
+                    if bs_file_attr:
+                        xml_paths.add(bs_file_attr)
+        return xml_paths
+
+    def _verify_active_layer_match(
+        self,
+        vm: VMConfig,
+        snapshots: list[SnapshotInfo],
+        broken: list[str],
+    ) -> None:
+        """Verify ``virsh domblklist`` active layer matches newest snapshot.
+
+        If the active layer shown by domblklist does not match the newest
+        snapshot in state, appends an issue to *broken*.
+        """
+        if not snapshots:
+            return
+        result = self._shell.run(
+            ["virsh", "domblklist", "--domain", vm.name],
+            timeout=30,
+            check=True,
+        )
+        if not result.success:
+            return
+        try:
+            disks = parse_domblklist_disks(result.stdout)
+        except ValueError:
+            return
+        newest = max(snapshots, key=lambda s: s.timestamp)
+        for _target_dev, source_path in disks:
+            if source_path != str(newest.path):
+                broken.append(
+                    f"domblklist active layer ≠ newest snapshot in state "
+                    f"(domblklist={source_path}, state={newest.path})",
+                )
+
+    def _cross_reference_snapshots(
+        self,
+        state_paths: dict[str, str],
+        disk_paths: set[str],
+        xml_paths: set[str],
+        broken: list[str],
+    ) -> None:
+        """Apply the triple-source matrix to snapshot paths.
+
+        | state_has | disk_has | xml_has | Classification |
+        | yes       | yes      | yes    | OK (consistent) |
+        | yes       | no       | no     | Phantom in state |
+        | yes       | no       | yes    | Stale domain XML |
+        | no        | yes      | yes    | Orphan (state incomplete) |
+        | no        | yes      | no     | Orphan (untracked) |
+        | no        | no       | no     | OK (legitimately deleted) |
+        """
+        all_paths = set(state_paths.keys()) | disk_paths | xml_paths
+        for path in all_paths:
+            state_has = path in state_paths
+            disk_has = path in disk_paths
+            xml_has = path in xml_paths
+
+            if state_has and disk_has and xml_has:
+                pass  # OK (consistent)
+            elif state_has and not disk_has and not xml_has:
+                # Phantom in state — WARNING, reconcile can fix
+                logger.warning(
+                    "phantom entry in state: %s — run reconcile to fix",
+                    state_paths[path],
+                )
+            elif state_has and not disk_has and xml_has:
+                # Stale domain XML — broken
+                broken.append(state_paths[path])
+                logger.warning(
+                    "stale domain XML for %s — run reconcile to fix",
+                    state_paths[path],
+                )
+            elif not state_has and disk_has and xml_has:
+                # Orphan (state incomplete) — WARNING
+                logger.warning(
+                    "orphan file %s exists on disk and in XML but not in state",
+                    path,
+                )
+            elif not state_has and disk_has and not xml_has:
+                # Orphan (untracked) — WARNING
+                logger.warning(
+                    "orphan file %s exists on disk but not in state or XML",
+                    path,
+                )
+            # no | no | no = OK (legitimately deleted)
+
+    def _check_target_consistency(
+        self,
+        vm: VMConfig,
+        target: TargetConfig,
+        provider: IBackupProvider,
+        backups: list[SnapshotInfo],
+        broken: list[str],
+    ) -> None:
+        """Triple-source verification for backup targets.
+
+        Cross-references: (1) state JSON (FULLs + incremental deps),
+        (2) disk files (provider.list), (3) libvirt checkpoints
+        (virsh checkpoint-list filtered by target_hash).
+        """
+        target_str = str(target.path)
+
+        # 1. State source — FULLs and their incremental dependencies
+        state_backup_paths: set[str] = set()
+        fulls = self._state.get_full_backups(target_str)
+        for full in fulls:
+            state_backup_paths.add(str(full.path))
+            deps = self._state.get_incremental_dependencies(target_str, full.name)
+            for dep_name in deps:
+                dep_path = target.path / f"{dep_name}.qcow2"
+                state_backup_paths.add(str(dep_path))
+
+        # 2. Disk source — files listed by provider
+        disk_backup_paths: set[str] = {str(b.path) for b in backups}
+
+        # Phantom FULLs — state has, disk does not
+        for path in state_backup_paths - disk_backup_paths:
+            broken.append(f"phantom backup: {Path(path).name}")
+
+        # Orphan files — disk has, state does not
+        for path in disk_backup_paths - state_backup_paths:
+            logger.warning(
+                "orphan backup file %s on target %s not tracked in state",
+                path,
+                target_str,
+            )
+
+        # 3. Checkpoint source — virsh checkpoint-list filtered by target_hash
+        checkpoints = provider.list_checkpoints(vm.name)
+        tgt_hash = provider.target_hash(target_str)
+        target_checkpoints = [
+            cp for cp in checkpoints if cp.startswith(f"qsnap-{tgt_hash}-")
+        ]
+
+        # Orphan checkpoints — target_hash does not match
+        orphan_cps = [cp for cp in checkpoints if not cp.startswith(f"qsnap-{tgt_hash}-")]
+        if orphan_cps:
+            logger.warning(
+                "orphan checkpoints detected for VM %s: %s",
+                vm.name,
+                orphan_cps,
+            )
+
+        # Missing checkpoint — no baseline for next incremental
+        if fulls and not target_checkpoints:
+            logger.warning(
+                "no checkpoint for target %s — next incremental impossible",
+                target_str,
+            )
+
+        # Multiple checkpoints — more than one for the same target
+        if len(target_checkpoints) > 1:
+            logger.warning(
+                "multiple checkpoints for target %s: %s",
+                target_str,
+                target_checkpoints,
+            )
+
+        # Verify chain traversability for last incremental per chain
+        for full in fulls:
+            deps = self._state.get_incremental_dependencies(target_str, full.name)
+            if deps:
+                last_dep = deps[-1]
+                last_dep_path = target.path / f"{last_dep}.qcow2"
+                chain_result = self._shell.run(
+                    [
+                        "qemu-img", "info", "--force-share",
+                        "--backing-chain", "--output=json",
+                        str(last_dep_path),
+                    ],
+                    timeout=30,
+                    check=True,
+                )
+                if not chain_result.success:
+                    broken.append(f"backup chain broken at {last_dep}")
 
     def _get_last_deep_check_time(self) -> datetime | None:
         """Read the last deep check timestamp from the state directory."""
@@ -1311,16 +1624,27 @@ class Core:
         """Actively repair state-vs-disk inconsistencies.
 
         For each VM (filtered):
-        1. Remove phantom snapshots from state (file missing on disk)
-        2. Remove phantom FULLs from state + cascade-clean dependencies
-        3. Clear last_backup_allocation if no FULLs remain on target
-        4. Remove stale incremental dependencies (incremental file missing)
-        5. Delete orphaned libvirt checkpoints (auto-cleanup)
+        1. Remove phantom snapshots from state (file missing, XML doesn't
+           reference)
+        2. Supplement state from disk+XML (file exists, XML references,
+           state doesn't)
+        3. Refresh stale domain XML (``<backingStore>`` references missing
+           files)
+        4. Remove phantom FULLs from state + cascade-clean dependencies
+        5. Clear stale baselines if no FULLs remain
+        6. Remove stale incremental dependencies
+        7. Delete orphaned libvirt checkpoints
+        8. Supplement/delete orphan files on targets (intact chain →
+           supplement, broken chain → CRITICAL log, truly orphan → delete)
+        9. Delete truly orphan snapshot files (not in state, not in XML)
+
+        Does NOT auto-rebase broken chains — only logs CRITICAL and leaves
+        the chain for operator intervention.
 
         Returns per-VM ``ReconcileResult`` with counts of items fixed.
 
         When ``self._dry_run`` is True, reports what would be fixed
-        without making any changes to state files or checkpoints.
+        without making any changes to state files, disk, or domain XML.
         """
         vms = self._filter_vms(vm_filter)
         results: dict[str, ReconcileResult] = {}
@@ -1331,14 +1655,32 @@ class Core:
             baselines_cleared = 0
             orphan_ckpts = 0
             orphan_files = 0
+            state_supplemented = 0
+            xml_refreshed = False
+            allocation_fixed = False
             errors: list[str] = []
             broken_chains: list[str] = []
 
-            # 1. Phantom snapshots (file missing on disk)
+            # Parse domain XML once for this VM (triple-source: XML)
+            xml_paths = self._parse_domain_xml_source_paths(vm.name)
+
+            # 1. Phantom snapshots (state has, disk doesn't, XML doesn't)
             try:
                 snapshots = self._state.get_snapshots(vm.name)
                 for sn in snapshots:
                     if not os.path.exists(str(sn.path)):
+                        # Check if XML still references this file
+                        if str(sn.path) in xml_paths:
+                            # Stale domain XML — don't remove from state,
+                            # will be refreshed in step 3
+                            logger.warning(
+                                "[reconcile] %s: stale domain XML references "
+                                "missing file %s — will refresh XML",
+                                vm.name,
+                                sn.path,
+                            )
+                            continue
+                        # Phantom in state — remove
                         if self._dry_run:
                             logger.info(
                                 "[dry-run reconcile] %s: would remove phantom snapshot %s",
@@ -1359,6 +1701,149 @@ class Core:
                 errors.append(f"phantom snapshots: {exc}")
                 logger.warning(
                     "[reconcile] %s: error checking phantom snapshots: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 2. Supplement state from disk+XML reality + delete truly
+            #    orphan snapshot files (not in state, not in XML)
+            try:
+                recorded = {sn.path.name for sn in self._state.get_snapshots(vm.name)}
+                for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
+                    if qcow2_file.name in recorded:
+                        continue
+                    if str(qcow2_file) in xml_paths:
+                        # File on disk + in XML but not in state → supplement
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would supplement state "
+                                "with snapshot %s (from disk+XML reality)",
+                                vm.name,
+                                qcow2_file.name,
+                            )
+                            state_supplemented += 1
+                        else:
+                            info = SnapshotInfo(
+                                name=qcow2_file.stem,
+                                path=qcow2_file,
+                                timestamp=parse_timestamp(qcow2_file.name, qcow2_file),
+                                allocation=0,
+                            )
+                            self._state.record_snapshot(vm.name, info)
+                            logger.info(
+                                "[reconcile] %s: state supplemented: %s recorded "
+                                "from disk+XML reality",
+                                vm.name,
+                                qcow2_file.name,
+                            )
+                            state_supplemented += 1
+                    else:
+                        # Truly orphan — not in state, not in XML → delete
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run reconcile] %s: would remove orphan snapshot file %s",
+                                vm.name,
+                                qcow2_file,
+                            )
+                            orphan_files += 1
+                        else:
+                            self._shell.run(
+                                ["rm", "-f", str(qcow2_file)],
+                                timeout=10,
+                                check=True,
+                            )
+                            logger.warning(
+                                "[reconcile] %s: removed orphan snapshot file "
+                                "%s (not tracked in state or XML)",
+                                vm.name,
+                                qcow2_file,
+                            )
+                            orphan_files += 1
+            except Exception as exc:
+                errors.append(f"orphan snapshot files: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking orphan snapshot files: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 3. Refresh stale domain XML (strip <backingStore> referencing
+            #    non-existent files)
+            try:
+                stale_xml = any(not os.path.exists(p) for p in xml_paths)
+                if stale_xml:
+                    if self._dry_run:
+                        logger.info(
+                            "[dry-run reconcile] %s: would refresh stale domain XML",
+                            vm.name,
+                        )
+                        xml_refreshed = True
+                    else:
+                        self._refresh_domain_backing_store(vm)
+                        logger.warning(
+                            "[reconcile] %s: stripped stale <backingStore> "
+                            "from domain XML",
+                            vm.name,
+                        )
+                        xml_refreshed = True
+            except Exception as exc:
+                errors.append(f"refresh domain XML: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error refreshing domain XML: %s",
+                    vm.name,
+                    exc,
+                )
+
+            # 3b. last_allocation mismatch detection and correction
+            try:
+                last_alloc = self._state.get_last_allocation(vm.name)
+                if last_alloc is not None:
+                    # Determine active layer path
+                    current_snaps = self._state.get_snapshots(vm.name)
+                    if current_snaps:
+                        active_path = str(current_snaps[-1].path)
+                    else:
+                        active_path = str(vm.base_image)
+                    info_result = self._shell.run(
+                        [
+                            "qemu-img", "info", "--force-share",
+                            "--output=json", active_path,
+                        ],
+                        timeout=30,
+                        check=True,
+                    )
+                    if info_result.success:
+                        try:
+                            info = json.loads(info_result.stdout)
+                            actual_size = info.get("actual-size")
+                            if actual_size is not None and actual_size != last_alloc:
+                                if self._dry_run:
+                                    logger.info(
+                                        "[dry-run reconcile] %s: would fix "
+                                        "last_allocation: %d → %d",
+                                        vm.name,
+                                        last_alloc,
+                                        actual_size,
+                                    )
+                                    allocation_fixed = True
+                                else:
+                                    self._state.set_last_allocation(
+                                        vm.name, actual_size
+                                    )
+                                    logger.info(
+                                        "[reconcile] %s: fixed last_allocation: "
+                                        "%d → %d",
+                                        vm.name,
+                                        last_alloc,
+                                        actual_size,
+                                    )
+                                    allocation_fixed = True
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            except Exception as exc:
+                errors.append(f"allocation mismatch: {exc}")
+                logger.warning(
+                    "[reconcile] %s: error checking allocation mismatch: %s",
                     vm.name,
                     exc,
                 )
@@ -1486,8 +1971,9 @@ class Core:
                     exc,
                 )
 
-            # 6. Orphan files on target directories (files on disk
-            # not tracked in state — bidirectional cleanup).
+            # 6. Orphan files on target directories — supplement state
+            #    for intact chains, log CRITICAL for broken chains, delete
+            #    truly orphan files.
             for target in vm.targets:
                 target_path = str(target.path)
                 try:
@@ -1502,44 +1988,10 @@ class Core:
                         deps = self._state.get_incremental_dependencies(target_path, full.name)
                         known_stems.update(deps)
 
-                    # Detect broken-chain files before orphan
-                    # classification (B6).  Non-FULL backups with
-                    # broken backing chains are logged with a WARNING
-                    # and added to broken_chains.  They then proceed
-                    # through normal orphan classification (if not
-                    # tracked in state, they are deleted).
-                    for backup in backups_on_disk:
-                        if ".FULL." in backup.name:
-                            continue
-                        chain_result = self._shell.run(
-                            [
-                                "qemu-img",
-                                "info",
-                                "--force-share",
-                                "--backing-chain",
-                                "--output=json",
-                                str(backup.path),
-                            ],
-                            timeout=30,
-                            check=True,
-                        )
-                        if not chain_result.success:
-                            broken_chains.append(backup.name)
-                            logger.warning(
-                                "[reconcile] %s: broken backing chain "
-                                "detected for %s on target %s — file "
-                                "will be classified as orphan and "
-                                "deleted. Consider running: "
-                                "qsnap check --deep",
-                                vm.name,
-                                backup.name,
-                                target_path,
-                            )
-
                     for backup in backups_on_disk:
                         if backup.name in known_stems:
                             continue
-                        # Only delete files matching qsnap naming pattern.
+                        # Only process files matching qsnap naming pattern.
                         if not backup.name.startswith(f"{vm.name}."):
                             logger.warning(
                                 "[reconcile] %s: untracked .qcow2 on target %s "
@@ -1549,6 +2001,60 @@ class Core:
                                 backup.name,
                             )
                             continue
+
+                        # Check backing chain integrity for non-FULL files
+                        if ".FULL." not in backup.name:
+                            chain_result = self._shell.run(
+                                [
+                                    "qemu-img",
+                                    "info",
+                                    "--force-share",
+                                    "--backing-chain",
+                                    "--output=json",
+                                    str(backup.path),
+                                ],
+                                timeout=30,
+                                check=True,
+                            )
+                            if not chain_result.success:
+                                # Broken chain — CRITICAL log, do NOT delete
+                                broken_chains.append(backup.name)
+                                logger.critical(
+                                    "[reconcile] %s: broken chain at %s — "
+                                    "blockcommit impossible, restore from "
+                                    "backup target",
+                                    vm.name,
+                                    backup.name,
+                                )
+                                continue
+
+                            # Check if chain leads to a FULL tracked in state
+                            anchor = self._resolve_chain_full_anchor(backup.path)
+                            if anchor is not None:
+                                # Supplement state — record dependency
+                                if self._dry_run:
+                                    logger.info(
+                                        "[dry-run reconcile] %s: would supplement "
+                                        "state with backup %s (intact chain to %s)",
+                                        vm.name,
+                                        backup.name,
+                                        anchor,
+                                    )
+                                    state_supplemented += 1
+                                else:
+                                    self._state.record_incremental_dependency(
+                                        target_path, backup.name, anchor
+                                    )
+                                    logger.info(
+                                        "[reconcile] %s: state supplemented: %s "
+                                        "recorded from disk reality",
+                                        vm.name,
+                                        backup.name,
+                                    )
+                                    state_supplemented += 1
+                                continue
+
+                        # Truly orphan — no chain, not in state → delete
                         if self._dry_run:
                             logger.info(
                                 "[dry-run reconcile] %s: would remove orphan file %s on target %s",
@@ -1558,11 +2064,6 @@ class Core:
                             )
                             orphan_files += 1
                         else:
-                            # Resolve FULL anchor BEFORE deletion —
-                            # _resolve_chain_full_anchor walks the
-                            # backing chain via qemu-img info, which
-                            # needs the file to exist (fixes B4).
-                            anchor = self._resolve_chain_full_anchor(backup.path)
                             provider.delete(backup)
                             logger.warning(
                                 "[reconcile] %s: removed orphan file %s from "
@@ -1572,12 +2073,6 @@ class Core:
                                 target_path,
                             )
                             orphan_files += 1
-                            # Clean up any stale dependency records
-                            # for this orphan file (fixes B4).
-                            if anchor is not None:
-                                self._state.remove_incremental_dependency(
-                                    target_path, backup.name, anchor
-                                )
                 except Exception as exc:
                     errors.append(f"orphan files for {target_path}: {exc}")
                     logger.warning(
@@ -1587,40 +2082,6 @@ class Core:
                         exc,
                     )
 
-            # 7. Orphan snapshot files in snapshot_dir (files on disk
-            # not tracked in state).
-            try:
-                recorded = {sn.path.name for sn in self._state.get_snapshots(vm.name)}
-                for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
-                    if qcow2_file.name not in recorded:
-                        if self._dry_run:
-                            logger.info(
-                                "[dry-run reconcile] %s: would remove orphan snapshot file %s",
-                                vm.name,
-                                qcow2_file,
-                            )
-                            orphan_files += 1
-                        else:
-                            self._shell.run(
-                                ["rm", "-f", str(qcow2_file)],
-                                timeout=10,
-                                check=True,
-                            )
-                            logger.warning(
-                                "[reconcile] %s: removed orphan snapshot file "
-                                "%s (not tracked in state)",
-                                vm.name,
-                                qcow2_file,
-                            )
-                            orphan_files += 1
-            except Exception as exc:
-                errors.append(f"orphan snapshot files: {exc}")
-                logger.warning(
-                    "[reconcile] %s: error checking orphan snapshot files: %s",
-                    vm.name,
-                    exc,
-                )
-
             results[vm.name] = ReconcileResult(
                 vm_name=vm.name,
                 phantom_snapshots_removed=phantom_snapshots,
@@ -1629,6 +2090,9 @@ class Core:
                 baselines_cleared=baselines_cleared,
                 orphan_checkpoints_deleted=orphan_ckpts,
                 orphan_files_removed=orphan_files,
+                state_supplemented=state_supplemented,
+                xml_refreshed=xml_refreshed,
+                allocation_fixed=allocation_fixed,
                 errors=errors,
                 broken_chains=broken_chains,
             )

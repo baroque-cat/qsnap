@@ -1,0 +1,22 @@
+<domain type='kvm'>
+  <name>testvm</name>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/var/lib/libvirt/snapshots/testvm/snap3.qcow2'/>
+      <backingStore type='file' index='3'>
+        <format type='qcow2'/>
+        <source file='/var/lib/libvirt/snapshots/testvm/snap2.qcow2'/>
+        <backingStore type='file' index='2'>
+          <format type='qcow2'/>
+          <source file='/var/lib/libvirt/snapshots/testvm/snap1.qcow2'/>
+          <backingStore type='file' index='1'>
+            <format type='qcow2'/>
+            <source file='/var/lib/libvirt/images/testvm.qcow2'/>
+            <backingStore/>
+          </backingStore>
+        </backingStore>
+      </backingStore>
+    </disk>
+  </devices>
+</domain>

@@ -391,6 +391,9 @@ def test_reconcile_result_is_frozen():
         baselines_cleared=1,
         orphan_checkpoints_deleted=0,
         orphan_files_removed=5,
+        state_supplemented=2,
+        xml_refreshed=True,
+        allocation_fixed=False,
         errors=["state file corrupted", "permission denied"],
     )
 
@@ -416,6 +419,12 @@ def test_reconcile_result_is_frozen():
         result.errors = ["mutated"]
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.broken_chains = ["mutated"]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.state_supplemented = 99
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.xml_refreshed = False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.allocation_fixed = True
 
     # Verify the exact set of field names.
     field_names = {f.name for f in dataclasses.fields(ReconcileResult)}
@@ -427,6 +436,9 @@ def test_reconcile_result_is_frozen():
         "baselines_cleared",
         "orphan_checkpoints_deleted",
         "orphan_files_removed",
+        "state_supplemented",
+        "xml_refreshed",
+        "allocation_fixed",
         "errors",
         "broken_chains",
     }
@@ -439,6 +451,9 @@ def test_reconcile_result_is_frozen():
     assert result.baselines_cleared == 1
     assert result.orphan_checkpoints_deleted == 0
     assert result.orphan_files_removed == 5
+    assert result.state_supplemented == 2
+    assert result.xml_refreshed is True
+    assert result.allocation_fixed is False
     assert result.errors == ["state file corrupted", "permission denied"]
 
     # Verify field types via isinstance on the actual values.
@@ -449,6 +464,9 @@ def test_reconcile_result_is_frozen():
     assert isinstance(result.baselines_cleared, int)
     assert isinstance(result.orphan_checkpoints_deleted, int)
     assert isinstance(result.orphan_files_removed, int)
+    assert isinstance(result.state_supplemented, int)
+    assert isinstance(result.xml_refreshed, bool)
+    assert isinstance(result.allocation_fixed, bool)
     assert isinstance(result.errors, list)
 
 
@@ -463,7 +481,11 @@ def test_reconcile_result_defaults_and_equality():
     assert result.baselines_cleared == 0
     assert result.orphan_checkpoints_deleted == 0
     assert result.orphan_files_removed == 0
+    assert result.state_supplemented == 0
+    assert result.xml_refreshed is False
+    assert result.allocation_fixed is False
     assert result.errors == []  # empty list, not None
+    assert result.broken_chains == []  # empty list, not None
 
     # Two instances with same args are equal.
     a = ReconcileResult(vm_name="eq-test")

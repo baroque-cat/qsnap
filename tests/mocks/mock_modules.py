@@ -202,7 +202,24 @@ class MockBitmapBackupProvider(IBackupProvider):
 
 
 class MockRetentionEngine(IRetentionEngine):
-    """Mock retention engine returning a valid RetentionResult."""
+    """Mock retention engine returning a valid RetentionResult.
+
+    Can be configured with explicit keep/remove lists.  When called
+    without arguments, keeps all items and removes none (same behaviour
+    as before).
+
+    Args:
+        keep: Specific item names to keep.  When ``None``, keeps all items.
+        remove: Specific item names to remove.
+    """
+
+    def __init__(
+        self,
+        keep: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> None:
+        self._keep = keep
+        self._remove = remove or []
 
     def evaluate(
         self,
@@ -210,18 +227,40 @@ class MockRetentionEngine(IRetentionEngine):
         policy: RetentionPolicy,
         now: datetime,
     ) -> RetentionResult:
-        keep = [item.name for item in items]
-        return RetentionResult(keep=keep, remove=[])
+        if self._keep is not None:
+            return RetentionResult(keep=list(self._keep), remove=list(self._remove))
+        # Backward-compatible default: keep everything, remove nothing.
+        return RetentionResult(keep=[item.name for item in items], remove=[])
 
 
 class MockChangeDetector(IChangeDetector):
-    """Mock change detector returning a valid ChangeResult."""
+    """Mock change detector returning a valid ChangeResult.
+
+    Can be configured with a ``changed`` flag and allocation values.
+    When called without arguments, returns ``changed=True`` (same
+    behaviour as before).
+
+    Args:
+        changed: Whether the VM disk has changed since last check.
+        last_alloc: Last recorded allocation size in bytes.
+        current_alloc: Current allocation size in bytes.
+    """
+
+    def __init__(
+        self,
+        changed: bool = True,
+        last_alloc: int = 1000000,
+        current_alloc: int = 2000000,
+    ) -> None:
+        self._changed = changed
+        self._last_alloc = last_alloc
+        self._current_alloc = current_alloc
 
     def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         return ChangeResult(
-            changed=True,
-            last_allocation=1000000,
-            current_allocation=2000000,
+            changed=self._changed,
+            last_allocation=self._last_alloc,
+            current_allocation=self._current_alloc,
         )
 
 

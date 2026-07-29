@@ -8,11 +8,12 @@ Provides `qsnap reconcile` — an active state-vs-disk repair command that delet
 
 ### Requirement: Reconcile command actively repairs state
 
-The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check --state` (read-only), `reconcile` SHALL delete stale state entries, clear stale baselines, delete orphaned libvirt checkpoints, and delete orphaned files on disk that are not tracked in state.
+The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check` (read-only), `reconcile` SHALL fix inconsistencies by: (a) removing phantom state entries (state has record, file missing), (b) supplementing state from disk+XML reality (file exists on disk and in domain XML but not in state → record in state), (c) refreshing stale domain XML via `_refresh_domain_backing_store()`, (d) deleting orphan files not referenced by state or domain XML, (e) deleting orphaned libvirt checkpoints, (f) clearing stale baselines. Reconcile SHALL NOT perform unsafe `qemu-img rebase -u` on broken chains — it SHALL only log CRITICAL and leave the chain for operator intervention. Reconcile SHALL NOT enforce retention policy (deletion of old chains is the pipeline's job).
 
 #### Scenario: Reconcile removes phantom FULLs with cascade cleanup
 
 - **WHEN** `qsnap reconcile` is invoked and a FULL backup record exists in `_full_backups.json` whose file does not exist on disk
+- **AND** domain XML does not reference the FULL (backups are not in domain XML)
 - **THEN** the system SHALL remove the FULL record from `_full_backups.json`, remove all linked incremental dependencies from `_dependencies.json`, and log a WARNING with the count of cleaned dependency records
 
 #### Scenario: Reconcile clears stale last_backup_allocation
@@ -23,12 +24,48 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 #### Scenario: Reconcile removes phantom snapshots
 
 - **WHEN** `qsnap reconcile` is invoked and a snapshot record exists in `{vm_name}.json` whose file does not exist on disk
+- **AND** domain XML does not reference the snapshot (legitimately deleted via blockcommit)
 - **THEN** the system SHALL remove the snapshot record from state and log a WARNING
 
 #### Scenario: Reconcile removes stale incremental dependencies
 
 - **WHEN** `qsnap reconcile` is invoked and an incremental dependency record exists in `_dependencies.json` whose incremental file does not exist on disk
 - **THEN** the system SHALL remove the dependency record and log a WARNING
+
+#### Scenario: Reconcile supplements state from disk+XML reality
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on disk in the snapshot directory
+- **AND** the file is NOT tracked in `{vm_name}.json` state
+- **AND** domain XML references the file in `<backingStore>` (the file is part of the active chain)
+- **THEN** the system SHALL call `record_snapshot()` to add the file to state
+- **AND** log an INFO message: "state supplemented: <snapshot_name> recorded from disk+XML reality"
+- **AND** `ReconcileResult.state_supplemented` SHALL be incremented
+
+#### Scenario: Reconcile deletes orphan files not in state or XML
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on disk
+- **AND** the file is NOT tracked in state
+- **AND** domain XML does NOT reference the file (truly orphan)
+- **THEN** the system SHALL delete the file via `rm -f` and log a WARNING
+- **AND** `ReconcileResult.orphan_files_removed` SHALL be incremented
+
+#### Scenario: Reconcile refreshes stale domain XML
+
+- **WHEN** `qsnap reconcile` is invoked
+- **AND** domain XML contains `<backingStore>` elements referencing files that do not exist on disk
+- **AND** state and disk agree (the files were legitimately deleted)
+- **THEN** the system SHALL call `_refresh_domain_backing_store()` to strip stale `<backingStore>` elements
+- **AND** apply the modified XML via `virsh define`
+- **AND** `ReconcileResult.xml_refreshed` SHALL be `True`
+- **AND** log a WARNING: "stripped stale <backingStore> from domain XML"
+
+#### Scenario: Reconcile does NOT auto-rebase broken chains
+
+- **WHEN** `qsnap reconcile` is invoked
+- **AND** a broken backing chain is detected (file missing from the middle of the chain)
+- **THEN** the system SHALL log CRITICAL: "broken chain at <file> — blockcommit impossible, restore from backup target"
+- **AND** the system SHALL NOT call `qemu-img rebase -u`
+- **AND** `ReconcileResult.broken_chains` SHALL include the file name
 
 #### Scenario: Reconcile deletes orphaned checkpoints
 
@@ -38,13 +75,14 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 #### Scenario: Reconcile dry-run mode
 
 - **WHEN** `qsnap reconcile --dry-run` is invoked
-- **THEN** the system SHALL report what would be fixed without making any changes to state files or deleting any checkpoints
-- **AND** the output SHALL list each item that would be removed/cleared
+- **THEN** the system SHALL report what would be fixed without making any changes to state files, disk, or domain XML
+- **AND** the output SHALL list each item that would be removed/cleared/supplemented/refreshed
+- **AND** all log messages SHALL be prefixed with `[dry-run reconcile]`
 
 #### Scenario: Reconcile returns structured result
 
 - **WHEN** `qsnap reconcile` completes for a VM
-- **THEN** the system SHALL return a `ReconcileResult` with counts of: phantom_snapshots_removed, phantom_fulls_removed, stale_deps_removed, baselines_cleared, orphan_checkpoints_deleted, orphan_files_removed, and a list of errors
+- **THEN** the system SHALL return a `ReconcileResult` with counts of: phantom_snapshots_removed, phantom_fulls_removed, stale_deps_removed, baselines_cleared, orphan_checkpoints_deleted, orphan_files_removed, state_supplemented, xml_refreshed, allocation_fixed, broken_chains, and a list of errors
 
 #### Scenario: Reconcile with VM filter
 
@@ -55,20 +93,23 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 #### Scenario: Reconcile removes orphan files on target
 
 - **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory that is not tracked in `_full_backups.json` or `_dependencies.json` and matches the qsnap naming pattern (`{vm_name}.*`)
+- **AND** the file has a broken backing chain (not traversable to any FULL)
 - **THEN** the system SHALL delete the file from the target and log a WARNING
 - **AND** the count SHALL be recorded in `ReconcileResult.orphan_files_removed`
-- **AND** after deletion, the system SHALL attempt to clean up any stale dependency records by calling `_resolve_chain_full_anchor(backup.path)` and, if an anchor is found, calling `IStateManager.remove_incremental_dependency(target_path, backup.name, anchor)`
+
+#### Scenario: Reconcile supplements state for orphan backup with intact chain
+
+- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory
+- **AND** the file is NOT tracked in `_full_backups.json` or `_dependencies.json`
+- **AND** `qemu-img info --backing-chain` shows the file has an intact chain to a FULL that IS tracked in state
+- **THEN** the system SHALL call `record_incremental_dependency()` to add the file to state
+- **AND** log an INFO: "state supplemented: <backup_name> recorded from disk reality"
+- **AND** `ReconcileResult.state_supplemented` SHALL be incremented
 
 #### Scenario: Reconcile skips non-qsnap files on target
 
 - **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory that does not match the qsnap naming pattern (`{vm_name}.*`)
 - **THEN** the system SHALL NOT delete the file and SHALL log a WARNING
-
-#### Scenario: Reconcile removes orphan snapshot files
-
-- **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists in the snapshot directory that is not tracked in `{vm_name}.json`
-- **THEN** the system SHALL delete the file and log a WARNING
-- **AND** the count SHALL be recorded in `ReconcileResult.orphan_files_removed`
 
 #### Scenario: Reconcile orphan file cleanup is non-fatal
 
@@ -77,33 +118,41 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 
 ### Requirement: ReconcileResult dataclass
 
-The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results.py` with the following fields: `vm_name: str`, `phantom_snapshots_removed: int`, `phantom_fulls_removed: int`, `stale_deps_removed: int`, `baselines_cleared: int`, `orphan_checkpoints_deleted: int`, `orphan_files_removed: int`, `errors: list[str]`, `broken_chains: list[str]`.
+The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results.py` with the following fields: `vm_name: str`, `phantom_snapshots_removed: int`, `phantom_fulls_removed: int`, `stale_deps_removed: int`, `baselines_cleared: int`, `orphan_checkpoints_deleted: int`, `orphan_files_removed: int`, `state_supplemented: int`, `xml_refreshed: bool`, `allocation_fixed: bool`, `errors: list[str]`, `broken_chains: list[str]`.
 
 #### Scenario: ReconcileResult is frozen
 
 - **WHEN** a `ReconcileResult` is constructed
 - **THEN** all fields SHALL be immutable (frozen dataclass)
 - **AND** `errors` SHALL default to an empty list
+- **AND** `state_supplemented` SHALL default to `0`
+- **AND** `xml_refreshed` SHALL default to `False`
+- **AND** `allocation_fixed` SHALL default to `False`
 
 ### Requirement: Broken backing chain detection in reconcile
 
-`Core.reconcile()` SHALL detect broken backing chains on backup files at each target before classifying them as orphans. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `qemu-img info --force-share --backing-chain --output=json <path>` via `IShell.run()` and check whether the command succeeds. Files where the command fails SHALL be logged with a WARNING message indicating a broken backing chain was detected and that the file will be classified as an orphan and deleted. The `ReconcileResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing the names of backups with broken backing chains.
+`Core.reconcile()` SHALL detect broken backing chains on backup files at each target before classifying them as orphans. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `qemu-img info --force-share --backing-chain --output=json <path>` via `IShell.run()` and check whether the command succeeds. Files where the command fails SHALL be logged with a CRITICAL message indicating a broken backing chain was detected. The system SHALL NOT attempt to repair broken chains via `qemu-img rebase -u`. The `ReconcileResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing the names of backups with broken backing chains.
 
-#### Scenario: Reconcile detects broken chain before orphan classification
+#### Scenario: Reconcile detects broken chain — no auto-rebase
+
 - **WHEN** `qsnap reconcile` is invoked
 - **AND** a non-FULL backup file at a target has a broken backing chain
-- **THEN** a WARNING is logged indicating the broken chain
+- **THEN** a CRITICAL is logged indicating the broken chain
 - **AND** the backup name is added to `ReconcileResult.broken_chains`
-- **AND** the file proceeds through normal orphan classification (if not tracked in state, it is deleted)
+- **AND** the system SHALL NOT call `qemu-img rebase -u`
+- **AND** the file is NOT deleted (left for operator review)
 
 #### Scenario: Reconcile with intact chains — no broken_chains
+
 - **WHEN** `qsnap reconcile` is invoked
 - **AND** all non-FULL backup files have intact backing chains
 - **THEN** `ReconcileResult.broken_chains` is an empty list
 
 #### Scenario: Reconcile dry-run reports broken chains without deletion
+
 - **WHEN** `qsnap reconcile --dry-run` is invoked
 - **AND** a non-FULL backup file at a target has a broken backing chain
-- **THEN** a WARNING is logged indicating the broken chain
+- **THEN** a CRITICAL is logged indicating the broken chain
 - **AND** the backup name is added to `ReconcileResult.broken_chains`
 - **AND** the file is NOT deleted (dry-run mode)
+- **AND** no `qemu-img rebase` is attempted

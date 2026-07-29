@@ -10,6 +10,7 @@ All shell calls through ``MockShell``; zero real I/O.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -38,7 +39,7 @@ def _make_snapshot() -> SnapshotInfo:
     )
 
 
-def _setup_convert_expectations(mock_shell, running: bool = True, *, compress: bool = False):
+def _setup_convert_expectations(mock_shell, target, running: bool = True, *, compress: bool = False):
     """Register core expectations for create_full_backup via qemu-img convert.
 
     MockShell already has ``virsh dominfo`` (→ State: running) from conftest,
@@ -58,6 +59,35 @@ def _setup_convert_expectations(mock_shell, running: bool = True, *, compress: b
     # virsh domjobabort in _full_pull_lifecycle finally (always called, idempotent)
     mock_shell.expect("virsh domjobabort").returns(_ok_result())
 
+    # Post-creation FULL validation (design D5): no backing file — FULL must
+    # be standalone (no backing-filename in qemu-img info output).
+    mock_shell.expect(r"qemu-img info.*--force-share.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout='{"format": "qcow2", "virtual-size": 1073741824, "actual-size": 1048576}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Post-creation FULL validation (design D5): checkpoint existence for
+    # running VMs — a qsnap- checkpoint must exist as baseline for future
+    # incrementals.  Stopped VMs don't create checkpoints.
+    if running:
+        target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
+        # A future timestamp (9999) ensures _delete_superseded_checkpoints
+        # sees it as NOT superseded (ts >= successor_ts → skip).
+        checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+        mock_shell.expect("checkpoint-list").returns(
+            ShellResult(
+                success=True,
+                stdout=f"{checkpoint_name}\n",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+
 
 # ── Tests: 1a–1d — qemu-img convert command construction ────────────────────
 
@@ -71,7 +101,7 @@ def test_convert_cmd_running_vm_compressed(mock_shell, make_target, tmp_path):
     pid = os.getpid()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=True)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=True)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
@@ -110,7 +140,7 @@ def test_convert_cmd_running_vm_uncompressed(mock_shell, make_target, tmp_path):
     pid = os.getpid()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
@@ -145,7 +175,7 @@ def test_convert_cmd_stopped_vm_compressed(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
     source_path = "/var/lib/libvirt/images/testvm.qcow2"
 
-    _setup_convert_expectations(mock_shell, running=False, compress=True)
+    _setup_convert_expectations(mock_shell, target, running=False, compress=True)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -187,7 +217,7 @@ def test_convert_cmd_stopped_vm_uncompressed(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
     source_path = "/var/lib/libvirt/images/testvm.qcow2"
 
-    _setup_convert_expectations(mock_shell, running=False, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=False, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -272,7 +302,7 @@ def test_convert_success_renames_tmp_to_final(mock_shell, make_target, tmp_path)
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
@@ -302,7 +332,7 @@ def test_running_vm_uses_nbd_convert(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
@@ -331,7 +361,7 @@ def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
     source_path = "/var/lib/libvirt/images/testvm.qcow2"
 
-    _setup_convert_expectations(mock_shell, running=False, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=False, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -370,7 +400,7 @@ def test_full_backup_does_not_use_write_server_or_transfer(mock_shell, make_targ
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -398,7 +428,7 @@ def test_convert_uses_stall_detection(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
@@ -435,7 +465,7 @@ def test_stall_detection_output_file_is_tmp(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
@@ -470,7 +500,7 @@ def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
@@ -511,7 +541,7 @@ def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, 
 
     # Register expectations from most-specific to least-specific
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -567,7 +597,7 @@ def test_full_pull_lifecycle_uses_convert(mock_shell, make_vm_config, make_targe
     target_cfb.path.mkdir(parents=True, exist_ok=True)
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target_cfb, running=True, compress=False)
 
     with patch.object(
         BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
@@ -633,7 +663,7 @@ def test_full_pull_lifecycle_no_write_server(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
 
@@ -663,7 +693,7 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path):
     snapshot = _make_snapshot()  # timestamp: 2025-01-01
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
     result = provider.create_full_backup(
@@ -699,7 +729,7 @@ def test_global_section_compress_false_affects_convert_cmd(mock_shell, make_targ
     pid = os.getpid()
 
     mock_shell.expect_first("virsh backup-begin").returns(_ok_result())
-    _setup_convert_expectations(mock_shell, running=True, compress=False)
+    _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     with patch.object(
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection

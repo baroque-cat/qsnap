@@ -9,10 +9,12 @@ Design decisions verified:
 - **D1**: ``ExternalSnapshotProvider`` does NOT inherit from ``Core``; its
   only dependency is ``IShell``.
 - **R4**: Disk is hardcoded as ``"vda"`` (passed by Core, not by the module).
+- **D4**: Post-creation validation: file existence, qcow2 format, corrupt
+  bit, backing-filename, libvirt pivot confirmation.
 - All fallible operations return ``Result`` types, never raise exceptions.
 - The constructor accepts only ``IShell`` (no ``Core``, no ``IStateManager``).
 
-Scenarios (from ``specs/snapshot-provider/spec.md``):
+Scenarios (from ``specs/snapshot-provider/spec.md`` + post-creation-validation):
 1. Successful snapshot creation — virsh + chmod + qemu-img all succeed.
 2. virsh command fails — non-zero exit, short-circuits before chmod/qemu-img.
 3. virsh command times out — simulated via ShellResult with "timed out".
@@ -20,15 +22,19 @@ Scenarios (from ``specs/snapshot-provider/spec.md``):
 5. No snapshots (fresh VM) — 1-element chain yields empty list.
 6. Successful file deletion — rm -f returns success.
 7. File not found — rm -f is idempotent, still returns success.
+8-11. Post-creation validation: file missing, wrong backing, corrupt bit, pivot.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -39,16 +45,39 @@ from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 
 
 def test_create_snapshot_success(mock_shell, make_vm_config):
-    """When virsh, chmod, and qemu-img all succeed, ``create()`` returns
+    """When virsh, chmod, and qemu-img all succeed, and post-creation
+    validation passes (file exists, format=qcow2, backing-filename matches,
+    no corrupt bit, pivot confirmed), ``create()`` returns
     ``SnapshotResult(success=True)`` with ``new_allocation`` from the
     ``actual-size`` field of ``qemu-img info`` JSON output.
 
     Also verifies:
     - The virsh command contains ``vda`` (hardcoded disk, design R4).
     - The virsh command contains ``--disk-only --atomic --no-metadata``.
+    - qemu-img info includes ``--force-share`` (design D5).
+    - Post-creation validation (design D4): domblklist pivot, qcow2 format,
+      backing-filename match, no corrupt bit.
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+
+    # Step 0 (pre-creation): virsh domblklist to capture previous active layer.
+    # Also serves as the post-creation pivot check — must show snapshot_path
+    # as the source for the pivot to be confirmed.
+    # Use expect_first to override conftest's default domblklist.
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snapshot_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     # Step 1: virsh snapshot-create-as succeeds
     mock_shell.expect("virsh snapshot-create-as").returns(
@@ -70,8 +99,14 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
             error=None,
         )
     )
-    # Step 3: qemu-img info returns JSON with actual-size
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    # Step 3: qemu-img info returns JSON with actual-size AND
+    # format=qcow2, backing-filename matching previous active, no corrupt bit
+    qemu_info_json = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": str(snapshot_path),
+    })
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -114,6 +149,20 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
     assert "--force-share" in qemu_cmd
 
+    # Assert pre-creation domblklist was called (step 0)
+    domblklist_calls = [cmd for cmd in all_cmds if "domblklist" in cmd]
+    # One pre-creation call (previous active capture), one post-creation
+    # (pivot check) — both satisfied by the same expect_first expectation.
+    assert len(domblklist_calls) >= 2, (
+        f"Expected at least 2 domblklist calls (pre + post), got {len(domblklist_calls)}"
+    )
+
+    # Assert test -f was called for post-creation file existence check
+    test_f_calls = [cmd for cmd in all_cmds if cmd.startswith("test -f")]
+    assert any(str(snapshot_path) in cmd for cmd in test_f_calls), (
+        "Post-creation file existence check (test -f) should have been called"
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 2. virsh command fails
@@ -153,12 +202,14 @@ def test_create_snapshot_virsh_fails(mock_shell, make_vm_config):
     assert result.error == stderr_msg
     assert result.new_allocation == 0
 
-    # Assert short-circuit: only virsh was called; chmod and qemu-img were NOT
+    # Assert short-circuit: only virsh + domblklist was called; chmod and qemu-img were NOT
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
-    assert len(all_cmds) == 1, (
-        f"Only the virsh command should have been called, but got {len(all_cmds)} calls"
+    # Pre-creation domblklist (step 0) + virsh snapshot-create-as (step 1) = 2 calls.
+    # chmod and qemu-img info must NOT have been called.
+    assert len(all_cmds) == 2, (
+        f"Only domblklist + virsh should have been called, but got {len(all_cmds)} calls"
     )
-    assert "snapshot-create-as" in all_cmds[0]
+    assert "snapshot-create-as" in all_cmds[1]
     assert not any("chmod" in cmd for cmd in all_cmds), (
         "chmod should NOT be called when virsh fails"
     )
@@ -227,23 +278,53 @@ def test_create_snapshot_timeout(mock_shell, make_vm_config):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _expect_successful_create(mock_shell):
+def _expect_successful_create(
+    mock_shell, snapshot_path: str | None = None
+):
     """Configure MockShell expectations for a successful create() pipeline.
 
     Sets up virsh snapshot-create-as, chmod, and qemu-img info to all
-    succeed.  The qemu-img info JSON carries ``actual-size: 1048576``.
+    succeed.  The qemu-img info JSON carries ``actual-size: 1048576``
+    and ``format: "qcow2"``.
+
+    If *snapshot_path* is given, pre/post domblklist is also set up
+    (returns the snapshot path as the active source), and
+    ``backing-filename`` in qemu-img info matches it.
     """
+    snap_path = snapshot_path or "/var/lib/libvirt/snapshots/testvm/snap.20250101T000000"
+
+    # Pre/post domblklist: both return the snapshot path as source.
+    # expect_first overrides conftest's default domblklist.
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snap_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     mock_shell.expect("virsh snapshot-create-as").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("chmod").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    qemu_info = {
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": snap_path,
+    }
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
-            stdout=qemu_info_json,
+            stdout=json.dumps(qemu_info),
             stderr="",
             returncode=0,
             error=None,
@@ -264,7 +345,7 @@ def test_create_snapshot_with_quiesce_enabled(mock_shell, make_vm_config):
     """When ``quiesce=True``, the virsh command contains ``--quiesce``."""
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -293,7 +374,7 @@ def test_create_snapshot_without_quiesce_default(mock_shell, make_vm_config):
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -317,7 +398,7 @@ def test_create_snapshot_quiesce_enabled(mock_shell, make_vm_config):
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -341,7 +422,7 @@ def test_create_snapshot_quiesce_disabled_default(mock_shell, make_vm_config):
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -409,7 +490,7 @@ def test_create_snapshot_quiesce_timeout_180s(mock_shell, make_vm_config):
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -439,7 +520,7 @@ def test_risk_quiesce_timeout_180s_not_120s(mock_shell, make_vm_config):
     """
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
-    _expect_successful_create(mock_shell)
+    _expect_successful_create(mock_shell, snapshot_path=str(snapshot_path))
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         provider = ExternalSnapshotProvider(mock_shell)
@@ -557,11 +638,32 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
+    # Pre/post domblklist: must return the snapshot path as source
+    # for the pivot check to pass.
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snapshot_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     # Pre-configure chmod and qemu-img info for the successful path
     mock_shell.expect("chmod").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    qemu_info_json = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": str(snapshot_path),
+    })
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -704,11 +806,31 @@ def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config)
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
+    # Pre/post domblklist: must return the snapshot path as source
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snapshot_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     # Pre-configure chmod and qemu-img info for the successful path
     mock_shell.expect("chmod").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    qemu_info_json = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": str(snapshot_path),
+    })
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -997,6 +1119,21 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
+    # Pre/post domblklist: must return the snapshot path as source
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snapshot_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     # Step 1: virsh snapshot-create-as succeeds
     mock_shell.expect("virsh snapshot-create-as").returns(
         ShellResult(
@@ -1018,7 +1155,12 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
         )
     )
     # Step 3: qemu-img info --force-share succeeds
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    qemu_info_json = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": str(snapshot_path),
+    })
     mock_shell.expect("qemu-img info.*--force-share").returns(
         ShellResult(
             success=True,
@@ -1064,6 +1206,21 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
     vm_config = make_vm_config()
     snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
 
+    # Pre/post domblklist: must return the snapshot path as source
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                f"vda   {snapshot_path}\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     # Step 1: virsh snapshot-create-as succeeds
     mock_shell.expect("virsh snapshot-create-as").returns(
         ShellResult(
@@ -1097,7 +1254,12 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
         )
     )
     # Normal expectation: --force-share IS present, so this succeeds
-    qemu_info_json = json.dumps({"actual-size": 1048576, "virtual-size": 1073741824})
+    qemu_info_json = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": str(snapshot_path),
+    })
     mock_shell.expect("qemu-img info.*--force-share").returns(
         ShellResult(
             success=True,
@@ -1135,3 +1297,462 @@ def test_external_snapshot_no_cross_domain_imports():
         "external.py must not import from qsnap.modules.backup "
         "(shared utilities live in qsnap.utils.*)"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 11. Post-creation validation — file missing despite virsh success
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_file_missing(mock_shell, make_vm_config):
+    """After ``virsh snapshot-create-as`` returns exit code 0, if the snapshot
+    file does not exist on disk (``test -f`` fails), ``create()`` returns
+    ``SnapshotResult(success=False, error="snapshot file not found on disk
+    after virsh success")``.
+
+    Validates step 5a of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+
+    # Pre-creation domblklist: returns the old active layer as source
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info returns valid qcow2 metadata
+    qemu_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": old_path,
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # test -f FAILS — override conftest's default success
+    mock_shell.expect_first("test -f").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            error="File not found",
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "snapshot file not found on disk after virsh success" in result.error
+    assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 12. Post-creation validation — backing-filename mismatch
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_wrong_backing(mock_shell, make_vm_config):
+    """When ``qemu-img info`` reports a ``backing-filename`` that does NOT
+    point to the previous active layer, ``create()`` returns
+    ``SnapshotResult(success=False, error="backing-filename mismatch: ...")``.
+
+    Validates step 5d of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+    wrong_backing = "/var/lib/libvirt/images/wrong.qcow2"
+
+    # Pre-creation domblklist: returns the old active layer
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info returns wrong backing-filename (different from old_path)
+    qemu_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": wrong_backing,
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # test -f succeeds (conftest default)
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "backing-filename mismatch" in result.error
+    assert old_path in result.error
+    assert wrong_backing in result.error
+    assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 13. Post-creation validation — corrupt bit set
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_corrupt_bit(mock_shell, make_vm_config):
+    """When ``qemu-img info`` reports ``incompatible-features`` containing
+    ``"corrupt"``, ``create()`` returns
+    ``SnapshotResult(success=False, error="snapshot has corrupt bit set")``.
+
+    Validates step 5c of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+
+    # Pre-creation domblklist: returns the old active layer
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info returns corrupt bit set
+    qemu_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": old_path,
+        "incompatible-features": ["corrupt"],
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # test -f succeeds (conftest default)
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "snapshot has corrupt bit set" in result.error
+    assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 14. Post-creation validation — libvirt pivot not confirmed
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_pivot_not_confirmed(mock_shell, make_vm_config):
+    """When the post-snapshot ``virsh domblklist`` still shows the previous
+    active layer (not the new snapshot path), ``create()`` returns
+    ``SnapshotResult(success=False, error="libvirt pivot not confirmed: ...")``.
+
+    Validates step 5e of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+
+    # Pre + post domblklist: both return the old path.
+    # The pivot check compares source (old_path) != str(snapshot_path) → fail.
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # qemu-img info returns valid metadata with correct backing-filename
+    qemu_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 1073741824,
+        "backing-filename": old_path,
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # test -f succeeds (conftest default)
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "libvirt pivot not confirmed" in result.error
+    assert old_path in result.error
+    assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 15. Post-creation validation — virtual-size mismatch
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_virtual_size_mismatch(mock_shell, make_vm_config):
+    """When the snapshot's ``virtual-size`` differs from the base image's
+    ``virtual-size``, ``create()`` returns
+    ``SnapshotResult(success=False, error="virtual-size mismatch: ...")``.
+
+    Validates step 5b-2 of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+
+    # Pre-creation domblklist: returns the old active layer
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # qemu-img info on the snapshot: virtual-size=2 GiB (2147483648).
+    # Must use expect_first with snapshot_path so it matches ONLY the
+    # snapshot call and not the base-image call.
+    qemu_snap_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1048576,
+        "virtual-size": 2147483648,
+        "backing-filename": old_path,
+    })
+    mock_shell.expect_first(
+        f"qemu-img info.*{re.escape(str(snapshot_path))}"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_snap_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img info on the base image: virtual-size=1 GiB (1073741824)
+    # — mismatched, triggers virtual-size mismatch error.
+    # Also use expect_first with old_path so it matches the base-image
+    # call before any generic qemu-img info pattern.
+    qemu_base_info = json.dumps({
+        "format": "qcow2",
+        "virtual-size": 1073741824,
+    })
+    mock_shell.expect_first(
+        f"qemu-img info.*{re.escape(old_path)}"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_base_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "virtual-size mismatch" in result.error
+    assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 16. Post-creation validation — actual-size unreasonable
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_post_creation_actual_size_unreasonable(mock_shell, make_vm_config):
+    """When the snapshot's ``actual-size`` exceeds 50% of ``virtual-size``
+    (unreasonable for a new overlay), ``create()`` returns
+    ``SnapshotResult(success=False)`` with an error containing
+    ``"actual-size"`` and ``"unreasonable"``.
+
+    Validates step 5b-3 of the post-creation checks (design D4).
+    """
+    vm_config = make_vm_config()
+    snapshot_path = Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000")
+    old_path = "/var/lib/libvirt/images/testvm.qcow2"
+
+    # Pre-creation domblklist: returns the old active layer
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {old_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # virsh snapshot-create-as succeeds
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # chmod succeeds
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # qemu-img info on the snapshot: actual-size == virtual-size, which is
+    # way above the 50% threshold (1073741824 == 1073741824 → 100%).
+    qemu_snap_info = json.dumps({
+        "format": "qcow2",
+        "actual-size": 1073741824,
+        "virtual-size": 1073741824,
+        "backing-filename": old_path,
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_snap_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # qemu-img info on the base image: matching virtual-size so 5b-2
+    # passes cleanly and we reach 5b-3 (actual-size check).
+    qemu_base_info = json.dumps({
+        "format": "qcow2",
+        "virtual-size": 1073741824,
+    })
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(
+            success=True,
+            stdout=qemu_base_info,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    result = provider.create(
+        vm_config=vm_config,
+        snapshot_name="snap.20250101T000000",
+        disk="vda",
+        snapshot_path=snapshot_path,
+    )
+
+    assert result.success is False
+    assert "actual-size" in result.error
+    assert "unreasonable" in result.error
+    assert result.new_allocation == 0

@@ -2728,7 +2728,7 @@ def test_deep_check_uses_force_share_on_active_layer(
     mock_state,
     mock_shell,
 ):
-    """Core._deep_check_file() uses --force-share on qemu-img check."""
+    """Core._deep_check_file() uses --force-share on qemu-img check with 7200s timeout."""
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2766,6 +2766,109 @@ def test_deep_check_uses_force_share_on_active_layer(
     assert len(check_calls) == 1, "qemu-img check should be called exactly once"
     cmd_str = " ".join(check_calls[0].args[0])
     assert "--force-share" in cmd_str, f"qemu-img check must include --force-share, got: {cmd_str}"
+
+    # Timeout changed from 60s to 7200s (design D6)
+    assert check_calls[0].kwargs.get("timeout") == 7200, (
+        f"qemu-img check timeout should be 7200, got: {check_calls[0].kwargs.get('timeout')}"
+    )
+
+
+# ── test_deep_check_errors_not_just_corruptions ────────────────────────────
+
+
+def test_deep_check_errors_not_just_corruptions(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``_deep_check_file`` checks the ``errors`` field, not just ``corruptions``.
+
+    When ``errors > 0`` but ``corruptions == 0``, the file is reported as
+    ``"warning"`` and added to the broken list.
+    """
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"corruptions": 0, "errors": 2, "leaks": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    broken: list[str] = []
+    result = core._deep_check_file(
+        Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        "snap1",
+        broken,
+    )
+
+    assert result == "warning", (
+        f"_deep_check_file should return 'warning' when errors>0, got: {result}"
+    )
+    assert "snap1" in broken, "snap1 should be added to broken list when errors>0"
+
+
+# ── test_deep_check_timeout_7200_seconds ─────────────────────────────────
+
+
+def test_deep_check_timeout_7200_seconds(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``_deep_check_file`` passes timeout=7200 (not 60) to qemu-img check."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"corruptions": 0, "errors": 0, "leaks": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        core._deep_check_file(
+            Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+            "snap1",
+            [],
+        )
+
+    check_calls = [
+        c
+        for c in shell_spy.call_args_list
+        if c.args
+        and isinstance(c.args[0], list)
+        and "qemu-img" in c.args[0][0]
+        and "check" in " ".join(c.args[0])
+    ]
+    assert len(check_calls) == 1, "qemu-img check should be called exactly once"
+
+    timeout_val = check_calls[0].kwargs.get("timeout")
+    assert timeout_val == 7200, (
+        f"Timeout should be 7200 (2 hours) for large disks, got: {timeout_val}"
+    )
 
 
 # ── test_core_passes_vm_name_to_create_full_backup ───────────────────────
@@ -5812,7 +5915,12 @@ def test_reconcile_removes_orphan_files_on_target(
     mock_state,
     mock_shell,
 ):
-    """reconcile() deletes .qcow2 files on target not tracked in state."""
+    """reconcile() deletes .qcow2 files on target not tracked in state.
+
+    Under the new reconcile behavior, orphan files on target go through
+    broken-chain detection first.  An intact chain with no FULL anchor
+    leads to deletion.  A broken chain is CRITICAL-logged and NOT deleted.
+    """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -5830,6 +5938,21 @@ def test_reconcile_removes_orphan_files_on_target(
         timestamp=datetime.now(),
         allocation=0,
     )
+
+    # Broken-chain detection: mock intact chain.
+    _ok = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    mock_shell.expect_first("--backing-chain").returns(_ok)
+    # Anchor resolution: return no anchor → behaves as truly orphan.
+    mock_shell.expect("qemu-img info --output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
     ), patch.object(
@@ -5849,7 +5972,12 @@ def test_reconcile_orphan_files_dry_run(
     mock_state,
     mock_shell,
 ):
-    """reconcile() in dry-run reports orphan files but does NOT delete them."""
+    """reconcile() in dry-run reports orphan files but does NOT delete them.
+
+    Under the new reconcile behavior, orphan files on target go through
+    broken-chain detection first.  An intact chain with no FULL anchor
+    proceeds to the "would delete" dry-run path.
+    """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -5867,6 +5995,21 @@ def test_reconcile_orphan_files_dry_run(
         timestamp=datetime.now(),
         allocation=0,
     )
+
+    # Broken-chain detection: mock intact chain.
+    _ok = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    mock_shell.expect_first("--backing-chain").returns(_ok)
+    # Anchor resolution: return no anchor → truly orphan.
+    mock_shell.expect("qemu-img info --output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_backup]
     ), patch.object(
@@ -6066,7 +6209,12 @@ def test_reconcile_orphan_files_after_phantom_cleanup(
     mock_shell,
 ):
     """reconcile() removes phantom FULL from state, then deletes orphan
-    incremental files left on disk (bidirectional cleanup)."""
+    incremental files left on disk (bidirectional cleanup).
+
+    Under the new reconcile behavior, orphan files on target go through
+    broken-chain detection first.  An intact chain with no FULL anchor
+    leads to deletion.
+    """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -6098,6 +6246,21 @@ def test_reconcile_orphan_files_after_phantom_cleanup(
         timestamp=datetime.now(),
         allocation=0,
     )
+
+    # Broken-chain detection: mock intact chain.
+    _ok = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    mock_shell.expect_first("--backing-chain").returns(_ok)
+    # Anchor resolution: return no anchor → truly orphan.
+    mock_shell.expect("qemu-img info --output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     with patch.object(
         mock_factory._bitmap_backup_provider, "list", return_value=[orphan_inc]
     ), patch.object(

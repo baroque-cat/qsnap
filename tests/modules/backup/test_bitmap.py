@@ -25,6 +25,7 @@ Design decisions verified:
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -117,7 +118,58 @@ def _setup_incr_expectations(mock_shell, target, prev_data: tuple[Path, str, str
     mock_shell.expect("kill 99999").returns(_ok_result())
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok_result())
     mock_shell.expect("^mv ").returns(_ok_result())
+
+    # Step 5b post-transfer validation: chain-to-FULL traversability.
+    # qemu-img info --backing-chain on the target file returns a valid
+    # JSON array (chain is intact).  Individual tests can override with
+    # expect_first for failure scenarios.
+    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout='[{"filename": "fake-chain-element.qcow2"}]',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
     return nbd
+
+
+def _add_post_validation_mocks(mock_shell, target_path: str | None = None) -> None:
+    """Register post-validation mock expectations for create_full_backup().
+
+    Post-creation validation (design D5) checks:
+    1. ``qemu-img info`` — no ``backing-filename`` (standalone FULL).
+    2. ``checkpoint-list`` — a ``qsnap-`` checkpoint exists.
+    Also covers ``_delete_superseded_checkpoints`` which calls
+    ``list_checkpoints()``.
+    """
+    mock_shell.expect(r"qemu-img info.*--force-share.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1073741824,
+                "actual-size": 1048576,
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    target_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8] if target_path else "abc12345"
+    # A future timestamp (9999) ensures _delete_superseded_checkpoints
+    # sees it as NOT superseded (ts >= successor_ts → skip).
+    checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=f"{checkpoint_name}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
 
 def _setup_convert_expectations(
@@ -133,6 +185,9 @@ def _setup_convert_expectations(
     Configures the full sequence: virsh domblklist, run_with_stall_detection
     with qemu-img convert, mv .tmp → final, and finally-block cleanup
     (rm -f .tmp, domjobabort, rm -f socket).
+
+    Post-creation validation (design D5): qemu-img info (no backing-filename)
+    and checkpoint-list (qsnap- checkpoint exists) are also registered.
 
     No write-side qemu-nbd — qemu-img convert replaces the former Python
     pread/pwrite loop + write-side qemu-nbd server (design D1/D5).
@@ -161,6 +216,39 @@ def _setup_convert_expectations(
     mock_shell.expect("virsh domjobabort").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("rm -f").returns(_ok_result())
+
+    # Post-creation validation (design D5): qemu-img info returns
+    # no backing-filename (standalone FULL).
+    mock_shell.expect(r"qemu-img info.*--force-share.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1073741824,
+                "actual-size": 1048576,
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Post-creation validation: checkpoint-list returns a qsnap- checkpoint
+    # (verifies a baseline exists for future incrementals).  The checkpoint
+    # name prefix must match the target_hash of this target path, since
+    # _list_checkpoints_for_target filters by ``qsnap-{target_hash}-``.
+    # A future timestamp (9999) ensures _delete_superseded_checkpoints
+    # sees it as NOT superseded (ts >= successor_ts → skip).
+    target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
+    checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=f"{checkpoint_name}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -244,7 +332,7 @@ def test_no_checkpoints_triggers_full_export(mock_shell, make_vm_config, make_ta
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("checkpoint-list").returns(
+    mock_shell.expect_first("checkpoint-list").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
@@ -485,7 +573,7 @@ def test_socket_cleanup_on_success(mock_shell, make_vm_config, make_target, tmp_
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("checkpoint-list").returns(_ok_result())
+    mock_shell.expect_first("checkpoint-list").returns(_ok_result())
     mock_shell.expect("backup-begin").returns(_ok_result())
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
@@ -1148,6 +1236,33 @@ def test_full_pull_lifecycle_shared_by_both_paths(
     )
     shell2.expect("rm -f").returns(_ok_result())  # stale socket
     shell2.expect("backup-begin").returns(_ok_result())
+    # Post-creation validation: no backing-filename (standalone FULL)
+    shell2.expect(r"qemu-img info.*--force-share.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1073741824,
+                "actual-size": 1048576,
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Post-creation validation + _delete_superseded_checkpoints:
+    # checkpoint-list returns a qsnap- checkpoint matching target_cfb's hash
+    # with a future timestamp so _delete_superseded_checkpoints skips it.
+    cfb_hash = hashlib.md5(str(target_cfb.path).encode()).hexdigest()[:8]
+    shell2.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=f"qsnap-{cfb_hash}-99991231T000000-deadbe\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
 
     with patch.object(
         BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 0)
@@ -1341,7 +1456,7 @@ def test_domjobabort_called_after_successful_transfer(
     _setup_convert_expectations(mock_shell, target)
 
     mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("checkpoint-list").returns(
+    mock_shell.expect_first("checkpoint-list").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
@@ -1424,7 +1539,7 @@ def test_domjobabort_failure_is_non_fatal(
     _setup_convert_expectations(mock_shell, target)
 
     mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("checkpoint-list").returns(
+    mock_shell.expect_first("checkpoint-list").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
@@ -1741,7 +1856,7 @@ def test_atomic_full_export_passes_checkpoint_xml(
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
     mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
-    mock_shell.expect("checkpoint-list").returns(
+    mock_shell.expect_first("checkpoint-list").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     mock_shell.expect("backup-begin").returns(_ok_result())
@@ -2519,6 +2634,7 @@ def test_create_full_backup_libnbd_engine_selected(mock_shell, make_target, tmp_
 
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("backup-begin").returns(_ok_result())
+    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
 
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
@@ -2762,6 +2878,7 @@ def test_libnbd_full_uses_stall_detection(mock_shell, make_target, tmp_path):
 
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("backup-begin").returns(_ok_result())
+    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
 
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
@@ -3005,6 +3122,7 @@ def test_create_full_backup_libnbd_with_zstd_compression(mock_shell, make_target
 
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("backup-begin").returns(_ok_result())
+    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
 
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
@@ -3045,6 +3163,7 @@ def test_create_full_backup_libnbd_no_compression(mock_shell, make_target, tmp_p
 
     mock_shell.expect("rm -f").returns(_ok_result())
     mock_shell.expect("backup-begin").returns(_ok_result())
+    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
 
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
@@ -3865,3 +3984,368 @@ def test_force_cleanup_checkpoints_deletes_all(mock_shell):
     assert called_checkpoints == set(checkpoints), (
         f"Expected deletion of {set(checkpoints)}, got {called_checkpoints}"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# POST-TRANSFER VALIDATION (Step 5b) — incremental backups
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_incremental_chain_to_full_traversable(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """After a successful incremental transfer, Step 5b validates that:
+    1. ``qemu-img info --backing-chain`` on the target file succeeds
+       (chain-to-FULL is traversable).
+    2. ``list_checkpoints()`` returns at least one qsnap- checkpoint.
+
+    Both pass → ``BackupResult(success=True)``.
+    """
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_incr_expectations(
+        mock_shell,
+        target,
+        (prev_backup, "vda", prev_backup.name),
+    )
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    # checkpoint-list returns prior checkpoint (qsnap- prefix) —
+    # used for Step 2 discovery AND Step 5b checkpoint existence check.
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())  # rotation
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # cleanup
+
+    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+    results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].error is None
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_incremental_chain_to_full_broken(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When Step 5b's chain-to-FULL check fails (``qemu-img info
+    --backing-chain`` returns non-zero exit), ``transfer_missing()``
+    returns ``BackupResult(success=False, error="chain-to-FULL not
+    traversable")``.
+
+    The partial file and successor checkpoint are cleaned up.
+    """
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    target_file = target.path / f"{snapshot.name}.qcow2"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_incr_expectations(
+        mock_shell,
+        target,
+        (prev_backup, "vda", prev_backup.name),
+    )
+
+    # Override the chain-to-FULL check to FAIL.
+    # Use the specific snapshot name in the pattern to avoid breaking
+    # _validate_backing_chain (which checks the previous backup, not the
+    # target file being created).  The target file is
+    # {target}/{snapshot.name}.qcow2.
+    mock_shell.expect_first(
+        rf"qemu-img info.*--backing-chain.*{snapshot.name}"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open ...",
+            returncode=1,
+            error="qemu-img info --backing-chain failed",
+        )
+    )
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # _cleanup_partial_file
+    mock_shell.expect(f"rm -f {target_file}").returns(_ok_result())
+    # successor checkpoint deletion best-effort
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # cleanup
+
+    provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+    results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "chain-to-FULL not traversable" in results[0].error
+    assert results[0].bytes_transferred == 0
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_incremental_checkpoint_missing(
+    mock_shell, make_vm_config, make_target, tmp_path
+):
+    """When Step 5b's chain-to-FULL check passes but ``list_checkpoints()``
+    returns empty (no qsnap- checkpoint), ``transfer_missing()`` returns
+    ``BackupResult(success=False, error="checkpoint missing — next
+    incremental impossible")``.
+
+    The partial file and successor checkpoint are cleaned up.
+    """
+    vm_config = make_vm_config()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    target = make_target(path=str(target_path), verify="off")
+    snapshot = _make_snapshot()
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    target_file = target.path / f"{snapshot.name}.qcow2"
+
+    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup.write_bytes(b"")
+
+    nbd = _setup_incr_expectations(
+        mock_shell,
+        target,
+        (prev_backup, "vda", prev_backup.name),
+    )
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    # Step 2 discovery: checkpoint-list returns prior (needed for incremental)
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout=prior_checkpoint + "\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("backup-begin").returns(_ok_result())
+    # _cleanup_partial_file
+    mock_shell.expect(f"rm -f {target_file}").returns(_ok_result())
+    # successor checkpoint deletion best-effort
+    mock_shell.expect("checkpoint-delete").returns(_ok_result())
+    mock_shell.expect("domjobabort").returns(_ok_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # cleanup
+
+    # Patch list_checkpoints: first call returns a non-empty checkpoint
+    # (for Step 2 discovery via _list_checkpoints_for_target), second
+    # call returns empty (for Step 5b post-transfer validation).
+    with patch.object(
+        BitmapBackupProvider,
+        "list_checkpoints",
+        side_effect=[[prior_checkpoint], []],
+    ):
+        provider = BitmapBackupProvider(mock_shell, nbd=nbd)
+        results = provider.transfer_missing(vm_config, target, [snapshot])
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "checkpoint missing" in results[0].error.lower()
+    assert results[0].bytes_transferred == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# POST-CREATION VALIDATION — FULL backups (design D5)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_no_backing_file_and_checkpoint_exists(
+    mock_shell, make_target, tmp_path
+):
+    """After a successful FULL backup creation, post-validation confirms:
+    1. ``qemu-img info`` shows no ``backing-filename`` (standalone FULL).
+    2. ``list_checkpoints()`` returns a qsnap- checkpoint.
+
+    Both pass → ``BackupResult(success=True)``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    _setup_convert_expectations(mock_shell, target)
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout, **kwargs):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run) as run_spy:
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target, compress=False
+        )
+
+    assert result.success is True
+    assert result.error is None
+    assert result.snapshot_name == snapshot.name
+    assert result.bytes_transferred == 65536
+
+    # Verify post-validation was exercised: qemu-img info (no backing)
+    # and checkpoint-list (qsnap- exists) both match expectations.
+    all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
+    info_cmds = [cmd for cmd in all_run_cmds if "qemu-img info" in cmd]
+    assert len(info_cmds) >= 1, (
+        "Post-creation qemu-img info check should have been called"
+    )
+    cp_cmds = [cmd for cmd in all_run_cmds if "checkpoint-list" in cmd]
+    assert len(cp_cmds) >= 1, (
+        "Post-creation checkpoint-list check should have been called"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_unexpected_backing_file(mock_shell, make_target, tmp_path):
+    """When post-validation ``qemu-img info`` shows a ``backing-filename``
+    (FULL is not standalone), ``create_full_backup()`` returns
+    ``BackupResult(success=False, error="FULL backup has unexpected
+    backing file")``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    _setup_convert_expectations(mock_shell, target)
+
+    # Override the post-validation qemu-img info to return a backing-filename
+    # (the generic pattern from _setup_convert_expectations is overridden
+    # by this expect_first which matches qemu-img info --force-share).
+    mock_shell.expect_first(r"qemu-img info.*--force-share.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({
+                "format": "qcow2",
+                "virtual-size": 1073741824,
+                "actual-size": 1048576,
+                "backing-filename": "/mnt/backup/some-backing.qcow2",
+            }),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout, **kwargs):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target, compress=False
+        )
+
+    assert result.success is False
+    assert "FULL backup has unexpected backing file" in result.error
+    assert result.bytes_transferred == 0
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_checkpoint_missing(mock_shell, make_target, tmp_path):
+    """When post-validation ``qemu-img info`` shows no backing-filename
+    (standalone) but ``list_checkpoints()`` returns empty (no qsnap-
+    checkpoint), ``create_full_backup()`` returns
+    ``BackupResult(success=False, error="checkpoint missing — next
+    incremental impossible")``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    _setup_convert_expectations(mock_shell, target)
+
+    mock_shell.expect("virsh --version").returns(_ok_version_result())
+    mock_shell.expect("rm -f").returns(_ok_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(_ok_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout, **kwargs):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    # The list_checkpoints in create_full_backup calls
+    # virsh checkpoint-list --name --domain testvm.
+    # _setup_convert_expectations already registered a checkpoint-list
+    # expectation with a qsnap- result.  Override with empty output.
+    with (
+        patch.object(mock_shell, "run", side_effect=spied_run),
+        patch.object(
+            BitmapBackupProvider, "list_checkpoints", return_value=[]
+        ),
+    ):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.create_full_backup(
+            "testvm", snapshot, target, compress=False
+        )
+
+    assert result.success is False
+    assert "checkpoint missing" in result.error.lower()
+    assert result.bytes_transferred == 0

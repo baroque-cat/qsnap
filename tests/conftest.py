@@ -21,6 +21,9 @@ from tests.mocks import (
     MockVMModuleFactory,
 )
 
+# Path to the fixtures directory (for domain XML fixtures).
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Remove stale pytest temp dirs left by previous runs.
@@ -289,6 +292,41 @@ def mock_lock_manager():
 def cli_app():
     """The built ArgumentParser for CLI tests that parse argv lists."""
     return build_argparser()
+
+
+@pytest.fixture
+def domain_xml_with_backing_store() -> str:
+    """XML string with valid <backingStore> chain for virsh dumpxml mock.
+
+    Represents a domain XML output from ``virsh dumpxml`` where libvirt
+    has resolved the full backing chain: snap3 → snap2 → snap1 → base.
+    """
+    fixture_path = _FIXTURES_DIR / "domain_xml_with_backing_store.xml"
+    return fixture_path.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def domain_xml_stale_backing_store() -> str:
+    """XML string with stale <backingStore> references.
+
+    Represents a domain XML where snap1.qcow2 was deleted via blockcommit
+    but libvirt still shows it in the backing chain.  The <backingStore>
+    chain references snap1 but the file no longer exists on disk.
+    """
+    fixture_path = _FIXTURES_DIR / "domain_xml_stale_backing_store.xml"
+    return fixture_path.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def domain_xml_no_backing_store() -> str:
+    """XML string with no <backingStore> elements (after refresh).
+
+    Represents a domain XML after _refresh_domain_backing_store has
+    stripped stale <backingStore> elements.  Only the active disk
+    source is present.
+    """
+    fixture_path = _FIXTURES_DIR / "domain_xml_no_backing_store.xml"
+    return fixture_path.read_text(encoding="utf-8")
 
 
 @pytest.fixture

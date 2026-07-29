@@ -230,6 +230,22 @@ def test_reconcile_command(test_vm, caplog):
         f"got {deps_after}"
     )
 
+    # Verify new ReconcileResult fields (D8) are present.
+    assert hasattr(rec_result, "state_supplemented"), (
+        "ReconcileResult must have state_supplemented field"
+    )
+    assert hasattr(rec_result, "xml_refreshed"), (
+        "ReconcileResult must have xml_refreshed field"
+    )
+    assert hasattr(rec_result, "allocation_fixed"), (
+        "ReconcileResult must have allocation_fixed field"
+    )
+    # In this scenario (phantom FULL removal from target), no state
+    # supplementation or XML refresh occurs:
+    assert rec_result.state_supplemented == 0, "no files should be supplemented"
+    assert rec_result.xml_refreshed is False, "XML should not be refreshed"
+    # allocation_fixed may be False by default here.
+
     # NOTE: baselines_cleared may be 0 because Core never calls
     # set_last_backup_allocation() anywhere — see
     # qsnap/core/__init__.py:_backup_target (lines ~3234-3266).
@@ -333,6 +349,24 @@ def test_reconcile_removes_orphan_backup_files(test_vm, caplog):
         f"Result: {rec_result}"
     )
 
+    # NOTE: Under the new reconcile behavior, an orphan file on target is
+    # deleted only when its backing chain does NOT lead to a FULL tracked
+    # in state.  If the chain were intact to a tracked FULL, reconcile
+    # would instead supplement state via record_incremental_dependency()
+    # and increment ``state_supplemented``.  In this test, the orphan was
+    # created from scratch (no backing chain to a tracked FULL), so it
+    # follows the deletion path.
+
+    # Verify new ReconcileResult fields (D8) are present:
+    assert hasattr(rec_result, "state_supplemented"), (
+        "ReconcileResult must have state_supplemented field"
+    )
+    assert isinstance(rec_result.state_supplemented, int)
+    assert hasattr(rec_result, "xml_refreshed")
+    assert isinstance(rec_result.xml_refreshed, bool)
+    assert hasattr(rec_result, "allocation_fixed")
+    assert isinstance(rec_result.allocation_fixed, bool)
+
     _cleanup_checkpoints(shell, vm_name)
 
 
@@ -352,8 +386,11 @@ def test_reconcile_removes_orphan_snapshot_files(test_vm, caplog):
        — simulating a crash between snapshot creation and state recording.
     4. Run ``core.reconcile()``.
     5. Verify:
-       - Orphan file is deleted from snapshot_dir.
+       - Orphan file is deleted from snapshot_dir ONLY when NOT referenced
+         by domain XML.
        - ``ReconcileResult.orphan_files_removed > 0``.
+       - When the file IS referenced by domain XML (part of the active
+         chain), reconcile supplements state instead of deleting.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -400,6 +437,13 @@ def test_reconcile_removes_orphan_snapshot_files(test_vm, caplog):
     )
     assert orphan_snap.exists(), "Orphan snapshot file should exist"
 
+    # Verify the orphan file is NOT referenced by domain XML before reconcile.
+    dumpxml = shell.run(["virsh", "dumpxml", "--domain", vm_name], timeout=30)
+    xml_text = dumpxml.stdout if dumpxml.success else ""
+    assert str(orphan_snap) not in xml_text, (
+        "Orphan file should NOT be in domain XML (standalone qcow2 not part of chain)"
+    )
+
     # --- Run reconcile ---
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -407,7 +451,7 @@ def test_reconcile_removes_orphan_snapshot_files(test_vm, caplog):
 
     rec_result = reconcile_results[vm_name]
 
-    # Orphan snapshot file should be deleted.
+    # Orphan snapshot file should be deleted because it is NOT in domain XML.
     assert not orphan_snap.exists(), (
         f"Orphan snapshot file {orphan_snap} should have been deleted by reconcile"
     )
@@ -415,5 +459,20 @@ def test_reconcile_removes_orphan_snapshot_files(test_vm, caplog):
         f"Expected orphan_files_removed > 0, got {rec_result.orphan_files_removed}. "
         f"Result: {rec_result}"
     )
+
+    # When domain XML does NOT reference the file, reconcile deletes it
+    # (step 2: truly orphan, not in state, not in XML).  When domain XML
+    # DOES reference a file missing from state, reconcile would instead
+    # call record_snapshot() and increment state_supplemented.
+
+    # Verify new ReconcileResult fields (D8) are present:
+    assert hasattr(rec_result, "state_supplemented"), (
+        "ReconcileResult must have state_supplemented field"
+    )
+    assert isinstance(rec_result.state_supplemented, int)
+    assert hasattr(rec_result, "xml_refreshed")
+    assert isinstance(rec_result.xml_refreshed, bool)
+    assert hasattr(rec_result, "allocation_fixed")
+    assert isinstance(rec_result.allocation_fixed, bool)
 
     _cleanup_checkpoints(shell, vm_name)

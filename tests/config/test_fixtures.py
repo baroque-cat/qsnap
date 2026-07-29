@@ -121,10 +121,10 @@ def test_example_config_parseable() -> None:
     # Verify global defaults.
     global_cfg = facade.get_global()
     assert global_cfg.timestamp_format == "long"
-    # Count-based retention fields default to None in the example (commented out).
-    assert global_cfg.snapshot_chain_length is None
-    assert global_cfg.target_chain_length is None
-    assert global_cfg.target_keep_generations is None
+    # Count-based retention fields — defaults are 24/168/2 when commented out.
+    assert global_cfg.snapshot_chain_length == 24
+    assert global_cfg.target_chain_length == 168
+    assert global_cfg.target_keep_generations == 2
 
     # Verify VM de facto.
     vm = facade.get_vm("debiantest")
@@ -135,10 +135,10 @@ def test_example_config_parseable() -> None:
     # Defaults.
     assert target.incremental is True
     assert target.compress is True
-    # Count-based retention fields default to None on the VM (inherited from global).
-    assert vm.snapshot_chain_length is None
-    assert vm.target_chain_length is None
-    assert vm.target_keep_generations is None
+    # Count-based retention fields — inherited from global defaults (24/168/2).
+    assert vm.snapshot_chain_length == 24
+    assert vm.target_chain_length == 168
+    assert vm.target_keep_generations == 2
 
 
 # ──────────────────────────────────────────────────────────────────────────

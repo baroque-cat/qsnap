@@ -41,14 +41,19 @@ class GlobalConfig:
     retention defaults (``snapshot_chain_length``, ``target_chain_length``,
     ``target_keep_generations``) are resolved by ``ConfigFacade`` via
     option inheritance (global → VM → target).
+
+    Default retention values: ``snapshot_chain_length=24`` (hourly
+    snapshots, ~1 day of history), ``target_chain_length=168`` (hourly
+    incrementals, ~1 week of history), ``target_keep_generations=2``
+    (keep 2 FULL chains on targets).
     """
 
     timestamp_format: str = "long"
     state_dir: str = "/var/lib/qsnap/state"
     lockfile: str | None = None
-    snapshot_chain_length: int | None = None
-    target_chain_length: int | None = None
-    target_keep_generations: int | None = None
+    snapshot_chain_length: int | None = 24
+    target_chain_length: int | None = 168
+    target_keep_generations: int | None = 2
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
