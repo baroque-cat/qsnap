@@ -211,7 +211,6 @@ class BitmapBackupProvider(IBackupProvider):
         *,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> list[BackupResult]:
@@ -438,7 +437,6 @@ class BitmapBackupProvider(IBackupProvider):
                         backup_xml_path=backup_xml_path,
                         checkpoint_xml_path=checkpoint_xml_path,
                         disk_target=disk_target,
-                        full_transfer_engine=full_transfer_engine,
                         convert_parallel=convert_parallel,
                         convert_out_of_order=convert_out_of_order,
                     )
@@ -803,143 +801,6 @@ class BitmapBackupProvider(IBackupProvider):
 
         return None, bytes_transferred
 
-    def _full_transfer_via_libnbd(
-        self,
-        *,
-        socket_path: str | None,
-        source_path: Path | None,
-        tmp_file: Path,
-        compress: bool,
-        compression_type: str,
-        stall_timeout: int,
-        disk_target: str | None = None,
-    ) -> tuple[str | None, int]:
-        """Execute FULL transfer via the libnbd ``pread``/``pwrite`` engine.
-
-        Alternative to :meth:`_qemu_img_convert_transfer` — selected when
-        ``full_transfer_engine == "libnbd"`` (design D3).  Revives the
-        former ``_start_write_server()`` + ``_transfer(zero_skip=True)``
-        path that was dead code since v0.3.0.
-
-        Lifecycle (design D4):
-
-        1. Determine the virtual size:
-           - **Running VM** (*socket_path* set): connect to the libvirt
-             NBD export via ``INbdClient.get_size()``.
-           - **Stopped VM** (*source_path* set): query via
-             :meth:`_query_virtual_size` (``qemu-img info``).
-        2. Create an empty qcow2 with the correct virtual size and
-           compression type via ``qemu-img create -f qcow2 [-o
-           compression_type=<type>] <tmp_file> <virtual_size>``.
-        3. Start a write-side ``qemu-nbd`` via
-           :meth:`_start_write_server` (compress driver when
-           *compress* is ``True``).
-        4. For stopped VMs: also start a read-side ``qemu-nbd``
-           (``--read-only``) on the source file.
-        5. Call :meth:`_transfer` with ``meta_contexts=["base:allocation"]``,
-           ``zero_skip=True`` to copy all allocated extents.
-        6. Cleanup: terminate both ``qemu-nbd`` processes via pidfile.
-
-        ``convert_parallel`` and ``convert_out_of_order`` are ignored
-        (design D5) — the libnbd engine has no parallelism or
-        out-of-order concept.
-
-        Returns ``(error, bytes_transferred)`` — *error* is ``None`` on
-        success; *bytes_transferred* is the sum of transferred extent
-        lengths.
-        """
-        assert self._nbd is not None  # guarded by callers
-
-        # For running VMs: socket_path is the libvirt NBD export socket.
-        # For stopped VMs: source_path is the source qcow2 — start a
-        # read-side qemu-nbd to serve it via NBD.
-        read_socket: str = socket_path or ""
-        read_pid_file: Path | None = None
-        write_socket = f"/tmp/qsnap-write-{os.getpid()}.sock"
-        write_pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}.pid")
-
-        try:
-            # (1) Determine virtual size.
-            if socket_path is not None:
-                # Running VM: connect to the libvirt NBD export to get
-                # the virtual size, then disconnect (the transfer loop
-                # will reconnect).
-                src = self._nbd
-                conn = src.connect(
-                    f"nbd+unix:///?socket={socket_path}",
-                    disk_target or "",
-                    [_BASE_ALLOCATION_CONTEXT],
-                )
-                if not conn.success:
-                    return conn.error or "source NBD connect failed", 0
-                virtual_size = src.get_size()
-                src.disconnect()
-            else:
-                # Stopped VM: query virtual size from the source file.
-                assert source_path is not None
-                virtual_size = self._query_virtual_size(source_path)
-                # Start a read-side qemu-nbd on the source file.
-                read_socket = f"/tmp/qsnap-read-{os.getpid()}.sock"
-                read_pid_file = Path(f"/tmp/qsnap-read-nbd-{os.getpid()}.pid")
-                self._shell.run(["rm", "-f", read_socket, str(read_pid_file)], timeout=10)
-                read_cmd = [
-                    "qemu-nbd",
-                    "--fork",
-                    "--persistent",
-                    "--read-only",
-                    "--pid-file",
-                    str(read_pid_file),
-                    "--socket",
-                    read_socket,
-                    "--format=qcow2",
-                    str(source_path),
-                ]
-                read_result = self._shell.run(read_cmd, timeout=30)
-                if not read_result.success:
-                    return read_result.error or "read-side qemu-nbd failed to start", 0
-
-            # (2) Create empty qcow2 with correct virtual size.
-            create_cmd: list[str] = ["qemu-img", "create", "-f", "qcow2"]
-            if compress:
-                create_cmd.extend(["-o", f"compression_type={compression_type}"])
-            create_cmd.extend([str(tmp_file), str(virtual_size or 0)])
-            create_result = self._shell.run(create_cmd, timeout=60, check=True)
-            if not create_result.success:
-                return create_result.error or "qemu-img create failed", 0
-
-            # (3) Start write-side qemu-nbd.
-            ws_result = self._start_write_server(
-                target_file=tmp_file,
-                write_socket=write_socket,
-                pid_file=write_pid_file,
-                compress=compress,
-            )
-            if not ws_result.success:
-                return ws_result.error or "write-side qemu-nbd failed to start", 0
-
-            # (4) Transfer via pread/pwrite with zero_skip=True.
-            transfer_error, bytes_transferred = self._transfer(
-                socket_path=read_socket,
-                write_socket=write_socket,
-                disk_target=disk_target or "",
-                meta_contexts=[_BASE_ALLOCATION_CONTEXT],
-                zero_skip=True,
-                compress=compress,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-            )
-
-            return transfer_error, bytes_transferred
-
-        finally:
-            # Cleanup write-side qemu-nbd (always, even on failure).
-            self._terminate_qemu_nbd(write_pid_file)
-            self._shell.run(["rm", "-f", write_socket, str(write_pid_file)], timeout=10)
-            # Cleanup read-side qemu-nbd (stopped VM only).
-            if read_pid_file is not None:
-                self._terminate_qemu_nbd(read_pid_file)
-                self._shell.run(["rm", "-f", read_socket, str(read_pid_file)], timeout=10)
-
     def _full_pull_lifecycle(
         self,
         *,
@@ -954,7 +815,6 @@ class BitmapBackupProvider(IBackupProvider):
         backup_xml_path: Path | None,
         checkpoint_xml_path: Path | None,
         disk_target: str | None = None,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> tuple[str | None, int]:
@@ -978,34 +838,19 @@ class BitmapBackupProvider(IBackupProvider):
         success; *dirty_bytes* is the size of the transferred file.
         """
         try:
-            # (1) Execute the FULL transfer via the selected engine
-            # (design D2/D3).  When full_transfer_engine == "libnbd",
-            # the pread/pwrite engine is used (create empty qcow2,
-            # start write-side qemu-nbd, _transfer(zero_skip=True)).
-            # Otherwise, qemu-img convert (default — C code, parallel
-            # coroutines, ~850 MB/s zstd).
-            if full_transfer_engine == "libnbd":
-                transfer_error, bytes_transferred = self._full_transfer_via_libnbd(
-                    socket_path=socket_path,
-                    source_path=source_path,
-                    tmp_file=tmp_file,
-                    compress=compress,
-                    compression_type=compression_type,
-                    stall_timeout=stall_timeout,
-                    disk_target=disk_target,
-                )
-            else:
-                transfer_error, bytes_transferred = self._qemu_img_convert_transfer(
-                    socket_path=socket_path,
-                    source_path=source_path,
-                    tmp_file=tmp_file,
-                    compress=compress,
-                    compression_type=compression_type,
-                    stall_timeout=stall_timeout,
-                    disk_target=disk_target,
-                    parallel=convert_parallel,
-                    out_of_order=convert_out_of_order,
-                )
+            # (1) Execute the FULL transfer via qemu-img convert (C code,
+            # parallel coroutines, ~850 MB/s zstd).
+            transfer_error, bytes_transferred = self._qemu_img_convert_transfer(
+                socket_path=socket_path,
+                source_path=source_path,
+                tmp_file=tmp_file,
+                compress=compress,
+                compression_type=compression_type,
+                stall_timeout=stall_timeout,
+                disk_target=disk_target,
+                parallel=convert_parallel,
+                out_of_order=convert_out_of_order,
+            )
 
             # (2) Atomic rename: mv .tmp to final name.
             if transfer_error is None:
@@ -1505,7 +1350,6 @@ class BitmapBackupProvider(IBackupProvider):
         compress: bool = False,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> BackupResult:
@@ -1608,7 +1452,6 @@ class BitmapBackupProvider(IBackupProvider):
                 backup_xml_path=backup_xml_path,
                 checkpoint_xml_path=checkpoint_xml_path,
                 disk_target=disk_target,
-                full_transfer_engine=full_transfer_engine,
                 convert_parallel=convert_parallel,
                 convert_out_of_order=convert_out_of_order,
             )
@@ -1658,7 +1501,6 @@ class BitmapBackupProvider(IBackupProvider):
                 stall_timeout=stall_timeout,
                 backup_xml_path=None,
                 checkpoint_xml_path=None,
-                full_transfer_engine=full_transfer_engine,
                 convert_parallel=convert_parallel,
                 convert_out_of_order=convert_out_of_order,
             )

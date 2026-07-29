@@ -138,7 +138,6 @@ def test_ibackup_provider_create_full_backup_abstract():
             *,
             compression_type="zstd",
             stall_timeout=1800,
-            full_transfer_engine="qemu-img-convert",
             convert_parallel=4,
             convert_out_of_order=True,
         ):
@@ -195,47 +194,7 @@ def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwar
     assert isinstance(result, BackupResult)
 
 
-# ── New contract tests: full_transfer_engine, convert_parallel, convert_out_of_order ──
-
-
-@pytest.mark.parametrize(
-    "cls,init_kwargs",
-    [
-        (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBitmapBackupProvider, {}),
-    ],
-    ids=["bitmap", "mock_bitmap"],
-)
-def test_backup_provider_create_full_backup_accepts_full_transfer_engine(
-    cls,
-    init_kwargs,
-):
-    """create_full_backup() accepts full_transfer_engine with default 'qemu-img-convert'."""
-    sig = inspect.signature(cls.create_full_backup)
-    assert "full_transfer_engine" in sig.parameters, (
-        f"full_transfer_engine missing from {cls.__name__}.create_full_backup"
-    )
-    param = sig.parameters["full_transfer_engine"]
-    assert param.default == "qemu-img-convert", (
-        f"default should be 'qemu-img-convert', got {param.default!r}"
-    )
-
-    provider = cls(**init_kwargs)
-    source_snapshot = SnapshotInfo(
-        name="test-snap",
-        path=Path("/tmp/snap.qcow2"),
-        timestamp=datetime.now(),
-        allocation=65536,
-    )
-    target = TargetConfig(path=Path("/mnt/backup/testvm"))
-    result = provider.create_full_backup(
-        "testvm",
-        source_snapshot,
-        target,
-        compress=False,
-        full_transfer_engine="libnbd",
-    )
-    assert isinstance(result, BackupResult)
+# ── Contract tests: convert_parallel, convert_out_of_order ──
 
 
 @pytest.mark.parametrize(
@@ -312,45 +271,6 @@ def test_backup_provider_create_full_backup_accepts_convert_out_of_order(
         convert_out_of_order=False,
     )
     assert isinstance(result, BackupResult)
-
-
-@pytest.mark.parametrize(
-    "cls,init_kwargs",
-    [
-        (BitmapBackupProvider, {"shell": MockShell()}),
-        (MockBitmapBackupProvider, {}),
-    ],
-    ids=["bitmap", "mock_bitmap"],
-)
-def test_backup_provider_transfer_missing_accepts_full_transfer_engine(
-    cls,
-    init_kwargs,
-):
-    """transfer_missing() accepts full_transfer_engine with default 'qemu-img-convert'."""
-    sig = inspect.signature(cls.transfer_missing)
-    assert "full_transfer_engine" in sig.parameters, (
-        f"full_transfer_engine missing from {cls.__name__}.transfer_missing"
-    )
-    param = sig.parameters["full_transfer_engine"]
-    assert param.default == "qemu-img-convert", (
-        f"default should be 'qemu-img-convert', got {param.default!r}"
-    )
-
-    provider = cls(**init_kwargs)
-    vm_config = VMConfig(
-        name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
-        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
-    )
-    target = TargetConfig(path=Path("/mnt/backup/testvm"))
-    snapshots: list[SnapshotInfo] = []
-    result = provider.transfer_missing(
-        vm_config,
-        target,
-        snapshots,
-        full_transfer_engine="libnbd",
-    )
-    assert isinstance(result, list)
 
 
 @pytest.mark.parametrize(

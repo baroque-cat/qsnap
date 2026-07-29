@@ -198,49 +198,6 @@ def test_no_global_section_backward_compatible() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# configurable-full-backup-engine: full_transfer_engine validation
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_valid_full_transfer_engine_accepted(tmp_path: Path) -> None:
-    """Global full_transfer_engine='libnbd' parses successfully, value stored in GlobalConfig."""
-    config_text = (
-        'full_transfer_engine = "libnbd"\n'
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
-        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
-        "[[vm.target]]\n"
-        'path = "/mnt/backup/testvm"\n'
-    )
-    config_file = tmp_path / "valid_engine.toml"
-    config_file.write_text(config_text)
-
-    facade = ConfigFacade(config_file)
-    assert facade.get_global().full_transfer_engine == "libnbd"
-
-
-@pytest.mark.unit
-def test_invalid_full_transfer_engine_raises_config_error(tmp_path: Path) -> None:
-    """Global full_transfer_engine='invalid-engine' raises ConfigError."""
-    config_text = (
-        'full_transfer_engine = "invalid-engine"\n'
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
-        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
-        "[[vm.target]]\n"
-        'path = "/mnt/backup/testvm"\n'
-    )
-    config_file = tmp_path / "invalid_engine.toml"
-    config_file.write_text(config_text)
-
-    with pytest.raises(ConfigError, match="Invalid full_transfer_engine"):
-        ConfigFacade(config_file)
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # configurable-full-backup-engine: convert_parallel validation
 # ──────────────────────────────────────────────────────────────────────────
 

@@ -691,29 +691,6 @@ def test_global_config_backup_create_explicit_onchange():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.full_transfer_engine — FULL backup transfer engine selection
-# ---------------------------------------------------------------------------
-
-
-def test_global_config_full_transfer_engine_default_is_qemu_img_convert():
-    """GlobalConfig().full_transfer_engine defaults to 'qemu-img-convert'."""
-    assert GlobalConfig().full_transfer_engine == "qemu-img-convert"
-
-
-def test_global_config_full_transfer_engine_is_immutable():
-    """GlobalConfig is frozen; mutating full_transfer_engine raises FrozenInstanceError."""
-    cfg = GlobalConfig()
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.full_transfer_engine = "libnbd"  # type: ignore[misc]
-
-
-def test_global_config_full_transfer_engine_set_to_libnbd():
-    """GlobalConfig(full_transfer_engine='libnbd') stores 'libnbd'."""
-    cfg = GlobalConfig(full_transfer_engine="libnbd")
-    assert cfg.full_transfer_engine == "libnbd"
-
-
-# ---------------------------------------------------------------------------
 # GlobalConfig.convert_parallel — qemu-img convert -m flag
 # ---------------------------------------------------------------------------
 
@@ -745,23 +722,6 @@ def test_global_config_convert_out_of_order_is_immutable():
     cfg = GlobalConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.convert_out_of_order = False  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# TargetConfig.full_transfer_engine
-# ---------------------------------------------------------------------------
-
-
-def test_target_config_full_transfer_engine_default():
-    """TargetConfig().full_transfer_engine defaults to 'qemu-img-convert'."""
-    target = TargetConfig(path=Path("/backup/testvm"))
-    assert target.full_transfer_engine == "qemu-img-convert"
-
-
-def test_target_config_full_transfer_engine_overrides():
-    """TargetConfig(full_transfer_engine='libnbd') overrides the default."""
-    target = TargetConfig(path=Path("/backup/testvm"), full_transfer_engine="libnbd")
-    assert target.full_transfer_engine == "libnbd"
 
 
 # ---------------------------------------------------------------------------

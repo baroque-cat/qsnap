@@ -1648,73 +1648,6 @@ def test_create_full_backup_skips_state_when_none(mock_shell, make_target, tmp_p
     assert result.snapshot_name == snapshot.name
 
 
-def test_create_full_zstd_libnbd(mock_shell, make_target, tmp_path, success_result):
-    """create_full_backup with full_transfer_engine='libnbd' and zstd compression.
-    
-    - _full_transfer_via_libnbd is called (libnbd path).
-    - qemu-img convert is NOT called via run_with_stall_detection.
-    """
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    # Pre-flight: virsh --version, stale socket cleanup
-    mock_shell.expect("virsh --version").returns(_ok_version_result())
-    mock_shell.expect("rm -f").returns(success_result())
-    # backup-begin for running VM
-    mock_shell.expect_first("backup-begin").returns(success_result())
-
-    # mv .tmp → final (in _full_pull_lifecycle)
-    mock_shell.expect("^mv ").returns(success_result())
-    # Cleanup: domjobabort, rm .tmp, rm socket (in _full_pull_lifecycle finally)
-    mock_shell.expect("domjobabort").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-
-    # Post-creation validation: qemu-img info (no backing-filename)
-    mock_shell.expect(r"qemu-img info.*--force-share.*--output=json").returns(
-        ShellResult(
-            success=True,
-            stdout='{"format": "qcow2", "virtual-size": 1073741824, "actual-size": 1048576}',
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    # Post-creation validation: checkpoint-list
-    import hashlib
-    target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
-    mock_shell.expect("checkpoint-list").returns(
-        ShellResult(
-            success=True,
-            stdout=f"qsnap-{target_hash}-99991231T000000-deadbe\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with (
-        patch.object(BitmapBackupProvider, "_full_transfer_via_libnbd", return_value=(None, 65536)) as mock_libnbd,
-        patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as stall_spy,
-    ):
-        provider = BitmapBackupProvider(mock_shell, nbd=None)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True, compression_type="zstd",
-            full_transfer_engine="libnbd",
-        )
-
-    assert result.success is True
-    assert result.snapshot_name == snapshot.name
-    # _full_transfer_via_libnbd was called (libnbd path)
-    mock_libnbd.assert_called_once()
-    # qemu-img convert was NOT called via stall detection
-    convert_stall_calls = [
-        call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
-    ]
-    assert len(convert_stall_calls) == 0, "qemu-img convert should NOT be called for libnbd engine"
-
-
 # ──────────────────────────────────────────────────────────────────────────
 # Failed file deletion + successor checkpoint best-effort
 # ──────────────────────────────────────────────────────────────────────────
@@ -2541,56 +2474,11 @@ def _setup_lifecycle_cleanup_expectations(mock_shell) -> None:
     mock_shell.expect("rm -f").returns(_ok())  # rm -f socket_path
 
 
-def test_first_full_transfer_via_libnbd_engine(mock_shell, make_vm_config, make_target, tmp_path, success_result):
-    """transfer_missing with full_transfer_engine='libnbd' delegates to
-    _full_transfer_via_libnbd via _full_pull_lifecycle."""
-    vm_config = make_vm_config()
-    target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off")
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("checkpoint-list").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect("test -f").returns(_ok())
-    mock_shell.expect("rm -f").returns(_ok())
-    mock_shell.expect("backup-begin").returns(_ok())
-
-    # Override conftest domblklist
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    # transfer_missing outer finally cleanup
-    mock_shell.expect("domjobabort").returns(_ok())
-    mock_shell.expect("rm -f").returns(_ok())
-    mock_shell.expect("rm -f").returns(_ok())
-    mock_shell.expect("rm -f").returns(_ok())
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], full_transfer_engine="libnbd"
-        )
-
-    assert len(results) == 1
-    assert results[0].success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
-
-
 def test_transfer_missing_defaults_to_qemu_img_convert(
     mock_shell, make_vm_config, make_target, tmp_path,
     success_result,
 ):
-    """transfer_missing defaults full_transfer_engine to qemu-img-convert."""
+    """transfer_missing uses qemu-img-convert for full transfers."""
     vm_config = make_vm_config()
     target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off")
     snapshot = _make_snapshot()
@@ -2626,51 +2514,7 @@ def test_transfer_missing_defaults_to_qemu_img_convert(
     assert len(results) == 1
     assert results[0].success is True
     mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("full_transfer_engine") == "qemu-img-convert"
 
-
-def test_transfer_missing_libnbd_full_engine(mock_shell, make_vm_config, make_target, tmp_path, success_result):
-    """transfer_missing with explicit full_transfer_engine='libnbd' invokes libnbd path."""
-    vm_config = make_vm_config()
-    target = make_target(path=str(tmp_path / "nonexistent_target"), verify="off")
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("checkpoint-list").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect("test -f").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("backup-begin").returns(success_result())
-
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    # transfer_missing outer finally cleanup
-    mock_shell.expect("domjobabort").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("rm -f").returns(success_result())
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], full_transfer_engine="libnbd"
-        )
-
-    assert len(results) == 1
-    assert results[0].success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
 
 
 # ── Engine selection: create_full_backup ───────────────────────────────
@@ -2704,66 +2548,20 @@ def test_create_full_backup_defaults_to_qemu_img_convert(mock_shell, make_target
     assert result.bytes_transferred == 65536
 
 
-def test_create_full_backup_libnbd_engine_selected(mock_shell, make_target, tmp_path, caplog, success_result):
-    """create_full_backup with full_transfer_engine='libnbd' triggers libnbd path
-    and logs WARNING about performance."""
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("backup-begin").returns(success_result())
-    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
-
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
-        result = provider.create_full_backup(
-            "testvm",
-            snapshot,
-            target,
-            compress=False,
-            full_transfer_engine="libnbd",
-        )
-
-    assert result.success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
-
-    # WARNING logged inside _full_pull_lifecycle → not reached when patched
+# ── Full pull lifecycle ───────────────────────────
 
 
-# ── Engine branching in _full_pull_lifecycle ───────────────────────────
 
-
-def test_full_pull_lifecycle_branches_on_engine(mock_shell, tmp_path, caplog, success_result):
-    """_full_pull_lifecycle branches on full_transfer_engine.
-    qemu-img-convert → _qemu_img_convert_transfer, libnbd → _full_transfer_via_libnbd."""
+def test_full_pull_lifecycle_always_qemu_img_convert(mock_shell, tmp_path, caplog, success_result):
+    """_full_pull_lifecycle always calls _qemu_img_convert_transfer."""
     tmp_file = tmp_path / "test.qcow2.tmp"
     final_file = tmp_path / "test.qcow2"
 
     provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient(size=65536))
 
-    # Branch 1: qemu-img-convert
-    with (
-        patch.object(
-            provider, "_qemu_img_convert_transfer", return_value=(None, 65536)
-        ) as mock_convert,
-        patch.object(provider, "_full_transfer_via_libnbd") as mock_libnbd,
-    ):
-        # _full_pull_lifecycle does mv + cleanup after transfer
+    with patch.object(
+        provider, "_qemu_img_convert_transfer", return_value=(None, 65536)
+    ) as mock_convert:
         mock_shell.expect("^mv ").returns(success_result())
         mock_shell.expect("domjobabort").returns(success_result())
         mock_shell.expect("rm -f").returns(success_result())
@@ -2780,44 +2578,12 @@ def test_full_pull_lifecycle_branches_on_engine(mock_shell, tmp_path, caplog, su
             backup_xml_path=None,
             checkpoint_xml_path=None,
             disk_target="vda",
-            full_transfer_engine="qemu-img-convert",
             convert_parallel=4,
             convert_out_of_order=True,
         )
     assert error is None
     assert dirty == 65536
     mock_convert.assert_called_once()
-    mock_libnbd.assert_not_called()
-
-    # Branch 2: libnbd
-    with (
-        patch.object(
-            provider, "_full_transfer_via_libnbd", return_value=(None, 65536)
-        ) as mock_libnbd2,
-        patch.object(provider, "_qemu_img_convert_transfer") as mock_convert2,
-    ):
-        mock_shell.expect("^mv ").returns(success_result())
-        mock_shell.expect("domjobabort").returns(success_result())
-        mock_shell.expect("rm -f").returns(success_result())
-        mock_shell.expect("rm -f").returns(success_result())
-        error, dirty = provider._full_pull_lifecycle(
-            vm_name="testvm",
-            tmp_file=tmp_file,
-            final_file=final_file,
-            socket_path="/tmp/test.sock",
-            source_path=None,
-            compress=False,
-            compression_type="zstd",
-            stall_timeout=1800,
-            backup_xml_path=None,
-            checkpoint_xml_path=None,
-            disk_target="vda",
-            full_transfer_engine="libnbd",
-        )
-    assert error is None
-    assert dirty == 65536
-    mock_libnbd2.assert_called_once()
-    mock_convert2.assert_not_called()
 
 
 # ── Custom convert flags ───────────────────────────────────────────────
@@ -2947,46 +2713,6 @@ def test_qemu_img_convert_uses_stall_detection(mock_shell, make_target, tmp_path
     # Verify the stall_timeout parameter is passed
     stall_call = stall_spy.call_args_list[-1]
     assert stall_call.kwargs.get("stall_timeout") == 1800
-
-
-def test_libnbd_full_uses_stall_detection(mock_shell, make_target, tmp_path, success_result):
-    """libnbd _full_transfer_via_libnbd passes stall_timeout to _transfer."""
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("backup-begin").returns(success_result())
-    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
-
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient(size=65536))
-        result = provider.create_full_backup(
-            "testvm",
-            snapshot,
-            target,
-            compress=False,
-            full_transfer_engine="libnbd",
-            stall_timeout=900,
-        )
-
-    assert result.success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("stall_timeout") == 900
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
 
 
 def test_stall_timeout_disabled_falls_back_to_fixed_timeout(mock_shell, make_target, tmp_path, success_result):
@@ -3189,90 +2915,6 @@ def test_create_full_backup_stopped_vm_direct_convert(mock_shell, make_target, t
     )
 
 
-# ── Libnbd FULL transfer — compression + zero_skip ────────────────────
-
-
-def test_create_full_backup_libnbd_with_zstd_compression(mock_shell, make_target, tmp_path, success_result):
-    """libnbd FULL with zstd compression: compress + compression_type passed
-    to _full_pull_lifecycle."""
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("backup-begin").returns(success_result())
-    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
-
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient(size=65536))
-        result = provider.create_full_backup(
-            "testvm",
-            snapshot,
-            target,
-            compress=True,
-            compression_type="zstd",
-            full_transfer_engine="libnbd",
-        )
-
-    assert result.success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("compress") is True
-    assert call_kwargs.get("compression_type") == "zstd"
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
-
-
-def test_create_full_backup_libnbd_no_compression(mock_shell, make_target, tmp_path, success_result):
-    """libnbd FULL without compression: compress=False passed to _full_pull_lifecycle."""
-    target = make_target(path=str(tmp_path / "backups"))
-    target.path.mkdir(parents=True, exist_ok=True)
-    snapshot = _make_snapshot()
-
-    mock_shell.expect("rm -f").returns(success_result())
-    mock_shell.expect("backup-begin").returns(success_result())
-    _add_post_validation_mocks(mock_shell, target_path=str(target.path))
-
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout="Target   Source\n--------------------------------\nvda   /var/lib/libvirt/images/testvm.qcow2\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    with patch.object(
-        BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-    ) as mock_lifecycle:
-        provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient(size=65536))
-        result = provider.create_full_backup(
-            "testvm",
-            snapshot,
-            target,
-            compress=False,
-            full_transfer_engine="libnbd",
-        )
-
-    assert result.success is True
-    mock_lifecycle.assert_called_once()
-    call_kwargs = mock_lifecycle.call_args.kwargs
-    assert call_kwargs.get("compress") is False
-    assert call_kwargs.get("full_transfer_engine") == "libnbd"
-
-
 # ── Libnbd zero_skip ──────────────────────────────────────────────────
 
 
@@ -3445,7 +3087,7 @@ def test_atomic_full_export_libnbd_with_checkpoint(
     ):
         provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
         results = provider.transfer_missing(
-            vm_config, target, [snapshot], full_transfer_engine="libnbd"
+            vm_config, target, [snapshot]
         )
 
     assert len(results) == 1

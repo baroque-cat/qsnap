@@ -195,7 +195,6 @@ def test_failed_transfer_records_no_dependency(
         *,
         compression_type="zstd",
         stall_timeout=1800,
-        full_transfer_engine="qemu-img-convert",
         convert_parallel=4,
         convert_out_of_order=True,
     ):

@@ -1521,16 +1521,15 @@ def test_full_size_verify_failure_triggers_cleanup(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# CONFIGURABLE FULL BACKUP ENGINE TESTS (configurable-full-backup-engine)
+# INCREMENTAL TRANSFER ENGINE TESTS (configurable-full-backup-engine)
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_incremental_unaffected_by_full_transfer_engine(
+def test_incremental_always_uses_pread_pwrite(
     mock_shell, make_vm_config, make_target, tmp_path
 , success_result
 ) -> None:
-    """Incremental transfers ignore full_transfer_engine — always use
-    pread/pwrite unified NBD engine regardless of engine setting."""
+    """Incremental transfers always use pread/pwrite unified NBD engine."""
     vm_config = make_vm_config()
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -1581,10 +1580,7 @@ def test_incremental_unaffected_by_full_transfer_engine(
         mock_wbxml.return_value = tmp_path / "backup-test.xml"
         mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
         provider = BitmapBackupProvider(mock_shell, nbd=nbd)
-        # Pass full_transfer_engine="libnbd" — incrementals should ignore this
-        results = provider.transfer_missing(
-            vm_config, target, [snapshot], full_transfer_engine="libnbd"
-        )
+        results = provider.transfer_missing(vm_config, target, [snapshot])
 
     assert len(results) == 1
     assert results[0].success is True
@@ -1594,7 +1590,7 @@ def test_incremental_unaffected_by_full_transfer_engine(
     # No qemu-img convert — incrementals always use pread/pwrite unified engine
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) == 0, (
-        "Incremental should NEVER use qemu-img convert, regardless of full_transfer_engine"
+        "Incremental should NEVER use qemu-img convert"
     )
 
     # pread/pwrite was called (unified NBD engine)

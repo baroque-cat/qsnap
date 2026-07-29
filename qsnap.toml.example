@@ -85,18 +85,11 @@ state_dir = "/var/lib/qsnap/state"
 # Only effective when compress = true.
 # compression_type = "zstd"
 
-# FULL backup transfer engine (global default, overridden per-target).
-#   "qemu-img-convert" (default) — C code, parallel coroutines, ~850 MB/s zstd
-#   "libnbd"                     — Python pread/pwrite loop, finer control, ~570x slower
-# full_transfer_engine = "qemu-img-convert"
-
 # qemu-img convert -m flag (parallel coroutines, range 1-8).
-# Only consumed when full_transfer_engine = "qemu-img-convert".
 # convert_parallel = 4
 
 # qemu-img convert -W flag (out-of-order writes).  True optimizes for
 # HDDs; False for in-order writes (some SSDs prefer this).
-# Only consumed when full_transfer_engine = "qemu-img-convert".
 # convert_out_of_order = true
 
 # Stall detection timeout for data-transfer commands (qemu-img convert).
@@ -180,17 +173,10 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # Only effective when compress = true.
   # compression_type = "zstd"
 
-  # FULL backup transfer engine (inherited from global → target).
-  #   "qemu-img-convert" (default) — C code, parallel coroutines
-  #   "libnbd"                     — Python pread/pwrite loop (slower)
-  # full_transfer_engine = "qemu-img-convert"
-
   # qemu-img convert -m flag (parallel coroutines, range 1-8).
-  # Only consumed when full_transfer_engine = "qemu-img-convert".
   # convert_parallel = 4
 
   # qemu-img convert -W flag (out-of-order writes).
-  # Only consumed when full_transfer_engine = "qemu-img-convert".
   # convert_out_of_order = true
 
   # Stall detection timeout (inherited from global → VM → target).

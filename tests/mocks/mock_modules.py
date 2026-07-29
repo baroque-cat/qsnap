@@ -79,7 +79,6 @@ class MockBitmapBackupProvider(IBackupProvider):
         *,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> list[BackupResult]:
@@ -115,7 +114,6 @@ class MockBitmapBackupProvider(IBackupProvider):
         compress: bool = False,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> BackupResult:

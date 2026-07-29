@@ -490,34 +490,6 @@ def test_zstd_config_toml_no_deprecated_fields() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# conftest fixture: make_global_config — full_transfer_engine
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_make_global_config_defaults_full_transfer_engine(
-    make_global_config,
-) -> None:
-    """make_global_config() defaults to full_transfer_engine='qemu-img-convert'."""
-    cfg = make_global_config()
-    assert isinstance(cfg, GlobalConfig)
-    assert cfg.full_transfer_engine == "qemu-img-convert"
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# conftest fixture: make_target — full_transfer_engine
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_make_target_defaults_full_transfer_engine(make_target) -> None:
-    """make_target() defaults to full_transfer_engine='qemu-img-convert'."""
-    target = make_target()
-    assert isinstance(target, TargetConfig)
-    assert target.full_transfer_engine == "qemu-img-convert"
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # conftest fixture: make_global_config — convert_parallel
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -554,25 +526,22 @@ def test_make_global_config_defaults_convert_out_of_order(
 
 @pytest.mark.unit
 def test_engine_config_toml_parses_correctly() -> None:
-    """engine_config.toml parses correctly — full_transfer_engine / convert_parallel
+    """engine_config.toml parses correctly — convert_parallel
     / convert_out_of_order fields with inheritance cascade."""
     facade = ConfigFacade(FIXTURES / "engine_config.toml")
     vms = facade.get_vms()
 
     assert len(vms) == 2
 
-    # Global: full_transfer_engine="libnbd", convert_parallel=2,
-    # convert_out_of_order=false.
+    # Global: convert_parallel=2, convert_out_of_order=false.
     global_cfg = facade.get_global()
-    assert global_cfg.full_transfer_engine == "libnbd"
     assert global_cfg.convert_parallel == 2
     assert global_cfg.convert_out_of_order is False
 
-    # vm_inherit: inherits all three from global.
+    # vm_inherit: inherits both from global.
     vm_inherit = facade.get_vm("vm_inherit")
     assert vm_inherit.name == "vm_inherit"
     target_inherit = next(t for t in vm_inherit.targets if t.path == Path("/mnt/backup/vm_inherit"))
-    assert target_inherit.full_transfer_engine == "libnbd"
     assert target_inherit.convert_parallel == 2
     assert target_inherit.convert_out_of_order is False
 
@@ -583,13 +552,11 @@ def test_engine_config_toml_parses_correctly() -> None:
     target_convert = next(
         t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_convert")
     )
-    assert target_convert.full_transfer_engine == "qemu-img-convert"
     assert target_convert.convert_parallel == 8
     assert target_convert.convert_out_of_order is True
 
     target_inh = next(
         t for t in vm_override.targets if t.path == Path("/mnt/backup/vm_override_inherit")
     )
-    assert target_inh.full_transfer_engine == "libnbd"
     assert target_inh.convert_parallel == 2
     assert target_inh.convert_out_of_order is False

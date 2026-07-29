@@ -72,18 +72,10 @@ class GlobalConfig:
     # than ``"zlib"``.  Only effective when ``compress=True``; when
     # ``compress=False``, no compression is applied regardless.
     compression_type: str = "zstd"
-    # FULL backup transfer engine (global default):
-    # ``"qemu-img-convert"`` (default — C code, parallel coroutines,
-    # ~850 MB/s zstd) or ``"libnbd"`` (Python pread/pwrite loop via
-    # ``INbdClient``, finer-grained control, slower).  Inherited by
-    # target.
-    full_transfer_engine: str = "qemu-img-convert"
     # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
-    # Only consumed when ``full_transfer_engine == "qemu-img-convert"``.
     convert_parallel: int = 4
     # ``qemu-img convert -W`` flag (out-of-order writes).  ``True``
     # optimizes for HDDs; ``False`` for in-order writes (some SSDs).
-    # Only consumed when ``full_transfer_engine == "qemu-img-convert"``.
     convert_out_of_order: bool = True
     # Stall detection timeout for data-transfer commands (``qemu-img
     # convert``).  Duration string (e.g. ``"30m"``, ``"1h"``)
@@ -156,15 +148,10 @@ class TargetConfig:
     verify: str = "metadata"
     compress: bool = True
     compression_type: str = "zstd"
-    # FULL backup transfer engine: ``"qemu-img-convert"`` (default) or
-    # ``"libnbd"`` (pread/pwrite loop).  Inherited from global → target.
-    full_transfer_engine: str = "qemu-img-convert"
     # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
-    # Only consumed when ``full_transfer_engine == "qemu-img-convert"``.
     # Inherited from global → target.
     convert_parallel: int = 4
-    # ``qemu-img convert -W`` flag (out-of-order writes).  Only consumed
-    # when ``full_transfer_engine == "qemu-img-convert"``.  Inherited
+    # ``qemu-img convert -W`` flag (out-of-order writes).  Inherited
     # from global → target.
     convert_out_of_order: bool = True
     backup_stall_timeout: str = "30m"

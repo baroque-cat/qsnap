@@ -335,67 +335,9 @@ The `full_verify_before_rebase` field is REMOVED from `GlobalConfig`. It was par
 - **THEN** `backup_create` is `"onchange"`
 
 
-### Requirement: full_transfer_engine field in GlobalConfig
-
-`GlobalConfig` SHALL include a `full_transfer_engine: str = "qemu-img-convert"` field. Valid values are `"qemu-img-convert"` (default — C code, parallel coroutines, ~850 MB/s zstd) and `"libnbd"` (Python pread/pwrite loop via `INbdClient`, finer-grained control, slower). This field selects the FULL backup transfer engine. The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.full_transfer_engine` when the target does not explicitly set it.
-
-#### Scenario: GlobalConfig default full_transfer_engine is qemu-img-convert
-
-- **WHEN** a GlobalConfig is created with only required fields
-- **THEN** `full_transfer_engine` defaults to `"qemu-img-convert"`
-
-#### Scenario: GlobalConfig full_transfer_engine is immutable
-
-- **WHEN** a GlobalConfig is created with `full_transfer_engine="libnbd"`
-- **THEN** attempting to mutate `full_transfer_engine` raises `FrozenInstanceError`
-
-#### Scenario: GlobalConfig full_transfer_engine set to libnbd
-
-- **WHEN** a GlobalConfig is created with `full_transfer_engine="libnbd"`
-- **THEN** `config.full_transfer_engine == "libnbd"`
-
-
-### Requirement: full_transfer_engine field in TargetConfig
-
-`TargetConfig` SHALL include a `full_transfer_engine: str = "qemu-img-convert"` field. This field is resolved via option inheritance: if not set in the target's TOML section, it inherits from `GlobalConfig.full_transfer_engine`. Valid values are `"qemu-img-convert"` and `"libnbd"`.
-
-#### Scenario: TargetConfig full_transfer_engine inherits from global
-
-- **WHEN** a TargetConfig is created without explicit `full_transfer_engine`
-- **AND** the GlobalConfig has `full_transfer_engine="libnbd"`
-- **THEN** `target.full_transfer_engine == "libnbd"`
-
-#### Scenario: TargetConfig full_transfer_engine overrides global
-
-- **WHEN** a TargetConfig is created with `full_transfer_engine="libnbd"`
-- **AND** the GlobalConfig has `full_transfer_engine="qemu-img-convert"`
-- **THEN** `target.full_transfer_engine == "libnbd"` (target overrides global)
-
-#### Scenario: TargetConfig default full_transfer_engine is qemu-img-convert
-
-- **WHEN** a TargetConfig is created without explicit `full_transfer_engine`
-- **AND** the GlobalConfig has default `full_transfer_engine="qemu-img-convert"`
-- **THEN** `target.full_transfer_engine == "qemu-img-convert"`
-
-
-### Requirement: full_transfer_engine validation
-
-`ConfigFacade` SHALL validate that `full_transfer_engine` is one of `"qemu-img-convert"` or `"libnbd"`. Invalid values SHALL raise `ConfigError` with a message listing the valid values.
-
-#### Scenario: Valid full_transfer_engine value
-
-- **WHEN** the config has `full_transfer_engine = "libnbd"`
-- **THEN** ConfigFacade accepts it and stores `"libnbd"` in the config dataclass
-
-#### Scenario: Invalid full_transfer_engine raises ConfigError
-
-- **WHEN** the config has `full_transfer_engine = "rsync"`
-- **THEN** ConfigFacade raises `ConfigError` with a message listing valid values: `"qemu-img-convert"`, `"libnbd"`
-
-
 ### Requirement: convert_parallel field in GlobalConfig
 
-`GlobalConfig` SHALL include a `convert_parallel: int = 4` field. This field maps to the `qemu-img convert -m` flag (number of parallel coroutines). Valid range is 1-8. This field is only consumed when `full_transfer_engine == "qemu-img-convert"`. The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_parallel`.
+`GlobalConfig` SHALL include a `convert_parallel: int = 4` field. This field maps to the `qemu-img convert -m` flag (number of parallel coroutines). Valid range is 1-8. The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_parallel`.
 
 #### Scenario: GlobalConfig default convert_parallel is 4
 
@@ -447,7 +389,7 @@ The `full_verify_before_rebase` field is REMOVED from `GlobalConfig`. It was par
 
 ### Requirement: convert_out_of_order field in GlobalConfig
 
-`GlobalConfig` SHALL include a `convert_out_of_order: bool = True` field. This field maps to the `qemu-img convert -W` flag (out-of-order writes). When `True`, `qemu-img convert` writes data in out-of-order fashion for optimal throughput on HDDs. When `False`, writes are in-order (may be preferred on some SSDs). This field is only consumed when `full_transfer_engine == "qemu-img-convert"`. The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_out_of_order`.
+`GlobalConfig` SHALL include a `convert_out_of_order: bool = True` field. This field maps to the `qemu-img convert -W` flag (out-of-order writes). When `True`, `qemu-img convert` writes data in out-of-order fashion for optimal throughput on HDDs. When `False`, writes are in-order (may be preferred on some SSDs). The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_out_of_order`.
 
 #### Scenario: GlobalConfig default convert_out_of_order is true
 

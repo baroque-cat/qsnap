@@ -3901,7 +3901,6 @@ class Core:
         *,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
-        full_transfer_engine: str = "qemu-img-convert",
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
     ) -> list[BackupResult]:
@@ -3924,7 +3923,6 @@ class Core:
                 snapshots,
                 compression_type=compression_type,
                 stall_timeout=stall_timeout,
-                full_transfer_engine=full_transfer_engine,
                 convert_parallel=convert_parallel,
                 convert_out_of_order=convert_out_of_order,
             )
@@ -4080,7 +4078,6 @@ class Core:
                                 compress=target.compress,
                                 compression_type=target.compression_type,
                                 stall_timeout=stall_timeout,
-                                full_transfer_engine=target.full_transfer_engine,
                                 convert_parallel=target.convert_parallel,
                                 convert_out_of_order=target.convert_out_of_order,
                             )
@@ -4175,7 +4172,6 @@ class Core:
                     snapshots,
                     compression_type=target.compression_type,
                     stall_timeout=stall_timeout,
-                    full_transfer_engine=target.full_transfer_engine,
                     convert_parallel=target.convert_parallel,
                     convert_out_of_order=target.convert_out_of_order,
                 )

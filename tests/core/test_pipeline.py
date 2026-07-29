@@ -4562,55 +4562,6 @@ def test_onchange_baseline_not_updated_on_failure(
     baseline_spy.assert_not_called()
 
 
-# ── Configurable Full Backup Engine: Core Pass-Through Tests ─────────────
-
-
-def test_core_passes_full_transfer_engine_to_create_full_backup(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core reads target.full_transfer_engine and passes it to provider.create_full_backup()."""
-    target = make_target(
-        full_transfer_engine="libnbd",
-    )
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    # Count-based trigger: no prior FULLs causes first backup to create FULL.
-
-    backup_provider = mock_factory._backup_provider
-
-    with patch.object(
-        backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
-    ) as full_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert full_spy.called, "create_full_backup should be called when strategy returns True"
-    assert full_spy.call_args.kwargs.get("full_transfer_engine") == "libnbd", (
-        f"full_transfer_engine should be 'libnbd', got: "
-        f"{full_spy.call_args.kwargs.get('full_transfer_engine')!r}"
-    )
-
-
 def test_core_passes_convert_parallel_to_create_full_backup(
     make_vm_config,
     make_target,
@@ -4699,53 +4650,6 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
     assert full_spy.call_args.kwargs.get("convert_out_of_order") is False, (
         f"convert_out_of_order should be False, got: "
         f"{full_spy.call_args.kwargs.get('convert_out_of_order')!r}"
-    )
-
-
-def test_core_passes_full_transfer_engine_to_transfer_missing(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Core reads target.full_transfer_engine and passes it to provider.transfer_missing()."""
-    target = make_target(
-        full_transfer_engine="libnbd",
-    )
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime(2025, 7, 13, 10, 0),
-        allocation=1000,
-    )
-    mock_state.record_snapshot("testvm", snap)
-
-    # Default count-based check returns False — no FULL,
-    # only transfer_missing is called.
-
-    backup_provider = mock_factory._backup_provider
-
-    with patch.object(
-        backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("full_transfer_engine") == "libnbd", (
-        f"full_transfer_engine should be 'libnbd', got: "
-        f"{transfer_spy.call_args.kwargs.get('full_transfer_engine')!r}"
     )
 
 
