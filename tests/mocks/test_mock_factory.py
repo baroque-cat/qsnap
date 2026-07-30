@@ -234,6 +234,88 @@ def test_mock_bitmap_backup_provider_transfer_missing_accepts_new_params(
     assert results[0].success is True
 
 
+# ---------------------------------------------------------------------------
+# MockChangeDetector current_allocation property tests
+# ---------------------------------------------------------------------------
+
+
+def test_mock_change_detector_accepts_current_allocation_constructor():
+    """MockChangeDetector constructor accepts ``current_allocation`` parameter
+    and stores it for later retrieval via the property."""
+    detector = MockChangeDetector(current_allocation=5000000)
+    assert detector.current_allocation == 5000000
+
+
+def test_mock_change_detector_current_allocation_default_value():
+    """MockChangeDetector.current_allocation defaults to 2000000 when not
+    specified in constructor."""
+    detector = MockChangeDetector()
+    assert detector.current_allocation == 2000000
+
+
+def test_mock_change_detector_current_allocation_setter():
+    """MockChangeDetector.current_allocation is a writable property (setter)
+    so tests can reconfigure the detector after construction."""
+    detector = MockChangeDetector()
+    detector.current_allocation = 999000
+    assert detector.current_allocation == 999000
+
+
+def test_mock_change_detector_has_changed_returns_configured_allocation(
+    make_vm_config,
+):
+    """MockChangeDetector.has_changed() returns a ChangeResult whose
+    ``current_allocation`` matches the value configured on the detector."""
+    detector = MockChangeDetector(current_allocation=3000000)
+    result = detector.has_changed(make_vm_config())
+    assert result.current_allocation == 3000000
+    assert result.changed is True  # default
+    assert result.last_allocation == 1000000  # default
+
+
+def test_mock_change_detector_has_changed_after_setter(make_vm_config):
+    """After mutating ``current_allocation`` via the setter,
+    ``has_changed()`` returns the updated value."""
+    detector = MockChangeDetector()
+    detector.current_allocation = 888000
+    result = detector.has_changed(make_vm_config())
+    assert result.current_allocation == 888000
+
+
+# ---------------------------------------------------------------------------
+# MockVMModuleFactory.change_detector property tests
+# ---------------------------------------------------------------------------
+
+
+def test_mock_factory_change_detector_property():
+    """MockVMModuleFactory.change_detector property returns the
+    MockChangeDetector instance that the factory holds internally."""
+    factory = MockVMModuleFactory()
+    cd = factory.change_detector
+    assert isinstance(cd, MockChangeDetector)
+    assert isinstance(cd, IChangeDetector)
+
+
+def test_mock_factory_create_change_detector_returns_same_instance():
+    """MockVMModuleFactory.create_change_detector() returns the same
+    MockChangeDetector instance as the ``change_detector`` property,
+    so tests can configure one and it affects all calls."""
+    factory = MockVMModuleFactory()
+    cd_prop = factory.change_detector
+    cd_create = factory.create_change_detector("allocation-size")
+    assert cd_prop is cd_create
+
+
+def test_mock_factory_change_detector_configuration_flows_through_create():
+    """Configuring ``current_allocation`` on ``factory.change_detector``
+    is visible through ``factory.create_change_detector()`` — both
+    reference the same object."""
+    factory = MockVMModuleFactory()
+    factory.change_detector.current_allocation = 777000
+    detector = factory.create_change_detector("allocation-map")
+    assert detector.current_allocation == 777000
+
+
 def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_target):
     """Both MockBitmapBackupProvider and MockBitmapBackupProvider default
     ``compression_type`` to ``"zstd"`` on both create_full_backup() and

@@ -36,6 +36,16 @@ class MockVMModuleFactory(IVMModuleFactory):
         self._change_detector = MockChangeDetector()
         self._lifecycle_manager = MockLifecycleManager()
 
+    @property
+    def change_detector(self) -> MockChangeDetector:
+        """Expose the mock change detector for test configuration.
+
+        Core tests configure ``current_allocation`` on this instance to
+        simulate "changed" vs "unchanged" source disk for the
+        ``backup_create="onchange"`` gate.
+        """
+        return self._change_detector
+
     def create_snapshot_provider(self, vm_config: VMConfig) -> ISnapshotProvider:
         return self._snapshot_provider
 

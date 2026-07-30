@@ -91,6 +91,15 @@ class ConfigFacade(IConfigFacade):
                     raise ConfigError(f"{key} must be an integer, got {type(val).__name__}")
                 global_kwargs[key] = val
 
+        # snapshot_preserve_min (global default — snapshot preservation floor).
+        if "snapshot_preserve_min" in raw:
+            val = raw["snapshot_preserve_min"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError(
+                    f"snapshot_preserve_min must be an integer, got {type(val).__name__}"
+                )
+            global_kwargs["snapshot_preserve_min"] = val
+
         # Deprecation warnings for removed retention fields.
         # Field names are constructed via f-string so the literal old
         # names don't appear in source (grep verification, task 9.4).
@@ -98,7 +107,6 @@ class ConfigFacade(IConfigFacade):
         _deprecated_retention = {
             f"snapshot_{_p}": "use snapshot_chain_length instead",
             f"target_{_p}": "use target_chain_length instead",
-            f"snapshot_{_p}_min": "chain_length is the minimum, use snapshot_chain_length",
             f"target_{_p}_min": "chain_length is the minimum, use target_chain_length",
             f"{_p}_day_of_week": "count-based retention has no weekly boundaries",
         }
@@ -164,6 +172,10 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError("target_chain_length must be >= 1")
         if self._global.target_keep_generations is not None and self._global.target_keep_generations < 1:
             raise ConfigError("target_keep_generations must be >= 1")
+        if self._global.snapshot_preserve_min < 0:
+            raise ConfigError(
+                f"snapshot_preserve_min must be >= 0, got {self._global.snapshot_preserve_min}"
+            )
 
         # rate_limit is deprecated (removed backup strategy) — log a
         # warning naming the field and ignore the value (design D3).
@@ -316,6 +328,16 @@ class ConfigFacade(IConfigFacade):
         else:
             target_keep_generations = global_cfg.target_keep_generations
 
+        # snapshot_preserve_min: VM overrides global (0 = inactive).
+        snapshot_preserve_min: int | None
+        if "snapshot_preserve_min" in vm_raw:
+            val = vm_raw["snapshot_preserve_min"]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ConfigError("snapshot_preserve_min must be an integer")
+            snapshot_preserve_min = val
+        else:
+            snapshot_preserve_min = global_cfg.snapshot_preserve_min
+
         # Validate count-based retention fields (when set).
         if snapshot_chain_length is not None and snapshot_chain_length < 1:
             raise ConfigError("snapshot_chain_length must be >= 1")
@@ -323,6 +345,10 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError("target_chain_length must be >= 1")
         if target_keep_generations is not None and target_keep_generations < 1:
             raise ConfigError("target_keep_generations must be >= 1")
+        if snapshot_preserve_min is not None and snapshot_preserve_min < 0:
+            raise ConfigError(
+                f"snapshot_preserve_min must be >= 0, got {snapshot_preserve_min}"
+            )
 
         # backup_create: VM overrides global (target may override VM).
         vm_backup_create: str
@@ -375,6 +401,7 @@ class ConfigFacade(IConfigFacade):
             snapshot_chain_length=snapshot_chain_length,
             target_chain_length=target_chain_length,
             target_keep_generations=target_keep_generations,
+            snapshot_preserve_min=snapshot_preserve_min,
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,

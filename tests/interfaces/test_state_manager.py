@@ -397,6 +397,49 @@ def test_inmemory_implements_remove_all_deps():
     assert result3 == 0
 
 
+# ── per-target state independence contract ────────────────────────────
+
+
+def test_inmemory_per_target_state_independent():
+    """Per-target backup allocation is independent.
+
+    Setting a baseline for one target does not affect baselines
+    for other targets (independent-target-onchange spec).
+    """
+    mgr = InMemoryStateManager()
+
+    mgr.set_last_backup_allocation("/mnt/backup/targetA", 1000)
+    mgr.set_last_backup_allocation("/mnt/backup/targetB", 2000)
+
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetA") == 1000
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetB") == 2000
+
+    # Overwrite targetA — targetB is unaffected.
+    mgr.set_last_backup_allocation("/mnt/backup/targetA", 3000)
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetA") == 3000
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetB") == 2000
+
+
+def test_json_per_target_state_independent(tmp_path):
+    """JsonStateManager per-target backup allocation is independent.
+
+    Verifies that persisted state for one target does not leak into
+    another target's baseline (independent-target-onchange spec).
+    """
+    mgr = JsonStateManager(state_dir=tmp_path)
+
+    mgr.set_last_backup_allocation("/mnt/backup/targetA", 1000)
+    mgr.set_last_backup_allocation("/mnt/backup/targetB", 2000)
+
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetA") == 1000
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetB") == 2000
+
+    # Overwrite targetA — targetB is unaffected.
+    mgr.set_last_backup_allocation("/mnt/backup/targetA", 3000)
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetA") == 3000
+    assert mgr.get_last_backup_allocation("/mnt/backup/targetB") == 2000
+
+
 def test_json_implements_remove_all_deps(tmp_path):
     """JsonStateManager implements remove_all_incremental_dependencies, returns int."""
     mgr = JsonStateManager(state_dir=tmp_path)

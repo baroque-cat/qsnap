@@ -31,6 +31,7 @@ class RetentionPolicy:
 
     chain_length: int = 0
     keep_generations: int = 1
+    preserve_min: int = 0
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class GlobalConfig:
     snapshot_chain_length: int | None = 24
     target_chain_length: int | None = 168
     target_keep_generations: int | None = 2
+    snapshot_preserve_min: int = 0
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
@@ -201,6 +203,7 @@ class VMConfig:
     snapshot_chain_length: int | None = None
     target_chain_length: int | None = None
     target_keep_generations: int | None = None
+    snapshot_preserve_min: int | None = None
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-size"

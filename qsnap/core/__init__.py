@@ -36,6 +36,7 @@ from qsnap.models.results import (
     ActionRecord,
     BackupResult,
     ChainVerifyResult,
+    ChangeResult,
     CheckResult,
     DeferredBlockcommit,
     DeferredSummary,
@@ -49,7 +50,6 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.nbd import get_first_disk_target, is_vm_running, write_backup_xml
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import (
@@ -58,6 +58,7 @@ from qsnap.utils.parsing import (
     parse_timestamp,
 )
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
+from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import scan_backing_chain, verify_full_backup
 
@@ -3034,13 +3035,21 @@ class Core:
         in the original remove list that are NOT in the oldest prefix
         are moved to the keep list (chain gap fillers) so blockcommit
         always processes a contiguous range from the base image.
+
+        After the oldest-prefix filter, Core applies a ``preserve_min``
+        post-processing filter (spec: snapshot-preserve-min) that
+        guarantees the newest N snapshots are never blockcommitted,
+        even when ``chain_length`` is exceeded.  When ``preserve_min``
+        is 0 (default), the filter is inactive.
         """
         snapshots = self._state.get_snapshots(vm_config.name)
         if not snapshots:
             return None
 
         policy = RetentionPolicy(
-            chain_length=vm_config.snapshot_chain_length or 0, keep_generations=1
+            chain_length=vm_config.snapshot_chain_length or 0,
+            keep_generations=1,
+            preserve_min=vm_config.snapshot_preserve_min or 0,
         )
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
@@ -3061,6 +3070,23 @@ class Core:
             else:
                 # First keep item encountered → prefix stops
                 prefix_done = True
+
+        # preserve_min post-processing (spec: snapshot-preserve-min).
+        # Applied AFTER the oldest-prefix filter. Guarantees the newest
+        # N snapshots are never blockcommitted, even when chain_length is
+        # exceeded.  Trims from the newest end of the remove list (moves
+        # newest excess items to keep) so the oldest snapshots remain
+        # eligible for blockcommit.
+        preserve_min = policy.preserve_min
+        if preserve_min > 0:
+            max_removable = max(0, len(snapshots) - preserve_min)
+            if len(final_remove) > max_removable:
+                # final_remove is ordered oldest-first; keep the oldest
+                # max_removable items, move the newest excess to keep.
+                excess = final_remove[max_removable:]
+                final_remove = final_remove[:max_removable]
+                final_keep.extend(excess)
+
         return RetentionResult(keep=final_keep, remove=final_remove)
 
     def _verify_backing_chain(self, vm_config: VMConfig) -> ChainVerifyResult:
@@ -3971,23 +3997,61 @@ class Core:
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        snapshots: list[SnapshotInfo],
-    ) -> bool:
-        """Return True if backup should proceed under ``onchange`` mode.
+    ) -> tuple[bool, ChangeResult]:
+        """Return ``(should_proceed, change_result)`` for ``onchange`` mode.
 
-        Approach B: checks whether any snapshot in state is not yet
-        backed up to this target by calling ``provider.list(target)``
-        and comparing snapshot names.  This is independent of
-        ``snapshot_create`` mode and works for ``always``/``onchange``/
-        ``ondemand``.
+        Source-disk-based change detection (spec: independent-target-onchange):
+        queries the VM's active disk directly via ``IChangeDetector``,
+        independent of snapshot existence.  Compares
+        ``change_result.current_allocation`` against the per-target
+        baseline stored in ``IStateManager.get_last_backup_allocation``.
+
+        For ``allocation-size`` mode: ``changed = current > last``.
+        For ``allocation-map`` mode: ``changed = current != last``.
+        When ``last`` is ``None`` (first run): return ``True`` (proceed).
+
+        The gate does NOT call ``provider.list(target)`` — it is
+        independent of snapshot names and target file listing.
         """
-        if not snapshots:
-            return False  # nothing to transfer
-        provider = self._factory.create_backup_provider(vm_config, target)
-        existing = provider.list(target)
-        existing_names = {s.name for s in existing}
-        has_new = any(s.name not in existing_names for s in snapshots)
-        return has_new
+        detector = self._factory.create_change_detector(
+            vm_config.change_detection_mode
+        )
+        change_result = detector.has_changed(vm_config)
+
+        last = self._state.get_last_backup_allocation(str(target.path))
+        if last is None:
+            # First run (or after clear) — always proceed.
+            return True, change_result
+
+        current = change_result.current_allocation
+        if vm_config.change_detection_mode == "allocation-size":
+            changed = current > last
+        elif vm_config.change_detection_mode == "allocation-map":
+            changed = current != last
+        else:
+            # Unrecognized mode — fail-safe: proceed with backup.
+            logger.warning(
+                "[backup] %s: unrecognized change_detection_mode %r — "
+                "proceeding fail-safe",
+                vm_config.name,
+                vm_config.change_detection_mode,
+            )
+            changed = True
+
+        # Fail-safe: when the detector reports changed=True (command
+        # failure or snapshot-side change detected), proceed with the
+        # backup regardless of the per-target baseline comparison (spec:
+        # independent-target-onchange, detector fail-safe behavior).
+        if change_result.changed and not changed:
+            changed = True
+
+        if not changed:
+            logger.info(
+                "[backup] %s: disk unchanged since last backup — skipping transfer",
+                vm_config.name,
+            )
+
+        return changed, change_result
 
     def _backup_target(
         self,
@@ -3999,19 +4063,18 @@ class Core:
 
         Returns True if any backup transfer failed.
         """
-        # Per-target onchange gate: skip transfer when there are no new
-        # snapshots to back up to this target (Approach B).  Retention
-        # + cleanup still run even when transfer is skipped.
+        # Per-target onchange gate: skip transfer when the source disk
+        # has not changed since the last backup to this target (spec:
+        # independent-target-onchange).  Retention + cleanup still run
+        # even when transfer is skipped.
         skip_transfer = False
-        if target.backup_create == "onchange" and not self._should_backup_onchange(
-            vm_config, target, snapshots
-        ):
-            logger.info(
-                "[backup] %s: target %s no new snapshots — skipping transfer",
-                vm_config.name,
-                target.path,
+        change_result: ChangeResult | None = None
+        if target.backup_create == "onchange":
+            should_proceed, change_result = self._should_backup_onchange(
+                vm_config, target
             )
-            skip_transfer = True
+            if not should_proceed:
+                skip_transfer = True
 
         provider = self._factory.create_backup_provider(vm_config, target)
         backup_failed = False
@@ -4264,6 +4327,22 @@ class Core:
                             r.snapshot_name,
                             anchor,
                         )
+
+        # Update per-target baseline after successful backup (onchange
+        # mode).  The baseline is the source disk's current_allocation
+        # at the time of the last successful backup.  Not updated on
+        # failure (fail-safe — next run retries) or when the gate
+        # skipped transfer (baseline already current).  Not updated in
+        # dry-run (no actual transfer occurred).
+        if (
+            change_result is not None
+            and not skip_transfer
+            and not backup_failed
+            and not self._dry_run
+        ):
+            self._state.set_last_backup_allocation(
+                str(target.path), change_result.current_allocation
+            )
 
         # Backup retention + cleanup — runs unless FULL verification
         # failed (verify-before-delete gate: old generations must not

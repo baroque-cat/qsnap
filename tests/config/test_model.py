@@ -20,10 +20,11 @@ from qsnap.models.config import GlobalConfig, RetentionPolicy, TargetConfig, VMC
 
 
 def test_retention_policy_defaults():
-    """RetentionPolicy() has chain_length=0, keep_generations=1."""
+    """RetentionPolicy() has chain_length=0, keep_generations=1, preserve_min=0."""
     policy = RetentionPolicy()
     assert policy.chain_length == 0
     assert policy.keep_generations == 1
+    assert policy.preserve_min == 0
 
 
 # ---------------------------------------------------------------------------
@@ -32,10 +33,25 @@ def test_retention_policy_defaults():
 
 
 def test_retention_policy_for_snapshots():
-    """RetentionPolicy with chain_length=168, keep_generations=1 (snapshot use)."""
-    policy = RetentionPolicy(chain_length=168, keep_generations=1)
+    """RetentionPolicy with chain_length=168, keep_generations=1, preserve_min=24 (snapshot use)."""
+    policy = RetentionPolicy(chain_length=168, keep_generations=1, preserve_min=24)
     assert policy.chain_length == 168
     assert policy.keep_generations == 1
+    assert policy.preserve_min == 24
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2b: RetentionPolicy for snapshots with preserve_min
+# ---------------------------------------------------------------------------
+
+
+def test_retention_policy_for_snapshots_with_preserve_min():
+    """RetentionPolicy(chain_length=168, keep_generations=1, preserve_min=24)
+    stores all three fields for snapshot retention with preservation floor."""
+    policy = RetentionPolicy(chain_length=168, keep_generations=1, preserve_min=24)
+    assert policy.chain_length == 168
+    assert policy.keep_generations == 1
+    assert policy.preserve_min == 24
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +66,14 @@ def test_retention_policy_for_targets():
     assert policy.keep_generations == 2
 
 
+def test_retention_policy_preserve_min_defaults_zero():
+    """RetentionPolicy(chain_length=72) without preserve_min defaults to 0 (inactive)."""
+    policy = RetentionPolicy(chain_length=72)
+    assert policy.chain_length == 72
+    assert policy.keep_generations == 1  # default
+    assert policy.preserve_min == 0  # default — inactive
+
+
 # ---------------------------------------------------------------------------
 # RetentionPolicy is frozen (immutable)
 # ---------------------------------------------------------------------------
@@ -57,13 +81,15 @@ def test_retention_policy_for_targets():
 
 def test_retention_policy_immutable():
     """RetentionPolicy is a frozen dataclass; mutating fields raises FrozenInstanceError."""
-    policy = RetentionPolicy(chain_length=168, keep_generations=2)
+    policy = RetentionPolicy(chain_length=168, keep_generations=2, preserve_min=24)
     assert policy.__dataclass_params__.frozen is True
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         policy.chain_length = 24  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         policy.keep_generations = 3  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.preserve_min = 10  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +115,8 @@ def test_global_config_immutable():
         cfg.target_chain_length = 100  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.target_keep_generations = 3  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.snapshot_preserve_min = 48  # type: ignore[misc]
 
     # Mutating fault-tolerance fields also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -113,6 +141,15 @@ def test_global_config_immutable():
         cfg.backup_stall_timeout = "1h"  # type: ignore[misc]
 
 
+def test_global_config_snapshot_preserve_min_immutable():
+    """Mutating GlobalConfig().snapshot_preserve_min raises FrozenInstanceError."""
+    cfg = GlobalConfig(snapshot_preserve_min=24)
+    assert cfg.snapshot_preserve_min == 24
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.snapshot_preserve_min = 48  # type: ignore[misc]
+
+
 
 
 
@@ -123,11 +160,17 @@ def test_global_config_immutable():
 
 def test_global_chain_length_defaults_are_sensible():
     """GlobalConfig().snapshot_chain_length is 24, target_chain_length is 168,
-    target_keep_generations is 2 (not None)."""
+    target_keep_generations is 2, snapshot_preserve_min is 0 (not None)."""
     cfg = GlobalConfig()
     assert cfg.snapshot_chain_length == 24
     assert cfg.target_chain_length == 168
     assert cfg.target_keep_generations == 2
+    assert cfg.snapshot_preserve_min == 0
+
+
+def test_global_config_snapshot_preserve_min_default():
+    """GlobalConfig().snapshot_preserve_min defaults to 0 (inactive preservation floor)."""
+    assert GlobalConfig().snapshot_preserve_min == 0
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +194,8 @@ def test_vm_config_required_fields():
     assert vm.snapshot_chain_length is None
     assert vm.target_chain_length is None
     assert vm.target_keep_generations is None
+    # snapshot_preserve_min defaults to None (inherits from global).
+    assert vm.snapshot_preserve_min is None
     # Deep verification fields (T2) default to False.
     assert vm.blockcommit_deep_verify is False
 

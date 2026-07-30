@@ -203,3 +203,129 @@ def test_vm_inherits_keep_generations_from_global(tmp_path: Path) -> None:
     vm = facade.get_vm("testvm")
 
     assert vm.target_keep_generations == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario: VM inherits snapshot_preserve_min from global
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_inherits_snapshot_preserve_min_from_global(tmp_path: Path) -> None:
+    """VM without snapshot_preserve_min inherits from global snapshot_preserve_min=24."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "snapshot_preserve_min = 24\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.snapshot_preserve_min == 24
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario: VM overrides global snapshot_preserve_min
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_overrides_snapshot_preserve_min(tmp_path: Path) -> None:
+    """VM overrides global snapshot_preserve_min: global=24, VM=48."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "snapshot_preserve_min = 24\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "snapshot_preserve_min = 48\n"
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.snapshot_preserve_min == 24
+    assert vm.snapshot_preserve_min == 48
+    assert vm.snapshot_preserve_min != global_cfg.snapshot_preserve_min
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario: VM sets snapshot_preserve_min to 0 (disables floor)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_sets_snapshot_preserve_min_to_zero(tmp_path: Path) -> None:
+    """Global snapshot_preserve_min=24, VM sets 0 → resolves to 0 (disables floor)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "snapshot_preserve_min = 24\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "snapshot_preserve_min = 0\n"
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.snapshot_preserve_min == 24
+    assert vm.snapshot_preserve_min == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario: Valid snapshot_preserve_min accepted
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_valid_snapshot_preserve_min_accepted(tmp_path: Path) -> None:
+    """TOML with snapshot_preserve_min=24 is accepted and stored."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "snapshot_preserve_min = 24\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.snapshot_preserve_min == 24
+    assert vm.snapshot_preserve_min == 24
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Scenario: Negative snapshot_preserve_min raises ConfigError
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_negative_snapshot_preserve_min_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """TOML with snapshot_preserve_min=-1 raises ConfigError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "snapshot_preserve_min = -1\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'base_image = "/tmp/test.qcow2"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+    )
+    from qsnap.config.facade import ConfigError
+
+    with pytest.raises(ConfigError, match="snapshot_preserve_min"):
+        ConfigFacade(config_file)

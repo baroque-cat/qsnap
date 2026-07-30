@@ -80,11 +80,13 @@ def test_make_global_config_compress_false(
 def test_make_global_config_chain_length_defaults(
     make_global_config,
 ) -> None:
-    """make_global_config() has snapshot_chain_length=None by default."""
+    """make_global_config() has snapshot_chain_length=None and
+    snapshot_preserve_min=0 by default (GlobalConfig default)."""
     cfg = make_global_config()
     assert cfg.snapshot_chain_length is None
     assert cfg.target_chain_length is None
     assert cfg.target_keep_generations is None
+    assert cfg.snapshot_preserve_min == 0
 
 
 @pytest.mark.unit
@@ -124,6 +126,7 @@ def test_example_config_parseable() -> None:
     assert global_cfg.snapshot_chain_length == 24
     assert global_cfg.target_chain_length == 168
     assert global_cfg.target_keep_generations == 2
+    assert global_cfg.snapshot_preserve_min == 0
 
     # Verify VM de facto.
     vm = facade.get_vm("debiantest")
@@ -137,6 +140,7 @@ def test_example_config_parseable() -> None:
     assert vm.snapshot_chain_length == 24
     assert vm.target_chain_length == 168
     assert vm.target_keep_generations == 2
+    assert vm.snapshot_preserve_min == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -559,3 +563,20 @@ def test_engine_config_toml_parses_correctly() -> None:
     )
     assert target_inh.convert_parallel == 2
     assert target_inh.convert_out_of_order is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# conftest fixture: make_global_config — snapshot_preserve_min
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_make_global_config_snapshot_preserve_min() -> None:
+    """GlobalConfig(snapshot_preserve_min=24) stores the value correctly.
+
+    NOTE: The make_global_config fixture in tests/conftest.py does NOT
+    accept snapshot_preserve_min as a parameter — it needs to be added.
+    This test uses GlobalConfig directly as a workaround.
+    """
+    cfg = GlobalConfig(snapshot_preserve_min=24)
+    assert cfg.snapshot_preserve_min == 24

@@ -2,6 +2,11 @@
 
 Verifies that every implementation of IChangeDetector obeys the interface
 contract: correct return types, ABC enforcement, and no Core inheritance (D1).
+
+The IChangeDetector interface is unchanged by the
+``independent-target-onchange`` spec — the backup gate change detection uses
+``IStateManager.get_last_backup_allocation()`` / ``set_last_backup_allocation()``
+to track per-target baselines, not IChangeDetector protocol changes.
 """
 
 from __future__ import annotations

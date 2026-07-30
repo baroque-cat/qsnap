@@ -177,21 +177,48 @@ class MockChangeDetector(IChangeDetector):
     When called without arguments, returns ``changed=True`` (same
     behaviour as before).
 
+    The ``current_allocation`` parameter controls the value returned
+    by ``has_changed()`` in ``ChangeResult.current_allocation``.  Core
+    tests use this to simulate "changed" vs "unchanged" source disk
+    for the ``backup_create="onchange"`` gate.
+
     Args:
         changed: Whether the VM disk has changed since last check.
-        last_alloc: Last recorded allocation size in bytes.
-        current_alloc: Current allocation size in bytes.
+        last_allocation: Last recorded allocation size in bytes.
+        current_allocation: Current allocation size in bytes.
     """
 
     def __init__(
         self,
         changed: bool = True,
-        last_alloc: int = 1000000,
-        current_alloc: int = 2000000,
+        last_allocation: int = 1000000,
+        current_allocation: int = 2000000,
     ) -> None:
         self._changed = changed
-        self._last_alloc = last_alloc
-        self._current_alloc = current_alloc
+        self._last_alloc = last_allocation
+        self._current_alloc = current_allocation
+
+    @property
+    def current_allocation(self) -> int:
+        """The current allocation value returned by ``has_changed()``."""
+        return self._current_alloc
+
+    @current_allocation.setter
+    def current_allocation(self, value: int) -> None:
+        self._current_alloc = value
+
+    @property
+    def changed(self) -> bool:
+        """The ``changed`` flag returned by ``has_changed()``.
+
+        Set to ``False`` for "unchanged" scenarios, ``True`` (default)
+        for "changed" or detector-failure scenarios.
+        """
+        return self._changed
+
+    @changed.setter
+    def changed(self, value: bool) -> None:
+        self._changed = value
 
     def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
         return ChangeResult(

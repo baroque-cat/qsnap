@@ -42,6 +42,12 @@ state_dir = "/var/lib/qsnap/state"
 # removed.  Minimum: 1.
 # target_keep_generations = 2
 
+# Snapshot preservation floor — guarantees the newest N snapshots are
+# never blockcommitted, even when snapshot_chain_length is exceeded.
+# Set to 0 (default) to disable.  Set to a positive integer N to always
+# keep the newest N snapshots for rollback, regardless of chain_length.
+# snapshot_preserve_min = 0
+
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
 # deferred_warn_count = "5"
@@ -139,6 +145,10 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 
 # Override number of FULL backup generations to keep for this VM's targets
 # target_keep_generations = 3
+
+# Override snapshot preservation floor for this VM (inherits from global
+# when unset).  0 = inactive (default), positive N = keep newest N snapshots.
+# snapshot_preserve_min = 24
 
 # ── Fault-tolerance & safety controls (per-VM) ──────────────────────────
 # T2: Heavy operations, OFF by default — enable per-VM for critical VMs.

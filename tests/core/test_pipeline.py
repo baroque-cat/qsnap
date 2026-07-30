@@ -4194,177 +4194,7 @@ def test_resolve_disks_returns_empty_on_failure(
     )
 
 
-# ── Onchange Backup Gate (core-onchange-gate) ───────────────────────────────
-
-
-def test_onchange_backup_first_run_proceeds(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """backup_create="onchange" with no prior backups → gate returns True.
-
-    Approach B: ``_should_backup_onchange()`` calls ``provider.list(target)``
-    and compares snapshot names against backup names on target.  When
-    ``provider.list(target)`` returns an empty list (no backups on target),
-    the gate returns True (first backup proceeds).
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-    )
-    # Mock provider.list() to return empty list — no backups yet on target.
-    with patch.object(
-        mock_factory._backup_provider,
-        "list",
-        return_value=[],
-    ) as list_spy:
-        # Verify _should_backup_onchange returns True (first backup).
-        assert core._should_backup_onchange(vm, target, [snap]) is True
-        assert list_spy.called, "provider.list() should be called by the onchange gate"
-
-
-def test_onchange_backup_no_change_skipped(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """backup_create="onchange" with all snapshots backed up → gate blocks backup.
-
-    Approach B: ``_should_backup_onchange()`` calls ``provider.list(target)``.
-    When all snapshots in state already have corresponding backups on target,
-    the gate returns False.  ``_backup_target`` sets ``skip_transfer=True``
-    but retention + cleanup still run.
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-    )
-
-    # Mock provider.list() to return the snapshot — already backed up.
-    backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider,
-        "list",
-        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
-                                    timestamp=datetime.now(), allocation=1000)],
-    ):
-        # Gate returns False because snap1 is already on target.
-        assert core._should_backup_onchange(vm, target, [snap]) is False
-
-    caplog.set_level(logging.INFO)
-    with (
-        patch.object(
-            backup_provider,
-            "list",
-            return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
-                                        timestamp=datetime.now(), allocation=1000)],
-        ),
-        patch.object(
-            backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
-        ) as transfer_spy,
-    ):
-        result = core._backup_target(vm, target, [snap])
-
-    # Gate blocked → _backup_target returns False (no failure, just skipped).
-    assert result is False, "_backup_target should return False when onchange gate blocks backup"
-    # transfer_missing was NOT called (skip_transfer flag).
-    assert not transfer_spy.called, (
-        "transfer_missing should NOT be called when onchange gate blocks"
-    )
-    # Log "no new snapshots — skipping" message was emitted.
-    log_messages = [r.message for r in caplog.records]
-    assert any("no new snapshots" in msg for msg in log_messages), (
-        f"Expected 'no new snapshots' log message, got: {log_messages}"
-    )
-
-
-def test_onchange_backup_allocation_grew_proceeds(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """backup_create="onchange" with missing backup → gate returns True.
-
-    Approach B: when ``provider.list(target)`` returns fewer backups than
-    snapshots in state (one snapshot not yet on target), the gate returns
-    True and backup proceeds.
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=2000,
-    )
-
-    # Mock provider.list() to return NO backups — snap1 not on target.
-    # Gate passes because snap1 is not yet on target.
-    backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider,
-        "list",
-        return_value=[],
-    ):
-        assert core._should_backup_onchange(vm, target, [snap]) is True
-
-    # Verify through _backup_target that backup proceeds.
-    with patch.object(
-        backup_provider,
-        "list",
-        return_value=[],
-    ), patch.object(
-        backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
-        core._backup_target(vm, target, [snap])
-
-    assert transfer_spy.called, (
-        "transfer_missing should be called when onchange gate passes (snapshot not yet on target)"
-    )
+# ── Onchange Backup Gate (independent-target-onchange) ────────────────────
 
 
 def test_always_mode_backup_gate_bypassed(
@@ -4376,9 +4206,9 @@ def test_always_mode_backup_gate_bypassed(
 ):
     """backup_create="always" → gate is bypassed entirely.
 
-    Even when all snapshots are already on target, ``_backup_target`` must NOT
-    call ``_should_backup_onchange()``.  The ``if target.backup_create ==
-    "onchange"`` check is ``False``, so the gate code is skipped.
+    ``_backup_target`` must NOT call ``_should_backup_onchange()``.  The
+    ``if target.backup_create == "onchange"`` check is ``False``, so the
+    gate code is skipped.
     """
     target = make_target(backup_create="always")
     vm = make_vm_config(name="testvm")
@@ -4405,161 +4235,6 @@ def test_always_mode_backup_gate_bypassed(
         core._backup_target(vm, target, [snap])
 
     assert not gate_spy.called, "_should_backup_onchange should NOT be called in always mode"
-
-
-def test_onchange_no_snapshots_skipped(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """backup_create="onchange" with empty snapshots → backup skipped.
-
-    When ``snapshots`` is an empty list, ``_should_backup_onchange()``
-    returns ``False`` immediately (``if not snapshots: return False``).
-    The gate in ``_backup_target`` then returns ``False``, skipping the
-    backup entirely — there is nothing to transfer.  ``provider.list()``
-    is never called because the gate returns early on empty snapshots.
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    backup_provider = mock_factory._backup_provider
-    with patch.object(
-        backup_provider,
-        "list",
-        wraps=backup_provider.list,
-    ) as list_spy:
-        # _should_backup_onchange returns False with empty snapshots.
-        assert core._should_backup_onchange(vm, target, []) is False
-
-    # provider.list() was NOT called (gate returns early on empty snapshots).
-    assert not list_spy.called, (
-        "provider.list() should NOT be called when snapshots list is empty"
-    )
-
-    # Verify _backup_target returns early with False when gate blocks.
-    with patch.object(
-        backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
-        result = core._backup_target(vm, target, [])
-
-    assert result is False, "_backup_target should return False when gate blocks (no snapshots)"
-    assert not transfer_spy.called, "transfer_missing should NOT be called when no snapshots"
-
-
-def test_onchange_baseline_updated_after_successful_transfer(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Under Approach B, set_last_backup_allocation is NOT called after backup.
-
-    The onchange gate now uses ``provider.list()`` (Approach B) instead of
-    ``get_last_backup_allocation()``.  The gate no longer reads or writes
-    ``last_backup_allocation`` — it compares snapshot names against backup
-    names on target.  This test verifies that ``set_last_backup_allocation``
-    is NOT called after a successful backup transfer under Approach B.
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-    )
-    # No prior state → gate passes (first backup).
-
-    with patch.object(
-        mock_state,
-        "set_last_backup_allocation",
-        wraps=mock_state.set_last_backup_allocation,
-    ) as baseline_spy:
-        core._backup_target(vm, target, [snap])
-
-    # Under Approach B, set_last_backup_allocation is NOT called.
-    baseline_spy.assert_not_called()
-
-
-def test_onchange_baseline_not_updated_on_failure(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Under Approach B, set_last_backup_allocation is NOT called on failure.
-
-    The onchange gate now uses ``provider.list()`` (Approach B) instead of
-    ``get_last_backup_allocation()``.  Set_last_backup_allocation is never
-    called by the onchange path — neither on success nor on failure.  This
-    test verifies that even a failing transfer does not trigger a call to
-    ``set_last_backup_allocation``.
-    """
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-    )
-    # No prior state → gate passes.
-
-    fail_result = BackupResult(
-        success=False,
-        snapshot_name="snap1",
-        source_path=Path("/tmp/snap1.qcow2"),
-        target_path=target.path / "snap1",
-        bytes_transferred=0,
-        error="Connection refused",
-    )
-
-    with (
-        patch.object(
-            mock_state,
-            "set_last_backup_allocation",
-            wraps=mock_state.set_last_backup_allocation,
-        ) as baseline_spy,
-        patch.object(
-            mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[fail_result],
-        ),
-    ):
-        core._backup_target(vm, target, [snap])
-
-    # Baseline was NOT updated because the transfer failed.
-    baseline_spy.assert_not_called()
 
 
 def test_core_passes_convert_parallel_to_create_full_backup(
@@ -4747,199 +4422,6 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GATE TESTS — Approach B (onchange gate via provider.list())
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_onchange_approach_b_new_snapshot_on_target(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Gate returns True when snap2 is on state but not yet on target."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap1 = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-    snap2 = SnapshotInfo(
-        name="snap2", path=Path("/tmp/snap2.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-    snapshots = [snap1, snap2]
-
-    # provider.list() returns only snap1_backup — snap2 is not yet on target.
-    with patch.object(
-        mock_factory._backup_provider, "list",
-        return_value=[SnapshotInfo(name="snap1_backup", path=target.path / "snap1_backup.qcow2",
-                                    timestamp=datetime.now(), allocation=0)],
-    ):
-        assert core._should_backup_onchange(vm, target, snapshots) is True
-
-
-def test_onchange_approach_b_all_backed_up(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Gate returns False when all snapshots are already on target."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-
-    # provider.list() returns snap1 — already backed up.
-    with patch.object(
-        mock_factory._backup_provider, "list",
-        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
-                                    timestamp=datetime.now(), allocation=0)],
-    ):
-        assert core._should_backup_onchange(vm, target, [snap]) is False
-
-
-def test_onchange_approach_b_first_backup(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Gate returns True when provider.list() returns empty (first backup ever)."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[],
-    ):
-        assert core._should_backup_onchange(vm, target, [snap]) is True
-
-
-def test_onchange_approach_b_always_snapshot_mode(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Gate works correctly with snapshot_create='always' mode."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm", snapshot_create="always")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-
-    # provider.list() returns empty — no backups on target yet.
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=[],
-    ):
-        assert core._should_backup_onchange(vm, target, [snap]) is True
-
-
-def test_onchange_approach_b_standalone_backup(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Gate works for standalone qsnap backup (backup_create='onchange')."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-
-    # Simulate standalone backup run — just the backup step.
-    with patch.object(
-        mock_factory._backup_provider, "list",
-        return_value=[SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
-                                    timestamp=datetime.now(), allocation=0)],
-    ):
-        # Gate returns False because snap1 is already on target.
-        assert core._should_backup_onchange(vm, target, [snap]) is False
-
-
-def test_onchange_approach_b_no_allocation_access(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Approach B gate does NOT read get_last_backup_allocation."""
-    target = make_target(backup_create="onchange")
-    vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = SnapshotInfo(
-        name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
-
-    with (
-        patch.object(mock_factory._backup_provider, "list", return_value=[]),
-        patch.object(mock_state, "get_last_backup_allocation",
-                     wraps=mock_state.get_last_backup_allocation) as alloc_spy,
-    ):
-        core._should_backup_onchange(vm, target, [snap])
-
-    # get_last_backup_allocation was NOT called under Approach B.
-    alloc_spy.assert_not_called()
-
-
 def test_onchange_skip_runs_retention(
     make_vm_config,
     make_target,
@@ -4962,15 +4444,16 @@ def test_onchange_skip_runs_retention(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(), allocation=1000)
 
-    # All snapshots already backed up — gate will skip transfer.
-    with (
-        patch.object(mock_factory._backup_provider, "list",
-                     return_value=[SnapshotInfo(
-                         name="snap1", path=target.path / "snap1.qcow2",
-                         timestamp=datetime.now(), allocation=0)]),
-        patch.object(core, "_evaluate_backup_retention",
-                     wraps=core._evaluate_backup_retention) as retention_spy,
-    ):
+    # Gate: source disk unchanged — set baseline == current_allocation.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = False
+
+    with patch.object(
+        core,
+        "_evaluate_backup_retention",
+        wraps=core._evaluate_backup_retention,
+    ) as retention_spy:
         core._backup_target(vm, target, [snap])
 
     # Retention evaluation ran even though transfer was skipped.
@@ -5006,11 +4489,12 @@ def test_gate_skip_retention_still_runs(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(), allocation=1000)
 
+    # Gate: source disk unchanged — set baseline == current_allocation.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = False
+
     with (
-        patch.object(mock_factory._backup_provider, "list",
-                     return_value=[SnapshotInfo(
-                         name="snap1", path=target.path / "snap1.qcow2",
-                         timestamp=datetime.now(), allocation=0)]),
         patch.object(core, "_evaluate_backup_retention",
                      wraps=core._evaluate_backup_retention) as retention_spy,
         patch.object(core, "_cleanup_backups",
@@ -5045,21 +4529,20 @@ def test_onchange_skip_cleans_expired_backups(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(), allocation=1000)
 
+    # Gate: source disk unchanged — set baseline == current_allocation.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+
     # Set up an expired backup on target — retention engine should mark it
     # for removal.
     old_backup = SnapshotInfo(
         name="testvm.FULL.old_backup.qcow2", path=target.path / "testvm.FULL.old_backup.qcow2",
         timestamp=datetime(2020, 1, 1), allocation=0)
 
-    # Mock provider.list() to show all backed up (gate skips) but also
-    # show the old backup so retention evaluates it.
+    # Mock provider.list() to show the old backup so retention evaluates it.
     with patch.object(
         mock_factory._backup_provider, "list",
-        return_value=[
-            SnapshotInfo(name="snap1", path=target.path / "snap1.qcow2",
-                         timestamp=datetime.now(), allocation=0),
-            old_backup,
-        ],
+        return_value=[old_backup],
     ):
         # Use a retention engine that removes old_backup.
         mock_factory._retention_engine.evaluate = lambda items, policy, now, **kw: RetentionResult(
@@ -5077,6 +4560,606 @@ def test_onchange_skip_cleans_expired_backups(
     assert delete_spy.called, (
         "Expired backup should be deleted even when transfer is skipped"
     )
+
+
+# ── New onchange gate tests (independent-target-onchange) ──────────────────
+
+
+def test_onchange_source_disk_changed_gate_opens(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """current_allocation > baseline → gate opens (proceeds with backup)."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Baseline from prior run is smaller than current allocation.
+    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_factory.change_detector.current_allocation = 3000000
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+    assert change_result.current_allocation == 3000000
+
+
+def test_onchange_source_disk_unchanged_gate_skips(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """current_allocation == baseline → gate skips (disk unchanged)."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = False
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is False
+
+
+def test_onchange_first_run_no_baseline_gate_opens(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """No baseline (None) → gate opens (first backup)."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # No baseline set — get_last_backup_allocation returns None.
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+
+
+def test_onchange_gate_works_without_snapshots(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """No snapshots in state, disk changed → gate opens."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # No snapshots in state, no baseline → gate opens.
+    mock_factory.change_detector.current_allocation = 5000000
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+
+
+def test_onchange_always_snapshot_disk_unchanged_gate_skips(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """snapshot_create="always", disk unchanged → gate skips backup."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", snapshot_create="always")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = False
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is False
+
+
+def test_onchange_allocation_size_detector_mode(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """allocation-size mode: changed = current > last (strictly greater)."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", change_detection_mode="allocation-size")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # current_allocation > baseline → changed
+    mock_factory.change_detector.changed = False
+    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_factory.change_detector.current_allocation = 3000000
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+
+    # current_allocation == baseline → unchanged
+    mock_state.set_last_backup_allocation(str(target.path), 3000000)
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is False
+
+    # current_allocation < baseline → also unchanged (never shrinks backward)
+    mock_state.set_last_backup_allocation(str(target.path), 5000000)
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is False
+
+
+def test_onchange_allocation_map_detector_mode(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """allocation-map mode: changed = current != last."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", change_detection_mode="allocation-map")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # current_allocation != baseline → changed
+    mock_factory.change_detector.changed = False
+    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_factory.change_detector.current_allocation = 9999999
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+
+    # current_allocation == baseline → unchanged
+    mock_state.set_last_backup_allocation(str(target.path), 9999999)
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is False
+
+
+def test_onchange_baseline_updated_after_successful_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """After successful backup, set_last_backup_allocation is called."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Gate opens (no baseline).
+    mock_factory.change_detector.current_allocation = 5000000
+
+    # Mock FULL backup verification to pass.
+    mock_shell.expect("qemu-img info.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"format": "qcow2", "virtual-size": 10000}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img check.*--output=json").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps({"errors": 0, "leaks": 0}),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(
+        mock_state,
+        "set_last_backup_allocation",
+        wraps=mock_state.set_last_backup_allocation,
+    ) as baseline_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert baseline_spy.called, (
+        "set_last_backup_allocation should be called after successful backup"
+    )
+
+
+def test_onchange_baseline_not_updated_on_failure(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """After failed backup, set_last_backup_allocation is NOT called."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Gate opens (no baseline).
+    mock_factory.change_detector.current_allocation = 5000000
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "snap1.qcow2",
+        bytes_transferred=0,
+        error="Connection refused",
+    )
+
+    with (
+        patch.object(
+            mock_state,
+            "set_last_backup_allocation",
+            wraps=mock_state.set_last_backup_allocation,
+        ) as baseline_spy,
+        patch.object(
+            mock_factory._backup_provider,
+            "transfer_missing",
+            return_value=[fail_result],
+        ),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Baseline was NOT updated because the transfer failed.
+    baseline_spy.assert_not_called()
+
+
+def test_onchange_baseline_not_updated_when_gate_skips(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When gate skips (disk unchanged), set_last_backup_allocation is NOT called."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Gate: disk unchanged.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+
+    with patch.object(
+        mock_state,
+        "set_last_backup_allocation",
+        wraps=mock_state.set_last_backup_allocation,
+    ) as baseline_spy:
+        core._backup_target(vm, target, [snap])
+
+    baseline_spy.assert_not_called()
+
+
+def test_onchange_skip_runs_retention_and_cleanup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """When gate skips transfer, retention + cleanup still run."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Gate: disk unchanged.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = False
+
+    with (
+        patch.object(core, "_evaluate_backup_retention",
+                     wraps=core._evaluate_backup_retention) as retention_spy,
+        patch.object(core, "_cleanup_backups",
+                     wraps=core._cleanup_backups) as cleanup_spy,
+    ):
+        core._backup_target(vm, target, [snap])
+
+    assert retention_spy.called, "retention should run even when gate skips"
+    assert cleanup_spy.called, "cleanup should run even when gate skips"
+
+
+def test_onchange_detector_failure_gate_opens_fail_safe(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Detector reports ``changed=True`` (fail-safe) — gate opens even
+    when per-target allocation comparison would skip.
+
+    When the change detector fails to query the source disk, it must
+    return ``ChangeResult(changed=True)``.  The backup gate must interpret
+    this ``changed=True`` flag as a fail-safe signal and proceed with the
+    backup, overriding the per-target baseline comparison.
+    """
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Baseline == current_allocation: per-target comparison would
+    # return False (skip).  But the detector reports ``changed=True``
+    # (e.g., the query command itself failed), so the fail-safe
+    # overrides the comparison result → gate opens.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.changed = True
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is True, (
+        "fail-safe: gate must open when change_result.changed=True "
+        "even though per-target allocation comparison returns False"
+    )
+    assert change_result.changed is True
+
+    # Also verify through _backup_target that transfer proceeds.
+    with patch.object(
+        mock_factory._backup_provider,
+        "transfer_missing",
+        wraps=mock_factory._backup_provider.transfer_missing,
+    ) as transfer_spy:
+        core._backup_target(vm, target, [snap])
+
+    assert transfer_spy.called, (
+        "transfer_missing should be called when fail-safe opens the gate"
+    )
+
+
+def test_onchange_gate_uses_detector_not_snapshot_names(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Verify provider.list is NOT called for gate decision."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Baseline exists.
+    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_factory.change_detector.current_allocation = 3000000
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "list",
+        wraps=mock_factory._backup_provider.list,
+    ) as list_spy:
+        should_proceed, _ = core._should_backup_onchange(vm, target)
+
+    assert should_proceed is True
+    assert not list_spy.called, (
+        "provider.list() should NOT be called by the onchange gate"
+    )
+
+
+def test_onchange_transfer_skipped_but_retention_cleans_expired_backups(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Gate skips transfer, but retention runs and deletes expired backups."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime.now(),
+        allocation=1000,
+    )
+
+    # Gate: disk unchanged.
+    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_factory.change_detector.current_allocation = 2000000
+
+    old_backup = SnapshotInfo(
+        name="testvm.FULL.old_backup.qcow2",
+        path=target.path / "testvm.FULL.old_backup.qcow2",
+        timestamp=datetime(2020, 1, 1),
+        allocation=0,
+    )
+
+    with patch.object(
+        mock_factory._backup_provider, "list",
+        return_value=[old_backup],
+    ):
+        mock_factory._retention_engine.evaluate = lambda items, policy, now, **kw: RetentionResult(
+            keep=[i.name for i in items if i.name != "testvm.FULL.old_backup.qcow2"],
+            remove=["testvm.FULL.old_backup.qcow2"],
+        )
+
+        with patch.object(
+            mock_factory._backup_provider, "delete",
+            wraps=mock_factory._backup_provider.delete,
+        ) as delete_spy, patch("qsnap.core.verify_full_backup", return_value=None):
+            core._backup_target(vm, target, [snap])
+
+    assert delete_spy.called, (
+        "Expired backup should be deleted even when transfer is skipped"
+    )
+
+
+def test_onchange_mode_switch_detects_changed(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Switching change_detection_mode mid-lifecycle → type mismatch → gate opens."""
+    target = make_target(backup_create="onchange")
+    # Run in allocation-map mode now, but baseline was stored as allocation-size.
+    vm = make_vm_config(name="testvm", change_detection_mode="allocation-map")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Baseline set as if from allocation-size mode.
+    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    # Current allocation for allocation-map mode is different.
+    mock_factory.change_detector.current_allocation = 9999999
+
+    should_proceed, _ = core._should_backup_onchange(vm, target)
+    assert should_proceed is True, (
+        "mode switch should cause gate to open (type mismatch → changed)"
+    )
+
+
+def test_onchange_gate_works_vm_shut_off(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM shut off — detector queries base image, gate works normally."""
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # No baseline → gate opens (detector works even when VM is shut off).
+    mock_factory.change_detector.current_allocation = 5000000
+
+    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    assert should_proceed is True
+    assert change_result.current_allocation == 5000000
 
 
 # ═══════════════════════════════════════════════════════════════════════════
