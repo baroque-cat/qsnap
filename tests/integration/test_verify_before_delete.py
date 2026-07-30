@@ -182,7 +182,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
         snapshot_chain_length=999,  # prevent blockcommit from interfering
         targets=[TargetConfig(
             path=target_dir,
-            
+
             compress=False,
             verify="off",
             target_keep_generations=1,
@@ -320,7 +320,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[TargetConfig(
             path=target_dir,
-            
+
             compress=False,
             verify="off",
             target_keep_generations=1,

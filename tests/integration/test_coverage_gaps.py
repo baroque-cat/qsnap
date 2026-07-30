@@ -35,11 +35,9 @@ from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
-from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
-from qsnap.utils.nbd_client import is_libnbd_available
 from tests.mocks import InMemoryStateManager, MockConfigFacade
 
 try:

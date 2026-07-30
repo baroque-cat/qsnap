@@ -16,15 +16,13 @@ from unittest.mock import patch
 
 from qsnap.core import Core
 from qsnap.models.results import (
-    DeferredBlockcommit,
     RetentionResult,
     ScheduleResult,
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockConfigFacade
 from tests.helpers import add_deferred_with_since
-
+from tests.mocks import MockConfigFacade
 
 # ── test_list_snapshots_returns_all_vms_sorted_ascending ──────────────────
 

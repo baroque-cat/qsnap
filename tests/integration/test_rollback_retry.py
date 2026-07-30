@@ -237,7 +237,7 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     # Step 1: Build Core with retry enabled.
     target = TargetConfig(
         path=target_dir,
-        
+
         compress=False,
         verify="off",
         backup_retry_max=3,

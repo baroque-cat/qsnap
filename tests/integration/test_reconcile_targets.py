@@ -414,7 +414,7 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
 
     target2 = TargetConfig(
         path=different_target_dir,
-        
+
         compress=False,
         verify="off",
     )

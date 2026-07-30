@@ -4038,11 +4038,21 @@ class Core:
             )
             changed = True
 
-        # Fail-safe: when the detector reports changed=True (command
-        # failure or snapshot-side change detected), proceed with the
-        # backup regardless of the per-target baseline comparison (spec:
+        # Fail-safe: when the detector reports changed=True due to a
+        # command failure (virsh/qemu-img error), proceed with the backup
+        # regardless of the per-target baseline comparison (spec:
         # independent-target-onchange, detector fail-safe behavior).
-        if change_result.changed and not changed:
+        # Distinguish real failure from first-run short-circuit: when
+        # last_allocation > 0 (snapshot-side baseline exists) but
+        # current_allocation == 0, the detector failed to query the disk.
+        # When last_allocation == 0, it's a first-run short-circuit — the
+        # per-target comparison handles it (first run → last is None → True).
+        if (
+            change_result.changed
+            and change_result.last_allocation > 0
+            and change_result.current_allocation == 0
+            and not changed
+        ):
             changed = True
 
         if not changed:

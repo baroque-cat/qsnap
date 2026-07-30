@@ -208,6 +208,15 @@ class MockChangeDetector(IChangeDetector):
         self._current_alloc = value
 
     @property
+    def last_allocation(self) -> int:
+        """The last allocation value returned by ``has_changed()``."""
+        return self._last_alloc
+
+    @last_allocation.setter
+    def last_allocation(self, value: int) -> None:
+        self._last_alloc = value
+
+    @property
     def changed(self) -> bool:
         """The ``changed`` flag returned by ``has_changed()``.
 

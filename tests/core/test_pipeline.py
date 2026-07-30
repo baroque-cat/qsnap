@@ -4987,12 +4987,15 @@ def test_onchange_detector_failure_gate_opens_fail_safe(
         allocation=1000,
     )
 
-    # Baseline == current_allocation: per-target comparison would
-    # return False (skip).  But the detector reports ``changed=True``
-    # (e.g., the query command itself failed), so the fail-safe
-    # overrides the comparison result → gate opens.
+    # Simulate a real detector failure: the detector could not query
+    # the source disk (virsh/qemu-img error), so it returns
+    # changed=True (fail-safe) with current_allocation=0 and
+    # last_allocation > 0 (snapshot-side baseline exists).
+    # Per-target comparison: 0 > 2000000 → False (would skip).
+    # Fail-safe override: changed=True + last_allocation>0 + current_allocation=0 → True.
     mock_state.set_last_backup_allocation(str(target.path), 2000000)
-    mock_factory.change_detector.current_allocation = 2000000
+    mock_factory.change_detector.current_allocation = 0
+    mock_factory.change_detector.last_allocation = 1000000
     mock_factory.change_detector.changed = True
 
     should_proceed, change_result = core._should_backup_onchange(vm, target)

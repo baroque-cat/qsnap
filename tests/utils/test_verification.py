@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.models.results import ChainScanResult, CommitResult, ShellResult
+from qsnap.models.results import CommitResult, ShellResult
 from qsnap.utils.verification import (
     deep_verify_base_image,
     scan_backing_chain,

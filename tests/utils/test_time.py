@@ -12,7 +12,6 @@ import pytest
 
 from qsnap.utils.time import parse_duration, parse_stall_timeout
 
-
 # ---------------------------------------------------------------------------
 # parse_duration
 # ---------------------------------------------------------------------------

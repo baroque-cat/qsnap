@@ -5,7 +5,6 @@ def test_mock_shell_implements_full_interface():
     """MockShell implements the full IShell ABC, including both ``run``
     and ``run_with_stall_detection``."""
     from qsnap.interfaces.shell import IShell
-
     from tests.mocks.mock_shell import MockShell
 
     mock = MockShell()

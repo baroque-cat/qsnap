@@ -28,7 +28,6 @@ Run only when explicitly requested::
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -38,10 +37,8 @@ import pytest
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
-from qsnap.models.results import BackupResult, SnapshotInfo
-from qsnap.modules.backup.bitmap import BitmapBackupProvider
+from qsnap.models.results import SnapshotInfo
 from qsnap.shell.subprocess_shell import SubprocessShell
-from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
 
@@ -170,7 +167,6 @@ def test_backup_retry_max_zero_calls_once(test_vm):
         # doesn't actually run real transfers.
         return _RetryResultStub(success=True, error=None, payload=[])
 
-    from qsnap.core import _RetryResult  # noqa: F811 - just for reference
 
     class _RetryResultStub:
         def __init__(self, success, error, payload):

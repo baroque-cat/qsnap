@@ -172,7 +172,7 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-                
+
                 compress=False,
                 verify="off",
                 # Bucket-driven FULL requires a non-zero retention bucket.

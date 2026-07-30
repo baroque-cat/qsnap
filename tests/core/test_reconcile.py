@@ -207,12 +207,11 @@ def test_reconcile_orphan_file_cleanup_non_fatal(
     # is NOT wrapped in try/except, we bypass it.  The orphan processing
     # loop's own list() call will still raise OSError, which IS caught at
     # line 2071.
-    with patch.object(core, "_detect_broken_chains", return_value=[]):
-        with patch.object(
-            mock_factory._bitmap_backup_provider, "list",
-            side_effect=OSError("target directory not accessible"),
-        ), caplog.at_level(logging.WARNING):
-            result = core.reconcile()
+    with patch.object(core, "_detect_broken_chains", return_value=[]), patch.object(
+        mock_factory._bitmap_backup_provider, "list",
+        side_effect=OSError("target directory not accessible"),
+    ), caplog.at_level(logging.WARNING):
+        result = core.reconcile()
 
     # Error recorded in the ReconcileResult, no exception raised.
     assert len(result["testvm"].errors) > 0

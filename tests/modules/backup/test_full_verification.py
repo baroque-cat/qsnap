@@ -28,7 +28,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from qsnap.models.results import ShellResult
 from qsnap.utils.verification import verify_full_backup
 from tests.mocks.mock_shell import MockShell
 

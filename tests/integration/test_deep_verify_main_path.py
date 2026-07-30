@@ -33,7 +33,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
+from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell

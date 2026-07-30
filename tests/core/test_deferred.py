@@ -24,8 +24,8 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
 )
-from tests.mocks import MockConfigFacade
 from tests.helpers import add_deferred_with_since
+from tests.mocks import MockConfigFacade
 
 _OK = ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 

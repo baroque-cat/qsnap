@@ -160,7 +160,7 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-                
+
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,

@@ -92,4 +92,4 @@ Each @Mr.Tester subagent receives:
 - [x] 7.3 Run full test suite: `poetry run pytest tests/ -m ""`
 - [x] 7.4 Verify no old Approach B test remnants exist: `grep -r "provider.list" tests/core/test_pipeline.py` should return nothing in onchange-gate context
 - [x] 7.5 Verify `snapshot_preserve_min` is documented in config examples if any exist
-- [ ] 7.6 Commit all changes with a descriptive message
+- [x] 7.6 Commit all changes with a descriptive message
