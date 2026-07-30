@@ -99,6 +99,13 @@ state_dir = "/var/lib/qsnap/state"
 # "0s" disables stall detection (falls back to fixed-timeout run()).
 # backup_stall_timeout = "30m"
 
+# When to create backups (global default): "always" (default — always
+# transfer backups) or "onchange" (skip backup transfer when the source
+# disk has not changed since the last backup to that target — queries
+# the VM's active disk directly via IChangeDetector, independent of
+# snapshot existence).  Inherited by VM and target levels.
+# backup_create = "always"
+
 
 # ── VM definitions ──────────────────────────────────────────────────────
 
@@ -128,7 +135,8 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #                via qemu-img (same tip-exclusion rule).
 # lifecycle_mode = "virsh"
 
-# Change detection mode for "onchange" snapshot_create:
+# Change detection mode — used by both snapshot_create="onchange" and
+# backup_create="onchange" to detect disk changes:
 #   "allocation-size" — compare qemu-img info actual-size (default)
 #   "allocation-map"   — compare qemu-img map allocated regions
 # change_detection_mode = "allocation-size"
@@ -188,6 +196,12 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
   # Duration string like "30m", "1h", "0s" (disables stall detection).
   # backup_stall_timeout = "30m"
 
+  # When to create backups for this target: "always" (default — always
+  # transfer) or "onchange" (skip transfer when the source disk has not
+  # changed since the last backup to this target).  Inherited from
+  # global → VM → target.
+  # backup_create = "onchange"
+
   # Backup verification level:
   #   "metadata" — verify qcow2 format + structure (default)
   #   "hash"     — metadata + chain-traversing qemu-img compare
@@ -212,11 +226,13 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # base_image = "/var/lib/libvirt/images/critical-db.qcow2"
 # snapshot_dir = "/var/lib/libvirt/snapshots/critical-db"
 # snapshot_create = "onchange"
+# snapshot_preserve_min = 48       # always keep newest 48 snapshots
 # snapshot_quiesce = true
 # blockcommit_deep_verify = true
 #
 #   [[vm.target]]
 #   path = "/mnt/backup/critical-db"
+#   backup_create = "onchange"     # skip transfer when disk unchanged
 #   verify = "metadata"
 #   compress = true
 #   backup_retry_max = 5

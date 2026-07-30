@@ -7,7 +7,8 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 ## Features
 
 - **External snapshots** — disk-only, no-metadata snapshots via `virsh snapshot-create-as`
-- **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode)
+- **Change detection** — skip snapshot creation when the disk hasn't changed (`onchange` mode); independent source-disk-based change detection for backup transfers (`backup_create="onchange"` — queries the VM's active disk directly, decoupled from snapshot existence)
+- **Snapshot preservation floor** — `snapshot_preserve_min` guarantees the newest N snapshots are never blockcommitted, even when `snapshot_chain_length` is exceeded
 - **Incremental backups** — NBD bitmap-based backup to remote targets, with compression support for FULL backups
 - **Periodic full backups** — standalone qcow2 via `qemu-img convert` (default) or `libnbd` pread/pwrite engine, with optional compression and configurable parallel coroutines
 - **FULL backup verification** — three-tier integrity check (M1/M2/M3) at post-create, pre-rebase, and pre-deletion lifecycle points. M1 (metadata/corrupt-bit) always enforced at the verify-before-delete gate
@@ -67,6 +68,9 @@ snapshot_chain_length = 168
 target_chain_length = 100
 target_keep_generations = 2
 
+# Always keep the newest 24 snapshots (never blockcommit them)
+snapshot_preserve_min = 24
+
 [[vm]]
 name = "debiantest"
 base_image = "/var/lib/libvirt/images/debiantest.qcow2"
@@ -74,7 +78,6 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 
   [[vm.target]]
   path = "/mnt/backup/debiantest"
-  incremental = true
   verify = "hash"
 ```
 
@@ -155,13 +158,14 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_chain_length` | int | none | Max snapshots before blockcommit triggers. 0 = keep all |
 | `target_chain_length` | int | none | Max incremental backups before new FULL backup |
 | `target_keep_generations` | int | none | Number of FULL backup generations to keep per target |
+| `snapshot_preserve_min` | int | `0` | Snapshot preservation floor — guarantees the newest N snapshots are never blockcommitted, even when `snapshot_chain_length` is exceeded. `0` = inactive (default). Inherits from global → VM |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c -o compression_type=<type>`. Overridden per-VM/target |
 | `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (default — 11x faster than zlib) or `"zlib"`. Only effective when `compress = true` |
 | `full_transfer_engine` | string | `"qemu-img-convert"` | FULL backup transfer engine: `"qemu-img-convert"` (default — C code, parallel coroutines) or `"libnbd"` (Python `pread`/`pwrite` loop via `INbdClient`). Inherits from global → target |
 | `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
 | `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). `true` optimizes for HDDs; `false` for in-order writes. Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string (e.g. `"30m"`, `"1h"`, `"0s"`). `"0s"` disables stall detection (falls back to fixed-timeout `run()`). Inherits from global → VM → target |
-| `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when all snapshots are already backed up to this target — compares snapshot names in state against backup files on target via `provider.list()`). Inherits from global → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` (transfer every snapshot) or `"onchange"` (skip transfer when the source disk has not changed since the last backup to that target — queries the VM's active disk directly via `IChangeDetector`, independent of snapshot existence). Inherits from global → VM → target |
 | `full_verify_after_create` | string | `"check"` | FULL verification after creation: `"off"`, `"metadata"` (M1), `"check"` (M1+M2), `"hash"` (M1+M2+M3 via qemu-img compare) |
 | `full_verify_before_rebase` | string | `"metadata"` | FULL verification before rebasing incrementals: `"metadata"` (M1), `"off"` |
 | `full_verify_before_delete` | string | `"check"` | FULL verification at verify-before-delete gate: `"metadata"` (M1 only), `"check"` (M1+M2), `"off"` (M1 still enforced — non-configurable) |
@@ -178,9 +182,10 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_chain_length` | int | inherits global | VM-specific snapshot chain length |
 | `target_chain_length` | int | inherits global | VM-specific target chain length |
 | `target_keep_generations` | int | inherits global | VM-specific FULL generations to keep |
+| `snapshot_preserve_min` | int | inherits global | VM-specific snapshot preservation floor. `0` = inactive, positive N = keep newest N snapshots. Overrides global |
 | `snapshot_quiesce` | bool | `false` | Use `--quiesce` for filesystem-consistent snapshots |
 | `lifecycle_mode` | string | `"virsh"` | How to merge snapshots (adaptive): `"virsh"` — live `virsh blockcommit` of non-active layers while running, offline `qemu-img commit` when shut off; `"qemu-img"` — offline-only, defers while the VM runs |
-| `change_detection_mode` | string | `"allocation-size"` | How to detect disk changes: `"allocation-size"` or `"none"` |
+| `change_detection_mode` | string | `"allocation-size"` | How to detect disk changes (used by both `snapshot_create="onchange"` and `backup_create="onchange"`): `"allocation-size"` (compare `qemu-img info` actual-size) or `"allocation-map"` (compare `qemu-img map` allocated regions) |
 | `disks` | list | `null` | Explicit list of disk paths to snapshot (default: all VM disks) |
 
 ### Target Keys
@@ -198,13 +203,15 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `convert_parallel` | int | `4` | `qemu-img convert -m` flag (parallel coroutines, range 1-8). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
 | `convert_out_of_order` | bool | `true` | `qemu-img convert -W` flag (out-of-order writes). Only consumed when `full_transfer_engine = "qemu-img-convert"`. Inherits from global → VM → target |
 | `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands. Duration string. `"0s"` disables stall detection. Inherits from global → VM → target |
-| `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when all snapshots are already backed up to this target). Inherits from global → target |
+| `backup_create` | string | `"always"` | When to create backups: `"always"` or `"onchange"` (skip transfer when the source disk has not changed since the last backup to this target — uses `IChangeDetector` to query the source disk directly, independent of snapshot existence). Inherits from global → VM → target |
 
 ## Retention Policy Guide
 
-qsnap uses count-based retention. Three config keys control how long chains are maintained:
+qsnap uses count-based retention. Four config keys control how long chains are maintained:
 
 - **`snapshot_chain_length`** — Maximum number of snapshots before blockcommit triggers. When the snapshot count exceeds this value, the oldest snapshots are committed (merged) into the base image. Set to `0` to keep all snapshots indefinitely.
+
+- **`snapshot_preserve_min`** — Snapshot preservation floor. Guarantees that the newest N snapshots are **never blockcommitted**, even when `snapshot_chain_length` is exceeded. Applied as a post-processing filter after the oldest-prefix filter: if `len(remove) > len(snapshots) - preserve_min`, the newest excess items are moved from `remove` to `keep`. Set to `0` (default) to disable. Example: with 30 snapshots, `chain_length=6`, `preserve_min=24` — only the 6 oldest are committed, the newest 24 are preserved.
 
 - **`target_chain_length`** — Maximum number of incremental backups before a new FULL backup is created. When `incremental_count > target_chain_length` (strictly greater than), the next backup transfer creates a FULL instead of an incremental.
 
@@ -681,7 +688,6 @@ snapshot_quiesce = true        # filesystem-consistent snapshots
 
   [[vm.target]]
   path = "/mnt/usb-backup/desktop-vm"
-  incremental = true
   verify = "hash"              # SHA-256 verification
   compress = false             # USB is slow, skip compression overhead
 ```
@@ -707,7 +713,6 @@ lifecycle_mode = "virsh"
 
   [[vm.target]]
   path = "/mnt/nas-backup/prod-server"
-  incremental = true
   verify = "full"              # maximum integrity via qemu-img compare
   compress = true              # compress to save NAS space
 
@@ -720,7 +725,6 @@ snapshot_quiesce = true
   # Different target with hash verification (faster than full for large DBs)
   [[vm.target]]
   path = "/mnt/nas-backup/db-server"
-  incremental = true
   verify = "hash"
   compress = true
 ```
