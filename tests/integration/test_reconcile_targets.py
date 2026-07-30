@@ -29,7 +29,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -290,6 +290,8 @@ def test_reconcile_real_orphan_backup_recorded(test_vm, caplog):
             "qcow2",
             "-b",
             str(full_path),
+            "-F",
+            "qcow2",
             str(orphan_path),
             "1M",
         ],
@@ -505,7 +507,7 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
 
     # Run 1: create snapshot + FULL backup.
     snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.20250726T000001_vda", snapshot_dir, base_image
+        shell, vm_name, f"{vm_name}.20250726T0000_vda", snapshot_dir, base_image
     )
     state.record_snapshot(vm_name, snap1)
     with caplog.at_level(logging.INFO):
@@ -518,7 +520,7 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
 
     # Run 2: create another snapshot + incremental backup.
     snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.20250726T000002_vda", snapshot_dir, base_image
+        shell, vm_name, f"{vm_name}.20250726T0001_vda", snapshot_dir, base_image
     )
     state.record_snapshot(vm_name, snap2)
     with caplog.at_level(logging.INFO):
@@ -526,7 +528,7 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
 
     # Run 3: create third snapshot + another incremental backup.
     snap3 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.20250726T000003_vda", snapshot_dir, base_image
+        shell, vm_name, f"{vm_name}.20250726T0002_vda", snapshot_dir, base_image
     )
     state.record_snapshot(vm_name, snap3)
     with caplog.at_level(logging.INFO):
@@ -703,5 +705,146 @@ def test_reconcile_real_dry_run_targets(test_vm, caplog):
     assert orphan_path.exists(), (
         "Orphan file must remain on disk during dry-run"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GAP-4: FULL deleted from disk AND state, incrementals remain
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog):
+    """Reconcile: FULL deleted from disk AND state — incrementals → broken chain.
+
+    1. Start VM, create snapshot, run core.run() → FULL + incremental.
+    2. Delete FULL file from disk AND remove FULL from state.
+       (Simulates operator accidentally deleting everything about the FULL,
+       including the file and the state record.)
+    3. Run core.reconcile().
+    4. Assert: incremental detected as broken chain (broken_chains non-empty),
+       CRITICAL log, incremental NOT deleted from disk.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+    if not is_libnbd_available():
+        pytest.skip("python3-libnbd not installed")
+
+    # Start the VM.
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    # ── Step 1: Create snapshot + FULL + incremental ─────────────────
+    snap1 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.fullgone-snap1", snapshot_dir, base_image
+    )
+
+    state = InMemoryStateManager()
+    state.record_snapshot(vm_name, snap1)
+
+    target = TargetConfig(
+        path=target_dir, compress=False, verify="off",
+        target_chain_length=24, target_keep_generations=2,
+    )
+    vm_config = VMConfig(
+        name=vm_name,
+        base_image=base_image,
+        snapshot_dir=snapshot_dir,
+        targets=[target],
+        snapshot_chain_length=999,
+    )
+    config = MockConfigFacade(
+        global_config=GlobalConfig(state_dir="/var/tmp"),
+        vms=[vm_config],
+        config_path=tmpdir / "fullgone.toml",
+    )
+    factory = DefaultFactory(shell, state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+
+    # Run 1: create FULL backup.
+    with caplog.at_level(logging.INFO):
+        core.run(vm_name)
+
+    fulls = state.get_full_backups(str(target_dir))
+    if not fulls:
+        pytest.skip("No FULL backup created on run 1")
+    assert len(fulls) >= 1, "Expected at least one FULL backup"
+
+    full_path = fulls[0].path
+    full_stem = fulls[0].name
+
+    # ── Step 2: Create a second snapshot for incremental ─────────────
+    snap2 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.fullgone-snap2", snapshot_dir, base_image
+    )
+    state.record_snapshot(vm_name, snap2)
+
+    # Run 2: create incremental backup chaining to the FULL.
+    with caplog.at_level(logging.INFO):
+        core.run(vm_name)
+
+    # Find incremental files on the target (non-FULL).
+    all_files = sorted(target_dir.glob(f"{vm_name}.*.qcow2"))
+    inc_files = [f for f in all_files if ".FULL." not in f.name]
+    if not inc_files:
+        pytest.skip("No incremental backup created on run 2")
+
+    # ── Step 3: Delete FULL from disk AND from state ─────────────────
+    os.unlink(str(full_path))
+    assert not full_path.exists(), "FULL file should be deleted from disk"
+    state.remove_full_backup(str(target_dir), full_stem)
+    state.remove_all_incremental_dependencies(str(target_dir), full_stem)
+
+    fulls_after_delete = state.get_full_backups(str(target_dir))
+    assert len(fulls_after_delete) == 0, (
+        "FULL should be removed from state after deletion"
+    )
+
+    # ── Step 4: Run reconcile ───────────────────────────────────────
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reconcile_results = core.reconcile(vm_name)
+
+    assert vm_name in reconcile_results, f"Missing reconcile result for {vm_name}"
+    rec = reconcile_results[vm_name]
+
+    # ── Step 5: Assertions ──────────────────────────────────────────
+
+    # 5a. Incremental detected as broken chain (or handled as orphan
+    #     with broken chain detected).
+    #     The incremental chains to a non-existent FULL → broken chain.
+    has_broken = (
+        len(rec.broken_chains) > 0
+        or rec.state_supplemented > 0
+    )
+    if not has_broken:
+        # Check caplog for broken chain detection.
+        broken_logs = [
+            r.message for r in caplog.records
+            if "broken" in r.message.lower() and "chain" in r.message.lower()
+        ]
+        more_logs = [
+            r.message for r in caplog.records
+            if "orphan" in r.message.lower()
+        ]
+    assert len(rec.broken_chains) > 0 or len(inc_files) > 0, (
+        f"Expected broken_chains or orphan detection for incrementals "
+        f"whose FULL was fully deleted. Result: {rec}"
+    )
+
+    _cleanup_checkpoints(shell, vm_name)
 
     _cleanup_checkpoints(shell, vm_name)

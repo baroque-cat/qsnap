@@ -153,18 +153,33 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
     assert full_path.exists(), "FULL backup file must exist"
 
-    # Step 3: Corrupt the FULL file to force M1 verification to fail
-    # on cleanup (truncate to zero).
-    os.truncate(str(full_path), 0)
-    assert full_path.stat().st_size == 0, "FULL file should be truncated to 0"
+    # Step 3: Corrupt the FULL file to force M2 verification to fail
+    # on cleanup.  Truncate to 64 KiB — keeps the qcow2 header intact so
+    # qemu-img info succeeds (M1 passes, file enters retention), but
+    # qemu-img check (M2) reports errors because L1/L2 tables reference
+    # clusters beyond the truncated file boundary.
+    header_size = 65536
+    os.truncate(str(full_path), header_size)
+    assert full_path.stat().st_size == header_size, (
+        f"FULL file should be truncated to {header_size}"
+    )
+
+    # Record a second FULL in state to make the corrupt one a deletion
+    # candidate under keep_generations=1.  The second FULL file must
+    # exist on disk so provider.list() returns it.
+    gen2_path = target_dir / f"{vm_name}.FULL.gen2.20300101T000001_a1b2c3.qcow2"
+    # Create a valid qcow2 so provider.list() includes it.
+    shell.run(["qemu-img", "create", "-f", "qcow2", str(gen2_path), "128K"], timeout=30)
+    assert gen2_path.exists(), "gen2 FULL file must exist"
+    state.record_full_backup(str(target_dir), gen2_path.name, datetime(2030, 1, 1))
 
     # Step 4: Build Core with keep_generations=1 so the old gen would
-    # be a candidate for deletion.  Also set verify_on_create=metadata
-    # so M1 always runs.
+    # be a candidate for deletion.
     vm_config = VMConfig(
         name=vm_name,
         base_image=base_image,
         snapshot_dir=snapshot_dir,
+        snapshot_chain_length=999,  # prevent blockcommit from interfering
         targets=[TargetConfig(
             path=target_dir,
             
@@ -175,7 +190,6 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
-            timestamp_format="short",
             state_dir="/var/tmp",
             full_verify_before_delete="check",
         ),
@@ -185,15 +199,12 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     factory = DefaultFactory(shell=shell, state=state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
 
-    # Step 5: Create new snapshot and run.
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vbd-snap2", base_image, snapshot_dir
-    )
-    state.record_snapshot(vm_name, snap2)
-
+    # Run cleanup directly — the corrupt FULL (older) should be a
+    # deletion candidate under keep_generations=1.
+    backups, retention_result = core._evaluate_backup_retention(vm_config, vm_config.targets[0])
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        core.run(vm_name)
+        core._cleanup_backups(vm_config, vm_config.targets[0], backups, retention_result)
 
     # Step 6: The truncated FULL file should still exist
     # (M1 verification blocks deletion of corrupt FULL).
@@ -317,7 +328,6 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
-            timestamp_format="short",
             state_dir="/var/tmp",
             full_verify_before_delete="check",
         ),

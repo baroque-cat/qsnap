@@ -58,7 +58,6 @@ poetry install
 1. Create a configuration file at `/etc/qsnap/qsnap.toml`:
 
 ```toml
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 
 # Default: trigger blockcommit after 168 snapshots
@@ -151,7 +150,6 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `timestamp_format` | string | `"short"` | Snapshot name format: `"short"` (`20250714T130000`) or `"long"` (`2025-07-14T13:00:00`) |
 | `state_dir` | string | `/var/lib/qsnap/state` | Directory for JSON state files (snapshot records, deferred operations) |
 | `lockfile` | string | `/var/lock/qsnap.lock` | Lockfile path to prevent concurrent runs |
 | `snapshot_chain_length` | int | none | Max snapshots before blockcommit triggers. 0 = keep all |
@@ -667,7 +665,6 @@ The `snapshot_dir` is created automatically. You can add targets and customize r
 A desktop machine running a few VMs, backing up to a hot-plugged USB drive. Conservative retention, hash verification:
 
 ```toml
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 lockfile = "/var/lock/qsnap.lock"
 
@@ -694,7 +691,6 @@ snapshot_quiesce = true        # filesystem-consistent snapshots
 A production server backing up to a persistent NFS/NAS mount. Aggressive pruning, full verification, full backups with compression:
 
 ```toml
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 lockfile = "/var/lock/qsnap.lock"
 

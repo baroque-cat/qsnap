@@ -143,7 +143,7 @@ def test_check_real_targets_all_consistent(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
         config_path=tmpdir / "check_tgt_consistent.toml",
     )
@@ -233,7 +233,7 @@ def test_check_real_targets_broken_chain(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
         config_path=tmpdir / "check_tgt_broken.toml",
     )
@@ -351,7 +351,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
         config_path=tmpdir / "check_tgt_orphan.toml",
     )
@@ -396,7 +396,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
         targets=[new_target],
     )
     new_config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[new_vm_config],
         config_path=tmpdir / "check_tgt_orphan2.toml",
     )
@@ -480,7 +480,7 @@ def test_check_real_deep_targets(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
         config_path=tmpdir / "check_tgt_deep.toml",
     )
@@ -562,7 +562,7 @@ def test_check_real_targets_after_retention(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
         config_path=tmpdir / "check_tgt_retention.toml",
     )

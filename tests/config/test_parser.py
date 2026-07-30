@@ -68,24 +68,10 @@ def test_config_parser_reads_lockfile_field_into_globalconfig() -> None:
 
 
 @pytest.mark.unit
-def test_config_parser_reads_timestamp_format_field() -> None:
-    """The top-level ``timestamp_format`` key is parsed into GlobalConfig."""
-    facade = ConfigFacade(FIXTURES / "global_fields.toml")
-    assert facade.get_global().timestamp_format == "short"
-
-
-@pytest.mark.unit
 def test_config_parser_lockfile_defaults_to_none() -> None:
     """When no ``lockfile`` is set, GlobalConfig.lockfile defaults to None."""
     facade = ConfigFacade(FIXTURES / "minimal.toml")
     assert facade.get_global().lockfile is None
-
-
-@pytest.mark.unit
-def test_config_parser_timestamp_format_defaults_to_long() -> None:
-    """When no ``timestamp_format`` is set, it defaults to 'long'."""
-    facade = ConfigFacade(FIXTURES / "minimal.toml")
-    assert facade.get_global().timestamp_format == "long"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -187,7 +173,6 @@ def test_no_global_section_backward_compatible() -> None:
 
     # Core fields from the fixture must parse as before.
     assert global_cfg.lockfile == "/var/lock/qsnap.lock"
-    assert global_cfg.timestamp_format == "short"
     # compress is not present in global_fields.toml → defaults to True.
     assert global_cfg.compress is True
 

@@ -223,7 +223,7 @@ When `--preserve` flags are active, snapshot and backup creation steps that fail
 #### Scenario: VM with multiple disks (vda, vdb)
 - **WHEN** `virsh domblklist` returns both `vda` and `vdb`
 - **THEN** two snapshots are created: one for each disk
-- **THEN** snapshot files are named `{vm}.{ts}_vda.qcow2` and `{vm}.{ts}_vdb.qcow2`
+- **THEN** snapshot files are named `{vm}.{ts}_vda_{6hex}.qcow2` and `{vm}.{ts}_vdb_{6hex}.qcow2`
 
 #### Scenario: Explicit disk list in config overrides auto-discovery
 - **WHEN** `VMConfig.disks` is `["vda"]` for a VM that also has `vdb`
@@ -481,8 +481,8 @@ When executing deferred blockcommit operations and `vm_config.blockcommit_deep_v
 `Core` SHALL provide a `deploy(backup_name: str, new_vm_name: str, storage_dir: Path, add_to_config: bool = False, vm_filter: str | None = None) -> RestoreResult` method. It SHALL delegate to `Core.fork()` with the same parameters.
 
 #### Scenario: deploy delegates to fork
-- **WHEN** `core.deploy("vm.FULL.20260701.monthly", "recovered-vm", Path("/var/lib/libvirt/images"))` is called
-- **THEN** `core.fork("vm.FULL.20260701.monthly", "recovered-vm", Path("/var/lib/libvirt/images"))` is called internally
+- **WHEN** `core.deploy("vm.FULL.20260701T000000_a1b2c3", "recovered-vm", Path("/var/lib/libvirt/images"))` is called
+- **THEN** `core.fork("vm.FULL.20260701T000000_a1b2c3", "recovered-vm", Path("/var/lib/libvirt/images"))` is called internally
 - **THEN** returns the same `RestoreResult`
 
 ### Requirement: Phantom FULL detection with cascade cleanup

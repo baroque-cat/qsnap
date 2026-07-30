@@ -184,7 +184,7 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 #### Scenario: Bitmap FULL with dotted VM name
 
 - **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False)` is called
-- **THEN** the FULL backup file is named `3.Projects_opencode.FULL.YYYYMMDD.qcow2`
+- **THEN** the FULL backup file is named `3.Projects_opencode.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2`
 
 
 ### Requirement: transfer_missing SHALL NOT create FULL backups

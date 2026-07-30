@@ -48,7 +48,6 @@ class GlobalConfig:
     (keep 2 FULL chains on targets).
     """
 
-    timestamp_format: str = "long"
     state_dir: str = "/var/lib/qsnap/state"
     lockfile: str | None = None
     snapshot_chain_length: int | None = 24

@@ -122,7 +122,7 @@ def _build_core(
         ],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short", state_dir="/var/tmp"),
+        global_config=GlobalConfig(state_dir="/var/tmp"),
         vms=[vm_config],
         config_path=target_dir / "test_target_chain_length_none.toml",
     )

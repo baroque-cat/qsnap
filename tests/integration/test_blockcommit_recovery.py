@@ -66,7 +66,6 @@ def _build_core(
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
-            timestamp_format="short",
             chain_verify_before_commit=True,
             chain_verify_after_commit=False,
         ),

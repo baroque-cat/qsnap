@@ -1,5 +1,4 @@
 # Config with all global fields set
-timestamp_format = "short"
 state_dir = "/tmp/qsnap-state"
 lockfile = "/var/lock/qsnap.lock"
 snapshot_chain_length = 168

@@ -80,7 +80,7 @@ def test_global_config_immutable():
 
     # Attempting to set an attribute on a frozen dataclass raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.timestamp_format = "short"  # type: ignore[misc]
+        cfg.state_dir = "/tmp"  # type: ignore[misc]
 
     # Mutating count-based retention fields also raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):

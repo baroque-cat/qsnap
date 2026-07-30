@@ -109,15 +109,6 @@ The `lockfile` field on `GlobalConfig` (already defined, default `None`) SHALL b
 - **THEN** a lock is acquired on `/var/lock/qsnap.lock`
 
 
-### Requirement: GlobalConfig timestamp_format field is consumed
-The `timestamp_format` field on `GlobalConfig` (default `"long"`) SHALL be consumed by `Core._generate_snapshot_name()` to select the timestamp format string.
-
-#### Scenario: timestamp_format controls snapshot naming
-- **WHEN** `timestamp_format = "short"` in the config and a snapshot is created
-- **THEN** the snapshot name uses `YYYYMMDD` format
-
-
-
 
 ### Requirement: VMConfig disks field
 `VMConfig` SHALL gain an optional `disks: list[str] | None` field (default `None`). When `None`, `Core` SHALL auto-discover all disks via `virsh domblklist`. When a list is provided, only those disks are snapshotted.

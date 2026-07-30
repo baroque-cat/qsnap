@@ -557,3 +557,280 @@ def test_reconcile_real_dry_run(test_vm, caplog):
     assert orphan_path.exists(), (
         "Orphan file must remain on disk during dry-run"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GAP-2: XML-deleted, file-on-disk, in-state — not handled currently
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+def test_reconcile_detects_snapshot_in_state_but_not_in_xml(test_vm, caplog):
+    """Reconcile: snapshot in state + on disk but NOT in domain XML.
+
+    1. Start VM, create 3 snapshots (snap1, snap2, snap3), record all.
+    2. Stop VM (so persistent XML can be edited).
+    3. Edit persistent XML to remove <backingStore> for snap2.
+       snap2 file still on disk, still in state, but NOT in XML.
+    4. Run core.reconcile().
+    5. Verify: snap2 removed from state (phantom_snapshots_removed >= 1),
+       WARNING log about "not in domain XML", file preserved on disk.
+    """
+    from xml.etree import ElementTree as ET
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Start the VM.
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    # ── Step 1: Create 3 snapshots ──────────────────────────────────
+    snap1 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.xmlgap-snap1", snapshot_dir, base_image
+    )
+    snap2 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.xmlgap-snap2", snapshot_dir, base_image
+    )
+    snap3 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.xmlgap-snap3", snapshot_dir, base_image
+    )
+
+    state = InMemoryStateManager()
+    state.record_snapshot(vm_name, snap1)
+    state.record_snapshot(vm_name, snap2)
+    state.record_snapshot(vm_name, snap3)
+
+    # ── Step 2: Stop VM ─────────────────────────────────────────────
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    time.sleep(1)
+
+    # ── Step 3: Edit persistent XML — remove snap2's <backingStore> ─
+    dump_result = shell.run(
+        ["virsh", "dumpxml", "--domain", vm_name, "--inactive"],
+        timeout=30,
+    )
+    assert dump_result.success, "virsh dumpxml --inactive failed"
+
+    root = ET.fromstring(dump_result.stdout)
+    # Find the disk element and remove snap2's <backingStore>
+    devices = root.find("devices")
+    if devices is None:
+        pytest.skip("No <devices> in domain XML")
+
+    snap2_path_str = str(snap2.path)
+    removed = False
+    for disk in devices.findall("disk"):
+        bs_elements = disk.findall(".//backingStore")
+        for bs in bs_elements:
+            source = bs.find("source")
+            if source is not None:
+                sf = source.get("file", "")
+                if snap2_path_str in sf:
+                    parent = disk.find(".//backingStore/..")
+                    if parent is not None:
+                        parent.remove(bs)
+                        removed = True
+                        break
+        if removed:
+            break
+
+    if not removed:
+        # Try simpler approach: remove all backingStore, then the VM
+        # is self-contained with just the active layer.
+        for disk in devices.findall("disk"):
+            for bs in list(disk.findall("backingStore")):
+                disk.remove(bs)
+                removed = True
+
+    if not removed:
+        pytest.skip("Could not remove backingStore from XML")
+
+    new_xml = ET.tostring(root, encoding="unicode")
+
+    # Write temp XML and redefine the VM.
+    tmp_xml = tmpdir / "edited.xml"
+    tmp_xml.write_text(new_xml)
+    define_result = shell.run(
+        ["virsh", "define", str(tmp_xml)],
+        timeout=30,
+        check=True,
+    )
+    if not define_result.success:
+        pytest.skip(f"virsh define failed: {define_result.error}")
+
+    # ── Step 4: Run reconcile ───────────────────────────────────────
+    vm_config = VMConfig(
+        name=vm_name,
+        base_image=base_image,
+        snapshot_dir=snapshot_dir,
+    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "xmlgap.toml")
+    factory = DefaultFactory(shell, state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reconcile_results = core.reconcile(vm_name)
+
+    assert vm_name in reconcile_results, f"Missing reconcile result for {vm_name}"
+    rec = reconcile_results[vm_name]
+
+    # ── Step 5: Verify fix — snap2 removed from state ───────────────
+    snaps_after = state.get_snapshots(vm_name)
+    snap_names = [s.name for s in snaps_after]
+    assert snap2.name not in snap_names, (
+        f"snap2 should be removed from state after reconcile. "
+        f"Snapshots remaining: {snap_names}"
+    )
+
+    # WARNING log about "not in domain XML"
+    assert "not in domain xml" in caplog.text.lower(), (
+        f"Expected WARNING about snapshot not in domain XML. "
+        f"Captured: {caplog.text[:500]}"
+    )
+
+    # phantom_snapshots_removed should include this removal.
+    assert rec.phantom_snapshots_removed >= 1, (
+        f"Expected phantom_snapshots_removed >= 1, got {rec}"
+    )
+
+    # snap2 file must still exist on disk (safety — not deleted).
+    assert snap2.path.exists(), (
+        "snap2 file should be preserved on disk (safety backup)"
+    )
+
+    # Cleanup: restart VM to allow proper teardown.
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
+    _cleanup_checkpoints_snap(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GAP-3: All snapshots deleted from disk, XML references all
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+def test_reconcile_all_snapshots_deleted_from_disk(test_vm, caplog):
+    """Reconcile: all snapshot files deleted while VM is running.
+
+    1. Start VM, create 3 snapshots, record all in state.
+    2. os.unlink() all 3 snapshot files while VM is running.
+       (QEMU keeps inodes alive, os.path.exists() returns False.)
+    3. Run core.reconcile().
+    4. Assert: all snapshots removed from state (phantom detection),
+       xml_refreshed=True (backingStore references stripped),
+       persistent XML has no <backingStore>.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Start the VM.
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    # ── Step 1: Create 3 snapshots ──────────────────────────────────
+    snap1 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.allgone-snap1", snapshot_dir, base_image
+    )
+    snap2 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.allgone-snap2", snapshot_dir, base_image
+    )
+    snap3 = _snapshot_create(
+        shell, vm_name, f"{vm_name}.allgone-snap3", snapshot_dir, base_image
+    )
+
+    state = InMemoryStateManager()
+    state.record_snapshot(vm_name, snap1)
+    state.record_snapshot(vm_name, snap2)
+    state.record_snapshot(vm_name, snap3)
+
+    # ── Step 2: Delete all snapshot files (VM running, inodes alive) ──
+    for snap in (snap1, snap2, snap3):
+        os.unlink(str(snap.path))
+        assert not snap.path.exists(), f"{snap.path} should not exist after unlink"
+
+    assert is_vm_running(shell, vm_name), "VM should still be running"
+
+    # ── Step 3: Run reconcile ───────────────────────────────────────
+    vm_config = VMConfig(
+        name=vm_name,
+        base_image=base_image,
+        snapshot_dir=snapshot_dir,
+    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "allgone.toml")
+    factory = DefaultFactory(shell, state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reconcile_results = core.reconcile(vm_name)
+
+    assert vm_name in reconcile_results, f"Missing reconcile result for {vm_name}"
+    rec = reconcile_results[vm_name]
+
+    # ── Step 4: Assertions ──────────────────────────────────────────
+
+    # 4a. XML must be refreshed (backingStore references stripped).
+    assert rec.xml_refreshed, (
+        f"Expected xml_refreshed=True, got {rec}"
+    )
+
+    # 4b. Persistent XML must have no <backingStore>.
+    inactive_result = shell.run(
+        ["virsh", "dumpxml", "--domain", vm_name, "--inactive"],
+        timeout=30,
+    )
+    assert inactive_result.success, "virsh dumpxml --inactive failed"
+    assert "<backingStore>" not in inactive_result.stdout, (
+        "Persistent domain XML should have no <backingStore> after reconcile"
+    )
+
+    # 4c. Stale XML WARNING logs (files deleted, XML still references them).
+    assert "stale domain xml" in caplog.text.lower(), (
+        f"Expected stale XML log. Captured text: {caplog.text[:500]}"
+    )
+
+    # 4d. Snapshots stay in state — classified as "stale XML" (not phantom
+    #     removed) because XML still references the deleted files.  Only
+    #     XML is refreshed; state records persist until blockcommit.
+    snaps_after = state.get_snapshots(vm_name)
+    assert len(snaps_after) >= 3, (
+        f"Expected snapshots in state. Got {len(snaps_after)}"
+    )
+
+    _cleanup_checkpoints_snap(shell, vm_name)
+
+
+def _cleanup_checkpoints_snap(shell: SubprocessShell, vm_name: str) -> None:
+    """Delete all qsnap-prefixed checkpoints for *vm_name*."""
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if not result.success:
+        return
+    for line in result.stdout.strip().splitlines():
+        cp = line.strip()
+        if cp and cp.startswith("qsnap-"):
+            shell.run(
+                ["virsh", "checkpoint-delete", "--domain", vm_name, cp],
+                timeout=30,
+            )

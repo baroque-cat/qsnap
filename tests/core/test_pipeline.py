@@ -549,8 +549,8 @@ def test_create_snapshot_single_disk_sda_not_vda(
     snapshot_name = create_spy.call_args.args[1]
     disk = create_spy.call_args.args[2]
     assert disk == "sda"
-    assert snapshot_name.endswith("_sda")
-    assert not snapshot_name.endswith("_vda")
+    assert "_sda_" in snapshot_name
+    assert "_vda_" not in snapshot_name
 
 
 # ── test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix ───────
@@ -600,8 +600,8 @@ def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
     disk_names = [call.args[2] for call in create_spy.call_args_list]
     assert set(disk_names) == {"vda", "vdb"}
     snapshot_names = [call.args[1] for call in create_spy.call_args_list]
-    assert any(name.endswith("_vda") for name in snapshot_names)
-    assert any(name.endswith("_vdb") for name in snapshot_names)
+    assert any("_vda_" in name for name in snapshot_names)
+    assert any("_vdb_" in name for name in snapshot_names)
 
 
 # ── test_create_snapshot_explicit_disk_list_overrides_discovery ───────────
@@ -639,7 +639,7 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
     # Snapshot should use sda
     assert create_spy.called
     assert create_spy.call_args.args[2] == "sda"
-    assert create_spy.call_args.args[1].endswith("_sda")
+    assert "_sda_" in create_spy.call_args.args[1]
 
 
 # ── test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline ─────────────
@@ -693,7 +693,7 @@ def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
     # vda snapshot was recorded in state (vdb was not)
     snapshots = mock_state.get_snapshots("testvm")
     assert len(snapshots) == 1
-    assert snapshots[0].name.endswith("_vda")
+    assert "_vda_" in snapshots[0].name
 
     # vdb error was logged
     assert "vdb" in caplog.text
@@ -5048,7 +5048,7 @@ def test_onchange_skip_cleans_expired_backups(
     # Set up an expired backup on target — retention engine should mark it
     # for removal.
     old_backup = SnapshotInfo(
-        name="old_backup", path=target.path / "old_backup.qcow2",
+        name="testvm.FULL.old_backup.qcow2", path=target.path / "testvm.FULL.old_backup.qcow2",
         timestamp=datetime(2020, 1, 1), allocation=0)
 
     # Mock provider.list() to show all backed up (gate skips) but also
@@ -5063,14 +5063,14 @@ def test_onchange_skip_cleans_expired_backups(
     ):
         # Use a retention engine that removes old_backup.
         mock_factory._retention_engine.evaluate = lambda items, policy, now, **kw: RetentionResult(
-            keep=[i.name for i in items if i.name != "old_backup"],
-            remove=["old_backup"],
+            keep=[i.name for i in items if i.name != "testvm.FULL.old_backup.qcow2"],
+            remove=["testvm.FULL.old_backup.qcow2"],
         )
 
         with patch.object(
             mock_factory._backup_provider, "delete",
             wraps=mock_factory._backup_provider.delete,
-        ) as delete_spy:
+        ) as delete_spy, patch("qsnap.core.verify_full_backup", return_value=None):
             core._backup_target(vm, target, [snap])
 
     # Expired backup was deleted even though transfer was skipped.
@@ -6839,3 +6839,191 @@ def test_chain_verify_missing_file_partial(
     assert warning_logs, "Expected WARNING log for broken chain"
 
 
+# ── GAP-1: Snapshot creation failure → no state record ────────────────────
+
+
+def test_snapshot_creation_failure_does_not_record_state(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """SnapshotResult(success=False) → Core does NOT record in state, logs error.
+
+    Verifies that when ExternalSnapshotProvider.create() returns failure,
+    Core does not call record_snapshot() for the failed disk.
+    """
+    vm = make_vm_config(name="testvm", disks=["vda", "vdb"])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
+        if disk == "vda":
+            return SnapshotResult(
+                success=True,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=65536,
+                error=None,
+            )
+        return SnapshotResult(
+            success=False,
+            name=snapshot_name,
+            path=snapshot_path,
+            new_allocation=0,
+            error="snapshot-create-as failed for vdb",
+        )
+
+    caplog.set_level(logging.ERROR)
+    with patch.object(snapshot_provider, "create", side_effect=create_side_effect):
+        result = core.snapshot()
+
+    # Pipeline overall result is success (partial failure tolerated).
+    assert result.success is True
+
+    # vda recorded in state — vdb NOT.
+    snapshots = mock_state.get_snapshots("testvm")
+    assert len(snapshots) == 1
+    assert "_vda_" in snapshots[0].name
+
+    # vdb failure logged.
+    assert "vdb" in caplog.text
+    assert "snapshot-create-as failed" in caplog.text
+
+
+# ── GAP-5: Pipeline skips blockcommit when snapshot failed ─────────────────
+
+
+def test_pipeline_skips_blockcommit_when_snapshot_creation_fails(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """When a snapshot creation fails, blockcommit is NOT called for that disk.
+
+    The failed disk has no snapshot recorded in state → no snapshot to
+    commit → blockcommit does not run for the failed disk.
+    """
+    vm = make_vm_config(
+        name="testvm",
+        disks=["vda"],
+        snapshot_chain_length=1,  # triggers commit after 1 snapshot
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with a snapshot so retention triggers commit.
+    old_snap = SnapshotInfo(
+        name="testvm.20250101T000000_vda_abc123",
+        path=Path("/tmp/testvm.20250101T000000_vda_abc123.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", old_snap)
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    # New snapshot creation FAILS for vda.
+    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
+        return SnapshotResult(
+            success=False,
+            name=snapshot_name,
+            path=snapshot_path,
+            new_allocation=0,
+            error="snapshot-create-as failed",
+        )
+
+    lifecycle = mock_factory._lifecycle_manager
+    with (
+        patch.object(snapshot_provider, "create", side_effect=create_side_effect),
+        patch.object(lifecycle, "blockcommit", wraps=lifecycle.blockcommit) as bc_spy,
+        patch("os.path.exists", return_value=False),  # no collision files
+    ):
+        caplog.set_level(logging.ERROR)
+        core.run("testvm")
+
+    # Blockcommit must NOT be called — no new snapshot was created.
+    assert not bc_spy.called, (
+        "blockcommit should be skipped when snapshot creation fails"
+    )
+
+
+# ── GAP-6: Pipeline skips retention when backup transfer fails ────────────
+
+
+def test_pipeline_skips_retention_when_backup_transfer_fails(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """BackupResult(success=False) → retention/cleanup skipped, old gen preserved.
+
+    When backup transfer fails, full_verification_failed should prevent
+    retention evaluation and cleanup, preserving old generations.
+    """
+    target = make_target(target_keep_generations=1)
+    vm = make_vm_config(
+        name="testvm",
+        targets=[target],
+        snapshot_chain_length=99,
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record a current snapshot in state.
+    snap = SnapshotInfo(
+        name="testvm.20250102T000000_vda_abc123",
+        path=Path("/tmp/testvm.20250102T000000_vda_abc123.qcow2"),
+        timestamp=datetime(2025, 1, 2, 0, 0),
+        allocation=1000,
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # NO prior FULL in state → _should_create_full returns True →
+    # create_full_backup IS called.  Mock it to fail.
+    backup_provider = mock_factory._backup_provider
+
+    fail_result = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=snap.path,
+        target_path=target.path / "bogus.qcow2",
+        bytes_transferred=0,
+        error="Connection refused — NBD transfer failed",
+    )
+
+    with (
+        patch("qsnap.core.os.path.exists", return_value=True),
+        patch.object(backup_provider, "create_full_backup", return_value=fail_result),
+        patch.object(core, "_cleanup_backups") as cleanup_spy,
+    ):
+        caplog.set_level(logging.CRITICAL)
+        core._backup_target(vm, target, [snap])
+
+    # _cleanup_backups must NOT be called — retention skipped.
+    assert not cleanup_spy.called, (
+        "_cleanup_backups should be skipped when backup transfer fails"
+    )

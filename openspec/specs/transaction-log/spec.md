@@ -23,20 +23,20 @@ Provides an optional structured, machine-readable transaction log file in btrbk-
 Each line in the transaction log SHALL follow the btrbk-compatible format: `localtime type status target_url source_url parent_url`. Fields SHALL be separated by a single space. Undefined fields SHALL use `-` as placeholder. The `type` field SHALL use qsnap action types: `snapshot`, `delete_snapshot`, `backup`, `backup_full`, `delete_backup`. The `status` field SHALL be `success` or `ERROR`.
 
 #### Scenario: Snapshot creation log line
-- **WHEN** a snapshot `testvm.20260718T1400_vda.qcow2` is successfully created at `/var/lib/libvirt/snapshots/testvm/`
-- **THEN** the log line is: `<localtime> snapshot success - /var/lib/libvirt/snapshots/testvm/testvm.20260718T1400_vda.qcow2 - -`
+- **WHEN** a snapshot `testvm.20260718T140000_vda_a1b2c3.qcow2` is successfully created at `/var/lib/libvirt/snapshots/testvm/`
+- **THEN** the log line is: `<localtime> snapshot success - /var/lib/libvirt/snapshots/testvm/testvm.20260718T140000_vda_a1b2c3.qcow2 - -`
 
 #### Scenario: Snapshot deletion log line
-- **WHEN** snapshot `testvm.20260718T0800_vda` is blockcommitted and removed
-- **THEN** the log line is: `<localtime> delete_snapshot success - /var/lib/libvirt/snapshots/testvm/testvm.20260718T0800_vda.qcow2 - -`
+- **WHEN** snapshot `testvm.20260718T080000_vda_a1b2c3` is blockcommitted and removed
+- **THEN** the log line is: `<localtime> delete_snapshot success - /var/lib/libvirt/snapshots/testvm/testvm.20260718T080000_vda_a1b2c3.qcow2 - -`
 
 #### Scenario: Backup transfer log line
-- **WHEN** incremental backup `testvm.20260718T1400_vda.qcow2` is transferred to `/snapshots/backup/vm/testvm/`
-- **THEN** the log line is: `<localtime> backup success /snapshots/backup/vm/testvm/testvm.20260718T1400_vda.qcow2 /var/lib/libvirt/snapshots/testvm/testvm.20260718T1400_vda.qcow2 -`
+- **WHEN** incremental backup `testvm.20260718T140000_vda_a1b2c3.qcow2` is transferred to `/snapshots/backup/vm/testvm/`
+- **THEN** the log line is: `<localtime> backup success /snapshots/backup/vm/testvm/testvm.20260718T140000_vda_a1b2c3.qcow2 /var/lib/libvirt/snapshots/testvm/testvm.20260718T140000_vda_a1b2c3.qcow2 -`
 
 #### Scenario: FULL backup log line
-- **WHEN** FULL backup `testvm.FULL.20260718.qcow2` is created at `/snapshots/backup/vm/testvm/`
-- **THEN** the log line is: `<localtime> backup_full success /snapshots/backup/vm/testvm/testvm.FULL.20260718.qcow2 /var/lib/libvirt/snapshots/testvm/testvm.20260718T1400_vda.qcow2 -`
+- **WHEN** FULL backup `testvm.FULL.20260718T000000_a1b2c3.qcow2` is created at `/snapshots/backup/vm/testvm/`
+- **THEN** the log line is: `<localtime> backup_full success /snapshots/backup/vm/testvm/testvm.FULL.20260718T000000_a1b2c3.qcow2 /var/lib/libvirt/snapshots/testvm/testvm.20260718T140000_vda_a1b2c3.qcow2 -`
 
 #### Scenario: Error log line
 - **WHEN** a backup transfer fails

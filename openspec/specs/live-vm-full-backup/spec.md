@@ -42,12 +42,12 @@ When `compress=True` and `compression_type="zstd"`, the `qemu-img convert` comma
 
 ### Requirement: Atomic FULL file creation via qemu-img convert
 
-When using `qemu-img convert` for FULL backup, the target file SHALL be created at a `.tmp` path first, then atomically renamed to the final `vm.FULL.YYYYMMDD.qcow2` name on success. This matches the project-wide atomic-creation pattern for backup outputs.
+When using `qemu-img convert` for FULL backup, the target file SHALL be created at a `.tmp` path first, then atomically renamed to the final `vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2` name on success. This matches the project-wide atomic-creation pattern for backup outputs.
 
 #### Scenario: qemu-img convert FULL creates tmp then renames
 - **WHEN** `qemu-img convert` succeeds
-- **THEN** the data is written to `<target_path>/vm.FULL.YYYYMMDD.qcow2.tmp`
-- **THEN** the file is renamed to `<target_path>/vm.FULL.YYYYMMDD.qcow2`
+- **THEN** the data is written to `<target_path>/vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2.tmp`
+- **THEN** the file is renamed to `<target_path>/vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2`
 - **AND** `BackupResult(success=True, path=<final_path>)` is returned
 
 #### Scenario: qemu-img convert FULL failure leaves no final file

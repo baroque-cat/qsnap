@@ -1,6 +1,5 @@
 # full_backup config — tests compress parsing with count-based retention
 
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 
 snapshot_chain_length = 168

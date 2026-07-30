@@ -169,16 +169,16 @@ All concrete implementations of `IStateManager` (JsonStateManager, InMemoryState
 `JsonStateManager._load_dependencies()` SHALL migrate `_dependencies.json` keys from the extended form (with `.qcow2` extension) to the stem form (without `.qcow2`) on load. For each target path's dependency dict, any key ending in `.qcow2` SHALL be renamed to its stem form, preserving the value list. Migration SHALL be idempotent — loading an already-migrated file produces no changes.
 
 #### Scenario: Legacy .qcow2 keys migrated to stem on load
-- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727.qcow2": ["incr-001"]}}`
-- **THEN** on load, the key is migrated to `"vm.FULL.20260727"` (stem form)
-- **AND** `get_incremental_dependencies("target", "vm.FULL.20260727")` returns `["incr-001"]`
+- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727T000000_a1b2c3.qcow2": ["incr-001"]}}`
+- **THEN** on load, the key is migrated to `"vm.FULL.20260727T000000_a1b2c3"` (stem form)
+- **AND** `get_incremental_dependencies("target", "vm.FULL.20260727T000000_a1b2c3")` returns `["incr-001"]`
 
 #### Scenario: Already-migrated file loaded unchanged
-- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727": ["incr-001"]}}` (stem keys)
+- **WHEN** `_dependencies.json` contains `{"target": {"vm.FULL.20260727T000000_a1b2c3": ["incr-001"]}}` (stem keys)
 - **THEN** on load, no migration occurs and the data is returned as-is
 
 #### Scenario: Mixed keys migrated correctly
-- **WHEN** `_dependencies.json` contains both `"vm.FULL.20260727.qcow2"` and `"vm.FULL.20260715"` keys
+- **WHEN** `_dependencies.json` contains both `"vm.FULL.20260727T000000_a1b2c3.qcow2"` and `"vm.FULL.20260715T000000_a1b2c3"` keys
 - **THEN** on load, the `.qcow2` key is migrated to stem form
 - **AND** the already-stem key is left unchanged
 
@@ -187,7 +187,7 @@ All concrete implementations of `IStateManager` (JsonStateManager, InMemoryState
 `FullBackupInfo` SHALL NOT have a `bucket_level` field. The dataclass SHALL have exactly: `name: str`, `path: Path`, `timestamp: datetime`. Old JSON entries containing `bucket_level` SHALL be read-tolerantly — the field is silently ignored on load.
 
 #### Scenario: FullBackupInfo constructed without bucket_level
-- **WHEN** a `FullBackupInfo` is created with `name="vm.FULL.20260701"`, `path=Path(...)`, `timestamp=ts`
+- **WHEN** a `FullBackupInfo` is created with `name="vm.FULL.20260701T000000_a1b2c3"`, `path=Path(...)`, `timestamp=ts`
 - **THEN** the instance has exactly three fields: `name`, `path`, `timestamp`
 - **AND** accessing `.bucket_level` raises `AttributeError`
 
@@ -201,6 +201,6 @@ All concrete implementations of `IStateManager` (JsonStateManager, InMemoryState
 `IStateManager.record_full_backup(target_path, name, timestamp)` SHALL NOT accept a `bucket_level` parameter. `JsonStateManager` SHALL NOT write `bucket_level` to JSON.
 
 #### Scenario: record_full_backup called without bucket_level
-- **WHEN** `record_full_backup("/mnt/backup/vm", "vm.FULL.20260701", ts)` is called
+- **WHEN** `record_full_backup("/mnt/backup/vm", "vm.FULL.20260701T000000_a1b2c3", ts)` is called
 - **THEN** the FULL is recorded in state with `name`, `path`, `timestamp` only
 - **AND** no `bucket_level` key is written to JSON

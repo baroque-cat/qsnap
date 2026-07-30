@@ -14,14 +14,14 @@ The standalone qcow2 creation SHALL detect VM running state via `virsh dominfo`.
 The chain-size estimation step (`qemu-img info --backing-chain`) SHALL use `--force-share` because the source snapshot may be the active layer of a running VM.
 
 #### Scenario: Fork creates standalone writable qcow2 (stopped VM)
-- **WHEN** `qsnap fork myvm.20260701T1200 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
+- **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
 - **AND** `virsh dominfo` returns `State: shut off`
-- **THEN** `qemu-img convert -O qcow2 /source/snapshots/myvm.20260701T1200.qcow2 /var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2` is executed
+- **THEN** `qemu-img convert -O qcow2 /source/snapshots/myvm.20260701T120000_a1b2c3.qcow2 /var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2` is executed
 - **THEN** the resulting file has NO backing file (`qemu-img info` shows `backing file: <none>`)
 - **THEN** the file is writable
 
 #### Scenario: Fork creates standalone writable qcow2 (running VM)
-- **WHEN** `qsnap fork myvm.20260701T1200 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
+- **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3 --as-vm myvm-clone --storage /var/lib/libvirt/images/` is executed
 - **AND** `virsh dominfo` returns `State: running`
 - **THEN** `virsh backup-begin` is called without `--incremental` to start NBD export
 - **THEN** `qemu-img convert -n nbd:unix:<socket> /var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2` is executed
@@ -56,8 +56,8 @@ The chain-size estimation step (`qemu-img info --backing-chain`) SHALL use `--fo
 `Core` SHALL provide a `fork(snapshot_name: str, new_vm_name: str, storage_dir: Path, add_to_config: bool = False, vm_filter: str | None = None) -> RestoreResult` method. It SHALL reuse `Core.restore()` for snapshot resolution, then create the standalone qcow2 via `IShell`, then create the VM via `virsh dumpxml` + XML modification + `virsh define`.
 
 #### Scenario: fork returns RestoreResult on success
-- **WHEN** `core.fork("myvm.20260701T1200", "myvm-clone", Path("/var/lib/libvirt/images"), add_to_config=False)` completes
-- **THEN** returns `RestoreResult(success=True, snapshot_name="myvm.20260701T1200", restored_path=Path("/var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2"), chain_files=[restored_path], error=None)`
+- **WHEN** `core.fork("myvm.20260701T120000_a1b2c3", "myvm-clone", Path("/var/lib/libvirt/images"), add_to_config=False)` completes
+- **THEN** returns `RestoreResult(success=True, snapshot_name="myvm.20260701T120000_a1b2c3", restored_path=Path("/var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2"), chain_files=[restored_path], error=None)`
 
 #### Scenario: fork fails on nonexistent snapshot
 - **WHEN** `core.fork("nonexistent-snap", ...)` is called
@@ -75,7 +75,7 @@ Before running `qemu-img convert`, fork SHALL estimate and log the expected size
 
 #### Scenario: Size estimate logged
 - **WHEN** `qsnap fork ...` is executed
-- **THEN** an INFO log message shows: "Converting snapshot myvm.20260701T1200 (chain size: ~12.3 GiB) to standalone qcow2..."
+- **THEN** an INFO log message shows: "Converting snapshot myvm.20260701T120000_a1b2c3 (chain size: ~12.3 GiB) to standalone qcow2..."
 
 #### Scenario: Fork chain-size estimation uses --force-share
 - **WHEN** `qsnap fork ...` estimates chain size via `qemu-img info --backing-chain`
@@ -87,11 +87,11 @@ Before running `qemu-img convert`, fork SHALL estimate and log the expected size
 `qsnap deploy <backup-name> --as-vm <new-vm-name> [--storage <dir>]` SHALL be a thin wrapper around fork semantics: locate the backup via restore resolution, convert to standalone qcow2, define VM. If the backup is already a FULL (standalone), `qemu-img convert` SHALL still be called (it is a no-op copy for standalone files, ensuring consistent behavior).
 
 #### Scenario: Deploy FULL backup
-- **WHEN** `qsnap deploy vm.FULL.20260701.monthly --as-vm recovered-vm` is executed
+- **WHEN** `qsnap deploy vm.FULL.20260701T000000_a1b2c3 --as-vm recovered-vm` is executed
 - **THEN** the FULL file is copied to `<storage>/recovered-vm/recovered-vm.qcow2`
 - **THEN** a new VM is defined
 
 #### Scenario: Deploy incremental backup
-- **WHEN** `qsnap deploy vm.20260715T1200 --as-vm recovered-vm` is executed and the backup is an incremental (has backing dependencies on the target)
+- **WHEN** `qsnap deploy vm.20260715T120000_a1b2c3 --as-vm recovered-vm` is executed and the backup is an incremental (has backing dependencies on the target)
 - **THEN** `qemu-img convert` flattens the chain into a standalone qcow2
 - **THEN** a new VM is defined

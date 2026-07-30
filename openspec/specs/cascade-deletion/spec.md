@@ -22,25 +22,25 @@ State cleanup when FULL and incremental backups are deleted by per-chain retenti
 
 `IStateManager` SHALL provide `record_incremental_dependency(target_path: str, incremental_name: str, full_name: str)` and `get_incremental_dependencies(target_path: str, full_name: str) -> list[str]`. Dependencies SHALL be persisted across runs.
 
-The `full_name` parameter in `get_incremental_dependencies`, `remove_incremental_dependency`, and `remove_all_incremental_dependencies` SHALL accept both stem form (`vm.FULL.20260727`) and extended form (`vm.FULL.20260727.qcow2`). When the extended form is passed, the implementation SHALL normalize it to stem form before lookup, because the storage format uses stem (as produced by `_resolve_chain_full_anchor`).
+The `full_name` parameter in `get_incremental_dependencies`, `remove_incremental_dependency`, and `remove_all_incremental_dependencies` SHALL accept both stem form (`vm.FULL.20260727T000000_a1b2c3`) and extended form (`vm.FULL.20260727T000000_a1b2c3.qcow2`). When the extended form is passed, the implementation SHALL normalize it to stem form before lookup, because the storage format uses stem (as produced by `_resolve_chain_full_anchor`).
 
 #### Scenario: Dependency recorded after rebase
-- **WHEN** an incremental is rebased to FULL `vm.FULL.20260701.qcow2`
-- **THEN** `get_incremental_dependencies(target_path, "vm.FULL.20260701.qcow2")` includes the incremental's name
-- **AND** `get_incremental_dependencies(target_path, "vm.FULL.20260701")` also includes the incremental's name (stem form works too)
+- **WHEN** an incremental is rebased to FULL `vm.FULL.20260701T000000_a1b2c3.qcow2`
+- **THEN** `get_incremental_dependencies(target_path, "vm.FULL.20260701T000000_a1b2c3.qcow2")` includes the incremental's name
+- **AND** `get_incremental_dependencies(target_path, "vm.FULL.20260701T000000_a1b2c3")` also includes the incremental's name (stem form works too)
 
 #### Scenario: Multiple incrementals depend on same FULL
 - **WHEN** three incrementals are rebased to the same FULL
 - **THEN** `get_incremental_dependencies()` returns a list of 3 names
 
 #### Scenario: Lookup with stem key finds dependencies stored with stem
-- **WHEN** `record_incremental_dependency(target, "incr-001", "vm.FULL.20260727")` is called (stem form)
-- **AND** `get_incremental_dependencies(target, "vm.FULL.20260727.qcow2")` is called (extended form)
+- **WHEN** `record_incremental_dependency(target, "incr-001", "vm.FULL.20260727T000000_a1b2c3")` is called (stem form)
+- **AND** `get_incremental_dependencies(target, "vm.FULL.20260727T000000_a1b2c3.qcow2")` is called (extended form)
 - **THEN** the method returns `["incr-001"]` (normalization makes both forms equivalent)
 
 #### Scenario: Lookup with extended key finds dependencies stored with stem
-- **WHEN** `record_incremental_dependency(target, "incr-001", "vm.FULL.20260727")` is called (stem form)
-- **AND** `get_incremental_dependencies(target, "vm.FULL.20260727")` is called (stem form)
+- **WHEN** `record_incremental_dependency(target, "incr-001", "vm.FULL.20260727T000000_a1b2c3")` is called (stem form)
+- **AND** `get_incremental_dependencies(target, "vm.FULL.20260727T000000_a1b2c3")` is called (stem form)
 - **THEN** the method returns `["incr-001"]`
 
 ### Requirement: _full_backups.json format migration

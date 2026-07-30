@@ -1,7 +1,6 @@
 # bucket_driven config — tests count-based FULL backup model
 # Uses compress; no deprecated full_every/full_compress.
 
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 compress = true
 

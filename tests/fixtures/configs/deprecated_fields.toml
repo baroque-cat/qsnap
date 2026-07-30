@@ -3,7 +3,6 @@
 # full_every is ignored with a WARNING.
 # full_compress is mapped to compress with a WARNING (when compress not set).
 
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 
 snapshot_preserve = "24h 7d 4w 12m 1y"

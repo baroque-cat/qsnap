@@ -70,8 +70,8 @@ Periodic creation of standalone (anchor) full backups via `qemu-img convert` on 
 `IStateManager` SHALL provide `get_full_backups(target_path) -> list[FullBackupInfo]` returning all FULLs for a target, and `record_full_backup(target_path, name, timestamp)` to append a new FULL. The `bucket_level` parameter is REMOVED. `JsonStateManager` SHALL persist this as a list per target path in `_full_backups.json`. Old JSON entries containing `bucket_level` SHALL be read-tolerantly (field silently ignored).
 
 #### Scenario: Full backup recorded and retrieved
-- **WHEN** `record_full_backup("/mnt/backup/vm", "vm.FULL.20260701", ts)` is called then `get_full_backups("/mnt/backup/vm")` is called
-- **THEN** the returned list contains a `FullBackupInfo` with `name="vm.FULL.20260701"`, `timestamp=ts`
+- **WHEN** `record_full_backup("/mnt/backup/vm", "vm.FULL.20260701T000000_a1b2c3", ts)` is called then `get_full_backups("/mnt/backup/vm")` is called
+- **THEN** the returned list contains a `FullBackupInfo` with `name="vm.FULL.20260701T000000_a1b2c3"`, `timestamp=ts`
 
 #### Scenario: Old JSON with bucket_level is read-tolerant
 - **WHEN** `_full_backups.json` contains an entry with `"bucket_level": "monthly"`

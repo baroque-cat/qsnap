@@ -26,7 +26,7 @@ The `-m <parallel>` flag (parallel coroutines) SHALL be included with the value 
 
 The method SHALL NOT start a write-side `qemu-nbd` process. The method SHALL NOT use `_start_write_server()` or `_transfer()` for FULL backups. The `_start_write_server()` and `_transfer()` methods SHALL be retained for incremental backups only.
 
-After `qemu-img convert` completes successfully, the `.tmp` file SHALL be atomically renamed to the final `vm.FULL.YYYYMMDD.qcow2` name. On failure, the `.tmp` file SHALL be deleted.
+After `qemu-img convert` completes successfully, the `.tmp` file SHALL be atomically renamed to the final `vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2` name. On failure, the `.tmp` file SHALL be deleted.
 
 #### Scenario: Running VM FULL with zstd compression and default flags
 
@@ -79,7 +79,7 @@ After `qemu-img convert` completes successfully, the `.tmp` file SHALL be atomic
 #### Scenario: FULL success atomically renames tmp to final
 
 - **WHEN** `qemu-img convert` completes successfully
-- **THEN** the `.tmp` file is renamed to `vm.FULL.YYYYMMDD.qcow2`
+- **THEN** the `.tmp` file is renamed to `vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2`
 - **AND** `BackupResult(success=True, path=<final_path>)` is returned
 
 ### Requirement: VM state detection in create_full_backup

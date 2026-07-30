@@ -1385,9 +1385,10 @@ class BitmapBackupProvider(IBackupProvider):
         — state recording is Core's responsibility after post-create
         verification passes.
         """
-        # Generate full backup name: vm.FULL.YYYYMMDD.qcow2
-        date_str = source_snapshot.timestamp.strftime("%Y%m%d")
-        full_name = f"{vm_name}.FULL.{date_str}"
+        # Generate full backup name: vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2
+        date_str = source_snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
+        hex_suffix = secrets.token_hex(3)
+        full_name = f"{vm_name}.FULL.{date_str}_{hex_suffix}"
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"
 

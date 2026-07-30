@@ -13,9 +13,9 @@ The chain file path extraction from `qemu-img info --backing-chain --output=json
 
 #### Scenario: Restore a backup chain with FULL anchor
 - **WHEN** `qsnap restore debiantest.20250101T1200 /restore/path` is executed
-- **AND** the backup chain includes a FULL anchor `vm.FULL.20250101.qcow2`
+- **AND** the backup chain includes a FULL anchor `vm.FULL.20250101T000000_a1b2c3.qcow2`
 - **THEN** the FULL anchor and all incremental files in the chain are copied to `/restore/path/`
-- **THEN** `qemu-img rebase -u -b ./vm.FULL.20250101.qcow2` is run on each incremental
+- **THEN** `qemu-img rebase -u -b ./vm.FULL.20250101T000000_a1b2c3.qcow2` is run on each incremental
 - **THEN** the command outputs the path to the active (top) image in the restored chain
 
 #### Scenario: Restore chain with new QEMU format
@@ -50,8 +50,8 @@ The chain file path extraction from `qemu-img info --backing-chain --output=json
 - **THEN** returns `(SnapshotInfo(name="myvm.20260701T1200", ...), VMConfig(name="myvm", ...))`
 
 #### Scenario: _resolve_snapshot finds snapshot in backup
-- **WHEN** `_resolve_snapshot("vm.FULL.20260701.monthly")` is called and the snapshot exists on a backup target
-- **THEN** returns `(SnapshotInfo(name="vm.FULL.20260701.monthly", ...), VMConfig(...))`
+- **WHEN** `_resolve_snapshot("vm.FULL.20260701T000000_a1b2c3")` is called and the snapshot exists on a backup target
+- **THEN** returns `(SnapshotInfo(name="vm.FULL.20260701T000000_a1b2c3", ...), VMConfig(...))`
 
 #### Scenario: _resolve_snapshot raises on not found
 - **WHEN** `_resolve_snapshot("nonexistent")` is called

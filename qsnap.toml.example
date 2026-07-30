@@ -18,11 +18,6 @@
 # When both are present, top-level keys take precedence over [global]
 # section keys.
 
-# Timestamp format for snapshot names.
-#   short    → 20250713
-#   long     → 20250713T1531          (default)
-#   long-iso → 20250713T153123+0200
-timestamp_format = "long"
 
 # Directory for persistent state files (per-VM JSON).
 state_dir = "/var/lib/qsnap/state"

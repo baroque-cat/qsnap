@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import time
 import uuid
@@ -57,7 +58,6 @@ from qsnap.utils.parsing import (
     parse_timestamp,
 )
 from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
-from qsnap.utils.time import format_snapshot_timestamp
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import scan_backing_chain, verify_full_backup
 
@@ -1723,6 +1723,35 @@ class Core:
                 recorded = {sn.path.name for sn in self._state.get_snapshots(vm.name)}
                 for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
                     if qcow2_file.name in recorded:
+                        # Cross-check: file in state + on disk → XML
+                        # must also reference it.
+                        if str(qcow2_file) not in xml_paths:
+                            # Anomaly: in state + on disk but NOT in
+                            # domain XML.  Remove from state to prevent
+                            # blockcommit from operating on a snapshot
+                            # the VM doesn't know about.  Keep file on
+                            # disk as safety backup.
+                            if self._dry_run:
+                                logger.info(
+                                    "[dry-run reconcile] %s: would remove "
+                                    "snapshot %s from state — not in "
+                                    "domain XML (file preserved)",
+                                    vm.name,
+                                    qcow2_file.name,
+                                )
+                                phantom_snapshots += 1
+                            else:
+                                self._state.remove_snapshot(
+                                    vm.name, qcow2_file.stem
+                                )
+                                logger.warning(
+                                    "[reconcile] %s: removed snapshot %s "
+                                    "from state (file on disk but not "
+                                    "in domain XML — file preserved)",
+                                    vm.name,
+                                    qcow2_file.name,
+                                )
+                                phantom_snapshots += 1
                         continue
                     if str(qcow2_file) in xml_paths:
                         # File on disk + in XML but not in state → supplement
@@ -2641,35 +2670,33 @@ class Core:
                     check=True,
                 )
                 if not verify_result.success:
-                    # Broken chain — resolve anchor BEFORE deletion
-                    # (the file is needed to walk the backing chain).
+                    # Broken chain — log CRITICAL, preserve file for
+                    # operator review.  Do NOT auto-delete — the
+                    # operator must decide whether to restore from
+                    # snapshots or delete manually.
                     try:
-                        anchor = self._resolve_chain_full_anchor(backup.path)
-                        provider.delete(backup)
-                        if anchor is not None:
-                            self._state.remove_incremental_dependency(
-                                str(target.path), backup.name, anchor
-                            )
                         broken_count += 1
-                        logger.warning(
-                            "[startup] %s: auto-recovery deleted broken-chain "
-                            "backup %s from %s",
+                        logger.critical(
+                            "[startup] %s: broken backup chain at %s "
+                            "on %s — preserving file for operator "
+                            "review.  Run 'qsnap reconcile' to clean "
+                            "up, or restore from snapshots.",
                             vm_config.name,
                             backup.name,
                             target.path,
                         )
                     except Exception as exc:
                         logger.warning(
-                            "[startup] %s: failed to delete broken backup %s: %s",
+                            "[startup] %s: failed to check broken backup %s: %s",
                             vm_config.name,
                             backup.name,
                             exc,
                         )
 
             if broken_count:
-                logger.warning(
-                    "[startup] %s: auto-recovery deleted %d broken-chain "
-                    "backup(s) from %s",
+                logger.critical(
+                    "[startup] %s: %d broken-chain backup(s) on %s — "
+                    "preserved for operator review",
                     vm_config.name,
                     broken_count,
                     target.path,
@@ -3444,16 +3471,17 @@ class Core:
                         vm_config, committable, verify_result.broken_file,
                     )
                     if not before_break:
-                        logger.critical(
-                            "Pre-commit chain verification failed for VM %s: %s. "
-                            "No snapshots can be committed before the break at %s. "
-                            "Check file existence, run qemu-img check, or "
-                            "restore from backup.",
-                            vm_config.name,
-                            verify_result.error,
-                            verify_result.broken_file,
+                        msg = (
+                            f"Snapshot chain broken for VM {vm_config.name}: "
+                            f"{verify_result.error}. "
+                            f"No snapshots can be committed before the break "
+                            f"at {verify_result.broken_file}. "
+                            f"Blockcommit cannot proceed. "
+                            f"Run 'qsnap check --deep' and restore "
+                            f"the chain before continuing."
                         )
-                        return
+                        logger.critical(msg)
+                        raise RuntimeError(msg)
                     logger.warning(
                         "Pre-commit chain verification found break at %s — "
                         "partial blockcommit: %d snapshot(s) committable, "
@@ -3464,15 +3492,16 @@ class Core:
                     )
                     committable = before_break
                 else:
-                    logger.critical(
-                        "Pre-commit chain verification failed for VM %s: %s. "
-                        "Check file existence, run qemu-img check, or "
-                        "restore from backup.",
-                        vm_config.name,
-                        verify_result.error,
+                    msg = (
+                        f"Snapshot chain verification failed for VM "
+                        f"{vm_config.name}: {verify_result.error}. "
+                        f"Blockcommit cannot proceed. "
+                        f"Run 'qsnap check --deep' and restore "
+                        f"the chain before continuing."
                     )
+                    logger.critical(msg)
                     # Do NOT defer — broken chain needs operator intervention
-                    return
+                    raise RuntimeError(msg)
         else:
             logger.info(
                 "chain_verify_before_commit is disabled — "
@@ -4427,7 +4456,12 @@ class Core:
         final_remove: list[str] = []
 
         for chain_id, chain_backups in chain_map.items():
-            if chain_id == "__orphan__" or chain_id in remove_chains:
+            if chain_id == "__orphan__":
+                # Broken chain — preserve files for operator review.
+                # Already logged as CRITICAL by startup validation.
+                for b in chain_backups:
+                    final_keep.append(b.name)
+            elif chain_id in remove_chains:
                 for b in chain_backups:
                     final_remove.append(b.name)
             else:
@@ -4603,21 +4637,20 @@ class Core:
                     )
 
     def _generate_snapshot_name(self, vm_config: VMConfig, disk: str) -> str:
-        """Generate a unique snapshot name using the configured timestamp format.
+        """Generate a unique snapshot name with seconds-resolution timestamp and hex suffix.
 
-        Reads ``GlobalConfig.timestamp_format`` to determine the timestamp
-        pattern: ``short``→``%Y%m%d``, ``long``→``%Y%m%dT%H%M``,
-        ``long-iso``→``%Y%m%dT%H%M%S%z``.
+        The name format is ``{vm_name}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}``
+        (design D2) to support multi-disk VMs.  The 6-character hex
+        suffix (``secrets.token_hex(3)``) guarantees uniqueness even
+        when two snapshots are created within the same second.
 
-        The name format is ``{vm_name}.{timestamp}_{disk}`` (design D2)
-        to support multi-disk VMs.
-
-        If a snapshot file with the same name already exists, a collision
+        If a snapshot file with the same name already exists
+        (astronomically unlikely with the hex suffix), a collision
         suffix ``_N`` (starting at 1) is appended.
         """
-        fmt = self._config.get_global().timestamp_format
-        timestamp = format_snapshot_timestamp(datetime.now(), fmt)
-        base_name = f"{vm_config.name}.{timestamp}_{disk}"
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        hex_suffix = secrets.token_hex(3)
+        base_name = f"{vm_config.name}.{timestamp}_{disk}_{hex_suffix}"
 
         # Collision suffix: append _N if the file already exists.
         name = base_name

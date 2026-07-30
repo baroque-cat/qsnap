@@ -96,7 +96,7 @@ def _build_core_snapshot_only(
         targets=[],  # No targets — avoids BitmapBackupProvider / libnbd
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
     )
     factory = DefaultFactory(shell=shell, state=state)

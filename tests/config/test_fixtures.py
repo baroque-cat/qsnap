@@ -120,7 +120,6 @@ def test_example_config_parseable() -> None:
 
     # Verify global defaults.
     global_cfg = facade.get_global()
-    assert global_cfg.timestamp_format == "long"
     # Count-based retention fields — defaults are 24/168/2 when commented out.
     assert global_cfg.snapshot_chain_length == 24
     assert global_cfg.target_chain_length == 168

@@ -250,7 +250,6 @@ def make_global_config():
     """Factory function to create GlobalConfig instances for tests."""
 
     def _make(
-        timestamp_format: str = "long",
         state_dir: str = "/var/lib/qsnap/state",
         lockfile: str | None = None,
         snapshot_chain_length: int | None = None,
@@ -276,7 +275,6 @@ def make_global_config():
         backup_create: str = "always",
     ) -> GlobalConfig:
         return GlobalConfig(
-            timestamp_format=timestamp_format,
             state_dir=state_dir,
             lockfile=lockfile,
             snapshot_chain_length=snapshot_chain_length,

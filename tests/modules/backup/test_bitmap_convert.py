@@ -700,18 +700,16 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path, succ
 
     assert result.success is True
 
-    # The filename is constructed as: vm.FULL.YYYYMMDD.qcow2
-    # where YYYYMMDD comes from source_snapshot.timestamp.strftime("%Y%m%d")
-    expected_date = snapshot.timestamp.strftime("%Y%m%d")
-    expected_name = f"testvm.FULL.{expected_date}.qcow2"
+    # The filename is constructed as: vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2
+    # where the timestamp comes from source_snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
+    expected_date = snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
 
-    assert result.target_path.name == expected_name, (
-        f"Expected filename {expected_name} (from snapshot timestamp {snapshot.timestamp}), "
+    assert result.target_path.name.startswith(f"testvm.FULL.{expected_date}_"), (
+        f"Expected filename starting with testvm.FULL.{expected_date}_ (from snapshot timestamp {snapshot.timestamp}), "
         f"got {result.target_path.name}"
     )
-    assert result.target_path.name.startswith("testvm.FULL.")
     assert result.target_path.name.endswith(".qcow2")
-    assert expected_date == "20250101", "Snapshot timestamp should be 2025-01-01"
+    assert expected_date == "20250101T000000", "Snapshot timestamp should be 2025-01-01T000000"
 
 
 # ── Test: 2e — Global compress=false affects convert command ────────────────

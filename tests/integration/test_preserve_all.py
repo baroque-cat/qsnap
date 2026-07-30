@@ -52,7 +52,7 @@ def test_chain_length_zero_keeps_one():
         RetentionItem(name="new", timestamp=now - timedelta(hours=1)),
     ]
     policy = RetentionPolicy(chain_length=0, keep_generations=1)
-    engine = TimeBasedRetention()
+    engine = TimeBasedRetention(policy)
     result = engine.evaluate(items, policy, now)
 
     assert set(result.keep) == {"new"}, (
@@ -114,7 +114,7 @@ def test_large_chain_length_keeps_all_backups_integration(test_vm):
         targets=[target],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
+        global_config=GlobalConfig(),
         vms=[vm_config],
     )
     factory = DefaultFactory(shell=shell, state=state)

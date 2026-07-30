@@ -1,7 +1,6 @@
 # Test fixture: all fault-tolerance safety fields set explicitly.
 # Used by config-parsing tests to verify ConfigFacade parses them correctly.
 
-timestamp_format = "long"
 state_dir = "/var/lib/qsnap/state"
 snapshot_chain_length = 24
 target_chain_length = 72

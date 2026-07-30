@@ -139,7 +139,6 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
-            timestamp_format="short",
             state_dir="/var/tmp",
             full_verify_after_create="check",
             full_verify_before_delete="check",
@@ -252,7 +251,6 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
-            timestamp_format="short",
             state_dir="/var/tmp",
         ),
         vms=[vm_config],

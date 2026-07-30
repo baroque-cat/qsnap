@@ -67,23 +67,20 @@ def parse_domblklist_disks(stdout: str) -> list[tuple[str, str]]:
 def parse_timestamp(name: str, filepath: Path) -> datetime:
     """Parse a timestamp from a snapshot or backup filename.
 
-    Searches *name* for timestamp patterns using :func:`re.search` in
-    order of specificity (long-iso first, then long, then short) so
-    that longer patterns are not shadowed by shorter ones:
-
-    - ``long-iso``: ``%Y%m%dT%H%M%S%z`` (e.g. ``20250713T153123+0200``)
-    - ``long``: ``%Y%m%dT%H%M`` (e.g. ``20250713T1531``) — default
-    - ``short``: ``%Y%m%d`` (e.g. ``20250713``)
+    Searches *name* for the unified timestamp pattern
+    ``YYYYMMDDTHHMMSS`` (e.g. ``20250713T153123``) — seconds
+    resolution, no timezone offset.
 
     This correctly handles:
 
-    - VM names containing dots (e.g. ``3.Projects_opencode.20250713T1531_vda``)
+    - VM names containing dots (e.g. ``3.Projects_opencode.20250713T153123_vda``)
     - The ``_{disk}`` suffix in snapshot names (e.g. ``_vda``, ``_vdb``)
+    - The ``_{6hex}`` collision-resistant suffix (e.g. ``_a1b2c3``)
     - Collision suffixes (e.g. ``_1`` appended to snapshot names)
-    - FULL backup names (e.g. ``vm.FULL.20250713.qcow2``)
+    - FULL backup names (e.g. ``vm.FULL.20250713T153123_a1b2c3.qcow2``)
 
-    The ``_{disk}`` and collision suffixes are naturally excluded
-    because they do not match the timestamp patterns.
+    The ``_{disk}``, ``_{6hex}``, and collision suffixes are naturally
+    excluded because they do not match the timestamp pattern.
 
     If no timestamp pattern is found, falls back to the file's ``mtime``,
     and finally to :func:`datetime.now`.
@@ -91,23 +88,13 @@ def parse_timestamp(name: str, filepath: Path) -> datetime:
     The function SHALL NOT use ``split(".")`` to extract the timestamp
     segment, as VM names may contain dots.
     """
-    # Patterns tried in order of specificity (longest first) so that a
-    # shorter pattern does not shadow a longer one.
-    patterns: list[tuple[str, str]] = [
-        # long-iso: 20250713T153123+0200
-        (r"(\d{8}T\d{6}[+-]\d{4})", "%Y%m%dT%H%M%S%z"),
-        # long: 20250713T1531
-        (r"(\d{8}T\d{4})", "%Y%m%dT%H%M"),
-        # short: 20250713
-        (r"(\d{8})", "%Y%m%d"),
-    ]
-    for regex, fmt in patterns:
-        match = re.search(regex, name)
-        if match:
-            try:
-                return datetime.strptime(match.group(1), fmt)
-            except ValueError:
-                continue
+    # Unified pattern: YYYYMMDDTHHMMSS (seconds resolution, no timezone).
+    match = re.search(r"(\d{8}T\d{6})", name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
+        except ValueError:
+            pass
     try:
         mtime = filepath.stat().st_mtime
         return datetime.fromtimestamp(mtime)

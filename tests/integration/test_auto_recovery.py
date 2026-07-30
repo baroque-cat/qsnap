@@ -169,7 +169,7 @@ def _build_core(
         ],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short", state_dir="/var/tmp"),
+        global_config=GlobalConfig(state_dir="/var/tmp"),
         vms=[vm_config],
         config_path=target_dir / "test_auto_recovery.toml",
     )
@@ -297,44 +297,38 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
 
     # ── Step 4: Run auto-recovery validation ────────────────────────
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.CRITICAL):
         core._validate_state_at_startup(vm_config)
 
-    # ── Step 5: Verify auto-recovery results ────────────────────────
-    # incr2 should be deleted (its backing chain is broken).
-    assert not incr2_path.exists(), (
-        "incr2 should be auto-deleted by recovery (broken chain)"
+    # ── Step 5: Verify new behavior — files PRESERVED, not deleted ──
+    # incr2 must still exist — auto-delete removed from startup validation.
+    assert incr2_path.exists(), (
+        "incr2 should be PRESERVED by startup validation (operator must decide)"
     )
 
-    # WARNING log about auto-recovery should be emitted.
-    recovery_warnings = [
-        r.message
-        for r in caplog.records
-        if "auto-recovery" in r.message.lower() and "deleted" in r.message.lower()
+    # CRITICAL log about broken chain preservation.
+    critical_logs = [
+        r.message for r in caplog.records
+        if "broken backup chain" in r.message.lower()
+        and "preserving" in r.message.lower()
     ]
-    assert len(recovery_warnings) > 0, (
-        f"Expected auto-recovery WARNING log. Logs: "
+    assert len(critical_logs) > 0, (
+        f"Expected CRITICAL 'preserving file' log. Logs: "
         f"{[r.message for r in caplog.records]}"
     )
 
-    # Known source limitation (BUG): _resolve_chain_full_anchor walks
-    # the backing chain one hop at a time.  When an intermediate file
-    # (incr1) is deleted, the walk hits a dead-end before reaching the
-    # FULL anchor, so remove_incremental_dependency is skipped and
-    # state is NOT cleaned.  The file IS deleted from disk — only the
-    # state record persists.  This is tracked in the test spec as a
-    # non-blocking limitation: the pipeline continues safely, and
-    # reconcile() will clean the stale state record later.
+    # Broken-chain files are now preserved (not auto-deleted).
+    # State may still have stale records — reconcile() cleans them later.
     _deps_after = state.get_incremental_dependencies(str(target_dir), full_name)
 
-    # Verify that WARNING about broken-chain auto-recovery was logged.
-    warning_logs = [
+    # Verify that CRITICAL about broken-chain was logged.
+    critical_logs = [
         r.message
         for r in caplog.records
-        if "broken-chain" in r.message.lower()
+        if "broken" in r.message.lower() and "chain" in r.message.lower()
     ]
-    assert len(warning_logs) > 0, (
-        f"Expected broken-chain related WARNING. Logs: "
+    assert len(critical_logs) > 0, (
+        f"Expected broken-chain CRITICAL log. Logs: "
         f"{[r.message for r in caplog.records]}"
     )
 
@@ -918,16 +912,16 @@ def test_production_incident_reproduction(test_vm, caplog):
     # have a broken backing chain since they chain to the deleted file or
     # to another file that chains to it.
 
-    # ── Step 4: Run auto-recovery ───────────────────────────────────
+    # ── Step 4: Run startup validation ─────────────────────────────
     caplog.clear()
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.CRITICAL):
         core._validate_state_at_startup(vm_config)
 
-    # ── Step 5: Verify recovery results ─────────────────────────────
-    # All incrementals after the break should be deleted.
+    # ── Step 5: Verify new behavior — files PRESERVED ───────────────
+    # All incrementals after the break are PRESERVED (not auto-deleted).
     for i in range(break_index + 1, incr_count):
-        assert not incr_paths[i].exists(), (
-            f"incr {incr_names[i]} (after break) should be auto-deleted"
+        assert incr_paths[i].exists(), (
+            f"incr {incr_names[i]} (after break) should be PRESERVED"
         )
 
     # The deleted intermediate file is obviously gone.
@@ -945,30 +939,26 @@ def test_production_incident_reproduction(test_vm, caplog):
     # FULL should still exist.
     assert full_path.exists(), "FULL backup should still exist"
 
-    # Auto-recovery WARNING logs should be emitted.
-    recovery_warnings = [
-        r.message
-        for r in caplog.records
-        if "auto-recovery" in r.message.lower() and "deleted" in r.message.lower()
+    # CRITICAL logs about broken chain preservation.
+    critical_logs = [
+        r.message for r in caplog.records
+        if "broken" in r.message.lower() and "preserving" in r.message.lower()
     ]
-    assert len(recovery_warnings) > 0, (
-        f"Expected auto-recovery WARNING logs. "
+    assert len(critical_logs) > 0, (
+        f"Expected CRITICAL broken-chain-preservation logs. "
         f"Logs: {[r.message for r in caplog.records]}"
     )
 
-    # The number of broken backups deleted should be reported.
-    # After break_index, there are (incr_count - break_index - 1) incrementals
-    # that were broken and deleted.
-    expected_deleted = incr_count - break_index - 1
-    deleted_count_logs = [
-        r.message
-        for r in caplog.records
-        if "auto-recovery deleted" in r.message.lower()
-        and str(expected_deleted) in r.message
+    # The number of broken backups should be reported.
+    expected_broken = incr_count - break_index - 1
+    broken_count_logs = [
+        r.message for r in caplog.records
+        if "broken-chain" in r.message.lower()
+        and str(expected_broken) in r.message
     ]
-    if expected_deleted > 0:
-        assert len(deleted_count_logs) > 0, (
-            f"Expected log with '{expected_deleted}' deleted count. "
+    if expected_broken > 0:
+        assert len(broken_count_logs) > 0, (
+            f"Expected log with {expected_broken} broken count. "
             f"Logs: {[r.message for r in caplog.records]}"
         )
 

@@ -73,7 +73,6 @@ class ConfigFacade(IConfigFacade):
         # Build global config from top-level keys.
         global_kwargs: dict[str, str | int | bool | None] = {}
         for key in (
-            "timestamp_format",
             "state_dir",
             "lockfile",
             "deferred_warn_count",

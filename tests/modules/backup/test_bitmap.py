@@ -1161,10 +1161,8 @@ def test_create_full_backup_dotted_vm_name_passed_untruncated(mock_shell, make_t
     assert "3.Projects_opencode" in abort_cmds[0]
 
     result_filename = result.target_path.name
-    expected_date = snapshot.timestamp.strftime("%Y%m%d")
-    expected_name = f"3.Projects_opencode.FULL.{expected_date}.qcow2"
-    assert result_filename == expected_name
-    assert result_filename.startswith("3.Projects_opencode.FULL.")
+    expected_date = snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
+    assert result_filename.startswith(f"3.Projects_opencode.FULL.{expected_date}_")
     assert result_filename.endswith(".qcow2")
     assert snapshot.name == "testvm.20250101T000000"
     assert "3.Projects_opencode" not in snapshot.name

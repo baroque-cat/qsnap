@@ -1,75 +1,95 @@
-"""Unit tests for timestamp formatting utilities in qsnap.utils.time.
+"""Unit tests for duration/stall-timeout parsing utilities in qsnap.utils.time.
 
-Tests verify format resolution, strftime output for each format name,
-and fallback behaviour for unknown format values.  Pure functions —
-no I/O, no side effects.
-
-Also verifies that parse_duration and parse_stall_timeout are importable
-from qsnap.utils.time and work correctly.
+Tests verify parse_duration and parse_stall_timeout behaviour.
+Pure functions — no I/O, no side effects.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import timedelta
 
+import pytest
 
-from qsnap.utils.time import (
-    format_snapshot_timestamp,
-    resolve_format,
-)
-
-
-def test_short_format_produces_yyyymmdd() -> None:
-    """The 'short' format produces a YYYYMMDD string with no time component."""
-    result = format_snapshot_timestamp(datetime(2025, 7, 13, 15, 31), "short")
-
-    assert result == "20250713"
-
-
-def test_long_format_produces_yyyymmdd_thhmm() -> None:
-    """The 'long' format produces a YYYYMMDDTHHMM string."""
-    result = format_snapshot_timestamp(datetime(2025, 7, 13, 15, 31), "long")
-
-    assert result == "20250713T1531"
-
-
-def test_long_iso_format_produces_yyyymmdd_thhmmss_offset() -> None:
-    """The 'long-iso' format produces YYYYMMDDTHHMMSS followed by a tz offset."""
-    result = format_snapshot_timestamp(datetime(2025, 7, 13, 15, 31, 23), "long-iso")
-
-    assert result.startswith("20250713T153123")
-    assert len(result) > len("20250713T153123")
-    assert result[len("20250713T153123")] in ("+", "-")
-
-
-def test_unknown_format_defaults_to_long() -> None:
-    """An unknown format name falls back to the 'long' format."""
-    result = format_snapshot_timestamp(datetime(2025, 7, 13, 15, 31), "bogus")
-
-    assert result == "20250713T1531"
-
-
-def test_resolve_format_short_returns_pctY_pctm_pctd() -> None:
-    """resolve_format('short') returns the %Y%m%d strftime string."""
-    assert resolve_format("short") == "%Y%m%d"
-
-
-def test_resolve_format_long_returns_pctY_pctm_pctdT_pctH_pctM() -> None:
-    """resolve_format('long') returns the %Y%m%dT%H%M strftime string."""
-    assert resolve_format("long") == "%Y%m%dT%H%M"
-
-
-def test_resolve_format_long_iso_returns_full_iso_format() -> None:
-    """resolve_format('long-iso') returns the full ISO strftime string."""
-    assert resolve_format("long-iso") == "%Y%m%dT%H%M%S%z"
-
-
-def test_resolve_format_unknown_defaults_to_long() -> None:
-    """resolve_format with an unknown name returns the same as 'long'."""
-    assert resolve_format("bogus") == resolve_format("long")
+from qsnap.utils.time import parse_duration, parse_stall_timeout
 
 
 # ---------------------------------------------------------------------------
-# parse_duration and parse_stall_timeout relocated to qsnap.utils.time
+# parse_duration
 # ---------------------------------------------------------------------------
 
+
+def test_parse_duration_hours() -> None:
+    """parse_duration('6h') returns 6 hours."""
+    assert parse_duration("6h") == timedelta(hours=6)
+
+
+def test_parse_duration_days() -> None:
+    """parse_duration('2d') returns 2 days."""
+    assert parse_duration("2d") == timedelta(days=2)
+
+
+def test_parse_duration_weeks() -> None:
+    """parse_duration('1w') returns 1 week."""
+    assert parse_duration("1w") == timedelta(weeks=1)
+
+
+def test_parse_duration_months() -> None:
+    """parse_duration('1m') returns ~30 days."""
+    assert parse_duration("1m") == timedelta(days=30)
+
+
+def test_parse_duration_years() -> None:
+    """parse_duration('1y') returns ~365 days."""
+    assert parse_duration("1y") == timedelta(days=365)
+
+
+def test_parse_duration_all_returns_max() -> None:
+    """parse_duration('all') returns timedelta.max (infinite)."""
+    assert parse_duration("all") == timedelta.max
+
+
+def test_parse_duration_latest_returns_zero() -> None:
+    """parse_duration('latest') returns timedelta(0)."""
+    assert parse_duration("latest") == timedelta(0)
+
+
+def test_parse_duration_invalid_raises() -> None:
+    """parse_duration with invalid string raises ValueError."""
+    with pytest.raises(ValueError):
+        parse_duration("bogus")
+
+
+# ---------------------------------------------------------------------------
+# parse_stall_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_parse_stall_timeout_seconds() -> None:
+    """parse_stall_timeout('30s') returns 30."""
+    assert parse_stall_timeout("30s") == 30
+
+
+def test_parse_stall_timeout_minutes() -> None:
+    """parse_stall_timeout('30m') returns 1800."""
+    assert parse_stall_timeout("30m") == 1800
+
+
+def test_parse_stall_timeout_hours() -> None:
+    """parse_stall_timeout('1h') returns 3600."""
+    assert parse_stall_timeout("1h") == 3600
+
+
+def test_parse_stall_timeout_days() -> None:
+    """parse_stall_timeout('2d') returns 172800."""
+    assert parse_stall_timeout("2d") == 172800
+
+
+def test_parse_stall_timeout_zero() -> None:
+    """parse_stall_timeout('0s') returns 0."""
+    assert parse_stall_timeout("0s") == 0
+
+
+def test_parse_stall_timeout_invalid_raises() -> None:
+    """parse_stall_timeout with invalid string raises ValueError."""
+    with pytest.raises(ValueError):
+        parse_stall_timeout("bogus")

@@ -186,10 +186,12 @@ def test_generate_snapshot_name_appends_collision_suffix(
     mock_shell,
     frozen_clock,
 ):
-    """When the timestamp-based name collides, ``_N`` suffix is appended."""
+    """When the generated name collides, ``_N`` suffix is appended."""
+    from unittest.mock import patch
+
     vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="long"),
+        global_config=GlobalConfig(),
         vms=[vm],
     )
     core = Core(
@@ -199,12 +201,15 @@ def test_generate_snapshot_name_appends_collision_suffix(
         shell=mock_shell,
     )
 
-    (tmp_path / "testvm.20250713T1531_vda.qcow2").touch()
+    with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
+        # Mock token_hex to return the same value → forces collision.
+        with patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"):
+            name1 = core._generate_snapshot_name(vm, disk="vda")
+            assert name1 == "testvm.20250713T153123_vda_a1b2c3"
+            (tmp_path / f"{name1}.qcow2").touch()
+            name2 = core._generate_snapshot_name(vm, disk="vda")
 
-    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm, disk="vda")
-
-    assert name == "testvm.20250713T1531_vda_1"
+    assert name2 == "testvm.20250713T153123_vda_a1b2c3_1"
 
 
 # ── test_generate_snapshot_name_collision_increments_suffix ───────────────
@@ -219,9 +224,11 @@ def test_generate_snapshot_name_collision_increments_suffix(
     frozen_clock,
 ):
     """When both the base name and ``_1`` exist, ``_2`` is used."""
+    from unittest.mock import patch
+
     vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="long"),
+        global_config=GlobalConfig(),
         vms=[vm],
     )
     core = Core(
@@ -231,19 +238,20 @@ def test_generate_snapshot_name_collision_increments_suffix(
         shell=mock_shell,
     )
 
-    (tmp_path / "testvm.20250713T1531_vda.qcow2").touch()
-    (tmp_path / "testvm.20250713T1531_vda_1.qcow2").touch()
+    with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
+        with patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"):
+            name1 = core._generate_snapshot_name(vm, disk="vda")
+            (tmp_path / f"{name1}.qcow2").touch()
+            (tmp_path / f"{name1}_1.qcow2").touch()
+            name2 = core._generate_snapshot_name(vm, disk="vda")
 
-    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm, disk="vda")
-
-    assert name == "testvm.20250713T1531_vda_2"
-
-
-# ── test_core_uses_config_timestamp_format_for_snapshot_name ──────────────
+    assert name2 == "testvm.20250713T153123_vda_a1b2c3_2"
 
 
-def test_core_uses_config_timestamp_format_for_snapshot_name(
+# ── test_core_snapshot_name_uses_unified_format ────────────────────────────
+
+
+def test_core_snapshot_name_uses_unified_format(
     tmp_path,
     make_vm_config,
     mock_factory,
@@ -251,70 +259,10 @@ def test_core_uses_config_timestamp_format_for_snapshot_name(
     mock_shell,
     frozen_clock,
 ):
-    """``short`` timestamp format produces a date-only snapshot name."""
+    """Snapshot name uses ``{vm}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}`` format."""
     vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short"),
-        vms=[vm],
-    )
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm, disk="vda")
-
-    assert name == "testvm.20250713_vda"
-
-
-# ── test_core_timestamp_format_long_produces_long_name ────────────────────
-
-
-def test_core_timestamp_format_long_produces_long_name(
-    tmp_path,
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    frozen_clock,
-):
-    """``long`` timestamp format produces a date+hour+minute snapshot name."""
-    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
-    config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="long"),
-        vms=[vm],
-    )
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    with frozen_clock(datetime(2025, 7, 13, 15, 31)):
-        name = core._generate_snapshot_name(vm, disk="vda")
-
-    assert name == "testvm.20250713T1531_vda"
-
-
-# ── test_core_timestamp_format_long_iso_produces_iso_name ─────────────────
-
-
-def test_core_timestamp_format_long_iso_produces_iso_name(
-    tmp_path,
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    frozen_clock,
-):
-    """``long-iso`` timestamp format produces an ISO 8601 snapshot name with seconds."""
-    vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path))
-    config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="long-iso"),
+        global_config=GlobalConfig(),
         vms=[vm],
     )
     core = Core(
@@ -327,8 +275,11 @@ def test_core_timestamp_format_long_iso_produces_iso_name(
     with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
         name = core._generate_snapshot_name(vm, disk="vda")
 
-    assert name.startswith("testvm.20250713T153123")
-    assert name.endswith("_vda")
+    assert name.startswith("testvm.20250713T153123_vda_")
+    # Hex suffix is 6 characters.
+    hex_part = name.rsplit("_", 1)[-1]
+    assert len(hex_part) == 6
+    int(hex_part, 16)  # must be valid hex
 
 
 # ── test_core_restore_from_snapshot_returns_restore_result ────────────────
@@ -1084,10 +1035,10 @@ def test_action_appended_on_backup_delete(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Pre-populate a backup that retention will remove.
+    # Pre-populate a FULL backup that retention will remove.
     backup = SnapshotInfo(
-        name="backup1",
-        path=target.path / "backup1.qcow2",
+        name="testvm.FULL.backup1.qcow2",
+        path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
     )
@@ -1102,7 +1053,7 @@ def test_action_appended_on_backup_delete(
         patch.object(
             mock_factory._retention_engine,
             "evaluate",
-            return_value=RetentionResult(keep=[], remove=["backup1"]),
+            return_value=RetentionResult(keep=[], remove=["testvm.FULL.backup1.qcow2"]),
         ),
         patch("qsnap.core.verify_full_backup", return_value=None),
     ):
@@ -1111,7 +1062,7 @@ def test_action_appended_on_backup_delete(
     delete_actions = [a for a in result.actions if a.action == "backup_delete"]
     assert len(delete_actions) == 1, "Should contain one backup_delete action"
     assert delete_actions[0].vm_name == "testvm"
-    assert delete_actions[0].name == "backup1"
+    assert delete_actions[0].name == "testvm.FULL.backup1.qcow2"
 
 
 # ── test_error_action_appended_on_failure ──────────────────────────────────
@@ -1601,13 +1552,13 @@ def test_backup_delete_info_log(
     mock_state.record_snapshot("testvm", snap)
 
     backup = SnapshotInfo(
-        name="backup1",
-        path=target.path / "backup1.qcow2",
+        name="testvm.FULL.backup1.qcow2",
+        path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
     )
 
-    # Ensure auto-recovery does not delete backup1 (valid backing chain).
+    # Ensure startup validation does not delete backup1 (valid FULL).
     mock_shell.expect("qemu-img info --backing-chain").returns(
         ShellResult(success=True, stdout="{}", stderr="", returncode=0, error=None)
     )
@@ -1619,7 +1570,7 @@ def test_backup_delete_info_log(
         patch.object(
             mock_factory._retention_engine,
             "evaluate",
-            return_value=RetentionResult(keep=[], remove=["backup1"]),
+            return_value=RetentionResult(keep=[], remove=["testvm.FULL.backup1.qcow2"]),
         ),
         patch("qsnap.core.verify_full_backup", return_value=None),
     ):
@@ -1634,7 +1585,7 @@ def test_backup_delete_info_log(
         f"Should have at least one backup delete log line, got: {delete_lines}"
     )
     assert "testvm" in delete_lines[0]
-    assert "backup1" in delete_lines[0]
+    assert "testvm.FULL.backup1" in delete_lines[0]
 
 
 

@@ -115,7 +115,7 @@ def _build_core(
         ],
     )
     config = MockConfigFacade(
-        global_config=GlobalConfig(timestamp_format="short", state_dir="/var/tmp"),
+        global_config=GlobalConfig(state_dir="/var/tmp"),
         vms=[vm_config],
         config_path=target_dir / "test_deep_verify_main_path.toml",
     )
