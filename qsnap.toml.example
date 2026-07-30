@@ -137,9 +137,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 
 # Change detection mode — used by both snapshot_create="onchange" and
 # backup_create="onchange" to detect disk changes:
-#   "allocation-size" — compare qemu-img info actual-size (default)
-#   "allocation-map"   — compare qemu-img map allocated regions
-# change_detection_mode = "allocation-size"
+#   "allocation-map"   — compare qemu-img map allocated regions (default)
+#                        catches zero-fill, fstrim, and region redistribution
+#   "allocation-size"  — compare qemu-img info actual-size (faster but
+#                        less sensitive)
+# change_detection_mode = "allocation-map"
 
 # Explicit list of disk targets (e.g. ["vda", "vdb"]).  When unset,
 # qsnap auto-discovers all disks via virsh domblklist.
@@ -239,13 +241,12 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #   backup_retry_base = "10s"
 
 
-# ── Fork & Deploy ───────────────────────────────────────────────────────
-# qsnap fork creates a standalone VM from a snapshot or backup:
-#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone
-#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone --storage /mnt/vms
-#   qsnap fork myvm.20250713T1531 --as-vm myvm-clone --add-to-config
+# ── Fork ────────────────────────────────────────────────────────────────
+# qsnap fork creates a standalone qcow2 from a snapshot or backup:
+#   qsnap fork myvm.20250713T1531 --output /mnt/vms/myvm-clone.qcow2
+#   qsnap fork myvm.20250713T1531 --output /mnt/vms/myvm-clone.qcow2 prod-server
 #
-# qsnap deploy creates a VM from a backup (same as fork, resolves from
-# backup targets):
-#   qsnap deploy vm.FULL.20250701T1200 --as-vm recovered-vm
-#   qsnap deploy backup.20250715T1200 --as-vm recovered-vm --storage /mnt/vms
+# qsnap restore replaces a stopped VM's disk with a flattened qcow2:
+#   qsnap restore myvm.20250713T1531
+#   qsnap restore myvm.20250713T1531 --dry-run
+#   qsnap restore myvm.20250713T1531 --yes

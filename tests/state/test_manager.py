@@ -1365,3 +1365,194 @@ def test_inmemory_clear_last_backup_allocation() -> None:
 
     # Verify the dict entry is truly removed, not just set to None.
     assert target not in manager._target_state
+
+
+# ── reset_vm_state tests ───────────────────────────────────────────────
+
+
+def test_reset_vm_state_clears_snapshots(tmp_path: Path) -> None:
+    """After reset_vm_state, get_snapshots returns an empty list."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    snap1 = _make_snapshot("snap1", datetime(2024, 1, 1, 11, 0, 0))
+    snap2 = _make_snapshot("snap2", datetime(2024, 1, 1, 12, 0, 0))
+    manager.record_snapshot("testvm", snap1)
+    manager.record_snapshot("testvm", snap2)
+
+    assert len(manager.get_snapshots("testvm")) == 2
+
+    manager.reset_vm_state("testvm")
+
+    assert manager.get_snapshots("testvm") == []
+
+
+def test_reset_vm_state_clears_last_allocation(tmp_path: Path) -> None:
+    """After reset_vm_state, get_last_allocation returns None."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_allocation("testvm", 4096)
+    assert manager.get_last_allocation("testvm") == 4096
+
+    manager.reset_vm_state("testvm")
+
+    assert manager.get_last_allocation("testvm") is None
+
+
+def test_reset_vm_state_clears_deferred_operations(tmp_path: Path) -> None:
+    """After reset_vm_state, get_deferred_operations returns an empty list."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("testvm", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("testvm", ["snap2.qcow2"], "vm_running")
+
+    assert len(manager.get_deferred_operations("testvm")) == 2
+
+    manager.reset_vm_state("testvm")
+
+    assert manager.get_deferred_operations("testvm") == []
+
+
+def test_reset_vm_state_nonexistent_vm_no_error(tmp_path: Path) -> None:
+    """resetting a VM that has no state file does not raise."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # No state file for this VM — should be a no-op.
+    manager.reset_vm_state("nonexistent")
+
+    # Still no state file was created.
+    state_file = tmp_path / "nonexistent.json"
+    assert not state_file.exists()
+
+
+def test_reset_vm_state_saves_atomically(tmp_path: Path) -> None:
+    """After reset_vm_state, the state file exists on disk and no .tmp file lingers."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_allocation("testvm", 4096)
+    manager.record_snapshot(
+        "testvm", _make_snapshot("snap1", datetime(2024, 1, 1, 12, 0, 0))
+    )
+
+    # Verify state file exists before reset.
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists()
+
+    manager.reset_vm_state("testvm")
+
+    # After reset, state file exists and .tmp file does not linger.
+    assert state_file.exists(), "state file must exist after reset"
+    tmp_file = tmp_path / "testvm.json.tmp"
+    assert not tmp_file.exists(), "no .tmp file should remain after atomic write"
+
+    # Verify content on disk reflects the reset.
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["snapshots"] == []
+    assert data["last_allocation"] is None
+    assert data["deferred_operations"] == []
+
+
+# ── reset_target_state tests ───────────────────────────────────────────
+
+
+def test_reset_target_state_removes_from_full_backups(tmp_path: Path) -> None:
+    """After reset_target_state, get_full_backups returns an empty list."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0))
+    manager.record_full_backup(target, "full-2024-02-01", datetime(2024, 2, 1, 12, 0, 0))
+
+    assert len(manager.get_full_backups(target)) == 2
+
+    manager.reset_target_state(target)
+
+    assert manager.get_full_backups(target) == []
+
+
+def test_reset_target_state_removes_from_dependencies(tmp_path: Path) -> None:
+    """After reset_target_state, get_incremental_dependencies returns an empty list."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+    manager.record_incremental_dependency(target, "incr-002", "full-2024-01-01")
+
+    assert len(manager.get_incremental_dependencies(target, "full-2024-01-01")) == 2
+
+    manager.reset_target_state(target)
+
+    assert manager.get_incremental_dependencies(target, "full-2024-01-01") == []
+
+
+def test_reset_target_state_removes_from_target_state(tmp_path: Path) -> None:
+    """After reset_target_state, get_last_backup_allocation returns None."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.set_last_backup_allocation(target, 12345)
+
+    assert manager.get_last_backup_allocation(target) == 12345
+
+    manager.reset_target_state(target)
+
+    assert manager.get_last_backup_allocation(target) is None
+
+
+def test_reset_target_state_nonexistent_target_no_error(tmp_path: Path) -> None:
+    """resetting a target that has no recorded state does not raise."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # No state files exist — should be a no-op.
+    manager.reset_target_state("/nonexistent/target")
+
+    # No error raised, state files still empty/absent.
+    assert manager.get_full_backups("/nonexistent/target") == []
+    assert manager.get_incremental_dependencies("/nonexistent/target", "any") == []
+    assert manager.get_last_backup_allocation("/nonexistent/target") is None
+
+
+def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
+    """After reset_target_state, all three state files exist on disk with target removed."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0))
+    manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
+    manager.set_last_backup_allocation(target, 12345)
+
+    # Verify all three state files exist before reset.
+    full_backups_file = tmp_path / "_full_backups.json"
+    deps_file = tmp_path / "_dependencies.json"
+    target_state_file = tmp_path / "_target_state.json"
+
+    assert full_backups_file.exists()
+    assert deps_file.exists()
+    assert target_state_file.exists()
+
+    manager.reset_target_state(target)
+
+    # After reset, all three files should still exist (just target removed).
+    assert full_backups_file.exists(), "_full_backups.json must exist after reset"
+    assert deps_file.exists(), "_dependencies.json must exist after reset"
+    assert target_state_file.exists(), "_target_state.json must exist after reset"
+
+    # No .tmp files should linger.
+    assert not (tmp_path / "_full_backups.json.tmp").exists()
+    assert not (tmp_path / "_dependencies.json.tmp").exists()
+    assert not (tmp_path / "_target_state.json.tmp").exists()
+
+    # Verify target is removed from full backups file.
+    with open(full_backups_file, encoding="utf-8") as fh:
+        fb_data = json.load(fh)
+    assert target not in fb_data
+
+    # Verify target is removed from dependencies file.
+    with open(deps_file, encoding="utf-8") as fh:
+        deps_data = json.load(fh)
+    assert target not in deps_data
+
+    # Verify target is removed from target state file.
+    with open(target_state_file, encoding="utf-8") as fh:
+        ts_data = json.load(fh)
+    assert target not in ts_data

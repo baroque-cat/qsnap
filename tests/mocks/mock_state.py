@@ -222,3 +222,20 @@ class InMemoryStateManager(IStateManager):
         count = len(deps[normalized])
         del deps[normalized]
         return count
+
+    # ── Bulk state reset (restore support) ───────────────────────────
+
+    def reset_vm_state(self, vm_name: str) -> None:
+        """Clear all per-VM state: snapshots, last_allocation, deferred_operations."""
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return
+        vm_state["snapshots"] = []
+        vm_state["last_allocation"] = None
+        vm_state["deferred_operations"] = []
+
+    def reset_target_state(self, target_path: str) -> None:
+        """Clear all per-target state: full_backups, dependencies, target_state."""
+        self._full_backups.pop(target_path, None)
+        self._dependencies.pop(target_path, None)
+        self._target_state.pop(target_path, None)

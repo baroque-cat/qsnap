@@ -442,30 +442,85 @@ def test_json_per_target_state_independent(tmp_path):
 
 def test_json_implements_remove_all_deps(tmp_path):
     """JsonStateManager implements remove_all_incremental_dependencies, returns int."""
-    mgr = JsonStateManager(state_dir=tmp_path)
+    manager = JsonStateManager(state_dir=tmp_path)
 
     # Verify method exists and is callable.
-    assert callable(mgr.remove_all_incremental_dependencies)
+    assert callable(manager.remove_all_incremental_dependencies)
 
     # Record some dependencies and verify remove_all returns the correct count.
-    mgr.record_incremental_dependency("/target", "inc1", "full1")
-    mgr.record_incremental_dependency("/target", "inc2", "full1")
-    mgr.record_incremental_dependency("/target", "inc3", "full1")
+    manager.record_incremental_dependency("/target", "inc1", "full1")
+    manager.record_incremental_dependency("/target", "inc2", "full1")
+    manager.record_incremental_dependency("/target", "inc3", "full1")
 
-    result = mgr.remove_all_incremental_dependencies("/target", "full1")
+    result = manager.remove_all_incremental_dependencies("/target", "full1")
     assert isinstance(result, int)
     assert result == 3
 
     # Verify dependencies were actually removed.
-    remaining = mgr.get_incremental_dependencies("/target", "full1")
+    remaining = manager.get_incremental_dependencies("/target", "full1")
     assert remaining == []
 
     # Removing all deps for a non-existent full backup returns 0.
-    result2 = mgr.remove_all_incremental_dependencies("/target", "nonexistent")
+    result2 = manager.remove_all_incremental_dependencies("/target", "nonexistent")
     assert isinstance(result2, int)
     assert result2 == 0
 
     # Removing all deps for a non-existent target returns 0.
-    result3 = mgr.remove_all_incremental_dependencies("/nonexistent_tgt", "full1")
+    result3 = manager.remove_all_incremental_dependencies("/nonexistent_tgt", "full1")
     assert isinstance(result3, int)
     assert result3 == 0
+
+
+# ── reset_vm_state / reset_target_state contract ──────────────────────────
+
+
+def test_istate_manager_reset_methods_abstract():
+    """reset_vm_state and reset_target_state are abstract on IStateManager.
+
+    A subclass missing only these two new methods must fail to instantiate
+    with TypeError because the ABC enforces all abstract methods.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "reset_vm_state" in abstract_methods
+    assert "reset_target_state" in abstract_methods
+
+    # A subclass that implements everything EXCEPT the reset methods
+    # must fail to instantiate.
+    class _MissingResetMethods(IStateManager):
+        def get_last_allocation(self, vm_name): ...
+        def set_last_allocation(self, vm_name, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path): ...
+        def set_last_backup_allocation(self, target_path, alloc): ...
+        def clear_last_backup_allocation(self, target_path): ...
+        def remove_all_incremental_dependencies(self, target_path, full_name): ...
+
+    with pytest.raises(TypeError):
+        _MissingResetMethods()
+
+
+def test_istate_manager_concrete_implementations_have_reset_methods(tmp_path):
+    """JsonStateManager and InMemoryStateManager implement reset_vm_state and reset_target_state."""
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+
+    for mgr, label in [
+        (json_mgr, "JsonStateManager"),
+        (inmemory_mgr, "InMemoryStateManager"),
+    ]:
+        assert callable(mgr.reset_vm_state), f"{label} missing reset_vm_state"
+        assert callable(mgr.reset_target_state), f"{label} missing reset_target_state"

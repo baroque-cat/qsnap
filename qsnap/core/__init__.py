@@ -18,12 +18,11 @@ import re
 import secrets
 import tempfile
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 from xml.etree import ElementTree as ET
 
 from qsnap.interfaces.backup import IBackupProvider
@@ -50,7 +49,7 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
-from qsnap.utils.nbd import get_first_disk_target, is_vm_running, write_backup_xml
+from qsnap.utils.nbd import is_vm_running
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import (
     parse_domblklist_disks,
@@ -224,17 +223,70 @@ class Core:
             results[vm.name] = sorted(snapshots, key=lambda s: s.timestamp)
         return results
 
-    def list_backups(self, vm_filter: str | None = None) -> dict[str, list[SnapshotInfo]]:
-        """Return all backups per VM (across all targets), sorted ascending."""
+    @overload
+    def list_backups(
+        self,
+        vm_filter: str | None = None,
+        tree: Literal[False] = False,
+    ) -> dict[str, list[SnapshotInfo]]: ...
+
+    @overload
+    def list_backups(
+        self,
+        vm_filter: str | None = None,
+        tree: Literal[True] = ...,
+    ) -> dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]]: ...
+
+    def list_backups(
+        self,
+        vm_filter: str | None = None,
+        tree: bool = False,
+    ) -> dict[str, list[SnapshotInfo]] | dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]]:
+        """Return all backups per VM (across all targets), sorted ascending.
+
+        When *tree* is ``False`` (default), returns a flat list per VM
+        sorted by timestamp (existing behavior).
+
+        When *tree* is ``True``, returns per-VM, per-target chain
+        grouping: ``{vm_name: [(target_path, {chain_id: [backups]})]}``.
+        Chains are grouped by FULL anchor via
+        ``_group_backups_by_chain()``.  Orphans (no FULL anchor) are
+        grouped under the ``"__orphan__"`` key.
+        """
         vms = self._filter_vms(vm_filter)
-        results: dict[str, list[SnapshotInfo]] = {}
+        if not tree:
+            results: dict[str, list[SnapshotInfo]] = {}
+            for vm in vms:
+                all_backups: list[SnapshotInfo] = []
+                for target in vm.targets:
+                    provider = self._factory.create_backup_provider(vm, target)
+                    all_backups.extend(provider.list(target))
+                results[vm.name] = sorted(all_backups, key=lambda b: b.timestamp)
+            return results
+
+        # Tree mode: group by FULL anchor per target
+        tree_results: dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]] = {}
         for vm in vms:
-            all_backups: list[SnapshotInfo] = []
+            target_chains: list[tuple[str, dict[str, list[SnapshotInfo]]]] = []
             for target in vm.targets:
                 provider = self._factory.create_backup_provider(vm, target)
-                all_backups.extend(provider.list(target))
-            results[vm.name] = sorted(all_backups, key=lambda b: b.timestamp)
-        return results
+                backups = provider.list(target)
+                if not backups:
+                    continue
+                chains = self._group_backups_by_chain(backups)
+                # Sort chains: FULLs by timestamp, orphans last
+                sorted_chains = dict(
+                    sorted(
+                        chains.items(),
+                        key=lambda kv: (
+                            1 if kv[0] == "__orphan__" else 0,
+                            min(b.timestamp for b in kv[1]),
+                        ),
+                    )
+                )
+                target_chains.append((str(target.path), sorted_chains))
+            tree_results[vm.name] = target_chains
+        return tree_results
 
     def list_config(self) -> list[VMConfig]:
         """Return all VM configurations from the config facade."""
@@ -948,161 +1000,278 @@ class Core:
 
     def restore(
         self,
-        snapshot_name: str,
-        target_dir: Path,
+        name: str,
         vm_filter: str | None = None,
     ) -> RestoreResult:
-        """Restore a snapshot/backup chain to *target_dir*.
+        """Replace a stopped VM's disk with a flattened standalone qcow2.
 
-        Searches snapshots in ``IStateManager`` and backups on targets for
-        *snapshot_name*.  Copies the entire backing chain to *target_dir*
-        and rebases each file with relative ``./`` backing paths.
+        Resolves *name* via ``_resolve_snapshot()``, verifies the VM is
+        stopped, pre-verifies source chain integrity, creates a
+        standalone image via ``qemu-img convert``, atomically replaces
+        the VM's base image, strips ``<backingStore>`` from domain XML,
+        resets all state, and performs best-effort checkpoint cleanup.
 
         Returns a ``RestoreResult``; never raises for expected failures.
         """
+        # Step 1: Resolve the snapshot/backup
         try:
-            snapshot_info, _ = self._resolve_snapshot(snapshot_name, vm_filter)
+            snapshot_info, vm_config = self._resolve_snapshot(name, vm_filter)
         except FileNotFoundError:
             return RestoreResult(
                 success=False,
-                snapshot_name=snapshot_name,
-                restored_path=target_dir,
+                snapshot_name=name,
+                restored_path=Path(),
                 chain_files=[],
-                error=f"Snapshot '{snapshot_name}' not found",
+                error=f"Snapshot not found: {name}",
             )
 
         source_path = snapshot_info.path
+        vm_name = vm_config.name
+        base_image = vm_config.base_image
+        snapshot_dir = vm_config.snapshot_dir
 
-        # Get backing chain via qemu-img info --backing-chain --output=json
-        result = self._shell.run(
-            ["qemu-img", "info", "--backing-chain", "--output=json", str(source_path)],
+        # Step 2: Verify VM is stopped (design D3)
+        if is_vm_running(self._shell, vm_name):
+            return RestoreResult(
+                success=False,
+                snapshot_name=name,
+                restored_path=base_image,
+                chain_files=[],
+                error="VM must be stopped for restore",
+            )
+
+        # Step 3: Pre-verify source chain integrity (design D6)
+        chain_scan = scan_backing_chain(self._shell, source_path)
+        if not chain_scan.success or chain_scan.broken_files:
+            details = chain_scan.error or ", ".join(chain_scan.broken_files)
+            return RestoreResult(
+                success=False,
+                snapshot_name=name,
+                restored_path=base_image,
+                chain_files=[],
+                error=f"Source backing chain is broken: {details}",
+            )
+
+        # Temp path for the standalone image (design D2)
+        tmp_path = snapshot_dir / f"{vm_name}.restored.qcow2.tmp"
+
+        if self._dry_run:
+            logger.info("[dry-run] Would convert %s to %s", source_path, tmp_path)
+            logger.info("[dry-run] Would replace %s with %s", base_image, tmp_path)
+            logger.info("[dry-run] Would strip <backingStore> from domain XML for %s", vm_name)
+            logger.info("[dry-run] Would reset state for %s", vm_name)
+            logger.info("[dry-run] Would clean up qsnap-* checkpoints for %s", vm_name)
+            return RestoreResult(
+                success=True,
+                snapshot_name=name,
+                restored_path=base_image,
+                chain_files=[tmp_path],
+                error=None,
+            )
+
+        # Step 4: Create standalone image at temporary path
+        convert_result = self._shell.run(
+            [
+                "qemu-img",
+                "convert",
+                "--force-share",
+                "-O",
+                "qcow2",
+                str(source_path),
+                str(tmp_path),
+            ],
+            timeout=7200,
+            check=True,
+        )
+        if not convert_result.success:
+            # Original base image and snapshot chain remain intact (D2)
+            return RestoreResult(
+                success=False,
+                snapshot_name=name,
+                restored_path=base_image,
+                chain_files=[],
+                error=f"image conversion failed: {convert_result.error}",
+            )
+
+        # Step 5: Delete old snapshot overlay files from snapshot_dir
+        old_snapshots = self._state.get_snapshots(vm_name)
+        for snap in old_snapshots:
+            if snap.path != tmp_path and snap.path != base_image:
+                rm_result = self._shell.run(
+                    ["rm", "-f", str(snap.path)],
+                    timeout=30,
+                    check=True,
+                )
+                if not rm_result.success:
+                    logger.warning(
+                        "Failed to delete old snapshot overlay %s: %s",
+                        snap.path,
+                        rm_result.error,
+                    )
+
+        # Step 6: Atomically replace base image (design D2)
+        os.replace(str(tmp_path), str(base_image))
+
+        # Step 7: Strip <backingStore> from domain XML + update <source file>
+        self._refresh_domain_backing_store(vm_config)
+
+        # Also update <source file> to point to the restored base image
+        dumpxml = self._shell.run(
+            ["virsh", "dumpxml", "--domain", vm_name],
             timeout=30,
             check=True,
         )
-        if not result.success:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=target_dir,
-                chain_files=[],
-                error=f"qemu-img info failed: {result.error}",
-            )
-
-        # Parse chain (JSON array, top-to-base order)
-        try:
-            chain_data = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=target_dir,
-                chain_files=[],
-                error=f"Failed to parse qemu-img output: {exc}",
-            )
-
-        # Extract chain file paths and reverse to base-to-top order
-        chain_paths: list[Path] = []
-        for item in chain_data:
-            # Accept both legacy "image" (QEMU < 11.0) and "filename" (QEMU 11.0+) keys.
-            image = item.get("image") or item.get("filename", "")
-            if image:
-                chain_paths.append(Path(image))
-        chain_paths.reverse()
-
-        if not chain_paths:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=target_dir,
-                chain_files=[],
-                error="No chain files found in qemu-img output",
-            )
-
-        # Copy all chain files to target_dir
-        chain_files: list[Path] = []
-        for src in chain_paths:
-            dst = target_dir / src.name
-            cp_result = self._shell.run(
-                ["cp", str(src), str(dst)],
-                timeout=60,
-                check=True,
-            )
-            if not cp_result.success:
-                return RestoreResult(
-                    success=False,
-                    snapshot_name=snapshot_name,
-                    restored_path=target_dir,
-                    chain_files=chain_files,
-                    error=f"Failed to copy {src}: {cp_result.error}",
+        if dumpxml.success:
+            try:
+                root = ET.fromstring(dumpxml.stdout)
+                for disk in root.iter("disk"):
+                    source = disk.find("source")
+                    if source is not None:
+                        source.set("file", str(base_image))
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".xml",
+                    prefix=f"qsnap-restore-{vm_name}-",
+                    delete=False,
+                    encoding="utf-8",
+                ) as tmp:
+                    tmp.write(ET.tostring(root, encoding="unicode"))
+                    tmp_xml_path = tmp.name
+                define_result = self._shell.run(
+                    ["virsh", "define", tmp_xml_path],
+                    timeout=30,
+                    check=True,
                 )
-            chain_files.append(dst)
-
-        # Rebase with relative paths (base-to-top, skip base)
-        for i in range(1, len(chain_files)):
-            backing_name = chain_files[i - 1].name
-            rebase_result = self._shell.run(
-                ["qemu-img", "rebase", "-u", "-b", f"./{backing_name}", str(chain_files[i])],
-                timeout=30,
-                check=True,
-            )
-            if not rebase_result.success:
-                return RestoreResult(
-                    success=False,
-                    snapshot_name=snapshot_name,
-                    restored_path=target_dir,
-                    chain_files=chain_files,
-                    error=f"Failed to rebase {chain_files[i]}: {rebase_result.error}",
+                if not define_result.success:
+                    logger.warning(
+                        "virsh define failed for VM %s after restore: %s",
+                        vm_name,
+                        define_result.error,
+                    )
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_xml_path)
+            except ET.ParseError as exc:
+                logger.warning(
+                    "Failed to parse/update domain XML for VM %s after restore: %s",
+                    vm_name,
+                    exc,
                 )
+        else:
+            logger.warning(
+                "virsh dumpxml failed for VM %s after restore: %s",
+                vm_name,
+                dumpxml.error,
+            )
+
+        # Step 8: Reset all VM state (design D4)
+        self._state.reset_vm_state(vm_name)
+        for target in vm_config.targets:
+            self._state.reset_target_state(str(target.path))
+
+        # Step 9: Best-effort checkpoint cleanup (design D5)
+        self._cleanup_checkpoints_after_restore(vm_config)
 
         return RestoreResult(
             success=True,
-            snapshot_name=snapshot_name,
-            restored_path=target_dir,
-            chain_files=chain_files,
+            snapshot_name=name,
+            restored_path=base_image,
+            chain_files=[base_image],
             error=None,
         )
 
+    def _cleanup_checkpoints_after_restore(self, vm_config: VMConfig) -> None:
+        """Best-effort cleanup of all qsnap-* checkpoints after restore.
+
+        Lists all libvirt checkpoints with ``qsnap-`` prefix and deletes
+        each via ``virsh checkpoint-delete --metadata``.  Failures are
+        logged at WARNING level and do not block the restore operation
+        (design D5).
+        """
+        # Use the first target's provider to list checkpoints; if no
+        # targets, list directly via virsh.
+        checkpoints: list[str] = []
+        if vm_config.targets:
+            provider = self._factory.create_backup_provider(
+                vm_config, vm_config.targets[0]
+            )
+            checkpoints = provider.list_checkpoints(vm_config.name)
+        else:
+            # Fallback: list directly via virsh checkpoint-list
+            result = self._shell.run(
+                ["virsh", "checkpoint-list", "--name", "--domain", vm_config.name],
+                timeout=30,
+                check=True,
+            )
+            if result.success:
+                checkpoints = [
+                    line.strip()
+                    for line in result.stdout.strip().splitlines()
+                    if line.strip().startswith("qsnap-")
+                ]
+
+        if not checkpoints:
+            return
+
+        for cp in checkpoints:
+            cmd = [
+                "virsh",
+                "checkpoint-delete",
+                "--metadata",
+                "--domain",
+                vm_config.name,
+                cp,
+            ]
+            result = self._shell.run(cmd, timeout=30, check=True)
+            if result.success:
+                logger.info(
+                    "[restore] %s: deleted checkpoint %s",
+                    vm_config.name,
+                    cp,
+                )
+            else:
+                logger.warning(
+                    "[restore] %s: failed to delete checkpoint %s: %s",
+                    vm_config.name,
+                    cp,
+                    result.error,
+                )
+
     def fork(
         self,
-        snapshot_name: str,
-        new_vm_name: str,
-        storage_dir: Path,
-        add_to_config: bool = False,
+        name: str,
+        output_path: Path,
         vm_filter: str | None = None,
     ) -> RestoreResult:
-        """Create a standalone VM from a snapshot or backup.
+        """Create a standalone qcow2 from a snapshot or backup.
 
-        Resolves *snapshot_name* via ``_resolve_snapshot()``, then runs
-        image conversion to produce a single standalone qcow2
-        with no backing dependencies.  Defines a new libvirt VM using a
-        modified copy of the source VM's XML (new name, new UUID, new disk
-        path, MAC removed).
+        Resolves *name* via ``_resolve_snapshot()``, estimates the
+        chain size, then runs ``qemu-img convert --force-share -O qcow2``
+        to produce a standalone qcow2 at *output_path* with no backing
+        dependencies.
 
-        When *add_to_config* is True, appends a minimal ``[[vm]]`` block
-        to the qsnap config file.
+        No XML manipulation, VM definition, or libvirt management is
+        performed — creating a VM from the resulting image is the
+        operator's responsibility.
 
         Returns a ``RestoreResult``; never raises for expected failures.
         """
-        # Step 1: Resolve the snapshot and source VM
+        # Step 1: Resolve the snapshot/backup
         try:
-            snapshot_info, source_vm = self._resolve_snapshot(snapshot_name, vm_filter)
+            snapshot_info, _ = self._resolve_snapshot(name, vm_filter)
         except FileNotFoundError:
             return RestoreResult(
                 success=False,
-                snapshot_name=snapshot_name,
-                restored_path=storage_dir,
+                snapshot_name=name,
+                restored_path=output_path,
                 chain_files=[],
-                error=f"Snapshot not found: {snapshot_name}",
+                error=f"Snapshot not found: {name}",
             )
 
         source_path = snapshot_info.path
-        vm_dir = storage_dir / new_vm_name
-        target_qcow2 = vm_dir / f"{new_vm_name}.qcow2"
-        xml_path = vm_dir / f"{new_vm_name}.xml"
 
-        # Step 2: Resolve backing chain to estimate total chain size
+        # Step 2: Estimate chain size via qemu-img info --backing-chain
         # --force-share: the source may be the active layer of a running
-        # VM, which has an exclusive write lock (design D5, bug U).
+        # VM with an exclusive write lock (design D1).
         chain_size = 0
         info_result = self._shell.run(
             [
@@ -1129,260 +1298,40 @@ class Core:
         size_str = self._format_bytes(chain_size)
         logger.info(
             "Converting snapshot %s (chain size: ~%s) to standalone qcow2...",
-            snapshot_name,
+            name,
             size_str,
         )
 
-        # Step 4: Create target directory
-        mkdir_result = self._shell.run(
-            ["mkdir", "-p", str(vm_dir)],
-            timeout=30,
+        # Step 4: Execute image conversion (always direct, no NBD — D1)
+        convert_result = self._shell.run(
+            [
+                "qemu-img",
+                "convert",
+                "--force-share",
+                "-O",
+                "qcow2",
+                str(source_path),
+                str(output_path),
+            ],
+            timeout=7200,
             check=True,
         )
-        if not mkdir_result.success:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
-                chain_files=[],
-                error=f"Failed to create directory {vm_dir}: {mkdir_result.error}",
-            )
-
-        # Step 5: Execute image conversion (hybrid NBD/direct — design D9)
-        # If the source VM is running, the active layer has an exclusive
-        # write lock.  Use NBD pull-model to avoid the lock conflict.
-        # If stopped, direct convert is safe.
-        if is_vm_running(self._shell, source_vm.name):
-            logger.info(
-                "VM %s is running — using NBD export for fork",
-                source_vm.name,
-            )
-            # Inline NBD export + convert (the former full-export helper
-            # was removed in the unify-nbd-transfer change — the restore
-            # simple full pull without checkpoints or the unified engine).
-            import os as _os
-
-            _fork_socket = f"/tmp/qsnap-restore-{_os.getpid()}.sock"
-            self._shell.run(["rm", "-f", _fork_socket], timeout=10)
-            _fork_xml = write_backup_xml(_fork_socket)
-            # libvirt's NBD server exports each disk under its target
-            # device name (e.g., "vda") — needed for the export name.
-            _fork_disk_target = get_first_disk_target(self._shell, source_vm.name)
-            try:
-                _begin_result = self._shell.run(
-                    [
-                        "virsh",
-                        "backup-begin",
-                        "--domain",
-                        source_vm.name,
-                        str(_fork_xml),
-                    ],
-                    timeout=120,
-                    check=True,
-                )
-                if not _begin_result.success:
-                    convert_result = _begin_result
-                else:
-                    _nbd_uri = f"nbd:unix:{_fork_socket}"
-                    if _fork_disk_target:
-                        _nbd_uri = f"nbd:unix:{_fork_socket}:exportname={_fork_disk_target}"
-                    convert_result = self._shell.run(
-                        [
-                            "qemu-img",
-                            "convert",
-                            "-O",
-                            "qcow2",
-                            _nbd_uri,
-                            str(target_qcow2),
-                        ],
-                        timeout=7200,
-                        check=True,
-                    )
-            finally:
-                _abort_result = self._shell.run(
-                    ["virsh", "domjobabort", "--domain", source_vm.name],
-                    timeout=30,
-                    check=True,
-                )
-                if not _abort_result.success:
-                    logger.warning(
-                        "virsh domjobabort failed for VM %s (job may have already terminated): %s",
-                        source_vm.name,
-                        _abort_result.error,
-                    )
-                self._shell.run(["rm", "-f", _fork_socket], timeout=10)
-                try:
-                    _fork_xml.unlink(missing_ok=True)
-                except OSError as exc:
-                    logger.warning("Failed to remove temp XML file %s: %s", _fork_xml, exc)
-        else:
-            convert_result = self._shell.run(
-                [
-                    "qemu-img",
-                    "convert",
-                    "-O",
-                    "qcow2",
-                    str(source_path),
-                    str(target_qcow2),
-                ],
-                timeout=7200,
-                check=True,
-            )
         if not convert_result.success:
             return RestoreResult(
                 success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
+                snapshot_name=name,
+                restored_path=output_path,
                 chain_files=[],
                 error=f"image conversion failed: {convert_result.error}",
             )
 
-        # Step 6: Obtain source VM XML
-        dumpxml_result = self._shell.run(
-            ["virsh", "dumpxml", "--domain", source_vm.name],
-            timeout=30,
-            check=True,
-        )
-        if not dumpxml_result.success:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
-                chain_files=[target_qcow2],
-                error=f"virsh dumpxml failed: {dumpxml_result.error}",
-            )
-
-        # Step 7: Modify XML
-        try:
-            root = ET.fromstring(dumpxml_result.stdout)
-        except ET.ParseError as exc:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
-                chain_files=[target_qcow2],
-                error=f"Failed to parse VM XML: {exc}",
-            )
-
-        # Replace <name>
-        name_elem = root.find("name")
-        if name_elem is not None:
-            name_elem.text = new_vm_name
-
-        # Replace <uuid> with a newly generated one
-        uuid_elem = root.find("uuid")
-        new_uuid = str(uuid.uuid4())
-        if uuid_elem is not None:
-            uuid_elem.text = new_uuid
-        else:
-            uuid_elem = ET.SubElement(root, "uuid")
-            uuid_elem.text = new_uuid
-
-        # Replace <source file="..."> paths to point to the new qcow2
-        for disk in root.iter("disk"):
-            source = disk.find("source")
-            if source is not None:
-                source.set("file", str(target_qcow2))
-
-        # Remove <mac address="..."> to avoid MAC conflicts
-        for interface in root.iter("interface"):
-            mac = interface.find("mac")
-            if mac is not None:
-                interface.remove(mac)
-
-        # Step 8: Write modified XML
-        try:
-            ET.ElementTree(root).write(str(xml_path), encoding="unicode")
-        except OSError as exc:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
-                chain_files=[target_qcow2],
-                error=f"Failed to write XML: {exc}",
-            )
-
-        # Step 9: Execute virsh define
-        define_result = self._shell.run(
-            ["virsh", "define", str(xml_path)],
-            timeout=30,
-            check=True,
-        )
-        if not define_result.success:
-            return RestoreResult(
-                success=False,
-                snapshot_name=snapshot_name,
-                restored_path=vm_dir,
-                chain_files=[target_qcow2],
-                error=f"virsh define failed: {define_result.error}",
-            )
-
-        # Step 10: Optionally append [[vm]] block to config file
-        if add_to_config:
-            self._append_vm_to_config(new_vm_name, target_qcow2, vm_dir)
-
         return RestoreResult(
             success=True,
-            snapshot_name=snapshot_name,
-            restored_path=target_qcow2,
-            chain_files=[target_qcow2],
+            snapshot_name=name,
+            restored_path=output_path,
+            chain_files=[output_path],
             error=None,
         )
-
-    def deploy(
-        self,
-        backup_name: str,
-        new_vm_name: str,
-        storage_dir: Path,
-        add_to_config: bool = False,
-        vm_filter: str | None = None,
-    ) -> RestoreResult:
-        """Deploy a backup as a new VM.
-
-        Thin wrapper around ``fork()`` — fork already handles resolution
-        from both snapshots and backups.
-        """
-        return self.fork(
-            backup_name,
-            new_vm_name,
-            storage_dir,
-            add_to_config=add_to_config,
-            vm_filter=vm_filter,
-        )
-
-    def _append_vm_to_config(
-        self,
-        vm_name: str,
-        base_image: Path,
-        vm_dir: Path,
-    ) -> None:
-        """Append a minimal ``[[vm]]`` block to the qsnap config file."""
-        snapshot_dir = vm_dir / "snapshots"
-        config_path = self._config.config_path
-        block = (
-            f"\n[[vm]]\n"
-            f'name = "{vm_name}"\n'
-            f'base_image = "{base_image}"\n'
-            f'snapshot_dir = "{snapshot_dir}"\n'
-            f'snapshot_create = "always"\n'
-        )
-        try:
-            with open(config_path, "a", encoding="utf-8") as fh:
-                fh.write(block)
-            # Create snapshot_dir if it does not exist
-            mkdir_result = self._shell.run(
-                ["mkdir", "-p", str(snapshot_dir)],
-                timeout=10,
-                check=True,
-            )
-            if not mkdir_result.success:
-                logger.warning(
-                    "Failed to create snapshot directory %s: %s",
-                    snapshot_dir,
-                    mkdir_result.error,
-                )
-        except OSError as exc:
-            logger.warning("Failed to append VM to config: %s", exc)
 
     @staticmethod
     def _format_bytes(size: int) -> str:

@@ -1,10 +1,4 @@
-# Fork Mode
-
-## Purpose
-
-One-command creation of a standalone qcow2 file from any qsnap-managed snapshot or backup. Uses `qemu-img convert --force-share -O qcow2` to flatten the backing chain into a single standalone file. No XML manipulation, VM definition, or libvirt management is performed — creating a VM from the resulting image is the operator's responsibility.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: qsnap fork command creates independent VM from snapshot
 `qsnap fork <name> --output <path> [vm]` SHALL locate the named snapshot or backup (via `IStateManager` and backup providers, reusing `Core._resolve_snapshot()` resolution logic) and create a standalone qcow2 file at the specified output path. The command SHALL NOT perform XML manipulation, VM definition, or any libvirt management operations — creating a VM from the resulting image is the operator's responsibility.
@@ -51,3 +45,21 @@ The chain-size estimation step (`qemu-img info --backing-chain --force-share`) S
 #### Scenario: fork fails on nonexistent snapshot
 - **WHEN** `core.fork("nonexistent-snap", Path("/tmp/test.qcow2"))` is called
 - **THEN** returns `RestoreResult(success=False, error="Snapshot not found: nonexistent-snap")`
+
+## REMOVED Requirements
+
+### Requirement: Fork defines new libvirt VM
+**Reason**: Fork is simplified to standalone image creation only. VM definition is the operator's responsibility.
+**Migration**: Use `virsh define` manually after `qsnap fork` to create a VM from the resulting standalone qcow2.
+
+### Requirement: Fork generates unique VM UUID
+**Reason**: Fork no longer creates VMs or manipulates XML. UUID generation is unnecessary.
+**Migration**: Generate UUIDs manually when defining the new VM via `virsh define`.
+
+### Requirement: Fork with --add-to-config
+**Reason**: Fork no longer manages VM configuration. The `--add-to-config` flag is removed.
+**Migration**: Manually add a `[[vm]]` block to the qsnap config file after fork.
+
+### Requirement: qsnap deploy command deploys backup as VM
+**Reason**: `deploy` was a thin wrapper around `fork()`. With fork simplified, deploy is redundant.
+**Migration**: Use `qsnap fork <backup_name> --output <path>` directly.

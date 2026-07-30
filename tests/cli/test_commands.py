@@ -15,10 +15,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from qsnap.cli.commands import (
     handle_backup,
     handle_check,
-    handle_deploy,
     handle_estimate,
     handle_fork,
     handle_list,
@@ -101,13 +102,6 @@ def _make_mock_core() -> Mock:
         error=None,
     )
     core.fork.return_value = RestoreResult(
-        success=True,
-        snapshot_name="",
-        restored_path=Path("/tmp"),
-        chain_files=[],
-        error=None,
-    )
-    core.deploy.return_value = RestoreResult(
         success=True,
         snapshot_name="",
         restored_path=Path("/tmp"),
@@ -264,37 +258,59 @@ def test_no_vm_filter_passes_none_to_core_method():
 # ── restore subcommand dispatch tests ────────────────────────────────────
 
 
-def test_handle_restore_dispatches_to_core_restore_with_positional_args(cli_app, tmp_path):
-    """Parse 'restore SNAP TARGET' args, verify core.restore is called."""
+# ── restore subcommand dispatch tests ──────────────────────────────────────
+
+
+def test_handle_restore_dispatches_to_core_restore(cli_app):
+    """Parse 'restore SNAP' args, verify core.restore is called."""
     mock_core = _make_mock_core()
-    args = cli_app.parse_args(["restore", "SNAP", str(tmp_path)])
+    args = cli_app.parse_args(["restore", "SNAP", "--yes"])
     handle_restore(mock_core, args)
-    mock_core.restore.assert_called_once_with("SNAP", tmp_path, None)
+    mock_core.restore.assert_called_once_with("SNAP", None)
 
 
-def test_handle_restore_nonexistent_backup_returns_exit_1(cli_app, tmp_path):
+def test_handle_restore_with_vm_filter(cli_app):
+    """Parse 'restore SNAP myvm', verify core.restore called with vm filter."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["restore", "SNAP", "myvm", "--yes"])
+    handle_restore(mock_core, args)
+    mock_core.restore.assert_called_once_with("SNAP", "myvm")
+
+
+def test_handle_restore_nonexistent_backup_returns_exit_1(cli_app):
     """When core.restore() returns RestoreResult(success=False), returns EXIT_GENERIC."""
     mock_core = _make_mock_core()
     mock_core.restore.return_value = RestoreResult(
         success=False,
         snapshot_name="SNAP",
-        restored_path=tmp_path,
+        restored_path=Path("/var/lib/libvirt/images"),
         chain_files=[],
         error="Snapshot 'SNAP' not found",
     )
-    args = cli_app.parse_args(["restore", "SNAP", str(tmp_path)])
+    args = cli_app.parse_args(["restore", "SNAP", "--yes"])
     result = handle_restore(mock_core, args)
     assert result == EXIT_GENERIC
 
 
-def test_handle_restore_missing_target_dir_returns_exit_1(cli_app, tmp_path):
-    """When target_dir does not exist, returns EXIT_GENERIC without calling core.restore()."""
+def test_handle_restore_dry_run_flag(cli_app):
+    """Parse 'restore SNAP --dry-run', verify core.dry_run = True."""
     mock_core = _make_mock_core()
-    nonexistent = tmp_path / "does_not_exist"
-    args = cli_app.parse_args(["restore", "SNAP", str(nonexistent)])
+    mock_core.dry_run = False
+    args = cli_app.parse_args(["restore", "SNAP", "--dry-run"])
     result = handle_restore(mock_core, args)
-    assert result == EXIT_GENERIC
-    mock_core.restore.assert_not_called()
+    assert mock_core.dry_run is True
+    assert result == EXIT_SUCCESS
+
+
+def test_handle_restore_yes_skips_confirmation(cli_app, capsys):
+    """Parse 'restore SNAP --yes', verify no confirmation prompt."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["restore", "SNAP", "--yes"])
+    result = handle_restore(mock_core, args)
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.err
+    assert "Aborted" not in captured.err
+    assert result == EXIT_SUCCESS
 
 
 # ── check --deep flag tests ──────────────────────────────────────────────
@@ -858,18 +874,55 @@ def test_estimate_subcommand_respects_format_flag(cli_app, capsys):
 # ── fork subcommand dispatch tests ────────────────────────────────────────
 
 
-def test_fork_command_dispatches_to_core_fork(cli_app):
-    """Parse 'fork snap1 --as-vm newvm --storage /tmp/storage' and
-    verify core.fork is called with the translated arguments."""
+@pytest.mark.unit
+def test_handle_restore_prompts_confirmation_without_yes(cli_app, capsys, monkeypatch):
+    """Restore without --yes prompts for confirmation; 'n' aborts, 'y' proceeds."""
     mock_core = _make_mock_core()
-    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm", "--storage", "/tmp/storage"])
+
+    # ---- User answers "n" → abort ----
+    args = cli_app.parse_args(["restore", "SNAP"])
+    monkeypatch.setattr("builtins.input", lambda: "n")
+    result = handle_restore(mock_core, args)
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err, f"Expected WARNING in stderr, got: {captured.err}"
+    assert "Aborted" in captured.err, f"Expected Aborted in stderr, got: {captured.err}"
+    assert result == EXIT_GENERIC
+    mock_core.restore.assert_not_called()
+
+    # ---- User answers "y" → proceed ----
+    mock_core2 = _make_mock_core()
+    monkeypatch.setattr("builtins.input", lambda: "y")
+    result2 = handle_restore(mock_core2, args)
+
+    assert result2 == EXIT_SUCCESS
+    mock_core2.restore.assert_called_once_with("SNAP", None)
+
+
+def test_fork_command_dispatches_to_core_fork(cli_app):
+    """Parse 'fork snap1 --output /tmp/output.qcow2' and verify
+    core.fork is called with the new signature."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/output.qcow2"])
     result = handle_fork(mock_core, args)
     mock_core.fork.assert_called_once_with(
         "snap1",
-        "newvm",
-        Path("/tmp/storage"),
-        add_to_config=False,
-        vm_filter=None,
+        Path("/tmp/output.qcow2"),
+        None,
+    )
+    assert result == EXIT_SUCCESS
+
+
+def test_fork_command_with_vm_filter(cli_app):
+    """Parse 'fork snap1 --output /tmp/output.qcow2 myvm' and verify
+    core.fork is called with vm_filter."""
+    mock_core = _make_mock_core()
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/output.qcow2", "myvm"])
+    result = handle_fork(mock_core, args)
+    mock_core.fork.assert_called_once_with(
+        "snap1",
+        Path("/tmp/output.qcow2"),
+        "myvm",
     )
     assert result == EXIT_SUCCESS
 
@@ -881,76 +934,19 @@ def test_fork_command_missing_snapshot_exit_one(cli_app):
     mock_core.fork.return_value = RestoreResult(
         success=False,
         snapshot_name="snap1",
-        restored_path=Path("/var/lib/libvirt/images"),
+        restored_path=Path("/tmp/output.qcow2"),
         chain_files=[],
         error="Snapshot not found: snap1",
     )
-    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm"])
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/output.qcow2"])
     result = handle_fork(mock_core, args)
     assert result == EXIT_GENERIC
 
 
-def test_fork_command_add_to_config_flag(cli_app):
-    """Parse 'fork snap1 --as-vm newvm --add-to-config' and verify
-    core.fork is called with add_to_config=True."""
-    mock_core = _make_mock_core()
-    args = cli_app.parse_args(["fork", "snap1", "--as-vm", "newvm", "--add-to-config"])
-    result = handle_fork(mock_core, args)
-    mock_core.fork.assert_called_once_with(
-        "snap1",
-        "newvm",
-        Path("/var/lib/libvirt/images"),
-        add_to_config=True,
-        vm_filter=None,
-    )
-    assert result == EXIT_SUCCESS
-
-
-# ── deploy subcommand dispatch tests ──────────────────────────────────────
-
-
-def test_deploy_command_dispatches_to_core_deploy(cli_app):
-    """Parse 'deploy backup1 --as-vm newvm --storage /tmp/storage' and
-    verify core.deploy is called with the translated arguments."""
-    mock_core = _make_mock_core()
-    args = cli_app.parse_args(
-        ["deploy", "backup1", "--as-vm", "newvm", "--storage", "/tmp/storage"]
-    )
-    result = handle_deploy(mock_core, args)
-    mock_core.deploy.assert_called_once_with(
-        "backup1",
-        "newvm",
-        Path("/tmp/storage"),
-        add_to_config=False,
-        vm_filter=None,
-    )
-    assert result == EXIT_SUCCESS
-
-
-def test_deploy_command_storage_and_add_to_config_flags(cli_app):
-    """Parse 'deploy backup1 --as-vm newvm --storage /custom/path --add-to-config'
-    and verify core.deploy is called with both flags translated."""
-    mock_core = _make_mock_core()
-    args = cli_app.parse_args(
-        [
-            "deploy",
-            "backup1",
-            "--as-vm",
-            "newvm",
-            "--storage",
-            "/custom/path",
-            "--add-to-config",
-        ]
-    )
-    result = handle_deploy(mock_core, args)
-    mock_core.deploy.assert_called_once_with(
-        "backup1",
-        "newvm",
-        Path("/custom/path"),
-        add_to_config=True,
-        vm_filter=None,
-    )
-    assert result == EXIT_SUCCESS
+def test_handle_deploy_not_importable():
+    """Verify that handle_deploy is NOT importable from commands module."""
+    with pytest.raises(ImportError, match="cannot import name 'handle_deploy'"):
+        from qsnap.cli.commands import handle_deploy  # noqa: F401, F811
 
 
 # ── reconcile subcommand dispatch tests ──────────────────────────────────

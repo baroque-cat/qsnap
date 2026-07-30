@@ -38,7 +38,6 @@ _DISPATCH: dict[str, object] = {
     "restore": commands.handle_restore,
     "estimate": commands.handle_estimate,
     "fork": commands.handle_fork,
-    "deploy": commands.handle_deploy,
 }
 
 
@@ -143,6 +142,12 @@ def build_argparser() -> argparse.ArgumentParser:
     for list_cmd in ("backups", "latest"):
         list_sub = list_subparsers.add_parser(list_cmd)
         list_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
+    # Add --tree flag to list backups
+    list_subparsers.choices["backups"].add_argument(
+        "--tree",
+        action="store_true",
+        help="Display backup chains as an indented tree grouped by FULL anchor",
+    )
     list_subparsers.add_parser("config")
     deferred_sub = list_subparsers.add_parser("deferred")
     deferred_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
@@ -187,11 +192,20 @@ def build_argparser() -> argparse.ArgumentParser:
 
     # restore subcommand
     restore_parser = subparsers.add_parser(
-        "restore", help="Restore a backup chain to a target directory"
+        "restore", help="Replace a stopped VM's disk with a flattened standalone qcow2"
     )
-    restore_parser.add_argument("snapshot_name", help="Snapshot name to restore")
-    restore_parser.add_argument("target_dir", help="Target directory for restored files")
+    restore_parser.add_argument("snapshot_name", help="Snapshot or backup name to restore from")
     restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
+    restore_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show planned actions without executing them",
+    )
+    restore_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt for destructive operation",
+    )
 
     # estimate subcommand
     estimate_parser = subparsers.add_parser(
@@ -202,57 +216,19 @@ def build_argparser() -> argparse.ArgumentParser:
     # fork subcommand
     fork_parser = subparsers.add_parser(
         "fork",
-        help="Create a standalone VM from a snapshot or backup",
+        help="Create a standalone qcow2 from a snapshot or backup",
     )
     fork_parser.add_argument("snapshot_name", help="Snapshot or backup name to fork from")
     fork_parser.add_argument(
-        "--as-vm",
+        "--output",
         required=True,
-        help="Name for the new VM",
-    )
-    fork_parser.add_argument(
-        "--storage",
-        default="/var/lib/libvirt/images",
-        help="Storage directory for the new VM (default: /var/lib/libvirt/images)",
-    )
-    fork_parser.add_argument(
-        "--add-to-config",
-        action="store_true",
-        help="Append the new VM to the qsnap config file",
+        help="Output file path for the standalone qcow2",
     )
     fork_parser.add_argument(
         "vm",
         nargs="*",
         default=[],
         help="VM name filter for snapshot resolution (optional)",
-    )
-
-    # deploy subcommand
-    deploy_parser = subparsers.add_parser(
-        "deploy",
-        help="Deploy a backup as a new VM",
-    )
-    deploy_parser.add_argument("backup_name", help="Backup name to deploy")
-    deploy_parser.add_argument(
-        "--as-vm",
-        required=True,
-        help="Name for the new VM",
-    )
-    deploy_parser.add_argument(
-        "--storage",
-        default="/var/lib/libvirt/images",
-        help="Storage directory for the new VM (default: /var/lib/libvirt/images)",
-    )
-    deploy_parser.add_argument(
-        "--add-to-config",
-        action="store_true",
-        help="Append the new VM to the qsnap config file",
-    )
-    deploy_parser.add_argument(
-        "vm",
-        nargs="*",
-        default=[],
-        help="VM name filter for backup resolution (optional)",
     )
 
     return parser

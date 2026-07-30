@@ -150,3 +150,24 @@ class IStateManager(ABC):
         Returns the count of removed dependency entries.
         """
         ...
+
+    @abstractmethod
+    def reset_vm_state(self, vm_name: str) -> None:
+        """Atomically clear all per-VM state.
+
+        Clears the ``snapshots`` list, ``last_allocation`` baseline, and
+        ``deferred_operations`` queue for *vm_name*.  Used by
+        :meth:`Core.restore` to reset VM state after disk replacement.
+        """
+        ...
+
+    @abstractmethod
+    def reset_target_state(self, target_path: str) -> None:
+        """Atomically clear all per-target state.
+
+        Clears full backup records, incremental dependencies, and the
+        ``last_backup_allocation`` baseline for *target_path*.  Used by
+        :meth:`Core.restore` to reset target state after VM disk
+        replacement.
+        """
+        ...

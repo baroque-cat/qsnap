@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import (
     RetentionResult,
@@ -1165,3 +1167,320 @@ def test_check_healthy_vm_no_remediation(
 
     assert result["testvm"].deferred_count == 0
     assert result["testvm"].remediation is None
+
+
+# ── test_list_backups_tree_false_returns_flat ───────────────────────────────
+
+
+@pytest.mark.unit
+def test_list_backups_tree_false_returns_flat(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_backups(tree=False)`` returns flat list sorted by timestamp."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    base = datetime(2025, 7, 13, 10, 0)
+    backups = [
+        SnapshotInfo(
+            name="b2",
+            path=Path("/mnt/backup/b2.qcow2"),
+            timestamp=base + timedelta(hours=1),
+            allocation=2000,
+        ),
+        SnapshotInfo(
+            name="b1",
+            path=Path("/mnt/backup/b1.qcow2"),
+            timestamp=base,
+            allocation=1000,
+        ),
+    ]
+
+    with patch.object(mock_factory._backup_provider, "list", return_value=backups):
+        result = core.list_backups(tree=False)
+
+    assert "testvm" in result
+    assert len(result["testvm"]) == 2
+    timestamps = [b.timestamp for b in result["testvm"]]
+    assert timestamps == sorted(timestamps)
+
+
+# ── test_list_backups_tree_true_returns_nested_dict ─────────────────────────
+
+
+@pytest.mark.unit
+def test_list_backups_tree_true_returns_nested_dict(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_backups(tree=True)`` returns ``{vm_name: [(target_path, {chain_id: [backups]})]}``."""
+    vm = make_vm_config(name="testvm", targets=[make_target(path="/mnt/backup/testvm")])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full1 = SnapshotInfo(
+        name="testvm.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+    )
+    inc1 = SnapshotInfo(
+        name="testvm.20250702T120000_def456",
+        path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+        timestamp=datetime(2025, 7, 2, 12, 0),
+        allocation=1000,
+    )
+
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=[full1, inc1]
+    ), patch.object(
+        core,
+        "_resolve_chain_full_anchor",
+        return_value="testvm.FULL.20250701T120000_abc123",
+    ):
+        result = core.list_backups(tree=True)
+
+    assert "testvm" in result
+    target_chains = result["testvm"]
+    assert len(target_chains) == 1
+    target_path, chains = target_chains[0]
+    assert target_path == "/mnt/backup/testvm"
+    assert "testvm.FULL.20250701T120000_abc123" in chains
+    chain_backups = chains["testvm.FULL.20250701T120000_abc123"]
+    assert len(chain_backups) == 2
+    chain_names = {b.name for b in chain_backups}
+    assert "testvm.FULL.20250701T120000_abc123" in chain_names
+    assert "testvm.20250702T120000_def456" in chain_names
+
+
+# ── test_list_backups_tree_groups_by_chain ──────────────────────────────────
+
+
+@pytest.mark.unit
+def test_list_backups_tree_groups_by_chain(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_backups(tree=True)`` groups FULLs and incrementals into separate chains."""
+    vm = make_vm_config(name="testvm", targets=[make_target(path="/mnt/backup/testvm")])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full1 = SnapshotInfo(
+        name="testvm.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+    )
+    inc1a = SnapshotInfo(
+        name="testvm.20250702T120000_def456",
+        path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+        timestamp=datetime(2025, 7, 2, 12, 0),
+        allocation=1000,
+    )
+    full2 = SnapshotInfo(
+        name="testvm.FULL.20250703T120000_ghi789",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250703T120000_ghi789.qcow2"),
+        timestamp=datetime(2025, 7, 3, 12, 0),
+        allocation=5000,
+    )
+    inc2a = SnapshotInfo(
+        name="testvm.20250704T120000_jkl012",
+        path=Path("/mnt/backup/testvm/testvm.20250704T120000_jkl012.qcow2"),
+        timestamp=datetime(2025, 7, 4, 12, 0),
+        allocation=1000,
+    )
+
+    all_backups = [full1, inc1a, full2, inc2a]
+
+    # Map each incremental path to its FULL anchor chain id
+    anchor_map = {
+        "/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2": "testvm.FULL.20250701T120000_abc123",
+        "/mnt/backup/testvm/testvm.20250704T120000_jkl012.qcow2": "testvm.FULL.20250703T120000_ghi789",
+    }
+
+    def mock_resolve(path: Path) -> str | None:
+        return anchor_map.get(str(path))
+
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=all_backups
+    ), patch.object(
+        core, "_resolve_chain_full_anchor", side_effect=mock_resolve
+    ):
+        result = core.list_backups(tree=True)
+
+    assert "testvm" in result
+    target_chains = result["testvm"]
+    assert len(target_chains) == 1
+    _, chains = target_chains[0]
+
+    # Two chains expected (sorted by min timestamp: full1 < full2)
+    assert len(chains) == 2
+    chain_keys = list(chains.keys())
+    assert chain_keys[0] == "testvm.FULL.20250701T120000_abc123"
+    assert chain_keys[1] == "testvm.FULL.20250703T120000_ghi789"
+
+    # Chain 1: FULL + 1 incremental
+    chain1_names = sorted(b.name for b in chains["testvm.FULL.20250701T120000_abc123"])
+    assert chain1_names == sorted([
+        "testvm.FULL.20250701T120000_abc123",
+        "testvm.20250702T120000_def456",
+    ])
+
+    # Chain 2: FULL + 1 incremental
+    chain2_names = sorted(b.name for b in chains["testvm.FULL.20250703T120000_ghi789"])
+    assert chain2_names == sorted([
+        "testvm.FULL.20250703T120000_ghi789",
+        "testvm.20250704T120000_jkl012",
+    ])
+
+
+# ── test_list_backups_tree_orphans_under_orphan_key ─────────────────────────
+
+
+@pytest.mark.unit
+def test_list_backups_tree_orphans_under_orphan_key(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_backups(tree=True)`` groups incrementals without FULL anchor under ``"__orphan__"``."""
+    vm = make_vm_config(name="testvm", targets=[make_target(path="/mnt/backup/testvm")])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full1 = SnapshotInfo(
+        name="testvm.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+    )
+    orphan1 = SnapshotInfo(
+        name="testvm.20250702T120000_def456",
+        path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+        timestamp=datetime(2025, 7, 2, 12, 0),
+        allocation=1000,
+    )
+    orphan2 = SnapshotInfo(
+        name="testvm.20250703T120000_ghi789",
+        path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
+        timestamp=datetime(2025, 7, 3, 12, 0),
+        allocation=1000,
+    )
+
+    all_backups = [full1, orphan1, orphan2]
+
+    # _resolve_chain_full_anchor returns None → grouped as __orphan__
+    with patch.object(
+        mock_factory._backup_provider, "list", return_value=all_backups
+    ), patch.object(
+        core, "_resolve_chain_full_anchor", return_value=None
+    ):
+        result = core.list_backups(tree=True)
+
+    assert "testvm" in result
+    target_chains = result["testvm"]
+    assert len(target_chains) == 1
+    _, chains = target_chains[0]
+
+    # FULL chain + orphan chain
+    assert "testvm.FULL.20250701T120000_abc123" in chains
+    assert "__orphan__" in chains
+
+    # Orphans under __orphan__ (sorted alphabetically within chain)
+    orphan_chain = chains["__orphan__"]
+    orphan_names = {b.name for b in orphan_chain}
+    assert "testvm.20250702T120000_def456" in orphan_names
+    assert "testvm.20250703T120000_ghi789" in orphan_names
+
+    # FULL chain should only contain the FULL
+    full_chain = chains["testvm.FULL.20250701T120000_abc123"]
+    assert len(full_chain) == 1
+    assert full_chain[0].name == "testvm.FULL.20250701T120000_abc123"
+
+
+# ── test_list_backups_tree_with_vm_filter ───────────────────────────────────
+
+
+@pytest.mark.unit
+def test_list_backups_tree_with_vm_filter(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """``list_backups(vm_filter="vm1", tree=True)`` returns only vm1's chains."""
+    vm1 = make_vm_config(name="vm1", targets=[make_target(path="/mnt/backup/vm1")])
+    vm2 = make_vm_config(name="vm2", targets=[make_target(path="/mnt/backup/vm2")])
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    full1 = SnapshotInfo(
+        name="vm1.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/vm1/vm1.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+    )
+    full2 = SnapshotInfo(
+        name="vm2.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/vm2/vm2.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+    )
+
+    def mock_list(target):
+        if str(target.path) == "/mnt/backup/vm1":
+            return [full1]
+        return [full2]
+
+    with patch.object(
+        mock_factory._backup_provider, "list", side_effect=mock_list
+    ):
+        result = core.list_backups(vm_filter="vm1", tree=True)
+
+    assert set(result.keys()) == {"vm1"}
+    assert "vm2" not in result
+
+    target_chains = result["vm1"]
+    assert len(target_chains) == 1
+    _, chains = target_chains[0]
+    assert "vm1.FULL.20250701T120000_abc123" in chains

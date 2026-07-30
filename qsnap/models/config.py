@@ -188,9 +188,9 @@ class VMConfig:
     ``"virsh"`` (blockcommit, default) or ``"qemu-img"`` (commit).
 
     ``change_detection_mode`` selects the change-detection strategy
-    for ``onchange`` mode: ``"allocation-size"`` (default, compares
-    ``qemu-img info`` actual-size) or ``"allocation-map"`` (compares
-    ``qemu-img map`` allocated regions).
+    for ``onchange`` mode: ``"allocation-map"`` (default, compares
+    ``qemu-img map`` allocated regions) or ``"allocation-size"``
+    (compares ``qemu-img info`` actual-size).
 
     ``targets`` uses a defensive copy on construction so that
     external mutation of the original list does not affect this instance.
@@ -206,7 +206,7 @@ class VMConfig:
     snapshot_preserve_min: int | None = None
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
-    change_detection_mode: str = "allocation-size"
+    change_detection_mode: str = "allocation-map"
     disks: list[str] | None = None
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False

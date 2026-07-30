@@ -110,15 +110,14 @@ qsnap prune debiantest       # retention + cleanup only
 | `qsnap backup [vm]` | Transfer backups to targets only |
 | `qsnap prune [vm]` | Apply retention policies and cleanup only |
 | `qsnap list snapshots [vm]` | List snapshots (use `--tree` for backing chain view) |
-| `qsnap list backups [vm]` | List backups across all targets |
+| `qsnap list backups [vm]` | List backups across all targets (use `--tree` for chain hierarchy view) |
 | `qsnap list latest [vm]` | Show most recent snapshot per VM |
 | `qsnap list config` | Show parsed VM configurations |
 | `qsnap stats [vm]` | Show snapshot/backup counts and sizes |
 | `qsnap check [vm]` | Verify backing-chain integrity (`--deep` for corruption check, `--state` for state consistency audit) |
 | `qsnap reconcile [vm]` | Actively repair state-vs-disk inconsistencies: remove phantom entries, delete orphan files, clean orphaned checkpoints (`--dry-run` to preview) |
-| `qsnap restore <name> <dir> [vm]` | Restore a backup chain to a directory |
-| `qsnap fork <snapshot> --as-vm <name>` | Create a standalone VM from a snapshot or backup |
-| `qsnap deploy <backup> --as-vm <name>` | Deploy a backup as a standalone VM |
+| `qsnap restore <name> [vm]` | Replace a stopped VM's disk with a flattened qcow2 from a snapshot/backup (`--dry-run` to preview, `--yes` to skip confirmation) |
+| `qsnap fork <name> --output <path> [vm]` | Create a standalone qcow2 from a snapshot or backup |
 
 ### Global Flags
 
@@ -185,7 +184,7 @@ All configuration is in TOML format. Keys are organized in three levels: **globa
 | `snapshot_preserve_min` | int | inherits global | VM-specific snapshot preservation floor. `0` = inactive, positive N = keep newest N snapshots. Overrides global |
 | `snapshot_quiesce` | bool | `false` | Use `--quiesce` for filesystem-consistent snapshots |
 | `lifecycle_mode` | string | `"virsh"` | How to merge snapshots (adaptive): `"virsh"` — live `virsh blockcommit` of non-active layers while running, offline `qemu-img commit` when shut off; `"qemu-img"` — offline-only, defers while the VM runs |
-| `change_detection_mode` | string | `"allocation-size"` | How to detect disk changes (used by both `snapshot_create="onchange"` and `backup_create="onchange"`): `"allocation-size"` (compare `qemu-img info` actual-size) or `"allocation-map"` (compare `qemu-img map` allocated regions) |
+| `change_detection_mode` | string | `"allocation-map"` | How to detect disk changes (used by both `snapshot_create="onchange"` and `backup_create="onchange"`): `"allocation-map"` (compare `qemu-img map` allocated regions — default, catches zero-fill/fstrim/region redistribution) or `"allocation-size"` (compare `qemu-img info` actual-size — faster but less sensitive) |
 | `disks` | list | `null` | Explicit list of disk paths to snapshot (default: all VM disks) |
 
 ### Target Keys
@@ -537,133 +536,84 @@ qsnap applies `--force-share` on these metadata-only calls when the file may be 
 - `Core.check_integrity()` — `qemu-img info --backing-chain` on snapshots (most recent may be active)
 - `Core._deep_check_file()` — `qemu-img check` when the file may be the active layer
 - `Core._verify_backing_chain()` / `Core._get_chain_length()` — `qemu-img info --backing-chain` (already had it)
-- `Core.fork()` — `qemu-img info --backing-chain` for chain-size estimation
+- `Core.fork()` — `qemu-img info --backing-chain --force-share` for chain-size estimation, `qemu-img convert --force-share -O qcow2` for standalone image creation
 - `verify_backup()` — source-side `qemu-img info` (source may be active layer). `qemu-img compare` (full verify) now uses `--force-share` to avoid lock errors on live sources; a WARNING is logged advising that `verify=full` on a running VM's active layer may produce unreliable results.
 - `verify_full_backup()` — M3 (`qemu-img compare` in `"hash"` mode) uses `--force-share` to safely compare source snapshot content (which may be the active layer of a running VM) against the FULL backup. This is safe because qemu-img compare reads both files read-only and `--force-share` allows shared read access to the active layer.
 
 ## Restore
 
-To restore a backup chain to a directory:
+`qsnap restore` replaces a stopped VM's disk with a flattened standalone qcow2 created from the named snapshot or backup. It also cleans up all snapshot state and libvirt checkpoints.
 
 ```bash
-qsnap restore <snapshot_name> <restore_dir> [vm]
-```
-
-This copies the backup chain (full or incremental) from the target to the specified directory, resolving backing file references. The target directory contains a **FULL anchor** (`*.FULL.*.qcow2`) that serves as the base of the incremental chain. Incremental backups are rebased to this FULL anchor, so the chain structure on the target is: `FULL → incremental1 → incremental2 → ...`.
-
-### Manual Restore
-
-For manual restore from backup files:
-
-1. **Identify the chain** — the most recent backup file references its backing file. Use `qemu-img info --backing-chain <file.qcow2>` to see the full chain.
-
-2. **Copy the chain** — copy all files in the chain to your restore directory:
-
-```bash
-TARGET="/mnt/backup/myvm"
-RESTORE="/tmp/restore"
-mkdir -p "$RESTORE"
-cp "$TARGET"/myvm.20250714T130000*.qcow2 "$RESTORE"/
-# Copy all backing files in the chain
-cp "$TARGET"/myvm.FULL.*.qcow2 "$RESTORE"/
-cp "$TARGET"/myvm.20250713T130000*.qcow2 "$RESTORE"/
-# ... etc for each file in the chain
-```
-
-3. **Fix backing references** — rebase the chain to use relative paths in the restore directory:
-
-```bash
-cd "$RESTORE"
-qemu-img rebase -u -b ./myvm.FULL.20250713.qcow2 myvm.20250713T130000.qcow2
-qemu-img rebase -u -b ./myvm.20250713T130000.qcow2 myvm.20250714T130000.qcow2
-```
-
-4. **Convert to a flat image** (optional) — if you need a standalone image without backing dependencies:
-
-```bash
-qemu-img convert -O raw myvm.20250714T130000.qcow2 restored.img
-```
-
-5. **Boot the restored VM** — attach the restored image to a new or existing VM definition.
-
-## Fork and Deploy
-
-`qsnap fork` and `qsnap deploy` create a fully independent, standalone VM from any qsnap-managed snapshot or backup. The resulting VM has no backing dependencies on the source — it is immune to source snapshot deletion.
-
-### fork — Create a VM from a snapshot
-
-```bash
-qsnap fork <snapshot-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-config]
+qsnap restore <snapshot_name> [vm] [--dry-run] [--yes]
 ```
 
 **Steps performed:**
 
 1. **Resolve** the snapshot/backup by name across all configured VMs (state + backup targets).
-2. **Estimate** total chain size via `qemu-img info --backing-chain` and log it.
-3. **Convert** the backing chain into a single standalone qcow2. If the source VM is running, the NBD pull-model is used (`virsh backup-begin` + `qemu-img convert -n nbd:unix:<socket>`); if stopped, direct `qemu-img convert -O qcow2` is used.
-4. **Obtain** the source VM's XML via `virsh dumpxml`.
-5. **Modify** the XML: new VM name, new UUID, updated disk paths, MAC address removed.
-6. **Define** the new VM via `virsh define`.
-7. Optionally **append** a `[[vm]]` block to the qsnap config file (`--add-to-config`).
+2. **Verify** the VM is stopped via `is_vm_running()` — aborts with error if running.
+3. **Pre-verify** source chain integrity via `scan_backing_chain()` — aborts if broken.
+4. **Convert** the source to a temporary file via `qemu-img convert --force-share -O qcow2 <source> <snapshot_dir>/<vm>.restored.qcow2.tmp`.
+5. **Delete** old snapshot overlay files from `snapshot_dir`.
+6. **Atomically replace** the base image: `os.replace(<temp>, <vm_config.base_image>)`.
+7. **Update domain XML** — strip `<backingStore>` elements, update `<source file>`, and `virsh define` the modified XML.
+8. **Reset all state** — `IStateManager.reset_vm_state()` clears snapshots, allocation, and deferred operations; `IStateManager.reset_target_state()` clears FULLs, dependencies, and baselines for each target.
+9. **Best-effort checkpoint cleanup** — deletes all `qsnap-*` libvirt checkpoints via `virsh checkpoint-delete --metadata`. Failures are logged at WARNING level and do not block restore.
 
-The resulting qcow2 file has **no backing file** — it is fully self-contained and writable.
+### Safety Flags
+
+- `--dry-run` — logs planned actions without executing any modifications.
+- `--yes` — skips the confirmation prompt. By default, restore prompts: `WARNING: This will replace the VM's disk and delete all snapshots. Continue? [y/N]`
+
+### After Restore
+
+The VM's disk is replaced with a standalone qcow2 (no backing chain). All snapshot state is cleared, all backup state is reset, and all libvirt checkpoints are deleted. The next `qsnap run` will create a fresh snapshot and force a new FULL backup.
+
+### Manual Restore
+
+For manual restore from backup files:
+
+1. **Identify the chain** — use `qemu-img info --backing-chain <file.qcow2>` to see the full chain.
+2. **Flatten the chain** — create a standalone image:
 
 ```bash
-# Basic fork
-qsnap fork myvm.20260701T1200 --as-vm myvm-clone
+qemu-img convert -O qcow2 <latest_backup.qcow2> restored.qcow2
+```
 
-# Fork to custom storage with auto-config
-qsnap fork myvm.20260701T1200 --as-vm myvm-clone \
-    --storage /mnt/fast-ssd --add-to-config
+3. **Replace the VM's disk** — point the VM's XML to the restored image, or swap the disk file.
+
+## Fork
+
+`qsnap fork` creates a standalone qcow2 file from any qsnap-managed snapshot or backup. The resulting file has no backing dependencies — it is fully self-contained and writable. Creating a VM from the resulting image is the operator's responsibility.
+
+```bash
+qsnap fork <snapshot-name> --output <path> [vm]
+```
+
+**Steps performed:**
+
+1. **Resolve** the snapshot/backup by name across all configured VMs (state + backup targets).
+2. **Estimate** total chain size via `qemu-img info --backing-chain --force-share` and log it.
+3. **Convert** the source into a standalone qcow2 via `qemu-img convert --force-share -O qcow2 <source> <output>`.
+
+The `--force-share` flag allows reading the source even if it is the active layer of a running VM. The resulting image MAY be inconsistent if the VM is actively writing — operators requiring consistency should stop the VM or fork a previous (non-active) snapshot.
+
+```bash
+# Fork a snapshot to a standalone qcow2
+qsnap fork myvm.20260701T1200 --output /var/lib/libvirt/images/myvm-clone.qcow2
 
 # Fork from a specific VM (when names collide across VMs)
-qsnap fork myvm.20260701T1200 --as-vm recovered-vm prod-server
+qsnap fork myvm.20260701T1200 --output /tmp/recovered.qcow2 prod-server
+
+# Fork from a backup target (flattens the incremental chain)
+qsnap fork vm.FULL.20260701T1200 --output /mnt/vms/recovered.qcow2
 ```
-
-### deploy — Deploy a backup as a VM
-
-```bash
-qsnap deploy <backup-name> --as-vm <new-vm-name> [--storage <dir>] [--add-to-config]
-```
-
-`deploy` is a thin wrapper around `fork` — it resolves the backup from backup targets and delegates everything to the same `qemu-img convert` + VM creation pipeline.
-
-```bash
-# Deploy a FULL backup
-qsnap deploy vm.FULL.20260701T1200 --as-vm recovered-vm
-
-# Deploy an incremental backup (chain is flattened via qemu-img convert)
-qsnap deploy vm.20260715T1200 --as-vm recovered-vm \
-    --storage /mnt/vms --add-to-config
-```
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--as-vm` | **required** | Name for the new VM |
-| `--storage` | `/var/lib/libvirt/images` | Directory where the VM disk and XML are stored. A subdirectory `/<new-vm-name>/` is created inside |
-| `--add-to-config` | `false` | Append a minimal `[[vm]]` block to the qsnap config file, enabling qsnap to manage the new VM going forward |
-
-### Generated `[[vm]]` Block
-
-When `--add-to-config` is used, the following block is appended:
-
-```toml
-[[vm]]
-name = "myvm-clone"
-base_image = "/var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2"
-snapshot_dir = "/var/lib/libvirt/images/myvm-clone/snapshots"
-snapshot_create = "always"
-```
-
-The `snapshot_dir` is created automatically. You can add targets and customize retention policies afterward.
 
 ### Important Notes
 
 - **Disk space:** `qemu-img convert` produces a file as large as the full virtual disk (not sparse like the backing chain). The estimated size is logged before conversion begins.
-- **Source VM running:** Fork does NOT require the source VM to be stopped. If the source VM is running, the NBD pull-model is used to avoid lock conflicts on the active layer. If stopped, direct `qemu-img convert` is used.
-- **Performance:** Conversion reads the entire backing chain. For large VMs, consider forking from a FULL backup (which is already standalone) for near-instant conversion.
+- **Source VM running:** Fork does NOT require the source VM to be stopped. The `--force-share` flag allows reading the active layer while the VM writes. The resulting image may be inconsistent — stop the VM or fork a previous snapshot for consistency.
+- **No VM creation:** Fork only creates the qcow2 file. To create a VM from it, use `virsh define` with your own XML, or use `virt-install --import`.
 
 ## Example Configurations
 

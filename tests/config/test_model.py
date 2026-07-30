@@ -829,3 +829,26 @@ def test_globalconfig_explicit_override_works():
     assert cfg.target_chain_length == 20
     assert cfg.target_keep_generations == 3
 
+
+# ---------------------------------------------------------------------------
+# Scenario: VMConfig.change_detection_mode default is allocation-map
+# ---------------------------------------------------------------------------
+
+
+def test_change_detection_mode_default_is_allocation_map(make_vm_config):
+    """VMConfig created without explicit change_detection_mode defaults to 'allocation-map'."""
+    vm = make_vm_config()
+    assert vm.change_detection_mode == "allocation-map"
+
+
+def test_change_detection_mode_explicit_allocation_size(make_vm_config):
+    """VMConfig created with change_detection_mode='allocation-size' keeps that value."""
+    vm = make_vm_config(change_detection_mode="allocation-size")
+    assert vm.change_detection_mode == "allocation-size"
+
+
+def test_change_detection_mode_explicit_allocation_map(make_vm_config):
+    """VMConfig created with change_detection_mode='allocation-map' keeps that value."""
+    vm = make_vm_config(change_detection_mode="allocation-map")
+    assert vm.change_detection_mode == "allocation-map"
+

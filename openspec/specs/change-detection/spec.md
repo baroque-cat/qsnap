@@ -11,6 +11,8 @@ Implements the `onchange` snapshot creation mode — only create a snapshot when
 
 The system SHALL determine whether a VM disk has changed by comparing the current allocation-size of the active image with the last recorded value from `IStateManager`. The current allocation-size SHALL be determined via `qemu-img info --output=json --force-share` on the active image, whose path is obtained via `virsh domblklist`.
 
+The default `change_detection_mode` in `VMConfig` SHALL be `"allocation-map"`. The `"allocation-size"` mode SHALL remain available as an explicit configuration option. The `allocation-map` mode is a strict superset of `allocation-size` in sensitivity — it catches zero-fill, fstrim, and region redistribution without total size change.
+
 #### Scenario: Allocation has grown — changes detected
 
 - **WHEN** `IStateManager.get_last_allocation()` returns 65536
@@ -33,6 +35,17 @@ The system SHALL determine whether a VM disk has changed by comparing the curren
 
 - **WHEN** `virsh domblklist` or `qemu-img info` returns an error
 - **THEN** the module returns `ChangeResult(changed=True)` (fail-safe: rather create an unnecessary snapshot than miss changes)
+
+#### Scenario: Default change detection mode is allocation-map
+
+- **WHEN** a `VMConfig` is constructed without an explicit `change_detection_mode`
+- **THEN** `vm_config.change_detection_mode` equals `"allocation-map"`
+
+#### Scenario: Explicit allocation-size still works
+
+- **WHEN** a `VMConfig` is constructed with `change_detection_mode = "allocation-size"`
+- **THEN** `vm_config.change_detection_mode` equals `"allocation-size"`
+- **AND** `DefaultFactory.create_change_detector("allocation-size")` returns `AllocationSizeDetector`
 
 ### Requirement: Per-disk change detection
 `IChangeDetector.has_changed()` SHALL accept an optional `disk: str` parameter. When provided, change detection SHALL be scoped to that specific disk. When omitted, change detection SHALL apply to the first discovered disk (backward-compatible).

@@ -611,3 +611,53 @@ class JsonStateManager(IStateManager):
         data[target_path] = target_deps
         self._save_dependencies(data)
         return count
+
+    # ── Bulk state reset (restore support) ───────────────────────────
+
+    def reset_vm_state(self, vm_name: str) -> None:
+        """Atomically clear all per-VM state.
+
+        Clears the ``snapshots`` list, ``last_allocation`` baseline, and
+        ``deferred_operations`` queue for *vm_name*.  If the VM has no
+        state file, no file is created (no-op).
+        """
+        path = self._state_path(vm_name)
+        if not path.exists():
+            return
+        data = self._load(vm_name)
+        data["snapshots"] = []
+        data["last_allocation"] = None
+        data["deferred_operations"] = []
+        self._save(vm_name, data)
+
+    def reset_target_state(self, target_path: str) -> None:
+        """Atomically clear all per-target state.
+
+        Removes the *target_path* entry from ``_full_backups.json``,
+        ``_dependencies.json``, and ``_target_state.json``.  All three
+        files are saved atomically.  If a file does not exist or the
+        target is not present, that file is a no-op.
+        """
+        # _full_backups.json
+        fb_path = self._full_backups_path()
+        if fb_path.exists():
+            data = self._load_full_backups()
+            if target_path in data:
+                del data[target_path]
+                self._save_full_backups(data)
+
+        # _dependencies.json
+        dep_path = self._dependencies_path()
+        if dep_path.exists():
+            data = self._load_dependencies()
+            if target_path in data:
+                del data[target_path]
+                self._save_dependencies(data)
+
+        # _target_state.json
+        ts_path = self._target_state_path()
+        if ts_path.exists():
+            data = self._load_target_state()
+            if target_path in data:
+                del data[target_path]
+                self._save_target_state(data)

@@ -109,6 +109,39 @@ def _print_tree(
             print(f"{indent}{snap.path.name}")
 
 
+def _print_backup_tree(
+    data: dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]],
+    vm_configs: list[VMConfig],
+) -> None:
+    """Print backup chains as an indented tree grouped by FULL anchor.
+
+    Each target is shown with a header.  FULL backups are displayed at
+    the top level with their dependent incrementals indented beneath.
+    Orphan backups (no FULL anchor) are displayed under ``(orphan)``.
+    """
+    for vm_name, target_chains in data.items():
+        print(f"=== {vm_name} ===")
+        for target_path, chains in target_chains:
+            print(f"Target: {target_path}")
+            for chain_id, backups in chains.items():
+                if chain_id == "__orphan__":
+                    print("  (orphan)")
+                    for b in backups:
+                        print(f"    {b.path.name}")
+                else:
+                    # FULL first, then incrementals
+                    fulls = [b for b in backups if ".FULL." in b.name]
+                    incrementals = [b for b in backups if ".FULL." not in b.name]
+                    for full in fulls:
+                        print(f"  {full.path.name}")
+                        for inc in incrementals:
+                            print(f"    {inc.path.name}")
+                    if not fulls:
+                        # Chain with no FULL (shouldn't happen, but handle)
+                        for b in backups:
+                            print(f"  {b.path.name}")
+
+
 def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for vm_name, result in data.items():
@@ -268,6 +301,10 @@ def handle_list(core: Core, args: Namespace) -> int:
         rows = _snapshots_to_rows(data)
         columns = ["vm", "name", "path", "timestamp", "allocation"]
     elif sub == "backups":
+        if getattr(args, "tree", False):
+            data = core.list_backups(vm_filter, tree=True)
+            _print_backup_tree(data, core.list_config())
+            return EXIT_SUCCESS
         data = core.list_backups(vm_filter)
         rows = _snapshots_to_rows(data)
         columns = ["vm", "name", "path", "timestamp", "allocation"]
@@ -385,25 +422,41 @@ def handle_check(core: Core, args: Namespace) -> int:
 
 
 def handle_restore(core: Core, args: Namespace) -> int:
-    snapshot_name: str = args.snapshot_name
-    target_dir = Path(args.target_dir)
-    vm_filter = _get_vm_filter(args)
+    """Replace a stopped VM's disk with a flattened standalone qcow2.
 
-    # Validate target_dir exists
-    if not target_dir.is_dir():
+    Calls ``Core.restore()`` and formats the ``RestoreResult`` output.
+    Prompts for confirmation unless ``--yes`` is given.
+    """
+    snapshot_name: str = args.snapshot_name
+    vm_filter = _get_vm_filter(args)
+    dry_run: bool = getattr(args, "dry_run", False)
+    skip_confirm: bool = getattr(args, "yes", False)
+
+    # Set dry-run mode on Core if requested
+    if dry_run:
+        core.dry_run = True
+
+    # Confirmation prompt (unless --yes or --dry-run)
+    if not skip_confirm and not dry_run:
         print(
-            f"Error: target directory does not exist: {target_dir}",
+            "WARNING: This will replace the VM's disk and delete all snapshots. Continue? [y/N]",
             file=sys.stderr,
         )
-        return EXIT_GENERIC
+        try:
+            response = input().strip().lower()
+        except EOFError:
+            response = ""
+        if response not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            return EXIT_GENERIC
 
-    result = core.restore(snapshot_name, target_dir, vm_filter)
+    result = core.restore(snapshot_name, vm_filter)
 
     if result.success:
-        print(f"Restored '{snapshot_name}' to {target_dir}")
-        print("Chain files:")
-        for f in result.chain_files:
-            print(f"  {f}")
+        if dry_run:
+            print(f"[dry-run] Would restore '{snapshot_name}' to {result.restored_path}")
+        else:
+            print(f"Restored '{snapshot_name}' to {result.restored_path}")
         return EXIT_SUCCESS
     else:
         print(f"Error: {result.error}", file=sys.stderr)
@@ -439,29 +492,18 @@ def handle_estimate(core: Core, args: Namespace) -> int:
 
 
 def handle_fork(core: Core, args: Namespace) -> int:
-    """Create a standalone VM from a snapshot or backup.
+    """Create a standalone qcow2 from a snapshot or backup.
 
     Calls ``Core.fork()`` and formats the ``RestoreResult`` output.
     """
     snapshot_name: str = args.snapshot_name
-    new_vm_name: str = args.as_vm
-    storage_dir = Path(args.storage)
-    add_to_config: bool = getattr(args, "add_to_config", False)
+    output_path = Path(args.output)
     vm_filter = _get_vm_filter(args)
 
-    result = core.fork(
-        snapshot_name,
-        new_vm_name,
-        storage_dir,
-        add_to_config=add_to_config,
-        vm_filter=vm_filter,
-    )
+    result = core.fork(snapshot_name, output_path, vm_filter)
 
     if result.success:
-        print(f"Forked '{snapshot_name}' to VM '{new_vm_name}'")
-        print(f"  Disk: {result.restored_path}")
-        if add_to_config:
-            print(f"  Added to config: {core.config.config_path}")
+        print(f"Forked '{snapshot_name}' to {result.restored_path}")
         return EXIT_SUCCESS
     else:
         print(f"Error: {result.error}", file=sys.stderr)
@@ -517,33 +559,3 @@ def handle_reconcile(core: Core, args: Namespace) -> int:
     print(output or "State is consistent — nothing to reconcile.")
     has_errors = any(r.errors for r in results.values())
     return 1 if has_errors else 0
-
-
-def handle_deploy(core: Core, args: Namespace) -> int:
-    """Deploy a backup as a new VM.
-
-    Calls ``Core.deploy()`` and formats the ``RestoreResult`` output.
-    """
-    backup_name: str = args.backup_name
-    new_vm_name: str = args.as_vm
-    storage_dir = Path(args.storage)
-    add_to_config: bool = getattr(args, "add_to_config", False)
-    vm_filter = _get_vm_filter(args)
-
-    result = core.deploy(
-        backup_name,
-        new_vm_name,
-        storage_dir,
-        add_to_config=add_to_config,
-        vm_filter=vm_filter,
-    )
-
-    if result.success:
-        print(f"Deployed '{backup_name}' to VM '{new_vm_name}'")
-        print(f"  Disk: {result.restored_path}")
-        if add_to_config:
-            print(f"  Added to config: {core.config.config_path}")
-        return EXIT_SUCCESS
-    else:
-        print(f"Error: {result.error}", file=sys.stderr)
-        return EXIT_GENERIC

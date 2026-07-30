@@ -31,8 +31,12 @@ def test_help_text_lists_subcommands_and_flags(capsys):
         "check",
         "restore",
         "estimate",
+        "fork",
+        "reconcile",
     ):
         assert subcommand in text
+    # deploy should NOT appear
+    assert "deploy" not in text
     for flag in (
         "--config",
         "--dry-run",
@@ -155,11 +159,37 @@ def test_unknown_subcommand_returns_parse_error_exit_code_2():
 # ── restore and check argument parsing tests ────────────────────────────
 
 
-def test_restore_subcommand_parses_positional_args():
+def test_restore_parses_snapshot_name():
     parser = build_argparser()
-    ns = parser.parse_args(["restore", "mysnap", "/tmp/target"])
+    ns = parser.parse_args(["restore", "mysnap"])
     assert ns.snapshot_name == "mysnap"
-    assert ns.target_dir == "/tmp/target"
+    assert ns.vm == []
+
+
+def test_restore_parses_vm_filter():
+    parser = build_argparser()
+    ns = parser.parse_args(["restore", "mysnap", "myvm"])
+    assert ns.snapshot_name == "mysnap"
+    assert ns.vm == ["myvm"]
+
+
+def test_restore_parses_dry_run_flag():
+    parser = build_argparser()
+    ns = parser.parse_args(["restore", "mysnap", "--dry-run"])
+    assert ns.dry_run is True
+
+
+def test_restore_parses_yes_flag():
+    parser = build_argparser()
+    ns = parser.parse_args(["restore", "mysnap", "--yes"])
+    assert ns.yes is True
+
+
+def test_restore_no_target_dir(cli_app):
+    """Verify restore does NOT accept target_dir positional arg (removed)."""
+    ns = cli_app.parse_args(["restore", "mysnap"])
+    # target_dir attribute should not exist on the namespace
+    assert not hasattr(ns, "target_dir")
 
 
 def test_check_deep_flag_sets_deep_true():
@@ -264,6 +294,46 @@ def test_estimate_subcommand_with_multiple_vms(cli_app):
     ns = cli_app.parse_args(["estimate", "vm1", "vm2"])
     assert ns.command == "estimate"
     assert ns.vm == ["vm1", "vm2"]
+
+
+# ── deploy removal verification tests ──────────────────────────────────────
+
+
+def test_deploy_not_in_help(capsys):
+    """Verify 'deploy' does NOT appear in help text."""
+    parser = build_argparser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    captured = capsys.readouterr()
+    assert "deploy" not in captured.out
+
+
+def test_deploy_not_in_dispatch_map():
+    """Verify 'deploy' is NOT in _DISPATCH map."""
+    assert "deploy" not in _DISPATCH
+
+
+# ── fork argument parsing tests ──────────────────────────────────────────
+
+
+def test_fork_parses_output_flag(cli_app):
+    """Verify fork subcommand parses --output as required argument."""
+    ns = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/output.qcow2"])
+    assert ns.snapshot_name == "snap1"
+    assert ns.output == "/tmp/output.qcow2"
+    assert ns.vm == []
+
+
+def test_fork_parses_vm_filter(cli_app):
+    """Verify fork subcommand parses vm positional arg."""
+    ns = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/output.qcow2", "myvm"])
+    assert ns.vm == ["myvm"]
+
+
+def test_fork_requires_output(cli_app):
+    """Verify fork subcommand fails when --output is missing."""
+    with pytest.raises(SystemExit):
+        cli_app.parse_args(["fork", "snap1"])
 
 
 # ── dispatch map entry tests ─────────────────────────────────────────────

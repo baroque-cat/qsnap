@@ -1,10 +1,4 @@
-# Restore Command
-
-## Purpose
-
-Replaces a stopped VM's disk with a flattened standalone qcow2 created from the named snapshot or backup. Performs full state cleanup (snapshots, FULLs, dependencies, baselines) and best-effort libvirt checkpoint cleanup after disk replacement.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Restore command copies backup chain to target directory
 The `qsnap restore <name> [vm]` command SHALL replace a stopped VM's disk with a flattened standalone qcow2 created from the named snapshot or backup. The command SHALL:
@@ -90,25 +84,3 @@ The command SHALL accept `--dry-run` (show what would be done without executing)
 #### Scenario: Restore fails on running VM
 - **WHEN** `core.restore("vm.20250101T1200")` is called and `is_vm_running()` returns True
 - **THEN** `RestoreResult(success=False, error="VM must be stopped for restore")` is returned
-
-### Requirement: Snapshot resolution exposes shared primitives for fork
-`Core` SHALL provide a `_resolve_snapshot(snapshot_name: str, vm_filter: str | None = None) -> tuple[SnapshotInfo, VMConfig]` method that locates a snapshot by name across all sources (IStateManager and backup providers) and returns both the `SnapshotInfo` and the `VMConfig` it belongs to. This method SHALL be used internally by both `restore()` and `fork()`.
-
-#### Scenario: _resolve_snapshot finds snapshot in state
-- **WHEN** `_resolve_snapshot("myvm.20260701T1200")` is called and the snapshot exists in IStateManager
-- **THEN** returns `(SnapshotInfo(name="myvm.20260701T1200", ...), VMConfig(name="myvm", ...))`
-
-#### Scenario: _resolve_snapshot finds snapshot in backup
-- **WHEN** `_resolve_snapshot("vm.FULL.20260701T000000_a1b2c3")` is called and the snapshot exists on a backup target
-- **THEN** returns `(SnapshotInfo(name="vm.FULL.20260701T000000_a1b2c3", ...), VMConfig(...))`
-
-#### Scenario: _resolve_snapshot raises on not found
-- **WHEN** `_resolve_snapshot("nonexistent")` is called
-- **THEN** raises `FileNotFoundError` with message "Snapshot not found: nonexistent"
-
-### Requirement: RestoreResult type
-The system SHALL provide a `RestoreResult` frozen dataclass with fields: `success: bool`, `snapshot_name: str`, `restored_path: Path`, `chain_files: list[Path]`, `error: str | None`.
-
-#### Scenario: Successful restore result
-- **WHEN** restore completes successfully
-- **THEN** `RestoreResult(success=True, chain_files=[...])` is returned with all copied file paths
