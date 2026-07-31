@@ -361,3 +361,44 @@ def test_backup_tree_output_multiple_chains(capsys):
         i for i, line in enumerate(lines) if "FULL.20250704T120000" in line
     )
     assert full1_idx < full2_idx
+
+
+def test_backup_tree_output_chain_without_full(capsys):
+    """``list backups --tree`` shows backups at 2-space indent for chains with no FULL entries
+    (defensive fallback — should not happen in practice)."""
+    backup1 = SnapshotInfo(
+        name="testvm.20250702T120000_def456",
+        path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+        timestamp=datetime(2025, 7, 2, 12, 0),
+        allocation=1000,
+    )
+    backup2 = SnapshotInfo(
+        name="testvm.20250703T120000_ghi789",
+        path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
+        timestamp=datetime(2025, 7, 3, 12, 0),
+        allocation=1000,
+    )
+
+    # Chain with non-orphan chain_id but no .FULL. entries
+    data = _make_backup_tree_data(
+        chains={"testvm.20250702T120000_def456": [backup1, backup2]}
+    )
+
+    mock_core = Mock()
+    mock_core.list_backups.return_value = data
+    mock_core.list_config.return_value = [_make_vm_config()]
+
+    args = _make_list_args(list_subcommand="backups", tree=True)
+
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    output = captured.out
+
+    assert "=== testvm ===" in output
+    # No (orphan) header — it's a normal chain with no FULL entries
+    assert "(orphan)" not in output
+    # Backups at 2-space indent (fallback branch)
+    assert "  testvm.20250702T120000_def456.qcow2" in output
+    assert "  testvm.20250703T120000_ghi789.qcow2" in output

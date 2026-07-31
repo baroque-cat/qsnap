@@ -1058,7 +1058,8 @@ class Core:
         if self._dry_run:
             logger.info("[dry-run] Would convert %s to %s", source_path, tmp_path)
             logger.info("[dry-run] Would replace %s with %s", base_image, tmp_path)
-            logger.info("[dry-run] Would strip <backingStore> from domain XML for %s", vm_name)
+            logger.info("[dry-run] Would delete old snapshot overlays for %s", vm_name)
+            logger.info("[dry-run] Would strip <backingStore> and update <source file> in domain XML for %s", vm_name)
             logger.info("[dry-run] Would reset state for %s", vm_name)
             logger.info("[dry-run] Would clean up qsnap-* checkpoints for %s", vm_name)
             return RestoreResult(
@@ -1093,7 +1094,10 @@ class Core:
                 error=f"image conversion failed: {convert_result.error}",
             )
 
-        # Step 5: Delete old snapshot overlay files from snapshot_dir
+        # Step 5: Atomically replace base image FIRST (design D2)
+        os.replace(str(tmp_path), str(base_image))
+
+        # Step 6: Delete old snapshot overlay files from snapshot_dir
         old_snapshots = self._state.get_snapshots(vm_name)
         for snap in old_snapshots:
             if snap.path != tmp_path and snap.path != base_image:
@@ -1109,13 +1113,8 @@ class Core:
                         rm_result.error,
                     )
 
-        # Step 6: Atomically replace base image (design D2)
-        os.replace(str(tmp_path), str(base_image))
-
-        # Step 7: Strip <backingStore> from domain XML + update <source file>
-        self._refresh_domain_backing_store(vm_config)
-
-        # Also update <source file> to point to the restored base image
+        # Step 7: Strip <backingStore> from domain XML AND update <source file>
+        # (single dumpxml/define pass — combine both XML modifications)
         dumpxml = self._shell.run(
             ["virsh", "dumpxml", "--domain", vm_name],
             timeout=30,
@@ -1124,7 +1123,11 @@ class Core:
         if dumpxml.success:
             try:
                 root = ET.fromstring(dumpxml.stdout)
+                # Strip all <backingStore> elements from every <disk>
                 for disk in root.iter("disk"):
+                    for backing_store in disk.findall("backingStore"):
+                        disk.remove(backing_store)
+                    # Update <source file> to point to the restored base image
                     source = disk.find("source")
                     if source is not None:
                         source.set("file", str(base_image))

@@ -13,9 +13,9 @@ The `qsnap restore <name> [vm]` command SHALL replace a stopped VM's disk with a
 2. Verify the VM is stopped via `is_vm_running()` — abort with error if running
 3. Pre-verify source chain integrity via `scan_backing_chain()` — abort if broken
 4. Create standalone image at temporary path via `qemu-img convert --force-share -O qcow2 <source> <snapshot_dir>/<vm>.restored.qcow2.tmp`
-5. Delete old snapshot overlay files from `snapshot_dir`
-6. Atomically replace base image: `mv <temp> <vm_config.base_image>`
-7. Strip `<backingStore>` elements from domain XML via `virsh dumpxml` + XML modification + `virsh define`
+5. Atomically replace base image FIRST: `os.replace(<tmp>, <vm_config.base_image>)`
+6. Delete old snapshot overlay files from `snapshot_dir` (best-effort AFTER atomic replace)
+7. Strip `<backingStore>` elements AND update `<source file>` in domain XML in a single `virsh dumpxml` / XML modification / `virsh define` pass
 8. Reset all VM state via `IStateManager.reset_vm_state(vm_name)` and `IStateManager.reset_target_state(target_path)` for each target
 9. Best-effort cleanup of libvirt checkpoints: `virsh checkpoint-delete --domain <vm> --metadata <checkpoint>` for each `qsnap-*` checkpoint
 
@@ -24,9 +24,9 @@ The command SHALL accept `--dry-run` (show what would be done without executing)
 #### Scenario: Restore from snapshot replaces VM disk
 - **WHEN** `qsnap restore myvm.20260701T120000_a1b2c3` is executed and the VM is stopped
 - **THEN** `qemu-img convert --force-share -O qcow2 <snapshot_path> <snapshot_dir>/myvm.restored.qcow2.tmp` is executed
-- **THEN** old snapshot overlay files in `snapshot_dir` are deleted
-- **THEN** the temporary file is moved to `vm_config.base_image` path
-- **THEN** domain XML is updated: `<backingStore>` elements removed, `<source file>` updated
+- **THEN** the temporary file atomically replaces `vm_config.base_image` via `os.replace()`
+- **THEN** old snapshot overlay files in `snapshot_dir` are deleted (best-effort)
+- **THEN** domain XML is updated in a single pass: `<backingStore>` elements removed, `<source file>` updated to the restored image
 - **THEN** `virsh define` is called with the modified XML
 - **AND** all VM state is reset (snapshots, allocation, deferred ops, FULLs, deps, baselines)
 

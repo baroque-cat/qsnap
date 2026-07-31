@@ -899,6 +899,22 @@ def test_handle_restore_prompts_confirmation_without_yes(cli_app, capsys, monkey
     mock_core2.restore.assert_called_once_with("SNAP", None)
 
 
+@pytest.mark.unit
+def test_handle_restore_eoferror_defaults_to_abort(cli_app, capsys, monkeypatch):
+    """Restore without --yes with EOFError on input defaults to abort."""
+    mock_core = _make_mock_core()
+
+    # ---- EOFError (non-interactive pipe) → abort ----
+    args = cli_app.parse_args(["restore", "SNAP"])
+    monkeypatch.setattr("builtins.input", lambda: (_ for _ in ()).throw(EOFError()))
+    result = handle_restore(mock_core, args)
+
+    captured = capsys.readouterr()
+    assert "Aborted" in captured.err, f"Expected Aborted in stderr, got: {captured.err}"
+    assert result == EXIT_GENERIC
+    mock_core.restore.assert_not_called()
+
+
 def test_fork_command_dispatches_to_core_fork(cli_app):
     """Parse 'fork snap1 --output /tmp/output.qcow2' and verify
     core.fork is called with the new signature."""

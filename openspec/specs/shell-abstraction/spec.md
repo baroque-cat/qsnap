@@ -64,18 +64,25 @@ The system SHALL classify `qemu-img` operations into two categories for `--force
 
 **SAFE (metadata-only):** `qemu-img info`, `qemu-img info --backing-chain`, `qemu-img map`, `qemu-img check`, `qemu-img rebase -u`. These operations read only headers, L2 tables, and refcount structures — minimal I/O with low risk of reading inconsistent data. `--force-share` SHALL be used on these operations when the target file may be the active layer of a running VM.
 
-**DANGEROUS (data-copying):** `qemu-img convert`, `qemu-img compare`, `qemu-img commit`. These operations read ALL data clusters — race conditions during concurrent QEMU writes produce silently corrupted output (missed writes, stale data, partial writes). `--force-share` SHALL NOT be used on these operations. Instead, the NBD pull-model SHALL be used for live-VM data-copying operations (FULL backup, fork). For offline operations (lifecycle commit), the VM MUST be stopped — `--force-share` would mask a dangerous state.
+**DANGEROUS (data-copying):** `qemu-img convert`, `qemu-img compare`, `qemu-img commit`. These operations read ALL data clusters — race conditions during concurrent QEMU writes produce silently corrupted output (missed writes, stale data, partial writes). The NBD pull-model SHALL be used for live-VM data-copying operations (FULL backup only). For offline operations (lifecycle commit), the VM MUST be stopped.
+
+**LEGACY-DANGEROUS-ACCEPTED (data-copying with --force-share):** `qemu-img convert` in `fork` and `restore` SHALL use `--force-share` for direct file reads. This is an accepted trade-off: the operator understands that reads from a running VM's active layer may produce an inconsistent point-in-time copy. For consistent copies, the operator SHALL stop the VM first or fork from a non-active snapshot.
 
 #### Scenario: Metadata-only operation uses --force-share on active layer
 - **WHEN** `qemu-img info` is called on a file that is the active layer of a running VM
 - **THEN** `--force-share` is included in the command
 - **AND** the command succeeds despite the VM holding a write lock
 
-#### Scenario: Data-copying operation does NOT use --force-share
-- **WHEN** `qemu-img convert` or `qemu-img compare` is called on a file that is the active layer
+#### Scenario: Data-copying operation uses NBD for FULL backup
+- **WHEN** `qemu-img convert` is called for a FULL backup on a running VM
 - **THEN** `--force-share` is NOT included in the command
-- **AND** the NBD pull-model is used instead (for FULL backup and fork)
+- **AND** the NBD pull-model is used instead (for FULL backup)
 - **AND** if the VM is stopped, direct operation is safe (no lock holder)
+
+#### Scenario: fork and restore use --force-share for direct reads
+- **WHEN** `qemu-img convert` is called for fork or restore on a file that may be the active layer
+- **THEN** `--force-share` IS included in the command (accepted risk of inconsistency)
+- **AND** the operator is responsible for stopping the VM if consistency is required
 
 #### Scenario: Lifecycle commit operations remain offline-only
 - **WHEN** `qemu-img commit` is called by `BlockCommitManager` or `QemuImgCommitManager`

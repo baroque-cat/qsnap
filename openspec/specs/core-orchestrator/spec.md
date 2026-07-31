@@ -365,7 +365,7 @@ After FULL creation, Core SHALL verify it (M1/M2 per `full_verify_after_create`)
 
 ### Requirement: Core imports shared utilities from qsnap.utils
 
-Core SHALL import `is_vm_running`, `nbd_full_export` from `qsnap.utils.nbd`, `verify_full_backup` from `qsnap.utils.verification`, and `file_sha256` from `qsnap.utils.hash`. Core SHALL NOT import from `qsnap.modules.backup` or `qsnap.modules.*` except through the factory.
+Core SHALL import `is_vm_running` from `qsnap.utils.nbd`, `verify_full_backup` and `scan_backing_chain` from `qsnap.utils.verification`, and `compute_backoff`, `is_retryable`, `parse_retry_duration` from `qsnap.utils.retry`. Core SHALL NOT import from `qsnap.modules.backup` or `qsnap.modules.*` except through the factory.
 
 #### Scenario: Core has no domain module imports
 - **WHEN** `qsnap/core/__init__.py` is inspected
@@ -463,27 +463,60 @@ When executing deferred blockcommit operations and `vm_config.blockcommit_deep_v
 - **THEN** `manager.blockcommit(vm_config, to_merge, deep_verify=True)` is called
 
 ### Requirement: Core.fork method
-`Core` SHALL provide a `fork(snapshot_name: str, new_vm_name: str, storage_dir: Path, add_to_config: bool = False, vm_filter: str | None = None) -> RestoreResult` method. It SHALL:
-1. Resolve the snapshot via `IStateManager` and backup providers (reuse restore resolution).
-2. Determine the snapshot's full chain via `qemu-img info --backing-chain --output=json`.
-3. Estimate and log total chain size.
-4. Execute `qemu-img convert -O qcow2 <snapshot-path> <storage_dir>/<new_vm_name>/<new_vm_name>.qcow2`.
-5. Obtain source VM XML via `virsh dumpxml <source-vm>`.
-6. Modify XML: new name, new UUID (uuidgen), new disk source paths, MAC removed.
-7. Execute `virsh define <modified-xml-path>`.
-8. Optionally append `[[vm]]` block to qsnap config file.
+`Core` SHALL provide a `fork(name: str, output_path: Path, vm_filter: str | None = None) -> RestoreResult` method. It SHALL:
+1. Resolve the snapshot/backup via `_resolve_snapshot()` which searches `IStateManager` and backup providers.
+2. Estimate total chain size via `qemu-img info --force-share --backing-chain --output=json` and log the estimate.
+3. Execute `qemu-img convert --force-share -O qcow2 <source_path> <output_path>` to produce a standalone qcow2.
+4. No XML manipulation, VM definition, or libvirt management is performed — creating a VM from the resulting image is the operator's responsibility.
+5. No NBD pull-model is used — direct file read with `--force-share` is sufficient for all cases.
 
-#### Scenario: fork succeeds
-- **WHEN** `core.fork("myvm.20260701T1200", "myvm-clone", Path("/var/lib/libvirt/images"), add_to_config=False)` is called
-- **THEN** returns `RestoreResult(success=True, restored_path=Path("/var/lib/libvirt/images/myvm-clone/myvm-clone.qcow2"))`
+The `--as-vm`, `--storage`, and `--add-to-config` flags are REMOVED. The `deploy` subcommand is REMOVED. The `_append_vm_to_config()` method is REMOVED.
 
-### Requirement: Core.deploy method
-`Core` SHALL provide a `deploy(backup_name: str, new_vm_name: str, storage_dir: Path, add_to_config: bool = False, vm_filter: str | None = None) -> RestoreResult` method. It SHALL delegate to `Core.fork()` with the same parameters.
+#### Scenario: fork from snapshot creates standalone qcow2
+- **WHEN** `core.fork("myvm.20260701T1200", Path("/tmp/standalone.qcow2"))` is called
+- **THEN** `qemu-img convert --force-share -O qcow2` is executed
+- **AND** returns `RestoreResult(success=True, restored_path=Path("/tmp/standalone.qcow2"), chain_files=[Path("/tmp/standalone.qcow2")])`
+- **AND** no `virsh dumpxml`, `virsh define`, or XML manipulation is performed
 
-#### Scenario: deploy delegates to fork
-- **WHEN** `core.deploy("vm.FULL.20260701T000000_a1b2c3", "recovered-vm", Path("/var/lib/libvirt/images"))` is called
-- **THEN** `core.fork("vm.FULL.20260701T000000_a1b2c3", "recovered-vm", Path("/var/lib/libvirt/images"))` is called internally
-- **THEN** returns the same `RestoreResult`
+#### Scenario: fork from incremental backup flattens chain
+- **WHEN** `core.fork("myvm.20260702T130000_def456", Path("/tmp/restored.qcow2"))` is called with an incremental backup
+- **THEN** `qemu-img convert --force-share -O qcow2` flattens the entire backing chain (FULL + all dependents) into a single standalone file
+
+### Requirement: Core.restore method
+`Core` SHALL provide a `restore(name: str, vm_filter: str | None = None) -> RestoreResult` method. The `target_dir` parameter is REMOVED — the result is written to `vm_config.base_image`. It SHALL:
+
+1. Resolve the snapshot/backup via `_resolve_snapshot()`.
+2. Verify the VM is stopped via `is_vm_running()` — abort with error `"VM must be stopped for restore"` if running.
+3. Pre-verify source chain integrity via `scan_backing_chain()` — abort if broken.
+4. Create a standalone image at `<snapshot_dir>/<vm_name>.restored.qcow2.tmp` via `qemu-img convert --force-share -O qcow2`.
+5. Delete old snapshot overlay files from `snapshot_dir` (best-effort, WARNING on failures).
+6. Atomically replace the base image via `os.replace(tmp_path, base_image)`.
+7. Strip `<backingStore>` from domain XML and update `<source file>` to the new base image, then `virsh define`.
+8. Reset all VM state via `IStateManager.reset_vm_state(vm_name)` and `IStateManager.reset_target_state(target_path)` for each target.
+9. Perform best-effort libvirt checkpoint cleanup via `virsh checkpoint-delete --metadata`.
+
+The CLI SHALL offer `--dry-run` (log planned actions, execute nothing) and `--yes` (skip confirmation prompt). Without `--yes` and without `--dry-run`, the CLI SHALL prompt the operator for confirmation.
+
+#### Scenario: restore from snapshot replaces VM disk
+- **WHEN** `core.restore("myvm.20260701T1200")` is called on a stopped VM
+- **THEN** `qemu-img convert --force-share -O qcow2` is executed to a temp file
+- **AND** `os.replace(tmp, base_image)` atomically replaces the base image
+- **AND** domain XML is updated and redefined
+- **AND** `reset_vm_state()` and `reset_target_state()` are called
+
+#### Scenario: restore aborts on running VM
+- **WHEN** `core.restore("myvm.20260701T1200")` is called and the VM is running
+- **THEN** returns `RestoreResult(success=False, error="VM must be stopped for restore")`
+
+#### Scenario: restore aborts on broken source chain
+- **WHEN** `core.restore("myvm.20260701T1200")` is called and `scan_backing_chain()` returns broken
+- **THEN** returns `RestoreResult(success=False, error="Source backing chain is broken: ...")`
+
+#### Scenario: restore dry-run shows planned actions
+- **WHEN** `core.restore("myvm.20260701T1200")` is called in dry-run mode
+- **THEN** all planned actions are logged at INFO level
+- **AND** no `qemu-img convert`, `os.replace`, or `virsh define` is executed
+- **AND** returns `RestoreResult(success=True)`
 
 ### Requirement: Phantom FULL detection with cascade cleanup
 
