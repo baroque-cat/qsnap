@@ -5,8 +5,11 @@ compress = false
 
 [[vm]]
 name = "testvm"
-base_image = "/var/lib/libvirt/images/testvm.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/testvm"

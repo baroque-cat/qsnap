@@ -34,6 +34,7 @@ def _make_snapshot() -> SnapshotInfo:
         path=Path("/snapshots/testvm.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+        disk="vda",
     )
 
 
@@ -75,7 +76,7 @@ def _setup_convert_expectations(mock_shell, target, running: bool = True, *, com
         target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
         # A future timestamp (9999) ensures _delete_superseded_checkpoints
         # sees it as NOT superseded (ts >= successor_ts → skip).
-        checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+        checkpoint_name = f"qsnap-{target_hash}-vda-99991231T000000-deadbe"
         mock_shell.expect("checkpoint-list").returns(
             ShellResult(
                 success=True,
@@ -179,7 +180,7 @@ def test_convert_cmd_stopped_vm_compressed(mock_shell, make_target, tmp_path):
 
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
-        patch("qsnap.modules.backup.bitmap.get_first_disk_path", return_value=source_path),
+        patch("qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", source_path)]),
         patch.object(
             mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
         ) as stall_spy,
@@ -221,7 +222,7 @@ def test_convert_cmd_stopped_vm_uncompressed(mock_shell, make_target, tmp_path):
 
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
-        patch("qsnap.modules.backup.bitmap.get_first_disk_path", return_value=source_path),
+        patch("qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", source_path)]),
         patch.object(
             mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
         ) as stall_spy,
@@ -365,7 +366,7 @@ def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
 
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
-        patch("qsnap.modules.backup.bitmap.get_first_disk_path", return_value=source_path),
+        patch("qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", source_path)]),
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
     ):
         result = provider.create_full_backup(
@@ -704,7 +705,7 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path, succ
     # where the timestamp comes from source_snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
     expected_date = snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
 
-    assert result.target_path.name.startswith(f"testvm.FULL.{expected_date}_"), (
+    assert result.target_path.name.startswith(f"testvm.FULL.{expected_date}_vda_"), (
         f"Expected filename starting with testvm.FULL.{expected_date}_ (from snapshot timestamp {snapshot.timestamp}), "
         f"got {result.target_path.name}"
     )

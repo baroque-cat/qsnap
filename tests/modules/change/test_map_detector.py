@@ -173,7 +173,7 @@ def test_map_changed_detected(
     new_regions = [{"offset": 0, "length": 2048}]
 
     old_hash = _compute_map_hash(old_regions)
-    mock_state.set_last_allocation("testvm", old_hash)
+    mock_state.set_last_allocation("testvm", "vda", old_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     # Pattern includes the domblklist path — only matches if D3 is respected
@@ -181,7 +181,7 @@ def test_map_changed_detected(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is True
     assert result.last_allocation == old_hash
@@ -222,14 +222,14 @@ def test_map_unchanged_no_changes(
     ]
 
     stored_hash = _compute_map_hash(regions)
-    mock_state.set_last_allocation("testvm", stored_hash)
+    mock_state.set_last_allocation("testvm", "vda", stored_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(regions))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is False
     assert result.last_allocation == stored_hash
@@ -269,14 +269,14 @@ def test_map_changed_new_region(
     ]
 
     old_hash = _compute_map_hash(old_regions)
-    mock_state.set_last_allocation("testvm", old_hash)
+    mock_state.set_last_allocation("testvm", "vda", old_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(new_regions))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is True
     assert result.last_allocation == old_hash
@@ -301,14 +301,14 @@ def test_map_command_fails_failsafe(
     """
     old_regions = [{"offset": 0, "length": 1024}]
     old_hash = _compute_map_hash(old_regions)
-    mock_state.set_last_allocation("testvm", old_hash)
+    mock_state.set_last_allocation("testvm", "vda", old_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map").returns(_failed_result())
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is True
     assert result.last_allocation == old_hash
@@ -360,14 +360,14 @@ def test_zero_fill_changes_map_not_size(
     ]
 
     old_hash = _compute_map_hash(old_regions)
-    mock_state.set_last_allocation("testvm", old_hash)
+    mock_state.set_last_allocation("testvm", "vda", old_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(new_regions))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is True
     assert result.last_allocation == old_hash
@@ -411,14 +411,14 @@ def test_risk_map_large_json_handled(
     large_regions = [{"offset": i * 4096, "length": 4096} for i in range(10000)]
 
     stored_hash = _compute_map_hash(large_regions)
-    mock_state.set_last_allocation("testvm", stored_hash)
+    mock_state.set_last_allocation("testvm", "vda", stored_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(large_regions))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is False
     assert result.last_allocation == stored_hash
@@ -445,7 +445,7 @@ def test_risk_map_fallback_on_parse_error(
     """
     old_regions = [{"offset": 0, "length": 1024}]
     old_hash = _compute_map_hash(old_regions)
-    mock_state.set_last_allocation("testvm", old_hash)
+    mock_state.set_last_allocation("testvm", "vda", old_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map").returns(
@@ -460,7 +460,7 @@ def test_risk_map_fallback_on_parse_error(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     assert result.changed is True
     assert result.last_allocation == old_hash
@@ -487,14 +487,14 @@ def test_map_on_running_vm_uses_force_share(
     """
     regions = [{"offset": 0, "length": 4096}]
     stored_hash = _compute_map_hash(regions)
-    mock_state.set_last_allocation("testvm", stored_hash)
+    mock_state.set_last_allocation("testvm", "vda", stored_hash)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img map.*new/active/path").returns(_ok_map_result(regions))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = MapChangeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
+    result = detector.has_changed(vm_config, "vda")
 
     # Command succeeds despite VM holding write lock
     assert result.changed is False

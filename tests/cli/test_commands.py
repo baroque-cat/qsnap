@@ -33,7 +33,7 @@ from qsnap.cli.commands import (
 )
 from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.core import Core, PipelineResult, VMRunResult
-from qsnap.models.config import GlobalConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
     CheckResult,
@@ -345,13 +345,14 @@ def test_list_snapshots_tree_dispatches_to_core_list_snapshots(capsys):
                 path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1.qcow2"),
                 timestamp=datetime(2025, 7, 14, 10, 0),
                 allocation=1024,
+                    disk="vda",
             ),
         ]
     }
     mock_core.list_config.return_value = [
         VMConfig(
             name="testvm",
-            base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
         )
     ]
@@ -541,6 +542,7 @@ def _make_deferred_summary(
         reason=reason,
         age=timedelta(hours=age_hours),
         since=since,
+            disk="vda",
     )
 
 
@@ -673,7 +675,7 @@ def test_list_config_shows_off_for_default_deep_verify(capsys):
     mock_core.list_config.return_value = [
         VMConfig(
             name="testvm",
-            base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
             blockcommit_deep_verify=False,
         )
@@ -706,7 +708,7 @@ def test_list_config_shows_on_for_enabled_deep_verify(capsys):
     mock_core.list_config.return_value = [
         VMConfig(
             name="critical-db",
-            base_image=Path("/var/lib/libvirt/images/critical-db.qcow2"),
+            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/critical-db.qcow2"))],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/critical-db"),
             blockcommit_deep_verify=True,
         )
@@ -1013,3 +1015,116 @@ def test_handle_reconcile_exit_code():
     }
     result = handle_reconcile(mock_core, args)
     assert result == 1
+
+
+# ── list backups flat output tests ─────────────────────────────────────────
+
+
+def test_list_backups_flat_output_includes_target_column(capsys):
+    """list backups flat table shows TARGET column with target path."""
+    mock_core = _make_mock_core()
+    mock_core.list_backups.return_value = {
+        "testvm": [
+            (
+                "/mnt/backup/testvm",
+                SnapshotInfo(
+                    name="backup1",
+                    path=Path("/mnt/backup/testvm/backup1.qcow2"),
+                    timestamp=datetime(2025, 7, 14, 10, 0),
+                    allocation=1024,
+                    disk="vda",
+                ),
+            ),
+        ]
+    }
+    args = _make_list_args(list_subcommand="backups")
+    result = handle_list(mock_core, args)
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "TARGET" in captured.out  # column header
+    assert "/mnt/backup/testvm" in captured.out  # target path in row
+    assert "backup1" in captured.out
+
+
+def test_list_backups_flat_output_with_vm_filter(capsys):
+    """list backups flat with a VM filter calls core.list_backups(vm_filter)."""
+    mock_core = _make_mock_core()
+    mock_core.list_backups.return_value = {
+        "myvm": [
+            (
+                "/mnt/backup/myvm",
+                SnapshotInfo(
+                    name="backup1",
+                    path=Path("/mnt/backup/myvm/backup1.qcow2"),
+                    timestamp=datetime(2025, 7, 14, 10, 0),
+                    allocation=1024,
+                    disk="vda",
+                ),
+            ),
+        ]
+    }
+    args = _make_list_args(list_subcommand="backups", vm=["myvm"])
+    result = handle_list(mock_core, args)
+    assert result == EXIT_SUCCESS
+    mock_core.list_backups.assert_called_once_with("myvm")
+    captured = capsys.readouterr()
+    assert "/mnt/backup/myvm" in captured.out
+    assert "backup1" in captured.out
+
+
+# ── list latest multi-disk output tests ────────────────────────────────────
+
+
+def test_list_latest_multi_disk_output(capsys):
+    """list latest prints one row per disk — vda has snapshot, vdb is None:
+    vdb row shows '-' placeholders."""
+    mock_core = _make_mock_core()
+    mock_core.list_latest.return_value = {
+        "testvm": {
+            "vda": SnapshotInfo(
+                name="snap1",
+                path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+                timestamp=datetime(2025, 7, 14, 10, 0),
+                allocation=1024,
+                disk="vda",
+            ),
+            "vdb": None,
+        }
+    }
+    args = _make_list_args(list_subcommand="latest")
+    result = handle_list(mock_core, args)
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "vda" in captured.out
+    assert "snap1" in captured.out
+    assert "vdb" in captured.out
+    # vdb row should have "-" placeholders
+    assert "-" in captured.out
+
+
+def test_list_latest_multi_disk_both_present(capsys):
+    """list latest with two disks both having snapshots: two rows, each
+    with its own snapshot data."""
+    mock_core = _make_mock_core()
+    dt1 = datetime(2025, 7, 14, 10, 0)
+    dt2 = datetime(2025, 7, 14, 11, 0)
+    mock_core.list_latest.return_value = {
+        "testvm": {
+            "vda": SnapshotInfo(
+                name="snap-vda", path=Path("/tmp/snap-vda.qcow2"),
+                timestamp=dt1, allocation=1000, disk="vda",
+            ),
+            "vdb": SnapshotInfo(
+                name="snap-vdb", path=Path("/tmp/snap-vdb.qcow2"),
+                timestamp=dt2, allocation=2000, disk="vdb",
+            ),
+        }
+    }
+    args = _make_list_args(list_subcommand="latest")
+    result = handle_list(mock_core, args)
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "vda" in captured.out
+    assert "snap-vda" in captured.out
+    assert "vdb" in captured.out
+    assert "snap-vdb" in captured.out

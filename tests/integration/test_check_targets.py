@@ -33,7 +33,7 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -72,7 +72,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -83,6 +83,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -138,7 +139,7 @@ def test_check_real_targets_all_consistent(test_vm):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
@@ -228,7 +229,7 @@ def test_check_real_targets_broken_chain(test_vm):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
@@ -346,7 +347,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
@@ -391,7 +392,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
     new_target = TargetConfig(path=different_target, compress=False, verify="off")
     new_vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[new_target],
     )
@@ -475,7 +476,7 @@ def test_check_real_deep_targets(test_vm):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
@@ -555,7 +556,7 @@ def test_check_real_targets_after_retention(test_vm):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=2,
         lifecycle_mode="virsh",

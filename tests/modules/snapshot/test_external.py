@@ -1033,6 +1033,7 @@ def test_delete_snapshot_success(mock_shell):
         path=Path("/var/lib/libvirt/snapshots/testvm/snap.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=1048576,
+        disk="vda",
     )
 
     provider = ExternalSnapshotProvider(mock_shell)
@@ -1068,6 +1069,7 @@ def test_delete_snapshot_file_not_found(mock_shell):
         path=Path("/var/lib/libvirt/snapshots/testvm/nonexistent.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=1048576,
+        disk="vda",
     )
 
     provider = ExternalSnapshotProvider(mock_shell)
@@ -1089,15 +1091,17 @@ def test_external_snapshot_provider_imports_shared_parsers():
     functions (i.e. the local duplicates have been removed).
     """
     from qsnap.modules.snapshot import external
-    from qsnap.utils.parsing import parse_domblklist_path, parse_timestamp
+    from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path_map, parse_timestamp
 
     # Shared parsers are imported (same object reference)
-    assert external.parse_domblklist_path is parse_domblklist_path
+    # parse_domblklist_path was renamed; check new imports
+    assert external.parse_domblklist_disks is parse_domblklist_disks
+    assert external.parse_domblklist_path_map is parse_domblklist_path_map
     assert external.parse_timestamp is parse_timestamp
 
     # No local duplicate functions exist
-    assert not hasattr(external, "_parse_domblklist_path"), (
-        "external.py should NOT have a local _parse_domblklist_path; "
+    assert not hasattr(external, "_parse_domblklist_disks"), (
+        "external.py should NOT have a local _parse_domblklist_disks; "
         "it must use the shared parser from qsnap.utils.parsing"
     )
     assert not hasattr(external, "_parse_timestamp"), (

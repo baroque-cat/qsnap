@@ -197,6 +197,148 @@ def test_vm(request):
         shutil.rmtree(str(tmpdir), ignore_errors=True)
 
 
+#: Unique suffix to avoid name clashes between the single-disk and
+#: multi-disk fixtures when they happen to run in the same session.
+#: Both used "qsnap-int-test-vm" as vm_name, which causes collisions
+#: during parallel cleanup.  Multi-disk uses a distinct name.
+_MULTI_VM_NAME = "qsnap-int-test-vm-multi"
+
+
+@pytest.fixture
+def test_vm_multi_disk():
+    """Create and manage a disposable dual-disk test VM for multi-disk
+    integration tests.
+
+    Creates two base images (vda 256M, vdb 128M), a domain XML with TWO
+    ``<disk>`` elements (target dev vda/vdb, bus virtio), and distinct
+    per-disk snapshot directories.  The VM is defined in libvirt but NOT
+    started — individual tests decide whether to start it.
+
+    Yields a dict with:
+        shell
+            ``SubprocessShell`` instance for real virsh/qemu-img calls.
+        vm_name : str
+            Name of the test VM (``"qsnap-int-test-vm-multi"``).
+        base_images : dict[str, Path]
+            ``{"vda": Path, "vdb": Path}`` — base qcow2 paths per disk.
+        snapshot_dirs : dict[str, Path]
+            ``{"vda": Path, "vdb": Path}`` — per-disk snapshot directories.
+        target_dir : Path
+            Directory for backup target storage.
+        tmpdir : Path
+            Root of the temporary working directory (under ``/var/tmp``).
+        disk_configs : list[DiskConfig]
+            Pre-built ``DiskConfig`` objects for vda and vdb, suitable
+            for constructing ``VMConfig(disks=[...])`` directly.
+
+    Teardown: destroys the VM, cleans up checkpoints, undefines it,
+    removes the NBD socket, and deletes all temporary files.
+    """
+    shell = SubprocessShell()
+    tmpdir = Path(tempfile.mkdtemp(prefix="qsnap-integration-", dir=_INTEGRATION_TMP))
+    vm_name = _MULTI_VM_NAME
+
+    # Disk layout
+    base_vda = tmpdir / f"{vm_name}-vda.qcow2"
+    base_vdb = tmpdir / f"{vm_name}-vdb.qcow2"
+    snap_dir_vda = tmpdir / "snapshots-vda"
+    snap_dir_vdb = tmpdir / "snapshots-vdb"
+    target_dir = tmpdir / "backup"
+
+    base_images = {"vda": base_vda, "vdb": base_vdb}
+    snapshot_dirs = {"vda": snap_dir_vda, "vdb": snap_dir_vdb}
+
+    # Create directories
+    for d in (snap_dir_vda, snap_dir_vdb, target_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Create two qcow2 base images
+    for img_path, size in ((base_vda, "256M"), (base_vdb, "128M")):
+        create_result = shell.run(
+            ["qemu-img", "create", "-f", "qcow2", str(img_path), size],
+            timeout=30,
+        )
+        if not create_result.success:
+            shutil.rmtree(str(tmpdir), ignore_errors=True)
+            pytest.skip(
+                f"qemu-img create failed for {img_path}: {create_result.error}"
+            )
+
+    # Build domain XML with two disks
+    domain_type = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "qemu"
+    xml = (
+        f'<domain type="{domain_type}">\n'
+        f"  <name>{vm_name}</name>\n"
+        f"  <memory unit='KiB'>262144</memory>\n"
+        f"  <vcpu placement='static'>1</vcpu>\n"
+        f"  <os>\n"
+        f"    <type arch='x86_64' machine='pc'>hvm</type>\n"
+        f'    <boot dev="hd"/>\n'
+        f"  </os>\n"
+        f"  <devices>\n"
+        f'    <disk type="file" device="disk">\n'
+        f'      <driver name="qemu" type="qcow2"/>\n'
+        f'      <source file="{base_vda}"/>\n'
+        f'      <target dev="vda" bus="virtio"/>\n'
+        f"    </disk>\n"
+        f'    <disk type="file" device="disk">\n'
+        f'      <driver name="qemu" type="qcow2"/>\n'
+        f'      <source file="{base_vdb}"/>\n'
+        f'      <target dev="vdb" bus="virtio"/>\n'
+        f"    </disk>\n"
+        f"  </devices>\n"
+        f"</domain>\n"
+    )
+    xml_path = tmpdir / f"{vm_name}.xml"
+    xml_path.write_text(xml)
+
+    # Pre-cleanup: destroy and undefine any stale domain
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    _cleanup_checkpoints(shell, vm_name)
+    shell.run(["virsh", "undefine", vm_name], timeout=30)
+
+    # Define the VM in libvirt
+    define_result = shell.run(
+        ["virsh", "define", str(xml_path)],
+        timeout=30,
+    )
+    if not define_result.success:
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
+        pytest.skip(
+            f"virsh define failed (libvirt daemon not available?): {define_result.error}"
+        )
+
+    # Pre-built DiskConfig objects for convenience
+    from qsnap.models.config import DiskConfig  # noqa: E402
+
+    disk_configs = [
+        DiskConfig(target="vda", base_image=base_vda, snapshot_dir=snap_dir_vda),
+        DiskConfig(target="vdb", base_image=base_vdb, snapshot_dir=snap_dir_vdb),
+    ]
+
+    try:
+        yield {
+            "shell": shell,
+            "vm_name": vm_name,
+            "base_images": base_images,
+            "snapshot_dirs": snapshot_dirs,
+            "target_dir": target_dir,
+            "tmpdir": tmpdir,
+            "disk_configs": disk_configs,
+        }
+    finally:
+        # Teardown: destroy, undefine, and clean up all files.
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        _cleanup_checkpoints(shell, vm_name)
+        shell.run(["virsh", "undefine", vm_name], timeout=30)
+        # NBD sockets
+        shell.run(
+            ["rm", "-f", f"/tmp/qsnap-backup-{os.getpid()}.sock"],
+            timeout=10,
+        )
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
+
+
 def _cleanup_checkpoints(shell, vm_name: str) -> None:
     """Delete all checkpoints for *vm_name* so virsh undefine can succeed."""
     result = shell.run(

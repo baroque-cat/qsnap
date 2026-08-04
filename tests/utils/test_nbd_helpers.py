@@ -1,10 +1,9 @@
-"""Unit tests for ``qsnap.utils.nbd`` helper functions added for the
-fast-compressed-full-backup change.
+"""Unit tests for ``qsnap.utils.nbd`` helper functions.
 
 Tests verify:
-- ``get_first_disk_path`` returns the file path of the first disk
+- ``get_disk_targets`` returns all disk ``(target, source_path)`` pairs
   from ``virsh domblklist --details`` output.
-- ``get_first_disk_path`` returns an empty string when no disk is
+- ``get_disk_targets`` returns an empty list when no disks are
   found or the command fails.
 """
 
@@ -13,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from qsnap.models.results import ShellResult
-from qsnap.utils.nbd import get_first_disk_path
+from qsnap.utils.nbd import get_disk_targets
 
 
 def _ok_domblklist_details(entries: list[tuple[str, str, str, str]]) -> ShellResult:
@@ -21,7 +20,7 @@ def _ok_domblklist_details(entries: list[tuple[str, str, str, str]]) -> ShellRes
 
     *entries* is a list of ``(Type, Device, Target, Source)`` tuples.
     The real ``--details`` output has four columns; the code checks
-    ``Device == "disk"`` and returns ``Source``.
+    ``Device == "disk"`` and returns ``(Target, Source)``.
     """
     header = " Type      Device      Target  Source\n"
     separator = "------------------------------------------------\n"
@@ -37,13 +36,13 @@ def _ok_domblklist_details(entries: list[tuple[str, str, str, str]]) -> ShellRes
     )
 
 
-class TestGetFirstDiskPath:
-    """Unit tests for ``get_first_disk_path``."""
+class TestGetDiskTargets:
+    """Unit tests for ``get_disk_targets``."""
 
     @pytest.mark.unit
-    def test_get_first_disk_path_returns_path(self, mock_shell) -> None:
+    def test_get_disk_targets_returns_single_disk(self, mock_shell) -> None:
         """When ``virsh domblklist --details`` lists one disk entry,
-        ``get_first_disk_path`` returns the ``Source`` (file path)."""
+        ``get_disk_targets`` returns a single ``(target, source_path)`` tuple."""
         # expect_first overrides the conftest.py fixture default which
         # registers a plain ``domblklist`` (2-column) expectation.
         mock_shell.expect_first("virsh domblklist").returns(
@@ -52,15 +51,33 @@ class TestGetFirstDiskPath:
             )
         )
 
-        result = get_first_disk_path(mock_shell, "testvm")
-        assert result == "/var/lib/libvirt/images/testvm.qcow2"
+        result = get_disk_targets(mock_shell, "testvm")
+        assert result == [("vda", "/var/lib/libvirt/images/testvm.qcow2")]
 
     @pytest.mark.unit
-    def test_get_first_disk_path_no_disks(self, mock_shell) -> None:
+    def test_get_disk_targets_returns_multiple_disks(self, mock_shell) -> None:
+        """When ``virsh domblklist --details`` lists multiple disk entries,
+        ``get_disk_targets`` returns all of them."""
+        mock_shell.expect_first("virsh domblklist").returns(
+            _ok_domblklist_details(
+                [
+                    ("file", "disk", "vda", "/var/lib/libvirt/images/testvm.qcow2"),
+                    ("file", "disk", "vdb", "/var/lib/libvirt/images/testvm-disk2.qcow2"),
+                ]
+            )
+        )
+
+        result = get_disk_targets(mock_shell, "testvm")
+        assert result == [
+            ("vda", "/var/lib/libvirt/images/testvm.qcow2"),
+            ("vdb", "/var/lib/libvirt/images/testvm-disk2.qcow2"),
+        ]
+
+    @pytest.mark.unit
+    def test_get_disk_targets_no_disks(self, mock_shell) -> None:
         """When ``virsh domblklist --details`` lists only cdrom and loop
-        devices (no ``Device == "disk"`` rows), ``get_first_disk_path``
-        returns an empty string."""
-        # expect_first overrides the conftest.py fixture default.
+        devices (no ``Device == "disk"`` rows), ``get_disk_targets``
+        returns an empty list."""
         mock_shell.expect_first("virsh domblklist").returns(
             _ok_domblklist_details(
                 [
@@ -70,14 +87,13 @@ class TestGetFirstDiskPath:
             )
         )
 
-        result = get_first_disk_path(mock_shell, "testvm")
-        assert result == ""
+        result = get_disk_targets(mock_shell, "testvm")
+        assert result == []
 
     @pytest.mark.unit
-    def test_get_first_disk_path_command_fails(self, mock_shell) -> None:
+    def test_get_disk_targets_command_fails(self, mock_shell) -> None:
         """When ``virsh domblklist --details`` itself fails (non-zero
-        return code), ``get_first_disk_path`` returns an empty string."""
-        # expect_first overrides the conftest.py fixture default.
+        return code), ``get_disk_targets`` returns an empty list."""
         mock_shell.expect_first("virsh domblklist").returns(
             ShellResult(
                 success=False,
@@ -88,5 +104,5 @@ class TestGetFirstDiskPath:
             )
         )
 
-        result = get_first_disk_path(mock_shell, "testvm")
-        assert result == ""
+        result = get_disk_targets(mock_shell, "testvm")
+        assert result == []

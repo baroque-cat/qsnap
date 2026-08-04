@@ -6,12 +6,15 @@ target_chain_length = 30
 
 [[vm]]
 name = "vm_override"
-base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
 # VM overrides global snapshot_chain_length
 snapshot_chain_length = 48
 # VM overrides global target_chain_length
 target_chain_length = 30
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_override_inherit"
@@ -24,9 +27,12 @@ target_chain_length = 30
 
 [[vm]]
 name = "vm_inherit"
-base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
 # VM inherits global snapshot_chain_length and target_chain_length (no override)
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_inherit"

@@ -65,6 +65,7 @@ def _make_snapshot(
     path: str = "/snapshots/testvm.20250101T000000.qcow2",
     timestamp: datetime | None = None,
     allocation: int = 65536,
+    disk: str = "vda",
 ) -> SnapshotInfo:
     """Create a ``SnapshotInfo`` with sensible defaults."""
     return SnapshotInfo(
@@ -72,6 +73,7 @@ def _make_snapshot(
         path=Path(path),
         timestamp=timestamp or datetime(2025, 1, 1, 0, 0, 0),
         allocation=allocation,
+        disk=disk,
     )
 
 
@@ -182,7 +184,7 @@ def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is True
@@ -228,7 +230,7 @@ def test_qemu_img_commit_fails(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -300,7 +302,7 @@ def test_qemu_img_commit_pivots_child_and_deletes(mock_shell: MockShell, make_vm
     # --- Execute ---
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
-    result = manager.blockcommit(vm_config, [s1])
+    result = manager.blockcommit(vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image)
 
     # --- Assertions ---
     assert isinstance(result, CommitResult)
@@ -360,7 +362,7 @@ def test_qemu_img_commit_no_child_skips_rebase(mock_shell: MockShell, make_vm_co
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is True
     assert result.committed_snapshot == snap.name
@@ -414,7 +416,7 @@ def test_qemu_img_commit_failure_no_delete_short_circuit(mock_shell: MockShell, 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [s1, s2])
+    result = manager.blockcommit(vm_config, [s1, s2], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -492,7 +494,7 @@ def test_qemu_img_rebase_failure_keeps_file(mock_shell: MockShell, make_vm_confi
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [s1])
+    result = manager.blockcommit(vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -533,7 +535,7 @@ def test_qemu_img_commit_blocked_by_apparmor(mock_shell: MockShell, make_vm_conf
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -565,7 +567,7 @@ def test_qemu_img_commit_blocked_by_selinux(mock_shell: MockShell, make_vm_confi
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -647,7 +649,7 @@ def test_qemu_img_commit_deep_verify(
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is expected_success
     assert result.error == expected_error
@@ -661,5 +663,174 @@ def test_qemu_img_commit_deep_verify(
     )
     check_cmd = next(c for c in cmds if "qemu-img check" in c)
     assert "--output=json" in check_cmd
-    assert str(vm_config.base_image) in check_cmd
+    assert str(vm_config.disks[0].base_image) in check_cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase-5: _find_child disk pre-filter (multi-disk isolation)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_config):
+    """_find_child skips candidates whose filename encodes a different disk.
+
+    Scan dir contains:
+      - vm.20250101T000000_vda_aaa111.qcow2 (vda child, backing=snap)
+      - vm.20250101T000000_vdb_bbb222.qcow2 (vdb file, NOT inspected)
+
+    Committing a vda snapshot: the vdb candidate must be skipped before
+    qemu-img info is called.  Only the vda candidate should be inspected,
+    and since its backing file matches, it is returned as the child.
+    """
+    from pathlib import Path
+
+    from qsnap.models.config import DiskConfig
+
+    snap_dir = "/var/lib/libvirt/snapshots/testvm"
+    vda_disk = DiskConfig(target="vda", base_image=Path("/tmp/vda.qcow2"))
+    vdb_disk = DiskConfig(
+        target="vdb",
+        base_image=Path("/tmp/vdb.qcow2"),
+        snapshot_dir=Path(snap_dir),  # same dir for the purpose of the test
+    )
+    vm_config = make_vm_config(disks=[vda_disk, vdb_disk])
+
+    snap = _make_snapshot(
+        name="vm.20250101T000000_vda_fff000",
+        path=f"{snap_dir}/vm.20250101T000000_vda_fff000.qcow2",
+        disk="vda",
+    )
+    vda_child = f"{snap_dir}/vm.20250101T010000_vda_aaa111.qcow2"
+    vdb_candidate = f"{snap_dir}/vm.20250101T010000_vdb_bbb222.qcow2"
+
+    # Commit succeeds.
+    mock_shell.expect("qemu-img commit").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # find returns both files intermixed.
+    find_out = vda_child + "\n" + vdb_candidate + "\n"
+    mock_shell.expect_first(r"find.*maxdepth.*1.*-name.*\.qcow2").returns(
+        ShellResult(success=True, stdout=find_out, stderr="", returncode=0, error=None)
+    )
+
+    # qemu-img info for vda_child: backing matches snap.
+    info_json = json.dumps(
+        {
+            "full-backing-filename": str(snap.path),
+            "format": "qcow2",
+            "virtual-size": 10737418240,
+        }
+    )
+    # Use a specific regex so we can track which file gets inspected.
+    mock_shell.expect_first(
+        r"qemu-img info.*" + vda_child.replace("/", r"\/")
+    ).returns(
+        ShellResult(success=True, stdout=info_json, stderr="", returncode=0, error=None)
+    )
+
+    # rebase vda_child
+    mock_shell.expect("qemu-img rebase").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # rm
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vda_disk.base_image
+    )
+
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+
+    # Verify qemu-img info was called exactly once (for vda_child, not vdb_candidate).
+    info_calls = [c for c in _cmd_strings(shell.calls) if "qemu-img info" in c]
+    assert len(info_calls) == 1, (
+        f"Expected 1 qemu-img info call, got {len(info_calls)}: {info_calls}"
+    )
+    assert vda_child in info_calls[0], (
+        f"qemu-img info should inspect vda child, got: {info_calls[0]}"
+    )
+    assert vdb_candidate not in info_calls[0], (
+        f"qemu-img info should NOT inspect vdb candidate, got: {info_calls[0]}"
+    )
+
+
+def test_find_child_still_inspects_unparseable_names(
+    mock_shell: MockShell, make_vm_config
+):
+    """Candidates whose names do not encode a disk are still inspected.
+
+    Files like ``random.qcow2`` or ``base.qcow2`` do not match the
+    ``{vm}.{ts}_{disk}_{hex}.qcow2`` pattern.  The pre-filter must NOT
+    skip them — they are still inspected via qemu-img info because they
+    may be the child overlay we are looking for (e.g. if the child was
+    created or renamed outside of qsnap).
+    """
+    from pathlib import Path
+
+    from qsnap.models.config import DiskConfig
+
+    snap_dir = "/var/lib/libvirt/snapshots/testvm"
+    vda_disk = DiskConfig(target="vda", base_image=Path("/tmp/vda.qcow2"))
+    vm_config = make_vm_config(disks=[vda_disk])
+
+    snap = _make_snapshot(
+        name="vm.20250101T000000_vda_fff000",
+        path=f"{snap_dir}/vm.20250101T000000_vda_fff000.qcow2",
+        disk="vda",
+    )
+    unparseable = f"{snap_dir}/random.qcow2"
+
+    # Commit succeeds.
+    mock_shell.expect("qemu-img commit").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    # find returns the unparseable file.
+    mock_shell.expect_first(r"find.*maxdepth.*1.*-name.*\.qcow2").returns(
+        ShellResult(success=True, stdout=unparseable + "\n", stderr="", returncode=0, error=None)
+    )
+
+    # qemu-img info for unparseable: backing does NOT match snap.
+    info_json = json.dumps(
+        {
+            "backing-filename": "other.qcow2",
+            "format": "qcow2",
+            "virtual-size": 10737418240,
+        }
+    )
+    mock_shell.expect("qemu-img info").returns(
+        ShellResult(success=True, stdout=info_json, stderr="", returncode=0, error=None)
+    )
+
+    # No child found → no rebase, just rm.
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vda_disk.base_image
+    )
+
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+
+    # Verify qemu-img info WAS called for the unparseable file.
+    info_calls = [c for c in _cmd_strings(shell.calls) if "qemu-img info" in c]
+    assert len(info_calls) == 1, (
+        f"Expected qemu-img info to inspect unparseable file, got {len(info_calls)} calls"
+    )
+    assert "random.qcow2" in info_calls[0], (
+        f"qemu-img info should include random.qcow2, got: {info_calls[0]}"
+    )
 

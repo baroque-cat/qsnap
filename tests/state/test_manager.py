@@ -34,6 +34,7 @@ def _make_snapshot(
         path=Path(path),
         timestamp=ts,
         allocation=allocation,
+        disk="vda",
     )
 
 
@@ -44,19 +45,19 @@ def test_write_read_allocation(tmp_path: Path) -> None:
     """set_last_allocation then get_last_allocation round-trips the value."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_allocation("testvm", 4096)
-    assert manager.get_last_allocation("testvm") == 4096
+    manager.set_last_allocation("testvm", "vda", 4096)
+    assert manager.get_last_allocation("testvm", "vda") == 4096
 
     # A second write overwrites the first.
-    manager.set_last_allocation("testvm", 8192)
-    assert manager.get_last_allocation("testvm") == 8192
+    manager.set_last_allocation("testvm", "vda", 8192)
+    assert manager.get_last_allocation("testvm", "vda") == 8192
 
 
 def test_missing_state_returns_none(tmp_path: Path) -> None:
     """A VM with no state file returns None, not 0 and not an exception."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    result = manager.get_last_allocation("nonexistent_vm")
+    result = manager.get_last_allocation("nonexistent_vm", "vda")
 
     assert result is None
 
@@ -96,7 +97,7 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     # ── Part 1: successful write leaves no .tmp file ──────────────────
-    manager.set_last_allocation("testvm", 4096)
+    manager.set_last_allocation("testvm", "vda", 4096)
 
     state_file = tmp_path / "testvm.json"
     tmp_file = tmp_path / "testvm.json.tmp"
@@ -106,8 +107,8 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     # ── Part 2: crash during os.replace leaves original file unchanged ──
     # Pre-write a valid state file with known data for a separate VM.
-    manager.set_last_allocation("crashvm", 100)
-    assert manager.get_last_allocation("crashvm") == 100
+    manager.set_last_allocation("crashvm", "vda", 100)
+    assert manager.get_last_allocation("crashvm", "vda") == 100
 
     crash_state_file = tmp_path / "crashvm.json"
 
@@ -119,7 +120,7 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
         ),
         pytest.raises(OSError, match="simulated crash"),
     ):
-        manager.set_last_allocation("crashvm", 999)
+        manager.set_last_allocation("crashvm", "vda", 999)
 
     # The original state file must still exist and be valid JSON — no
     # partial corruption is observable by a concurrent reader.
@@ -127,10 +128,10 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     with open(crash_state_file, encoding="utf-8") as fh:
         data = json.load(fh)  # must parse without error
-    assert data["last_allocation"] == 100, "original data must be unchanged after crash"
+    assert data.get("last_allocation", {}).get("vda", None) == 100, "original data must be unchanged after crash"
 
     # Re-reading through the manager must yield the original value.
-    assert manager.get_last_allocation("crashvm") == 100
+    assert manager.get_last_allocation("crashvm", "vda") == 100
 
 
 # ── deferred operations tests ────────────────────────────────────────────
@@ -140,7 +141,7 @@ def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
     """add_deferred_blockcommit stores entry; get_deferred_operations returns it with correct fields."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
 
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
@@ -158,7 +159,7 @@ def test_add_deferred_blockcommit_vm_running_reason(tmp_path: Path) -> None:
     """add_deferred_blockcommit stores entry with "vm_running" reason."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2", "snap2.qcow2"], "vm_running")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2", "snap2.qcow2"], "vm_running")
 
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
@@ -176,7 +177,7 @@ def test_add_deferred_blockcommit_active_layer_reason(tmp_path: Path) -> None:
     """add_deferred_blockcommit stores entry with "active_layer" reason."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap3.qcow2"], "active_layer")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap3.qcow2"], "active_layer")
 
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
@@ -194,7 +195,7 @@ def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
     """Alternate: add_deferred_blockcommit round-trips through get_deferred_operations."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
 
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
@@ -210,8 +211,8 @@ def test_clear_deferred_operations(tmp_path: Path) -> None:
     """clear_deferred_operations removes all queued operations for a VM."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
-    manager.add_deferred_blockcommit("vm1", ["snap2.qcow2", "snap3.qcow2"], "selinux")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap2.qcow2", "snap3.qcow2"], "selinux")
 
     assert len(manager.get_deferred_operations("vm1")) == 2
 
@@ -232,8 +233,8 @@ def test_no_deferred_operations_empty_list(tmp_path: Path) -> None:
 def test_deferred_operations_persisted_to_json(tmp_path: Path) -> None:
     """Deferred operations survive across JsonStateManager instances pointing to the same dir."""
     manager1 = JsonStateManager(state_dir=tmp_path)
-    manager1.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
-    manager1.add_deferred_blockcommit("vm1", ["snap2.qcow2"], "selinux")
+    manager1.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
+    manager1.add_deferred_blockcommit("vm1", "vda", ["snap2.qcow2"], "selinux")
 
     # New manager instance, same state directory — must load persisted data.
     manager2 = JsonStateManager(state_dir=tmp_path)
@@ -254,6 +255,7 @@ def test_deferred_blockcommit_dataclass_fields() -> None:
         snapshots=["snap1.qcow2"],
         reason="apparmor",
         since=datetime(2024, 1, 1, 12, 0, 0),
+        disk="vda",
     )
 
     # Fields exist and hold correct values.
@@ -279,6 +281,7 @@ def test_state_round_trips_last_warned_at(tmp_path: Path) -> None:
         snapshots=["snap1.qcow2"],
         reason="apparmor",
         since=datetime(2024, 1, 1, 12, 0, 0),
+        disk="vda",
         last_warned_at=warned,
     )
 
@@ -317,7 +320,7 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
     """update_deferred_warning sets last_warned_at on the deferred entry at index."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
 
     # Initially None.
     ops = manager.get_deferred_operations("vm1")
@@ -342,7 +345,7 @@ def test_set_and_get_last_full_backup(tmp_path: Path) -> None:
     name = "full-2024-01-01"
     ts = datetime(2024, 1, 1, 12, 0, 0)
 
-    manager.set_last_full_backup(target, name, ts)
+    manager.set_last_full_backup(target, name, ts, "vda")
 
     result = manager.get_last_full_backup(target)
 
@@ -360,7 +363,7 @@ def test_full_backup_state_saved_and_retrieved(tmp_path: Path) -> None:
     ts = datetime(2024, 6, 1, 9, 30, 0)
 
     manager1 = JsonStateManager(state_dir=tmp_path)
-    manager1.set_last_full_backup(target, name, ts)
+    manager1.set_last_full_backup(target, name, ts, "vda")
 
     # New manager instance, same state directory — must load persisted data.
     manager2 = JsonStateManager(state_dir=tmp_path)
@@ -393,7 +396,7 @@ def test_record_and_get_full_backups(tmp_path: Path) -> None:
     name = "full-2024-01-01"
     ts = datetime(2024, 1, 1, 12, 0, 0)
 
-    manager.record_full_backup(target, name, ts)
+    manager.record_full_backup(target, name, ts, "vda")
 
     backups = manager.get_full_backups(target)
 
@@ -413,9 +416,9 @@ def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
     ts2 = datetime(2024, 2, 1, 12, 0, 0)
     ts3 = datetime(2024, 3, 1, 12, 0, 0)
 
-    manager.record_full_backup(target, "full-2024-01-01", ts1)
-    manager.record_full_backup(target, "full-2024-02-01", ts2)
-    manager.record_full_backup(target, "full-2024-03-01", ts3)
+    manager.record_full_backup(target, "full-2024-01-01", ts1, "vda")
+    manager.record_full_backup(target, "full-2024-02-01", ts2, "vda")
+    manager.record_full_backup(target, "full-2024-03-01", ts3, "vda")
 
     backups = manager.get_full_backups(target)
 
@@ -787,7 +790,7 @@ def test_corrupt_state_file_renamed_and_empty_state_returned(
     state_file.write_text("{ broken json", encoding="utf-8")
 
     manager = JsonStateManager(state_dir=tmp_path)
-    result = manager.get_last_allocation("testvm")
+    result = manager.get_last_allocation("testvm", "vda")
 
     assert result is None
 
@@ -814,12 +817,12 @@ def test_clean_state_file_loads_normally(tmp_path: Path) -> None:
     """
     state_file = tmp_path / "testvm.json"
     state_file.write_text(
-        json.dumps({"last_allocation": 4096}),
+        json.dumps({"last_allocation": {"vda": 4096}}),
         encoding="utf-8",
     )
 
     manager = JsonStateManager(state_dir=tmp_path)
-    assert manager.get_last_allocation("testvm") == 4096
+    assert manager.get_last_allocation("testvm", "vda") == 4096
 
 
 def test_missing_state_file_returns_none_gracefully(tmp_path: Path) -> None:
@@ -835,11 +838,11 @@ def test_missing_state_file_returns_none_gracefully(tmp_path: Path) -> None:
     assert not any(tmp_path.iterdir()), "State directory should be empty"
 
     # Should return None gracefully for any non-existent VM.
-    result = manager.get_last_allocation("nonexistent")
+    result = manager.get_last_allocation("nonexistent", "vda")
     assert result is None
 
     # Also check a second non-existent VM for confidence.
-    assert manager.get_last_allocation("another_vm") is None
+    assert manager.get_last_allocation("another_vm", "vda") is None
 
 
 def test_first_save_creates_state_file_only(tmp_path: Path) -> None:
@@ -853,7 +856,7 @@ def test_first_save_creates_state_file_only(tmp_path: Path) -> None:
     """
     manager = JsonStateManager(state_dir=tmp_path, state_backup_count=3)
 
-    manager.set_last_allocation("testvm", 4096)
+    manager.set_last_allocation("testvm", "vda", 4096)
 
     state_file = tmp_path / "testvm.json"
     assert state_file.exists(), "State file should be created on first save"
@@ -864,7 +867,7 @@ def test_first_save_creates_state_file_only(tmp_path: Path) -> None:
         assert not backup.exists(), f"Backup file {backup.name} should NOT exist on first save"
 
     # Verify content is correct.
-    assert manager.get_last_allocation("testvm") == 4096
+    assert manager.get_last_allocation("testvm", "vda") == 4096
 
 
 def test_subsequent_saves_rotate_state_files(tmp_path: Path) -> None:
@@ -880,30 +883,30 @@ def test_subsequent_saves_rotate_state_files(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path, state_backup_count=3)
 
     # First save — no rotation.
-    manager.set_last_allocation("testvm", 100)
+    manager.set_last_allocation("testvm", "vda", 100)
 
     # Second save — rotates 100 → testvm.json.1.
-    manager.set_last_allocation("testvm", 200)
+    manager.set_last_allocation("testvm", "vda", 200)
 
-    assert manager.get_last_allocation("testvm") == 200
+    assert manager.get_last_allocation("testvm", "vda") == 200
 
     backup1 = tmp_path / "testvm.json.1"
     assert backup1.exists(), "testvm.json.1 should exist after second save"
     with open(backup1, encoding="utf-8") as fh:
         data = json.load(fh)
-    assert data["last_allocation"] == 100, (
+    assert data["last_allocation"]["vda"] == 100, (
         f"testvm.json.1 should contain previous value (100), got {data}"
     )
 
     # Third save — pushes 200 → .1, 100 → .2.
-    manager.set_last_allocation("testvm", 300)
+    manager.set_last_allocation("testvm", "vda", 300)
 
-    assert manager.get_last_allocation("testvm") == 300
+    assert manager.get_last_allocation("testvm", "vda") == 300
 
     with open(tmp_path / "testvm.json.1", encoding="utf-8") as fh:
-        assert json.load(fh)["last_allocation"] == 200
+        assert json.load(fh)["last_allocation"]["vda"] == 200
     with open(tmp_path / "testvm.json.2", encoding="utf-8") as fh:
-        assert json.load(fh)["last_allocation"] == 100
+        assert json.load(fh)["last_allocation"]["vda"] == 100
 
 
 def test_backup_count_limit_enforced(tmp_path: Path) -> None:
@@ -917,24 +920,24 @@ def test_backup_count_limit_enforced(tmp_path: Path) -> None:
     """
     manager = JsonStateManager(state_dir=tmp_path, state_backup_count=2)
 
-    manager.set_last_allocation("testvm", 100)
-    manager.set_last_allocation("testvm", 200)
-    manager.set_last_allocation("testvm", 300)
-    manager.set_last_allocation("testvm", 400)
+    manager.set_last_allocation("testvm", "vda", 100)
+    manager.set_last_allocation("testvm", "vda", 200)
+    manager.set_last_allocation("testvm", "vda", 300)
+    manager.set_last_allocation("testvm", "vda", 400)
 
-    assert manager.get_last_allocation("testvm") == 400
+    assert manager.get_last_allocation("testvm", "vda") == 400
 
     # Backup 1 should contain 300
     backup1 = tmp_path / "testvm.json.1"
     assert backup1.exists()
     with open(backup1, encoding="utf-8") as fh:
-        assert json.load(fh)["last_allocation"] == 300
+        assert json.load(fh)["last_allocation"]["vda"] == 300
 
     # Backup 2 should contain 200
     backup2 = tmp_path / "testvm.json.2"
     assert backup2.exists()
     with open(backup2, encoding="utf-8") as fh:
-        assert json.load(fh)["last_allocation"] == 200
+        assert json.load(fh)["last_allocation"]["vda"] == 200
 
     # Backup 3 must NOT exist — limit is 2, oldest (100) discarded.
     backup3 = tmp_path / "testvm.json.3"
@@ -951,13 +954,13 @@ def test_state_backup_count_zero_disables_rotation(tmp_path: Path) -> None:
     """
     manager = JsonStateManager(state_dir=tmp_path, state_backup_count=0)
 
-    manager.set_last_allocation("testvm", 100)
-    manager.set_last_allocation("testvm", 200)
+    manager.set_last_allocation("testvm", "vda", 100)
+    manager.set_last_allocation("testvm", "vda", 200)
 
     state_file = tmp_path / "testvm.json"
     assert state_file.exists()
     with open(state_file, encoding="utf-8") as fh:
-        assert json.load(fh)["last_allocation"] == 200
+        assert json.load(fh)["last_allocation"]["vda"] == 200
 
     # No backup files should exist.
     for i in range(1, 5):
@@ -1155,15 +1158,15 @@ def test_per_target_backup_allocation_write_read(tmp_path: Path) -> None:
     """set_last_backup_allocation then get_last_backup_allocation round-trips the value."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_backup_allocation("/path/to/target", 12345)
-    assert manager.get_last_backup_allocation("/path/to/target") == 12345
+    manager.set_last_backup_allocation("/path/to/target", "vda", 12345)
+    assert manager.get_last_backup_allocation("/path/to/target", "vda") == 12345
 
 
 def test_per_target_backup_allocation_missing_returns_none(tmp_path: Path) -> None:
     """get_last_backup_allocation on a target with no recorded state returns None."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    result = manager.get_last_backup_allocation("/nonexistent")
+    result = manager.get_last_backup_allocation("/nonexistent", "vda")
     assert result is None
 
 
@@ -1171,18 +1174,18 @@ def test_per_target_backup_allocation_independent(tmp_path: Path) -> None:
     """Per-target backup allocation state is independent — target A and B don't interfere."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_backup_allocation("/mnt/backup/target_a", 1000)
-    manager.set_last_backup_allocation("/mnt/backup/target_b", 2000)
+    manager.set_last_backup_allocation("/mnt/backup/target_a", "vda", 1000)
+    manager.set_last_backup_allocation("/mnt/backup/target_b", "vda", 2000)
 
-    assert manager.get_last_backup_allocation("/mnt/backup/target_a") == 1000
-    assert manager.get_last_backup_allocation("/mnt/backup/target_b") == 2000
+    assert manager.get_last_backup_allocation("/mnt/backup/target_a", "vda") == 1000
+    assert manager.get_last_backup_allocation("/mnt/backup/target_b", "vda") == 2000
 
 
 def test_target_state_json_atomic_write(tmp_path: Path) -> None:
     """After set_last_backup_allocation, _target_state.json exists with correct JSON and no .tmp file lingers."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_backup_allocation("/path/to/target", 12345)
+    manager.set_last_backup_allocation("/path/to/target", "vda", 12345)
 
     target_state_file = tmp_path / "_target_state.json"
     tmp_file = tmp_path / "_target_state.json.tmp"
@@ -1192,7 +1195,7 @@ def test_target_state_json_atomic_write(tmp_path: Path) -> None:
 
     with open(target_state_file, encoding="utf-8") as fh:
         data = json.load(fh)
-    assert data == {"/path/to/target": {"last_backup_allocation": 12345}}
+    assert data == {"/path/to/target": {"last_backup_allocation": {"vda": 12345}}}
 
 
 def test_target_state_json_missing_returns_none(tmp_path: Path) -> None:
@@ -1202,7 +1205,7 @@ def test_target_state_json_missing_returns_none(tmp_path: Path) -> None:
     # Verify the state directory has no _target_state.json.
     assert not (tmp_path / "_target_state.json").exists()
 
-    result = manager.get_last_backup_allocation("/some/target")
+    result = manager.get_last_backup_allocation("/some/target", "vda")
     assert result is None
 
 
@@ -1213,7 +1216,7 @@ def test_target_state_json_corrupted_renamed(tmp_path: Path) -> None:
 
     manager = JsonStateManager(state_dir=tmp_path)
 
-    result = manager.get_last_backup_allocation("/any/target")
+    result = manager.get_last_backup_allocation("/any/target", "vda")
     assert result is None, "Corrupted state must return None (graceful recovery)"
 
     # Original file must be gone.
@@ -1236,22 +1239,22 @@ def test_clear_backup_allocation_existing(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     # Set a baseline first.
-    manager.set_last_backup_allocation("/path/to/target", 12345)
-    assert manager.get_last_backup_allocation("/path/to/target") == 12345
+    manager.set_last_backup_allocation("/path/to/target", "vda", 12345)
+    assert manager.get_last_backup_allocation("/path/to/target", "vda") == 12345
 
     # Clear it.
-    result = manager.clear_last_backup_allocation("/path/to/target")
+    result = manager.clear_last_backup_allocation("/path/to/target", "vda")
     assert result is True
 
     # Verify it's gone.
-    assert manager.get_last_backup_allocation("/path/to/target") is None
+    assert manager.get_last_backup_allocation("/path/to/target", "vda") is None
 
 
 def test_clear_backup_allocation_nonexistent(tmp_path: Path) -> None:
     """clear_last_backup_allocation on a target with no baseline returns False."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    result = manager.clear_last_backup_allocation("/nonexistent/target")
+    result = manager.clear_last_backup_allocation("/nonexistent/target", "vda")
     assert result is False
 
 
@@ -1304,10 +1307,10 @@ def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/path/to/target"
-    manager.set_last_backup_allocation(target, 12345)
+    manager.set_last_backup_allocation(target, "vda", 12345)
 
     # Verify baseline is set.
-    assert manager.get_last_backup_allocation(target) == 12345
+    assert manager.get_last_backup_allocation(target, "vda") == 12345
 
     target_state_file = tmp_path / "_target_state.json"
     assert target_state_file.exists(), "_target_state.json must exist after set"
@@ -1324,7 +1327,7 @@ def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
         ),
         pytest.raises(OSError, match="simulated crash"),
     ):
-        manager.clear_last_backup_allocation(target)
+        manager.clear_last_backup_allocation(target, "vda")
 
     # The original state file must still exist and contain the original data.
     assert target_state_file.exists(), (
@@ -1337,7 +1340,7 @@ def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
     ), "original data must be unchanged after simulated crash"
 
     # Re-reading through the manager must yield the original value.
-    assert manager.get_last_backup_allocation(target) == 12345
+    assert manager.get_last_backup_allocation(target, "vda") == 12345
 
 
 # ── InMemoryStateManager tests ────────────────────────────────────────
@@ -1353,18 +1356,19 @@ def test_inmemory_clear_last_backup_allocation() -> None:
     target = "/path/to/target"
 
     # Set baseline.
-    manager.set_last_backup_allocation(target, 12345)
-    assert manager.get_last_backup_allocation(target) == 12345
+    manager.set_last_backup_allocation(target, "vda", 12345)
+    assert manager.get_last_backup_allocation(target, "vda") == 12345
 
     # Clear it.
-    result = manager.clear_last_backup_allocation(target)
+    result = manager.clear_last_backup_allocation(target, "vda")
     assert result is True
 
     # Verify it's gone (get_last_backup_allocation returns None).
-    assert manager.get_last_backup_allocation(target) is None
+    assert manager.get_last_backup_allocation(target, "vda") is None
 
-    # Verify the dict entry is truly removed, not just set to None.
-    assert target not in manager._target_state
+    # Verify the disk key is removed from the target entry.
+    assert target in manager._target_state
+    assert not manager._target_state[target]
 
 
 # ── reset_vm_state tests ───────────────────────────────────────────────
@@ -1390,20 +1394,20 @@ def test_reset_vm_state_clears_last_allocation(tmp_path: Path) -> None:
     """After reset_vm_state, get_last_allocation returns None."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_allocation("testvm", 4096)
-    assert manager.get_last_allocation("testvm") == 4096
+    manager.set_last_allocation("testvm", "vda", 4096)
+    assert manager.get_last_allocation("testvm", "vda") == 4096
 
     manager.reset_vm_state("testvm")
 
-    assert manager.get_last_allocation("testvm") is None
+    assert manager.get_last_allocation("testvm", "vda") is None
 
 
 def test_reset_vm_state_clears_deferred_operations(tmp_path: Path) -> None:
     """After reset_vm_state, get_deferred_operations returns an empty list."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("testvm", ["snap1.qcow2"], "apparmor")
-    manager.add_deferred_blockcommit("testvm", ["snap2.qcow2"], "vm_running")
+    manager.add_deferred_blockcommit("testvm", "vda", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("testvm", "vda", ["snap2.qcow2"], "vm_running")
 
     assert len(manager.get_deferred_operations("testvm")) == 2
 
@@ -1428,7 +1432,7 @@ def test_reset_vm_state_saves_atomically(tmp_path: Path) -> None:
     """After reset_vm_state, the state file exists on disk and no .tmp file lingers."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.set_last_allocation("testvm", 4096)
+    manager.set_last_allocation("testvm", "vda", 4096)
     manager.record_snapshot(
         "testvm", _make_snapshot("snap1", datetime(2024, 1, 1, 12, 0, 0))
     )
@@ -1448,7 +1452,7 @@ def test_reset_vm_state_saves_atomically(tmp_path: Path) -> None:
     with open(state_file, encoding="utf-8") as fh:
         data = json.load(fh)
     assert data["snapshots"] == []
-    assert data["last_allocation"] is None
+    assert data["last_allocation"] == {}
     assert data["deferred_operations"] == []
 
 
@@ -1460,8 +1464,8 @@ def test_reset_target_state_removes_from_full_backups(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0))
-    manager.record_full_backup(target, "full-2024-02-01", datetime(2024, 2, 1, 12, 0, 0))
+    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0), "vda")
+    manager.record_full_backup(target, "full-2024-02-01", datetime(2024, 2, 1, 12, 0, 0), "vda")
 
     assert len(manager.get_full_backups(target)) == 2
 
@@ -1490,13 +1494,13 @@ def test_reset_target_state_removes_from_target_state(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    manager.set_last_backup_allocation(target, 12345)
+    manager.set_last_backup_allocation(target, "vda", 12345)
 
-    assert manager.get_last_backup_allocation(target) == 12345
+    assert manager.get_last_backup_allocation(target, "vda") == 12345
 
     manager.reset_target_state(target)
 
-    assert manager.get_last_backup_allocation(target) is None
+    assert manager.get_last_backup_allocation(target, "vda") is None
 
 
 def test_reset_target_state_nonexistent_target_no_error(tmp_path: Path) -> None:
@@ -1509,7 +1513,7 @@ def test_reset_target_state_nonexistent_target_no_error(tmp_path: Path) -> None:
     # No error raised, state files still empty/absent.
     assert manager.get_full_backups("/nonexistent/target") == []
     assert manager.get_incremental_dependencies("/nonexistent/target", "any") == []
-    assert manager.get_last_backup_allocation("/nonexistent/target") is None
+    assert manager.get_last_backup_allocation("/nonexistent/target", "vda") is None
 
 
 def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
@@ -1517,9 +1521,9 @@ def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0))
+    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0), "vda")
     manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
-    manager.set_last_backup_allocation(target, 12345)
+    manager.set_last_backup_allocation(target, "vda", 12345)
 
     # Verify all three state files exist before reset.
     full_backups_file = tmp_path / "_full_backups.json"
@@ -1556,3 +1560,253 @@ def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
     with open(target_state_file, encoding="utf-8") as fh:
         ts_data = json.load(fh)
     assert target not in ts_data
+
+
+# ── State migration: legacy records without disk field ─────────────────
+
+
+def test_snapshot_migration_no_disk_vdb_from_name(tmp_path: Path) -> None:
+    """Legacy snapshot record lacking ``disk`` key recovers disk from name.
+
+    A snapshot named ``testvm.20250101T000000_vdb_a1b2c3.qcow2`` lacking
+    a ``disk`` field should load with ``disk="vdb"`` after migration.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "name": "testvm.20250101T000000_vdb_a1b2c3.qcow2",
+                        "path": "/snaps/testvm.20250101T000000_vdb_a1b2c3.qcow2",
+                        "timestamp": "2025-01-01T00:00:00",
+                        "allocation": 1024,
+                        # No "disk" key — legacy.
+                    },
+                ],
+                "last_allocation": {"vdb": 4096},
+                "deferred_operations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    snapshots = manager.get_snapshots("testvm")
+
+    assert len(snapshots) == 1
+    assert snapshots[0].name == "testvm.20250101T000000_vdb_a1b2c3.qcow2"
+    assert snapshots[0].disk == "vdb", (
+        f"Expected disk='vdb' recovered from name, got {snapshots[0].disk!r}"
+    )
+
+
+def test_snapshot_migration_no_disk_fallback_vda(tmp_path: Path) -> None:
+    """Legacy snapshot record with unparseable name falls back to disk='vda'.
+
+    A snapshot named ``unparseable.qcow2`` (no timestamp/disk embedded)
+    lacking a ``disk`` field should load with ``disk="vda"`` (the
+    ``_LEGACY_FALLBACK_DISK`` constant).
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "name": "unparseable.qcow2",
+                        "path": "/snaps/unparseable.qcow2",
+                        "timestamp": "2025-01-01T00:00:00",
+                        "allocation": 1024,
+                        # No "disk" key — legacy, name not parseable.
+                    },
+                ],
+                "last_allocation": {"vda": 4096},
+                "deferred_operations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    snapshots = manager.get_snapshots("testvm")
+
+    assert len(snapshots) == 1
+    assert snapshots[0].name == "unparseable.qcow2"
+    assert snapshots[0].disk == "vda", (
+        f"Expected fallback disk='vda', got {snapshots[0].disk!r}"
+    )
+
+
+def test_deferred_migration_no_disk_recovered_from_first_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Legacy deferred_operations record lacking ``disk`` key recovers disk
+    from the first snapshot name.
+
+    The entry has snapshots ``["testvm.20250101T000000_vdc_aaa111.qcow2"]``
+    but no ``disk`` field.  After migration, ``disk`` should be ``"vdc"``.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [],
+                "last_allocation": {},
+                "deferred_operations": [
+                    {
+                        "snapshots": ["testvm.20250101T000000_vdc_aaa111.qcow2"],
+                        "reason": "apparmor",
+                        "since": "2025-01-01T00:00:00",
+                        # No "disk" key — legacy.
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    ops = manager.get_deferred_operations("testvm")
+
+    assert len(ops) == 1
+    assert ops[0].snapshots == ["testvm.20250101T000000_vdc_aaa111.qcow2"]
+    assert ops[0].reason == "apparmor"
+    assert ops[0].disk == "vdc", (
+        f"Expected disk='vdc' recovered from first snapshot name, got {ops[0].disk!r}"
+    )
+
+
+def test_deferred_migration_no_disk_unparseable_fallback_vda(
+    tmp_path: Path,
+) -> None:
+    """Legacy deferred_operations record with no ``disk`` key and
+    unparseable snapshot names falls back to ``disk="vda"``.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [],
+                "last_allocation": {},
+                "deferred_operations": [
+                    {
+                        "snapshots": ["unparseable.qcow2"],
+                        "reason": "selinux",
+                        "since": "2025-01-01T00:00:00",
+                        # No "disk" key — legacy, name not parseable.
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    ops = manager.get_deferred_operations("testvm")
+
+    assert len(ops) == 1
+    assert ops[0].disk == "vda", (
+        f"Expected fallback disk='vda', got {ops[0].disk!r}"
+    )
+
+
+def test_deferred_migration_no_disk_empty_snapshots_fallback_vda(
+    tmp_path: Path,
+) -> None:
+    """Legacy deferred_operations record with no ``disk`` key and empty
+    snapshots list falls back to ``disk="vda"``.
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [],
+                "last_allocation": {},
+                "deferred_operations": [
+                    {
+                        "snapshots": [],
+                        "reason": "vm_running",
+                        "since": "2025-01-01T00:00:00",
+                        # No "disk" key — legacy, empty snapshots.
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+    ops = manager.get_deferred_operations("testvm")
+
+    assert len(ops) == 1
+    assert ops[0].disk == "vda", (
+        f"Expected fallback disk='vda' for empty snapshots, got {ops[0].disk!r}"
+    )
+
+
+def test_full_backup_migration_no_disk_vdb_from_name(tmp_path: Path) -> None:
+    """Legacy full backup entry lacking ``disk`` key recovers disk from name.
+
+    A FULL backup named ``vm.20250101T000000_vdb_aaa111.qcow2`` with no
+    ``disk`` field loads with ``disk="vdb"`` after migration.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(
+        json.dumps(
+            {
+                "/mnt/backup/testvm": [
+                    {
+                        "name": "vm.20250101T000000_vdb_aaa111.qcow2",
+                        "path": "/mnt/backup/testvm/vm.20250101T000000_vdb_aaa111.qcow2",
+                        "timestamp": "2025-01-01T00:00:00",
+                        # No "disk" key — legacy.
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+
+    assert len(backups) == 1
+    assert backups[0].name == "vm.20250101T000000_vdb_aaa111.qcow2"
+    assert backups[0].disk == "vdb", (
+        f"Expected disk='vdb' recovered from name, got {backups[0].disk!r}"
+    )
+
+
+def test_full_backup_migration_no_disk_unparseable_fallback_vda(
+    tmp_path: Path,
+) -> None:
+    """Legacy full backup entry with unparseable name falls back to ``disk="vda"``."""
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(
+        json.dumps(
+            {
+                "/mnt/backup/testvm": [
+                    {
+                        "name": "old-backup-2024",
+                        "path": "/mnt/backup/testvm/old-backup-2024",
+                        "timestamp": "2024-01-01T00:00:00",
+                        # No "disk" key — legacy, name not parseable.
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups("/mnt/backup/testvm")
+
+    assert len(backups) == 1
+    assert backups[0].disk == "vda", (
+        f"Expected fallback disk='vda', got {backups[0].disk!r}"
+    )

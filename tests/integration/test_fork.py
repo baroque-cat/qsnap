@@ -34,6 +34,7 @@ def _make_snapshot(
         path=Path(path),
         timestamp=timestamp,
         allocation=allocation,
+        disk="vda",
     )
 
 
@@ -246,7 +247,8 @@ def test_fork_from_incremental_flattens_chain(
 
     # Record FULL + 2 incrementals in state
     mock_state.record_full_backup(
-        target_path, full_name, datetime(2025, 7, 13, 8, 0)
+        target_path, full_name, datetime(2025, 7, 13, 8, 0),
+        disk="vda",
     )
     mock_state.record_incremental_dependency(target_path, inc1_name, full_name)
     mock_state.record_incremental_dependency(target_path, inc2_name, full_name)
@@ -257,6 +259,7 @@ def test_fork_from_incremental_flattens_chain(
         path=target.path / f"{inc2_name}.qcow2",
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=524288,
+        disk="vda",
     )
 
     _setup_fork_shell(mock_shell)

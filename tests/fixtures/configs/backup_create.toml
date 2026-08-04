@@ -12,8 +12,11 @@ backup_create = "onchange"
 
 [[vm]]
 name = "vm_inherit"
-base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_inherit"
@@ -21,9 +24,12 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
 
 [[vm]]
 name = "vm_override"
-base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
 backup_create = "always"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_override_inherit"
@@ -36,8 +42,11 @@ backup_create = "always"
 
 [[vm]]
 name = "vm_no_override"
-base_image = "/var/lib/libvirt/images/vm_no_override.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_override"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_no_override.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_no_override"

@@ -10,8 +10,11 @@ target_preserve = "48h 14d 8w 12m 1y"
 
 [[vm]]
 name = "vm_deprecated"
-base_image = "/var/lib/libvirt/images/vm_deprecated.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_deprecated"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_deprecated.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_deprecated"
@@ -22,8 +25,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_deprecated"
 
 [[vm]]
 name = "vm_full_every_only"
-base_image = "/var/lib/libvirt/images/vm_full_every_only.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_full_every_only"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_full_every_only.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_full_every_only"

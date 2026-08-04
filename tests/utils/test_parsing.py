@@ -1,9 +1,9 @@
 """Unit tests for shared parsing utilities in qsnap.utils.parsing.
 
-Tests cover ``parse_domblklist_path``, ``parse_domblklist_target``,
-``parse_domblklist_disks``, and ``parse_timestamp``.  All functions are
-pure — no I/O except ``parse_timestamp`` which reads file metadata
-(``stat().st_mtime``) as a fallback.
+Tests cover ``parse_domblklist_path_map``, ``parse_domblklist_path_for_disk``,
+``parse_disk_from_snapshot_name``, ``parse_domblklist_disks``, and
+``parse_timestamp``.  All functions are pure -- no I/O except ``parse_timestamp``
+which reads file metadata (``stat().st_mtime``) as a fallback.
 """
 
 from __future__ import annotations
@@ -14,57 +14,106 @@ from pathlib import Path
 import pytest
 
 from qsnap.utils.parsing import (
+    parse_disk_from_snapshot_name,
     parse_domblklist_disks,
-    parse_domblklist_path,
-    parse_domblklist_target,
+    parse_domblklist_path_for_disk,
+    parse_domblklist_path_map,
     parse_timestamp,
 )
 
-# ── parse_domblklist_path ──────────────────────────────────────────────────
+# ── parse_domblklist_path_map ────────────────────────────────────────────────
 
 
-def test_parse_domblklist_path_one_disk():
-    """Standard domblklist output with vda returns the source path."""
+def test_parse_domblklist_path_map_one_disk():
+    """Standard domblklist output with vda returns a dict mapping target to source path."""
     stdout = (
         " Target   Source\n"
         "------------------------------------\n"
         " vda      /var/lib/libvirt/images/testvm.qcow2\n"
     )
-    result = parse_domblklist_path(stdout)
-    assert result == "/var/lib/libvirt/images/testvm.qcow2"
+    result = parse_domblklist_path_map(stdout)
+    assert result == {"vda": "/var/lib/libvirt/images/testvm.qcow2"}
 
 
-def test_parse_domblklist_path_multiple_lines_skips_header():
-    """Multiple data lines — header and separator are skipped, returns
-    the path of the first data row."""
+def test_parse_domblklist_path_map_multiple_disks():
+    """Multiple data lines -- returns a dict mapping all target -> source pairs."""
     stdout = (
         " Target   Source\n"
         "------------------------------------\n"
         " vda      /var/lib/libvirt/images/testvm.qcow2\n"
         " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
     )
-    result = parse_domblklist_path(stdout)
-    assert result == "/var/lib/libvirt/images/testvm.qcow2"
+    result = parse_domblklist_path_map(stdout)
+    assert result == {
+        "vda": "/var/lib/libvirt/images/testvm.qcow2",
+        "vdb": "/var/lib/libvirt/images/testvm-disk2.qcow2",
+    }
 
 
-def test_parse_domblklist_path_empty_raises_value_error():
-    """Empty output raises ValueError."""
-    with pytest.raises(ValueError, match="no data rows"):
-        parse_domblklist_path("")
+def test_parse_domblklist_path_map_empty():
+    """Empty output returns an empty dict."""
+    result = parse_domblklist_path_map("")
+    assert result == {}
 
 
-# ── parse_domblklist_target ────────────────────────────────────────────────
+# ── parse_domblklist_path_for_disk ───────────────────────────────────────────
 
 
-def test_parse_domblklist_target_returns_target_name():
-    """Returns the first column (target device name, e.g. 'vda')."""
+def test_parse_domblklist_path_for_disk_finds_target():
+    """Finds the source path for a specific disk target."""
+    stdout = (
+        " Target   Source\n"
+        "------------------------------------\n"
+        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
+        " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
+    )
+    result = parse_domblklist_path_for_disk(stdout, "vdb")
+    assert result == "/var/lib/libvirt/images/testvm-disk2.qcow2"
+
+
+def test_parse_domblklist_path_for_disk_missing_raises_value_error():
+    """Raises ValueError when the requested disk target is not in the output."""
     stdout = (
         " Target   Source\n"
         "------------------------------------\n"
         " vda      /var/lib/libvirt/images/testvm.qcow2\n"
     )
-    result = parse_domblklist_target(stdout)
+    with pytest.raises(ValueError, match="no row for disk 'vdb'"):
+        parse_domblklist_path_for_disk(stdout, "vdb")
+
+
+# ── parse_disk_from_snapshot_name ────────────────────────────────────────────
+
+
+def test_parse_disk_from_snapshot_name_vda():
+    """Extracts vda from a single-disk snapshot name."""
+    result = parse_disk_from_snapshot_name("testvm.20250713T153123_vda_a1b2c3.qcow2")
     assert result == "vda"
+
+
+def test_parse_disk_from_snapshot_name_vdb():
+    """Extracts vdb from a multi-disk snapshot name."""
+    result = parse_disk_from_snapshot_name("testvm.20250713T153123_vdb_123abc.qcow2")
+    assert result == "vdb"
+
+
+def test_parse_disk_from_snapshot_name_no_disk_returns_none():
+    """Returns None when the name has no recognizable disk segment."""
+    # VM name with dots but no _{disk}_ pattern
+    result = parse_disk_from_snapshot_name("3.Projects_opencode.20250713T153123_a1b2c3.qcow2")
+    assert result is None
+
+
+def test_parse_disk_from_snapshot_name_full_backup():
+    """Returns None for a FULL backup name (has hex but no disk segment)."""
+    result = parse_disk_from_snapshot_name("testvm.FULL.20250713T153123_a1b2c3.qcow2")
+    assert result is None
+
+
+def test_parse_disk_from_snapshot_name_no_timestamp():
+    """Returns None when there is no timestamp pattern at all."""
+    result = parse_disk_from_snapshot_name("some_random_name.qcow2")
+    assert result is None
 
 
 # ── parse_domblklist_disks ─────────────────────────────────────────────────
@@ -89,7 +138,7 @@ def test_parse_domblklist_disks_returns_all_disks():
 
 
 def test_parse_timestamp_unified_format_from_filename_with_disk_suffix():
-    """Parse ``vm.20250101T120000_vda`` → datetime(2025, 1, 1, 12, 0, 0)."""
+    """Parse ``vm.20250101T120000_vda`` -> datetime(2025, 1, 1, 12, 0, 0)."""
     result = parse_timestamp(
         "vm.20250101T120000_vda", Path("/fake/path/qsnap_vm.20250101T120000_vda.qcow2")
     )

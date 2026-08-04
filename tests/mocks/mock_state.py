@@ -30,21 +30,27 @@ class InMemoryStateManager(IStateManager):
         self._state: dict[str, dict[str, object]] = {}
         self._full_backups: dict[str, list[FullBackupInfo]] = {}
         self._dependencies: dict[str, dict[str, list[str]]] = {}
-        self._target_state: dict[str, int] = {}
+        self._target_state: dict[str, dict[str, int]] = {}
 
-    def get_last_allocation(self, vm_name: str) -> int | None:
+    def get_last_allocation(self, vm_name: str, disk: str) -> int | None:
         vm_state = self._state.get(vm_name)
         if vm_state is None:
             return None
         value = vm_state.get("last_allocation")
-        if value is None:
+        if not isinstance(value, dict):
             return None
-        return int(value)  # type: ignore[arg-type]
+        disk_value = value.get(disk)
+        if disk_value is None:
+            return None
+        return int(disk_value)  # type: ignore[arg-type]
 
-    def set_last_allocation(self, vm_name: str, alloc: int) -> None:
+    def set_last_allocation(self, vm_name: str, disk: str, alloc: int) -> None:
         if vm_name not in self._state:
             self._state[vm_name] = {}
-        self._state[vm_name]["last_allocation"] = alloc
+        existing = self._state[vm_name].get("last_allocation")
+        per_disk: dict[str, int] = existing if isinstance(existing, dict) else {}
+        per_disk[disk] = alloc
+        self._state[vm_name]["last_allocation"] = per_disk
 
     def record_snapshot(self, vm_name: str, info: SnapshotInfo) -> None:
         if vm_name not in self._state:
@@ -81,7 +87,9 @@ class InMemoryStateManager(IStateManager):
             return []
         return list(deferred)  # type: ignore[return-value]
 
-    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
+    def add_deferred_blockcommit(
+        self, vm_name: str, disk: str, snapshots: list[str], reason: str
+    ) -> None:
         if vm_name not in self._state:
             self._state[vm_name] = {}
         deferred = self._state[vm_name].setdefault("deferred_operations", [])
@@ -90,6 +98,7 @@ class InMemoryStateManager(IStateManager):
                 snapshots=list(snapshots),
                 reason=reason,
                 since=datetime.now(),
+                disk=disk,
             )
         )
 
@@ -111,6 +120,7 @@ class InMemoryStateManager(IStateManager):
                     snapshots=item.snapshots,
                     reason=item.reason,
                     since=item.since,
+                    disk=item.disk,
                     last_warned_at=timestamp,
                 )
 
@@ -122,8 +132,10 @@ class InMemoryStateManager(IStateManager):
             return None
         return entries[-1]
 
-    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
-        self.record_full_backup(target_path, name, timestamp)
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime, disk: str
+    ) -> None:
+        self.record_full_backup(target_path, name, timestamp, disk)
 
     def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
         return list(self._full_backups.get(target_path, []))
@@ -133,6 +145,7 @@ class InMemoryStateManager(IStateManager):
         target_path: str,
         name: str,
         timestamp: datetime,
+        disk: str,
     ) -> None:
         from pathlib import Path
 
@@ -142,6 +155,7 @@ class InMemoryStateManager(IStateManager):
                 name=name,
                 path=Path(target_path) / name,
                 timestamp=timestamp,
+                disk=disk,
             )
         )
 
@@ -186,23 +200,28 @@ class InMemoryStateManager(IStateManager):
 
     # ── Per-target backup allocation tracking ─────────────────────────
 
-    def get_last_backup_allocation(self, target_path: str) -> int | None:
-        """Return the last backup allocation for *target_path*, or None."""
-        return self._target_state.get(target_path)
+    def get_last_backup_allocation(self, target_path: str, disk: str) -> int | None:
+        """Return the last backup allocation for *target_path*/*disk*."""
+        entry = self._target_state.get(target_path)
+        if entry is None:
+            return None
+        return entry.get(disk)
 
-    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
-        """Record the last backup allocation for *target_path*."""
-        self._target_state[target_path] = alloc
+    def set_last_backup_allocation(self, target_path: str, disk: str, alloc: int) -> None:
+        """Record the last backup allocation for *target_path*/*disk*."""
+        entry = self._target_state.setdefault(target_path, {})
+        entry[disk] = alloc
 
-    def clear_last_backup_allocation(self, target_path: str) -> bool:
-        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+    def clear_last_backup_allocation(self, target_path: str, disk: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*/*disk*.
 
         Returns ``True`` if an entry was found and removed, ``False``
         if no matching entry existed.
         """
-        if target_path not in self._target_state:
+        entry = self._target_state.get(target_path)
+        if entry is None or disk not in entry:
             return False
-        del self._target_state[target_path]
+        del entry[disk]
         return True
 
     def remove_all_incremental_dependencies(
@@ -231,7 +250,7 @@ class InMemoryStateManager(IStateManager):
         if vm_state is None:
             return
         vm_state["snapshots"] = []
-        vm_state["last_allocation"] = None
+        vm_state["last_allocation"] = {}
         vm_state["deferred_operations"] = []
 
     def reset_target_state(self, target_path: str) -> None:

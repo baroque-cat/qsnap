@@ -99,9 +99,12 @@ def e2e_vm():
         f'name = "{vm_name}"\n'
         f'snapshot_dir = "{snapshot_dir}"\n'
         f"\n"
+        f"  [[vm.disk]]\n"
+        f'  target = "vda"\n'
+        f'  base_image = "{base_image}"\n'
+        f"\n"
         f"  [[vm.target]]\n"
         f'  path = "{target_dir}"\n'
-        f"  incremental = true\n"
     )
 
     try:

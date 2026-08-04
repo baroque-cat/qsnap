@@ -8,8 +8,11 @@ target_keep_generations = 2
 
 [[vm]]
 name = "vm_with_full"
-base_image = "/var/lib/libvirt/images/vm_with_full.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_with_full"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_with_full.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_with_full"
@@ -20,8 +23,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_with_full"
 
 [[vm]]
 name = "vm_no_full"
-base_image = "/var/lib/libvirt/images/vm_no_full.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_full"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_no_full.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_no_full"

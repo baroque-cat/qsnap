@@ -45,7 +45,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -130,7 +130,7 @@ def _create_external_snapshot(
     """
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     result = provider.create(vm_config, snap_name, "vda", snap_path)
     assert result.success, f"Snapshot creation failed: {result.error}"
     info = SnapshotInfo(
@@ -138,6 +138,7 @@ def _create_external_snapshot(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
     return info, snap_path
 
@@ -319,7 +320,7 @@ def test_refresh_after_offline_commit(test_vm):
 
     # Step 6: Call _refresh_domain_backing_store().
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     core = _build_core(shell, vm_config, state, tmpdir)
     core._refresh_domain_backing_store(vm_config)
 
@@ -402,7 +403,7 @@ def test_refresh_strips_all_backing_store(test_vm):
 
     # Call _refresh_domain_backing_store() — must not raise.
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     core = _build_core(shell, vm_config, state, tmpdir)
     core._refresh_domain_backing_store(vm_config)
 
@@ -463,7 +464,7 @@ def test_refresh_idempotent(test_vm):
     )
 
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     core = _build_core(shell, vm_config, state, tmpdir)
 
     # First call: strips <backingStore> and runs virsh define.
@@ -515,7 +516,7 @@ def test_refresh_failure_non_fatal(test_vm, caplog):
 
     # Use a non-existent VM name — virsh dumpxml will fail.
     nonexistent_vm = "qsnap-nonexistent-vm-xyz123"
-    vm_config = VMConfig(name=nonexistent_vm, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=nonexistent_vm, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     state = InMemoryStateManager()
     core = _build_core(shell, vm_config, state, tmpdir)

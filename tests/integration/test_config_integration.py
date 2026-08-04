@@ -41,8 +41,11 @@ def test_int_bitmap_hash_preserved(caplog: pytest.LogCaptureFixture):
     toml_content = """\
 [[vm]]
 name = "test-vm-int"
-base_image = "/var/lib/libvirt/images/test-vm.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/test-vm"
+
+[[vm.disk]]
+target = "vda"
+base_image = "/var/lib/libvirt/images/test-vm.qcow2"
 
 [[vm.target]]
 path = "/mnt/backup/test-vm"

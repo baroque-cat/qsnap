@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core
+from qsnap.models.config import DiskConfig
 from qsnap.models.results import (
     CommitResult,
     RetentionResult,
@@ -39,6 +40,8 @@ def _add_snapshot(state, vm_name: str, name: str, path: str | None = None) -> No
             path=Path(path or f"/tmp/{name}.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
+        
+            disk="vda",
         ),
     )
 
@@ -79,7 +82,7 @@ def test_deferred_blockcommits_executed_on_shutoff_vm(
     mock_shell,
 ):
     """Deferred ops exist + VM shut off → blockcommit executed, queue cleared."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -90,7 +93,7 @@ def test_deferred_blockcommits_executed_on_shutoff_vm(
 
     # Pre-populate state with a deferred blockcommit and matching snapshot.
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
     # domblklist returns a DIFFERENT source — snap1 is NOT the tip → committable
     _set_domblklist(mock_shell, "/tmp/other.qcow2")
@@ -127,7 +130,7 @@ def test_deferred_blockcommits_skipped_on_running_vm(
     current active layer (domblklist source == snapshot path), so it is
     not committable while running — the entry stays in the queue.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -138,7 +141,7 @@ def test_deferred_blockcommits_skipped_on_running_vm(
 
     # Pre-populate state with a deferred blockcommit AND matching snapshot.
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "running")
     # domblklist returns the same path → snap1 IS the active layer
     _set_domblklist(mock_shell, "/tmp/snap1.qcow2")
@@ -174,7 +177,7 @@ def test_deferred_blockcommit_fails_on_retry_remains_queued(
     caplog,
 ):
     """Deferred blockcommit still fails on retry → stays in queue."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -185,7 +188,7 @@ def test_deferred_blockcommit_fails_on_retry_remains_queued(
 
     # Pre-populate state with a deferred blockcommit and matching snapshot.
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
     # domblklist returns a DIFFERENT source — snap1 is NOT the tip → committable
     _set_domblklist(mock_shell, "/tmp/other.qcow2")
@@ -236,7 +239,7 @@ def test_risk_deferred_accumulation_logs_warning(
     This test verifies that at least one warning is logged when deferred
     operations fail on retry.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -248,8 +251,8 @@ def test_risk_deferred_accumulation_logs_warning(
     # Pre-populate state with two deferred entries and matching snapshots.
     _add_snapshot(mock_state, "testvm", "snap1")
     _add_snapshot(mock_state, "testvm", "snap2")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
-    mock_state.add_deferred_blockcommit("testvm", ["snap2"], "selinux")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap2"], "selinux")
     _set_vm_state(mock_shell, "shut off")
     # domblklist returns a DIFFERENT source — both snap1 and snap2 are committable
     _set_domblklist(mock_shell, "/tmp/other.qcow2")
@@ -293,7 +296,7 @@ def test_risk_deferred_count_visible_in_list(
     the list of pending deferred blockcommits.  ``list_snapshots`` must
     still return correct snapshot data even when deferred operations exist.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -305,8 +308,8 @@ def test_risk_deferred_count_visible_in_list(
     # Pre-populate state with snapshots and deferred operations.
     _add_snapshot(mock_state, "testvm", "snap1")
     _add_snapshot(mock_state, "testvm", "snap2")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
-    mock_state.add_deferred_blockcommit("testvm", ["snap2"], "selinux")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap2"], "selinux")
 
     # Deferred count is accessible via state manager.
     deferred = mock_state.get_deferred_operations("testvm")
@@ -342,7 +345,7 @@ def test_risk_deferred_queue_grows_across_runs(
     """
     vm = make_vm_config(
         name="testvm",
-        disks=["vda"],
+
         snapshot_chain_length=24,
     )
     config = MockConfigFacade(vms=[vm])
@@ -424,7 +427,7 @@ def test_deferred_count_below_warn_silent(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -434,7 +437,7 @@ def test_deferred_count_below_warn_silent(
     )
 
     for i in range(4):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     caplog.set_level(logging.WARNING)
     core._check_deferred_thresholds()
@@ -462,7 +465,7 @@ def test_deferred_count_meets_warn_threshold(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -472,7 +475,7 @@ def test_deferred_count_meets_warn_threshold(
     )
 
     for i in range(5):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     caplog.set_level(logging.WARNING)
     core._check_deferred_thresholds()
@@ -498,7 +501,7 @@ def test_deferred_count_meets_crit_threshold(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -508,7 +511,7 @@ def test_deferred_count_meets_crit_threshold(
     )
 
     for i in range(10):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     caplog.set_level(logging.CRITICAL)
     core._check_deferred_thresholds()
@@ -535,7 +538,7 @@ def test_deferred_age_meets_warn_threshold(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -546,7 +549,7 @@ def test_deferred_age_meets_warn_threshold(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=7)
-    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", "vda", ["snap1"], "apparmor", since)
 
     caplog.set_level(logging.WARNING)
     with frozen_clock(frozen_dt):
@@ -574,7 +577,7 @@ def test_deferred_age_meets_crit_threshold(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -585,7 +588,7 @@ def test_deferred_age_meets_crit_threshold(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=14)
-    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", "vda", ["snap1"], "apparmor", since)
 
     caplog.set_level(logging.CRITICAL)
     with frozen_clock(frozen_dt):
@@ -618,7 +621,7 @@ def test_threshold_check_exit_code_unchanged(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="qemu-img")
+    vm = make_vm_config(name="testvm", lifecycle_mode="qemu-img")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -630,7 +633,7 @@ def test_threshold_check_exit_code_unchanged(
     for i in range(10):
         # Add a matching snapshot so the deferred entry is not stale.
         _add_snapshot(mock_state, "testvm", f"snap{i}")
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     # VM is running → in qemu-img mode everything is skipped.
     _set_vm_state(mock_shell, "running")
@@ -662,7 +665,7 @@ def test_deferred_status_ok_below_thresholds(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -672,7 +675,7 @@ def test_deferred_status_ok_below_thresholds(
     )
 
     for i in range(4):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     result = core.check()
 
@@ -697,7 +700,7 @@ def test_deferred_status_warning_count(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -707,7 +710,7 @@ def test_deferred_status_warning_count(
     )
 
     for i in range(5):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     result = core.check()
 
@@ -733,7 +736,7 @@ def test_deferred_status_critical_age(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -744,7 +747,7 @@ def test_deferred_status_critical_age(
 
     frozen_dt = datetime(2025, 7, 13, 15, 31)
     since = frozen_dt - timedelta(days=14)
-    add_deferred_with_since(mock_state, "testvm", ["snap1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", "vda", ["snap1"], "apparmor", since)
 
     with frozen_clock(frozen_dt):
         result = core.check()
@@ -771,7 +774,7 @@ def test_deferred_threshold_warning_logged(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -781,7 +784,7 @@ def test_deferred_threshold_warning_logged(
     )
 
     for i in range(5):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "apparmor")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
 
     caplog.set_level(logging.WARNING)
     core._check_deferred_thresholds()
@@ -812,7 +815,7 @@ def test_deferred_threshold_critical_logged(
         deferred_warn_age="7d",
         deferred_crit_age="14d",
     )
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_config, vms=[vm])
     core = Core(
         config=config,
@@ -822,7 +825,7 @@ def test_deferred_threshold_critical_logged(
     )
 
     for i in range(10):
-        mock_state.add_deferred_blockcommit("testvm", [f"snap{i}"], "selinux")
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "selinux")
 
     caplog.set_level(logging.CRITICAL)
     core._check_deferred_thresholds()
@@ -852,7 +855,7 @@ def test_drain_shutoff_uses_qemu_img_executor(
 
     After a successful drain the queue is empty.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -862,7 +865,7 @@ def test_drain_shutoff_uses_qemu_img_executor(
     )
 
     _add_snapshot(mock_state, "testvm", "s1")
-    mock_state.add_deferred_blockcommit("testvm", ["s1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["s1"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
     # domblklist points to a DIFFERENT path → s1 is NOT the tip
     _set_domblklist(mock_shell, "/tmp/other.qcow2")
@@ -898,7 +901,7 @@ def test_drain_shutoff_tip_remainder_requeued(
     s1 committed (mode qemu-img) and removed from state.  Queue has ONE
     entry with snapshots==["s2"] and the ORIGINAL reason ("apparmor").
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -909,7 +912,7 @@ def test_drain_shutoff_tip_remainder_requeued(
 
     _add_snapshot(mock_state, "testvm", "s1")
     _add_snapshot(mock_state, "testvm", "s2")
-    mock_state.add_deferred_blockcommit("testvm", ["s1", "s2"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["s1", "s2"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
     # domblklist returns s2's path → s2 IS the tip, s1 is below it
     _set_domblklist(mock_shell, "/tmp/s2.qcow2")
@@ -939,7 +942,7 @@ def test_drain_running_virsh_mode_commits_non_active(
 
     Formerly-active snapshots become committable; entry removed from queue.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="virsh")
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -949,7 +952,7 @@ def test_drain_running_virsh_mode_commits_non_active(
     )
 
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "running")
     # domblklist returns a DIFFERENT (newer) file → snap1 is below active layer
     _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
@@ -993,7 +996,7 @@ def test_drain_running_qemu_img_mode_skips(
 
     Queue is unchanged (entry kept).
     """
-    vm = make_vm_config(name="testvm", disks=["vda"], lifecycle_mode="qemu-img")
+    vm = make_vm_config(name="testvm", lifecycle_mode="qemu-img")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1003,7 +1006,7 @@ def test_drain_running_qemu_img_mode_skips(
     )
 
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "running")
 
     lifecycle_manager = mock_factory._lifecycle_manager
@@ -1037,7 +1040,7 @@ def test_drain_paused_skips(
 
     Tested with both lifecycle_mode="virsh" (default); paused skips in all modes.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1047,7 +1050,7 @@ def test_drain_paused_skips(
     )
 
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
     _set_vm_state(mock_shell, "paused")
 
     caplog.set_level(logging.INFO)
@@ -1080,7 +1083,7 @@ def test_drain_removes_committed_from_state(
     mock_shell,
 ):
     """After a successful drain (shut off), committed names gone from state."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1091,7 +1094,7 @@ def test_drain_removes_committed_from_state(
 
     _add_snapshot(mock_state, "testvm", "snap_a")
     _add_snapshot(mock_state, "testvm", "snap_b")
-    mock_state.add_deferred_blockcommit("testvm", ["snap_a"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap_a"], "apparmor")
     _set_vm_state(mock_shell, "shut off")
     # domblklist points elsewhere → both are committable (only snap_a is in the entry)
     _set_domblklist(mock_shell, "/tmp/other.qcow2")
@@ -1107,4 +1110,221 @@ def test_drain_removes_committed_from_state(
 
     # Queue is empty.
     assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MULTI-DISK — per-disk deferred drain independence
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_multidisk_deferred_drain_per_disk_independence(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """Both disks have deferred entries → drain processes each independently.
+
+    Each entry gets the correct disk's base_image.  Both succeed and the
+    queue is empty afterwards.
+    """
+    vda_base = Path("/var/lib/libvirt/images/testvm_vda.qcow2")
+    vdb_base = Path("/var/lib/libvirt/images/testvm_vdb.qcow2")
+    disks = [
+        DiskConfig(target="vda", base_image=vda_base),
+        DiskConfig(target="vdb", base_image=vdb_base),
+    ]
+    vm = make_vm_config(name="testvm", disks=disks)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with snapshots for both disks
+    for disk, name, path in [
+        ("vda", "vda_s1", "/tmp/vda_s1.qcow2"),
+        ("vdb", "vdb_s1", "/tmp/vdb_s1.qcow2"),
+    ]:
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=name,
+                path=Path(path),
+                timestamp=datetime(2025, 7, 13, 10, 0),
+                allocation=1000,
+                disk=disk,
+            ),
+        )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(days=1)
+
+    # Add deferred entries for both disks
+    add_deferred_with_since(mock_state, "testvm", "vda", ["vda_s1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", "vdb", ["vdb_s1"], "selinux", since)
+
+    # VM shut off → committable via qemu-img
+    _set_vm_state(mock_shell, "shut off")
+    # domblklist returns paths DIFFERENT from the deferred snapshots
+    # (so all are committable)
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                "vda   /tmp/vda_tip.qcow2\n"
+                "vdb   /tmp/vdb_tip.qcow2\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+
+    with (
+        frozen_clock(frozen_dt),
+        patch.object(
+            lifecycle_manager,
+            "blockcommit",
+            wraps=lifecycle_manager.blockcommit,
+        ) as bc_spy,
+    ):
+        core.snapshot()
+
+    # Both entries were drained (blockcommit called twice)
+    assert bc_spy.call_count == 2, (
+        f"Expected 2 blockcommit calls, got {bc_spy.call_count}"
+    )
+
+    # Collect per-disk call details
+    calls_by_disk: dict[str, dict] = {}
+    for call in bc_spy.call_args_list:
+        disk = call.kwargs["disk"]
+        calls_by_disk[disk] = {
+            "snapshots": call[0][1],  # positional arg: snapshots_to_merge
+            "base_image": call.kwargs["base_image"],
+        }
+
+    assert "vda" in calls_by_disk
+    assert "vdb" in calls_by_disk
+
+    # vda: correct base_image, only vda snapshots
+    vda_snap_names = {s.name for s in calls_by_disk["vda"]["snapshots"]}
+    assert vda_snap_names == {"vda_s1"}
+    assert calls_by_disk["vda"]["base_image"] == vda_base
+
+    # vdb: correct base_image, only vdb snapshots
+    vdb_snap_names = {s.name for s in calls_by_disk["vdb"]["snapshots"]}
+    assert vdb_snap_names == {"vdb_s1"}
+    assert calls_by_disk["vdb"]["base_image"] == vdb_base
+
+    # Both entries cleared
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_multidisk_deferred_drain_one_failure_independent(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """vda deferred fails, vdb deferred succeeds → vda re-queued, vdb cleared.
+
+    One disk's failure/re-queue does NOT disturb the other disk's drain.
+    """
+    vda_base = Path("/var/lib/libvirt/images/testvm_vda.qcow2")
+    vdb_base = Path("/var/lib/libvirt/images/testvm_vdb.qcow2")
+    disks = [
+        DiskConfig(target="vda", base_image=vda_base),
+        DiskConfig(target="vdb", base_image=vdb_base),
+    ]
+    vm = make_vm_config(name="testvm", disks=disks)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Pre-populate state with snapshots for both disks
+    for disk, name, path in [
+        ("vda", "vda_s1", "/tmp/vda_s1.qcow2"),
+        ("vdb", "vdb_s1", "/tmp/vdb_s1.qcow2"),
+    ]:
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=name,
+                path=Path(path),
+                timestamp=datetime(2025, 7, 13, 10, 0),
+                allocation=1000,
+                disk=disk,
+            ),
+        )
+
+    frozen_dt = datetime(2025, 7, 13, 15, 31)
+    since = frozen_dt - timedelta(days=1)
+
+    add_deferred_with_since(mock_state, "testvm", "vda", ["vda_s1"], "apparmor", since)
+    add_deferred_with_since(mock_state, "testvm", "vdb", ["vdb_s1"], "selinux", since)
+
+    _set_vm_state(mock_shell, "shut off")
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                "vda   /tmp/vda_tip.qcow2\n"
+                "vdb   /tmp/vdb_tip.qcow2\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+
+    # Make blockcommit fail only for vda
+    original_bc = lifecycle_manager.blockcommit
+
+    def _fail_vda(vm_config, snapshots_to_merge, *, disk, base_image, deep_verify=False):
+        if disk == "vda":
+            return CommitResult(
+                success=False, committed_snapshot="", error="vda commit failed",
+            )
+        return original_bc(
+            vm_config, snapshots_to_merge, disk=disk, base_image=base_image,
+            deep_verify=deep_verify,
+        )
+
+    with (
+        frozen_clock(frozen_dt),
+        patch.object(
+            lifecycle_manager,
+            "blockcommit",
+            side_effect=_fail_vda,
+        ) as bc_spy,
+    ):
+        core.snapshot()
+
+    # Blockcommit was called twice (once per disk entry)
+    assert bc_spy.call_count == 2
+
+    # vdb entry drained (cleared from queue); only vda remains
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].disk == "vda"
+    assert remaining[0].snapshots == ["vda_s1"]
+    assert remaining[0].reason == "apparmor"
 

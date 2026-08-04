@@ -199,7 +199,8 @@ def test_full_backup_compression_modes(test_vm):
     result_none = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0
+            name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0,
+            disk="vda",
         ),
         TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
@@ -218,7 +219,8 @@ def test_full_backup_compression_modes(test_vm):
     result_zstd = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0
+            name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0,
+            disk="vda",
         ),
         TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
@@ -236,7 +238,8 @@ def test_full_backup_compression_modes(test_vm):
     result_zlib = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0
+            name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0,
+            disk="vda",
         ),
         TargetConfig(path=target_dir, compress=True, verify="off"),
         compress=True,
@@ -301,7 +304,8 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0
+            name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0,
+            disk="vda",
         ),
         TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
@@ -372,6 +376,7 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     provider = BitmapBackupProvider(shell)
@@ -475,6 +480,7 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     provider = BitmapBackupProvider(shell)
@@ -554,6 +560,7 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     provider = BitmapBackupProvider(shell)

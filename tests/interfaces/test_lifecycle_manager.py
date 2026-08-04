@@ -13,7 +13,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.interfaces.lifecycle import ILifecycleManager
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
 from qsnap.modules.lifecycle.blockcommit_manager import BlockCommitManager
 from qsnap.modules.lifecycle.qemu_img_commit import QemuImgCommitManager
@@ -78,7 +78,7 @@ def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
     manager = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     snapshots = [
@@ -87,7 +87,8 @@ def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
             path=Path("/tmp/snap.qcow2"),
             timestamp=datetime.now(),
             allocation=65536,
+            disk="vda",
         )
     ]
-    result = manager.blockcommit(vm_config, snapshots, deep_verify=True)
+    result = manager.blockcommit(vm_config, snapshots, disk="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"), deep_verify=True)
     assert isinstance(result, CommitResult)

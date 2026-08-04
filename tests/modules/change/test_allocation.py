@@ -149,7 +149,7 @@ def test_has_changed_allocation_grown(
     detector used the old base_image path, the command would not match and
     the test would fail.
     """
-    mock_state.set_last_allocation("testvm", 65536)
+    mock_state.set_last_allocation("testvm", "vda", 65536)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     # Pattern includes the domblklist path — only matches if D3 is respected
@@ -157,9 +157,9 @@ def test_has_changed_allocation_grown(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
-
+    result = detector.has_changed(vm_config, "vda") 
     assert result == ChangeResult(
+        disk="vda",
         changed=True,
         last_allocation=65536,
         current_allocation=131072,
@@ -185,16 +185,16 @@ def test_has_changed_allocation_unchanged(
     output (``/new/active/path.qcow2``), not ``base_image``
     (``/old/path.qcow2``).
     """
-    mock_state.set_last_allocation("testvm", 65536)
+    mock_state.set_last_allocation("testvm", "vda", 65536)
 
     tracking_shell.expect("virsh domblklist").returns(_ok_domblklist_result())
     tracking_shell.expect("qemu-img info.*new/active/path").returns(_ok_qemu_img_result(65536))
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
-
+    result = detector.has_changed(vm_config, "vda") 
     assert result == ChangeResult(
+        disk="vda",
         changed=False,
         last_allocation=65536,
         current_allocation=65536,
@@ -230,9 +230,9 @@ def test_has_changed_first_run_no_state(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
-
+    result = detector.has_changed(vm_config, "vda") 
     assert result == ChangeResult(
+        disk="vda",
         changed=True,
         last_allocation=0,
         current_allocation=0,
@@ -262,15 +262,15 @@ def test_has_changed_command_fails_failsafe(
     should return ``changed=True`` with ``last_allocation`` preserved
     from state and ``current_allocation=0`` (unknown due to failure).
     """
-    mock_state.set_last_allocation("testvm", 65536)
+    mock_state.set_last_allocation("testvm", "vda", 65536)
 
     tracking_shell.expect("virsh domblklist").returns(_failed_result())
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)
-
+    result = detector.has_changed(vm_config, "vda") 
     assert result == ChangeResult(
+        disk="vda",
         changed=True,
         last_allocation=65536,
         current_allocation=0,
@@ -298,7 +298,7 @@ def test_has_changed_per_disk_vdb_uses_vdb_path(
     domblklist (not vda).  Mock domblklist with both vda and vdb, verify
     ``qemu-img info`` is called on vdb's path.
     """
-    mock_state.set_last_allocation("testvm", 65536)
+    mock_state.set_last_allocation("testvm", "vdb", 65536)
 
     vda_path = "/var/lib/libvirt/images/testvm.qcow2"
     vdb_path = "/var/lib/libvirt/images/testvm-disk2.qcow2"
@@ -322,9 +322,10 @@ def test_has_changed_per_disk_vdb_uses_vdb_path(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config, disk="vdb")
+    result = detector.has_changed(vm_config, "vdb")
 
     assert result == ChangeResult(
+        disk="vdb",
         changed=True,
         last_allocation=65536,
         current_allocation=131072,
@@ -355,7 +356,7 @@ def test_has_changed_no_disk_uses_first_disk_backward_compatible(
     """When ``disk=None`` (default), the detector uses the first disk from
     domblklist (backward compatible with pre-per-disk behaviour).
     """
-    mock_state.set_last_allocation("testvm", 65536)
+    mock_state.set_last_allocation("testvm", "vda", 65536)
 
     vda_path = "/var/lib/libvirt/images/testvm.qcow2"
     vdb_path = "/var/lib/libvirt/images/testvm-disk2.qcow2"
@@ -379,9 +380,10 @@ def test_has_changed_no_disk_uses_first_disk_backward_compatible(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config)  # disk=None (default)
+    result = detector.has_changed(vm_config, "vda")  # disk=None (default)
 
     assert result == ChangeResult(
+        disk="vda",
         changed=False,
         last_allocation=65536,
         current_allocation=65536,
@@ -434,7 +436,7 @@ def test_state_recovery_triggers_first_run_changed_true(tmp_path, make_vm_config
     manager = JsonStateManager(state_dir=tmp_path)
 
     # Verify corruption recovery: get_last_allocation returns None.
-    assert manager.get_last_allocation("testvm") is None
+    assert manager.get_last_allocation("testvm", "vda") is None
 
     # Feed the recovered state manager to AllocationSizeDetector.
     # Use a MockShell with no expectations — no shell commands should run.
@@ -442,9 +444,9 @@ def test_state_recovery_triggers_first_run_changed_true(tmp_path, make_vm_config
     detector = AllocationSizeDetector(shell=shell, state=manager)
 
     vm_config = make_vm_config(name="testvm")
-    result = detector.has_changed(vm_config)
-
+    result = detector.has_changed(vm_config, "vda") 
     assert result == ChangeResult(
+        disk="vda",
         changed=True,
         last_allocation=0,
         current_allocation=0,

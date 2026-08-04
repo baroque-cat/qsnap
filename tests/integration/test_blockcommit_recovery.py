@@ -29,7 +29,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import RetentionResult
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
@@ -51,7 +51,7 @@ def _build_core(
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=24,
         lifecycle_mode="qemu-img",
@@ -290,7 +290,7 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
     assert "merged" in all_logs.lower(), (
         f"Expected 'merged' in logs for partial blockcommit. Logs: {all_logs[:300]}"
     )
-    assert f"[blockcommit] {vm_name}: merged" in all_logs, (
+    assert f"[blockcommit] {vm_name}/vda: merged" in all_logs, (
         f"Expected blockcommit merge log. Logs: {all_logs[:300]}"
     )
 
@@ -563,7 +563,7 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
     assert "merged" in all_logs.lower(), (
         f"Expected 'merged' in logs for partial blockcommit. Logs: {all_logs[:300]}"
     )
-    assert f"[blockcommit] {vm_name}: merged" in all_logs, (
+    assert f"[blockcommit] {vm_name}/vda: merged" in all_logs, (
         f"Expected blockcommit merge log. Logs: {all_logs[:300]}"
     )
 

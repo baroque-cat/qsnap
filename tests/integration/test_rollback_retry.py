@@ -21,7 +21,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -68,7 +68,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -79,6 +79,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -133,7 +134,7 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
@@ -245,7 +246,7 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     )
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[target],
     )

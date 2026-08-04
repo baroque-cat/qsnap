@@ -21,7 +21,7 @@ from unittest import mock
 import pytest
 
 from qsnap.core import Core
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import is_vm_running
 from tests.mocks.mock_config import MockConfigFacade
@@ -65,7 +65,7 @@ def test_validate_environment_passes_with_libnbd(test_vm) -> None:
     # Create a VMConfig with a target (no incremental_mode kwarg — removed).
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[
             TargetConfig(
@@ -127,7 +127,7 @@ def test_libnbd_missing_hard_failure(test_vm) -> None:
     # Minimal config — no incremental_mode field (removed from TargetConfig).
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[
             TargetConfig(

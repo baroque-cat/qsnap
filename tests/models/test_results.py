@@ -139,6 +139,7 @@ def test_change_result_disk_grown():
         changed=True,
         last_allocation=1024,
         current_allocation=2048,
+        disk="vda",
     )
     assert result.changed is True
     assert result.last_allocation == 1024
@@ -192,7 +193,7 @@ def test_old_json_bucket_level_loaded(tmp_path):
     """
     manager = JsonStateManager(state_dir=tmp_path)
     ts = datetime(2025, 1, 15, 12, 0, 0)
-    manager.record_full_backup("/mnt/backup", "full-backup-20250115.qcow2", ts)
+    manager.record_full_backup("/mnt/backup", "full-backup-20250115.qcow2", ts, "vda")
 
     # Inject a legacy ``bucket_level`` field into the raw JSON.
     fulls_path = tmp_path / "_full_backups.json"
@@ -225,8 +226,8 @@ def test_old_json_bucket_level_read_tolerant(tmp_path):
     ts1 = datetime(2025, 1, 10, 0, 0, 0)
     ts2 = datetime(2025, 2, 10, 0, 0, 0)
 
-    manager.record_full_backup("/mnt/backup", "full-backup-20250110.qcow2", ts1)
-    manager.record_full_backup("/mnt/backup", "full-backup-20250210.qcow2", ts2)
+    manager.record_full_backup("/mnt/backup", "full-backup-20250110.qcow2", ts1, "vda")
+    manager.record_full_backup("/mnt/backup", "full-backup-20250210.qcow2", ts2, "vda")
 
     # Inject legacy bucket_level into both entries.
     fulls_path = tmp_path / "_full_backups.json"
@@ -250,7 +251,7 @@ def test_full_backup_state_saved_retrieved(tmp_path):
     manager = JsonStateManager(state_dir=tmp_path)
     ts = datetime(2025, 6, 1, 12, 0, 0)
 
-    manager.record_full_backup("/mnt/backup", "vm.FULL.20250601.qcow2", ts)
+    manager.record_full_backup("/mnt/backup", "vm.FULL.20250601.qcow2", ts, "vda")
 
     result = manager.get_last_full_backup("/mnt/backup")
     assert result is not None
@@ -270,7 +271,7 @@ def test_full_backup_recorded_and_retrieved(tmp_path):
     manager = JsonStateManager(state_dir=tmp_path)
     ts = datetime(2025, 7, 1, 12, 0, 0)
 
-    manager.record_full_backup("/mnt/backup", "vm.FULL.20250701.qcow2", ts)
+    manager.record_full_backup("/mnt/backup", "vm.FULL.20250701.qcow2", ts, "vda")
 
     backups = manager.get_full_backups("/mnt/backup")
     assert len(backups) == 1
@@ -287,6 +288,7 @@ def test_deferred_blockcommit_defaults_last_warned_at_none():
         snapshots=[],
         reason="test",
         since=datetime.now(),
+        disk="vda",
     )
     assert item.last_warned_at is None
 
@@ -298,6 +300,7 @@ def test_deferred_blockcommit_explicit_last_warned_at():
         snapshots=["snap1.qcow2"],
         reason="apparmor",
         since=datetime(2024, 1, 1, 12, 0, 0),
+        disk="vda",
         last_warned_at=warned,
     )
     assert item.last_warned_at == warned
@@ -515,7 +518,7 @@ def test_chain_verify_result_broken_file_field():
 
     # 3. Verify the exact set of field names.
     field_names = {f.name for f in dataclasses.fields(ChainVerifyResult)}
-    assert field_names == {"success", "error", "broken_file"}
+    assert field_names == {"success", "error", "broken_file", "disk"}
 
     # 4. Verify the dataclass is frozen (immutable).
     assert result.__dataclass_params__.frozen is True

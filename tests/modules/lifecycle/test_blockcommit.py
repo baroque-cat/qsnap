@@ -75,6 +75,7 @@ def _make_snapshot(
     path: str = "/snapshots/testvm.20250101T000000.qcow2",
     timestamp: datetime | None = None,
     allocation: int = 65536,
+    disk: str = "vda",
 ) -> SnapshotInfo:
     """Create a ``SnapshotInfo`` with sensible defaults."""
     return SnapshotInfo(
@@ -82,6 +83,7 @@ def _make_snapshot(
         path=Path(path),
         timestamp=timestamp or datetime(2025, 1, 1, 0, 0, 0),
         allocation=allocation,
+        disk=disk,
     )
 
 
@@ -129,7 +131,7 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert isinstance(result, CommitResult)
     assert result.success is True
@@ -147,9 +149,9 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     assert "--verbose" in cmd
     assert "--wait" in cmd
 
-    # Verify --base points to vm_config.base_image and --top to snapshot path.
+    # Verify --base points to vm_config.disks[0].base_image and --top to snapshot path.
     base_idx = cmd.index("--base")
-    assert cmd[base_idx + 1] == str(vm_config.base_image)
+    assert cmd[base_idx + 1] == str(vm_config.disks[0].base_image)
     top_idx = cmd.index("--top")
     assert cmd[top_idx + 1] == str(snap.path)
 
@@ -192,7 +194,7 @@ def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is False
     assert result.error == error_msg
@@ -215,7 +217,7 @@ def test_blockcommit_empty_list_no_op(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [])
+    result = manager.blockcommit(vm_config, [], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is True
     assert result.committed_snapshot == ""
@@ -263,7 +265,7 @@ def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is False
     assert "timed out" in result.error
@@ -324,7 +326,7 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap1, snap2])
+    result = manager.blockcommit(vm_config, [snap1, snap2], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is True
     assert result.committed_snapshot == snap2.name  # last merged
@@ -365,7 +367,7 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     fail_counting = CountingShell(fail_shell)
     fail_manager = BlockCommitManager(shell=fail_counting)
 
-    fail_result = fail_manager.blockcommit(vm_config, [snap1, snap2])
+    fail_result = fail_manager.blockcommit(vm_config, [snap1, snap2], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert fail_result.success is False
     assert fail_result.committed_snapshot == snap1.name  # the one that failed
@@ -420,7 +422,7 @@ def test_blockcommit_blocked_by_apparmor(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is False
     assert result.error == "blocked by apparmor"
@@ -469,7 +471,7 @@ def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is False
     assert result.error == "blocked by selinux"
@@ -516,7 +518,7 @@ def test_blockcommit_blocked_by_apparmor_returns_deferred(mock_shell: MockShell,
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     # Core's deferral condition: not success AND error contains "apparmor".
     assert result.success is False
@@ -564,7 +566,7 @@ def test_blockcommit_blocked_by_selinux_returns_deferred(mock_shell: MockShell, 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     # Core's deferral condition: not success AND error contains "selinux".
     assert result.success is False
@@ -614,7 +616,7 @@ def test_blockcommit_normal_failure_no_deferral(mock_shell: MockShell, make_vm_c
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap])
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
 
     assert result.success is False
     # The original error is propagated, not a MAC-specific message.
@@ -670,7 +672,7 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     )
 
     manager = BlockCommitManager(shell=mock_shell)
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is True
     assert result.error is None
@@ -717,7 +719,7 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
     )
 
     manager = BlockCommitManager(shell=mock_shell)
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is False
     assert "deep verify" in result.error
@@ -765,7 +767,7 @@ def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_con
     )
 
     manager = BlockCommitManager(shell=mock_shell)
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is False
     assert "deep verify" in result.error
@@ -813,7 +815,7 @@ def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_conf
     )
 
     manager = BlockCommitManager(shell=mock_shell)
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is False
     assert "deep verify" in result.error
@@ -854,7 +856,7 @@ def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_c
     # Intentionally NO qemu-img check expectation set.
 
     manager = BlockCommitManager(shell=mock_shell)
-    result = manager.blockcommit(vm_config, [snap], deep_verify=False)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=False)
 
     assert result.success is True
     assert result.error is None
@@ -907,7 +909,7 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert result.success is True
     assert result.committed_snapshot == snap.name
@@ -929,6 +931,90 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
         assert "--force-share" not in cmd_str, (
             f"virsh blockcommit must NOT include --force-share, got: {cmd_str}"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 12a. Multi-disk — blockcommit uses the correct disk's base
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_multi_disk_uses_correct_disk_base(
+    mock_shell: MockShell, make_vm_config
+):
+    """With a multi-disk VM, blockcommit for vdb uses vdb's base_image.
+
+    - VM config has two disks: vda (base /tmp/vda.qcow2) and vdb
+      (base /tmp/vdb.qcow2).
+    - blockcommit called with ``disk="vdb"`` and ``base_image`` set to
+      vdb's base.
+    - The virsh blockcommit command must contain ``--path vdb`` and
+      ``--base <vdb base path>`` (NOT vda's base).
+    """
+    from pathlib import Path
+
+    from qsnap.models.config import DiskConfig
+
+    vda_disk = DiskConfig(target="vda", base_image=Path("/tmp/vda.qcow2"))
+    vdb_disk = DiskConfig(target="vdb", base_image=Path("/tmp/vdb.qcow2"))
+    vm_config = make_vm_config(disks=[vda_disk, vdb_disk])
+
+    snap = _make_snapshot(
+        name="testvm.20250101T000000_vdb",
+        path="/snapshots/testvm.20250101T000000_vdb.qcow2",
+        disk="vdb",
+    )
+
+    mock_shell.expect("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_DOMBLKLIST_OUTPUT,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh blockcommit").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vdb", base_image=vdb_disk.base_image
+    )
+
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+
+    # Inspect the recorded blockcommit command.
+    bc_calls = _blockcommit_calls(shell)
+    assert len(bc_calls) == 1
+    cmd = bc_calls[0]
+
+    # Must contain --path with the domain name and disk target.
+    assert "--domain" in cmd
+    domain_idx = cmd.index("--domain")
+    assert domain_idx + 1 < len(cmd)
+
+    # --path must reference vdb.
+    path_idx = cmd.index("--path")
+    assert "vdb" in cmd[path_idx + 1]
+
+    # --base must point to vdb's base_image, NOT vda's.
+    base_idx = cmd.index("--base")
+    assert cmd[base_idx + 1] == str(vdb_disk.base_image)
+    assert str(vda_disk.base_image) not in " ".join(cmd)
+
+    # --top must point to the snapshot path.
+    top_idx = cmd.index("--top")
+    assert cmd[top_idx + 1] == str(snap.path)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -981,7 +1067,7 @@ def test_blockcommit_deep_verify_graceful_qemu_img_failure(
 
     manager = BlockCommitManager(shell=clean_shell)
     # This must NOT raise — graceful failure via CommitResult
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
 
     assert isinstance(result, CommitResult)
     assert result.success is False

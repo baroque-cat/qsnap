@@ -1,0 +1,20 @@
+# Multi-disk config — one VM with two disks sharing snapshot_dir
+# vda inherits the VM-level snapshot_dir; vdb has its own per-disk override.
+# The [[vm.target]] is shared across all disks.  The target / base_image
+# fields are required per [[vm.disk]].
+
+[[vm]]
+name = "multi_disk_vm"
+snapshot_dir = "/var/lib/libvirt/snapshots/multi_disk_vm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/multi_disk_vm_vda.qcow2"
+
+  [[vm.disk]]
+  target = "vdb"
+  base_image = "/var/lib/libvirt/images/multi_disk_vm_vdb.qcow2"
+  snapshot_dir = "/var/lib/libvirt/snapshots/multi_disk_vm_vdb"
+
+  [[vm.target]]
+  path = "/mnt/backup/multi_disk_vm"

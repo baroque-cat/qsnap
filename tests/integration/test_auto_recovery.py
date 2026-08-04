@@ -32,7 +32,7 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -122,7 +122,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -133,6 +133,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -154,7 +155,7 @@ def _build_core(
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=7,
         targets=[
@@ -256,6 +257,7 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -273,6 +275,7 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         str(target_dir),
         f"{full_name}.qcow2",
         source_snap.timestamp,
+        disk="vda",
     )
 
     # ── Step 2: Create backing-chained incrementals ─────────────────
@@ -383,6 +386,7 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -396,7 +400,8 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        disk="vda",
     )
 
     # ── Step 2: Create intact incrementals ──────────────────────────
@@ -483,6 +488,7 @@ def test_auto_recovery_no_full_remains(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -496,7 +502,8 @@ def test_auto_recovery_no_full_remains(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        disk="vda",
     )
 
     # ── Step 2: Create incrementals ─────────────────────────────────
@@ -604,6 +611,7 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             path=base_image,
             timestamp=now - timedelta(days=age_days),
             allocation=0,
+            disk="vda",
         )
         full_result = provider.create_full_backup(
             vm_name,
@@ -619,6 +627,7 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             str(target_dir),
             f"{full_name}.qcow2",
             source_snap.timestamp,
+            disk="vda",
         )
 
         incr_names: list[str] = []
@@ -743,6 +752,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -773,6 +783,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     caplog.clear()
@@ -866,6 +877,7 @@ def test_production_incident_reproduction(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -879,7 +891,8 @@ def test_production_incident_reproduction(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        disk="vda",
     )
 
     # ── Step 2: Create 25 incrementals (chain of FULL → incr1 → incr2 → ...) ──

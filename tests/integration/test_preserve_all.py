@@ -22,7 +22,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
@@ -108,7 +108,7 @@ def test_large_chain_length_keeps_all_backups_integration(test_vm):
     )
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=999999,
         targets=[target],

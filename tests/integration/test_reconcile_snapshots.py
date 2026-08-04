@@ -29,7 +29,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -50,7 +50,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -61,6 +61,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -134,13 +135,14 @@ def test_reconcile_real_phantom_snapshot(test_vm, caplog):
         path=phantom_path,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     state.record_snapshot(vm_name, phantom_snap)
 
     # Build Core — no targets needed for snapshot-only reconciliation.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "phantom.toml")
@@ -218,7 +220,7 @@ def test_reconcile_real_orphan_snapshot_recorded(test_vm, caplog):
     snap2_path = snapshot_dir / f"{snap2_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result2 = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap2_name,
         "vda",
         snap2_path,
@@ -229,7 +231,7 @@ def test_reconcile_real_orphan_snapshot_recorded(test_vm, caplog):
     # Build Core — no targets needed.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "orphan_snap.toml")
@@ -329,7 +331,7 @@ def test_reconcile_real_stale_xml(test_vm, caplog):
     # Build Core — no targets needed.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "stale_xml.toml")
@@ -425,7 +427,7 @@ def test_reconcile_real_broken_chain_no_rebase(test_vm, caplog):
     # Build Core.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "broken.toml")
@@ -508,6 +510,7 @@ def test_reconcile_real_dry_run(test_vm, caplog):
         path=phantom_path,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     state.record_snapshot(vm_name, phantom_snap)
 
@@ -522,7 +525,7 @@ def test_reconcile_real_dry_run(test_vm, caplog):
     # Build Core.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "dryrun.toml")
@@ -670,7 +673,7 @@ def test_reconcile_detects_snapshot_in_state_but_not_in_xml(test_vm, caplog):
     # ── Step 4: Run reconcile ───────────────────────────────────────
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "xmlgap.toml")
@@ -772,7 +775,7 @@ def test_reconcile_all_snapshots_deleted_from_disk(test_vm, caplog):
     # ── Step 3: Run reconcile ───────────────────────────────────────
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
     )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "allgone.toml")

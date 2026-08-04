@@ -40,7 +40,7 @@ try:
 except ImportError:
     _HAS_LIBNBD = False
 
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo, SnapshotResult
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -204,7 +204,7 @@ def test_snapshot_post_creation_validation(test_vm):
     snap_name = f"{vm_name}.post-val"
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
 
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     result: SnapshotResult = provider.create(vm_config, snap_name, "vda", snap_path)
 
     assert result.success, (
@@ -283,7 +283,7 @@ def test_snapshot_post_creation_validation_failure(test_vm):
     snap_name = f"{vm_name}.post-val-fail"
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
 
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
     result = provider.create(vm_config, snap_name, "vda", snap_path)
 
     assert result.success, (
@@ -365,6 +365,7 @@ def test_incremental_post_transfer_validation(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -423,11 +424,12 @@ def test_incremental_post_transfer_validation(test_vm):
         path=overlay_path,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     # Step 3: transfer_missing — must produce an incremental.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,
@@ -530,6 +532,7 @@ def test_full_post_creation_validation(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 

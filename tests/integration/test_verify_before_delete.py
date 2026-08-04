@@ -21,7 +21,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -69,7 +69,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -80,6 +80,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -141,6 +142,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     full_result = provider.create_full_backup(
         vm_name, source_snap, target, compress=False,
@@ -150,7 +152,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
     assert full_path.exists(), "FULL backup file must exist"
 
     # Step 3: Corrupt the FULL file to force M2 verification to fail
@@ -171,13 +173,13 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     # Create a valid qcow2 so provider.list() includes it.
     shell.run(["qemu-img", "create", "-f", "qcow2", str(gen2_path), "128K"], timeout=30)
     assert gen2_path.exists(), "gen2 FULL file must exist"
-    state.record_full_backup(str(target_dir), gen2_path.name, datetime(2030, 1, 1))
+    state.record_full_backup(str(target_dir), gen2_path.name, datetime(2030, 1, 1), disk="vda")
 
     # Step 4: Build Core with keep_generations=1 so the old gen would
     # be a candidate for deletion.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=999,  # prevent blockcommit from interfering
         targets=[TargetConfig(
@@ -295,6 +297,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     full_result1 = provider.create_full_backup(
         vm_name, source_snap, target, compress=False,
@@ -304,7 +307,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
 
     gen1_path = full_result1.target_path
     gen1_name = gen1_path.stem
-    state.record_full_backup(str(target_dir), f"{gen1_name}.qcow2", source_snap.timestamp)
+    state.record_full_backup(str(target_dir), f"{gen1_name}.qcow2", source_snap.timestamp, disk="vda")
     assert gen1_path.exists(), "Generation 1 FULL must exist"
 
     # Step 3: Create second snapshot.
@@ -316,7 +319,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
     # Step 4: Build Core with keep_generations=1.
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[TargetConfig(
             path=target_dir,

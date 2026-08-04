@@ -14,7 +14,7 @@ from unittest.mock import Mock
 
 from qsnap.cli.commands import handle_list
 from qsnap.cli.errors import EXIT_SUCCESS
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -28,12 +28,14 @@ def _make_snapshots() -> list[SnapshotInfo]:
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1.qcow2"),
             timestamp=datetime(2025, 7, 14, 10, 0),
             allocation=1024,
+                    disk="vda",
         ),
         SnapshotInfo(
             name="snap2",
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap2.qcow2"),
             timestamp=datetime(2025, 7, 14, 11, 0),
             allocation=2048,
+                    disk="vda",
         ),
     ]
 
@@ -42,7 +44,7 @@ def _make_vm_config() -> VMConfig:
     """Create a VMConfig with a base image for tree output."""
     return VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
 
@@ -170,18 +172,21 @@ def _make_backup_tree_data(
             path=Path(f"{target}/testvm.FULL.20250701T120000_abc123.qcow2"),
             timestamp=datetime(2025, 7, 1, 12, 0),
             allocation=5000,
+                    disk="vda",
         )
         inc1 = SnapshotInfo(
             name="testvm.20250702T120000_def456",
             path=Path(f"{target}/testvm.20250702T120000_def456.qcow2"),
             timestamp=datetime(2025, 7, 2, 12, 0),
             allocation=1000,
+                    disk="vda",
         )
         inc2 = SnapshotInfo(
             name="testvm.20250703T120000_ghi789",
             path=Path(f"{target}/testvm.20250703T120000_ghi789.qcow2"),
             timestamp=datetime(2025, 7, 3, 12, 0),
             allocation=1000,
+                    disk="vda",
         )
         chains = {"testvm.FULL.20250701T120000_abc123": [full1, inc1, inc2]}
     return {vm_name: [(target, chains)]}
@@ -231,12 +236,14 @@ def test_backup_tree_output_orphan_backups(capsys):
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
     orphan2 = SnapshotInfo(
         name="testvm.20250703T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 3, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
 
     data = _make_backup_tree_data(
@@ -270,6 +277,7 @@ def test_backup_tree_output_with_vm_filter(capsys):
         path=Path("/mnt/backup/vm1/vm1.FULL.20250701T120000_abc123.qcow2"),
         timestamp=datetime(2025, 7, 1, 12, 0),
         allocation=5000,
+                    disk="vda",
     )
     chains = {"vm1.FULL.20250701T120000_abc123": [full1]}
     data = {"vm1": [("/mnt/backup/vm1", chains)]}
@@ -279,7 +287,7 @@ def test_backup_tree_output_with_vm_filter(capsys):
     mock_core.list_config.return_value = [
         VMConfig(
             name="vm1",
-            base_image=Path("/var/lib/libvirt/images/vm1.qcow2"),
+            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vm1.qcow2"))],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/vm1"),
         )
     ]
@@ -306,24 +314,28 @@ def test_backup_tree_output_multiple_chains(capsys):
         path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
         timestamp=datetime(2025, 7, 1, 12, 0),
         allocation=5000,
+                    disk="vda",
     )
     inc1a = SnapshotInfo(
         name="testvm.20250702T120000_def456",
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
     full2 = SnapshotInfo(
         name="testvm.FULL.20250704T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.FULL.20250704T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 4, 12, 0),
         allocation=5000,
+                    disk="vda",
     )
     inc2a = SnapshotInfo(
         name="testvm.20250705T120000_jkl012",
         path=Path("/mnt/backup/testvm/testvm.20250705T120000_jkl012.qcow2"),
         timestamp=datetime(2025, 7, 5, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
 
     chains = {
@@ -371,12 +383,14 @@ def test_backup_tree_output_chain_without_full(capsys):
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
     backup2 = SnapshotInfo(
         name="testvm.20250703T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 3, 12, 0),
         allocation=1000,
+                    disk="vda",
     )
 
     # Chain with non-orphan chain_id but no .FULL. entries

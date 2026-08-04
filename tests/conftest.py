@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from qsnap.cli.app import build_argparser
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import ShellResult
 from tests.mocks import (
     InMemoryStateManager,
@@ -197,17 +197,39 @@ def mock_factory() -> MockVMModuleFactory:
 
 @pytest.fixture
 def make_vm_config():
-    """Factory function to create VMConfig instances for tests."""
+    """Factory function to create VMConfig instances for tests.
+
+    Multi-disk refactor: ``VMConfig`` no longer has a VM-level
+    ``base_image``; each disk carries its own.  For backward
+    compatibility with single-disk test call sites, the ``base_image``
+    argument is synthesized into a single ``DiskConfig`` (target ``vda``)
+    unless an explicit ``disks`` list is provided.
+    """
 
     def _make(
         name: str = "testvm",
         base_image: str = "/var/lib/libvirt/images/testvm.qcow2",
         snapshot_dir: str = "/var/lib/libvirt/snapshots/testvm",
+        disks: list[DiskConfig] | None = None,
         **kwargs: object,
     ) -> VMConfig:
+        if disks is None:
+            disks = [DiskConfig(target="vda", base_image=Path(base_image))]
+        else:
+            # Accept legacy plain-string disk targets (e.g. ["vda"]) by
+            # synthesizing a DiskConfig that reuses the default base image.
+            normalized: list[DiskConfig] = []
+            for d in disks:
+                if isinstance(d, DiskConfig):
+                    normalized.append(d)
+                else:
+                    normalized.append(
+                        DiskConfig(target=str(d), base_image=Path(base_image))
+                    )
+            disks = normalized
         defaults: dict[str, object] = {
             "name": name,
-            "base_image": Path(base_image),
+            "disks": disks,
             "snapshot_dir": Path(snapshot_dir),
         }
         defaults.update(kwargs)

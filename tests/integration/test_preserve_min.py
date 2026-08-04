@@ -37,7 +37,7 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -75,7 +75,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -86,6 +86,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -150,7 +151,7 @@ def test_preserve_min_keeps_newest_with_real_blockcommit(test_vm, caplog):
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=1,
         snapshot_preserve_min=8,
@@ -259,7 +260,7 @@ def test_preserve_min_exceeds_total_no_blockcommit_integration(test_vm, caplog):
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=1,
         snapshot_preserve_min=10,
@@ -373,13 +374,13 @@ def test_source_disk_onchange_gate_opens_after_write(
     # code path instead of the early-return (which would report
     # current_allocation=0).  Without this, the detector's fail-safe
     # path returns current_allocation=0 and Core records baseline=0.
-    state.set_last_allocation(vm_name, 0)
+    state.set_last_allocation(vm_name, "vda", 0)
 
     target = TargetConfig(path=target_dir, backup_create="onchange",
                           compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         change_detection_mode=change_detection_mode,
         targets=[target],
@@ -399,7 +400,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     first_skip_msgs = [
         r.message
         for r in caplog.records
-        if "disk unchanged since last backup" in r.message
+        if "no disk changed since last backup" in r.message
     ]
     assert len(first_skip_msgs) == 0, (
         f"First run must not skip — no baseline. "
@@ -419,7 +420,7 @@ def test_source_disk_onchange_gate_opens_after_write(
         pytest.skip("First backup failed — cannot test gate-open.")
 
     # Verify baseline was recorded after successful backup.
-    baseline = state.get_last_backup_allocation(str(target_dir))
+    baseline = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline is not None, "Baseline should be recorded after successful backup"
 
     # --- Simulate disk growth: lower the baseline ---
@@ -427,7 +428,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     # hasn't changed (no new VM writes).  By setting the baseline lower,
     # we simulate that the disk grew since the last backup.
     stale_baseline = max(baseline - 50000, 0)
-    state.set_last_backup_allocation(str(target_dir), stale_baseline)
+    state.set_last_backup_allocation(str(target_dir), "vda", stale_baseline)
 
     should_proceed, change_result = core._should_backup_onchange(vm_config, target)
     assert should_proceed is True, (
@@ -438,9 +439,9 @@ def test_source_disk_onchange_gate_opens_after_write(
 
     # --- Lower baseline further; gate opens again ---
     even_staler = max(stale_baseline - 50000, 0)
-    state.set_last_backup_allocation(str(target_dir), even_staler)
+    state.set_last_backup_allocation(str(target_dir), "vda", even_staler)
     # Restore last_allocation so detector still enters normal path.
-    state.set_last_allocation(vm_name, 0)
+    state.set_last_allocation(vm_name, "vda", 0)
 
     should_proceed_2, change_result_2 = core._should_backup_onchange(
         vm_config, target
@@ -498,13 +499,13 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
     # Seed last_allocation so detector enters the normal code path.
-    state.set_last_allocation(vm_name, 0)
+    state.set_last_allocation(vm_name, "vda", 0)
 
     target = TargetConfig(path=target_dir, backup_create="onchange",
                           compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         change_detection_mode=change_detection_mode,
         targets=[target],
@@ -529,7 +530,7 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
         pytest.skip("First backup failed — cannot test gate-skip.")
 
     # Verify baseline recorded.
-    baseline = state.get_last_backup_allocation(str(target_dir))
+    baseline = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline is not None, "Baseline should be recorded after successful backup"
 
     # --- Second run: no new data written → gate skips ---
@@ -540,7 +541,7 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
     skip_msgs = [
         r.message
         for r in caplog.records
-        if "disk unchanged since last backup" in r.message
+        if "no disk changed since last backup" in r.message
     ]
     assert len(skip_msgs) >= 1, (
         f"Expected onchange skip on second run, but no skip message found. "
@@ -617,7 +618,7 @@ def test_per_target_baseline_independent(
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
     # Seed last_allocation so detector enters the normal code path.
-    state.set_last_allocation(vm_name, 0)
+    state.set_last_allocation(vm_name, "vda", 0)
 
     target_a_config = TargetConfig(
         path=target_a, backup_create="onchange", compress=False, verify="off"
@@ -627,7 +628,7 @@ def test_per_target_baseline_independent(
     )
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         change_detection_mode=change_detection_mode,
         targets=[target_a_config, target_b_config],
@@ -648,20 +649,20 @@ def test_per_target_baseline_independent(
         _cleanup_checkpoints(shell, vm_name)
         pytest.skip("First backup failed — cannot test independent baselines.")
 
-    baseline_a = state.get_last_backup_allocation(str(target_a))
-    baseline_b = state.get_last_backup_allocation(str(target_b))
+    baseline_a = state.get_last_backup_allocation(str(target_a), "vda")
+    baseline_b = state.get_last_backup_allocation(str(target_b), "vda")
     assert baseline_a is not None, "Baseline A should be recorded"
     assert baseline_b is not None, "Baseline B should be recorded"
 
     # --- Clear baseline B to simulate a fresh target ---
-    cleared = state.clear_last_backup_allocation(str(target_b))
+    cleared = state.clear_last_backup_allocation(str(target_b), "vda")
     assert cleared, "clear_last_backup_allocation should return True"
 
-    baseline_b_after_clear = state.get_last_backup_allocation(str(target_b))
+    baseline_b_after_clear = state.get_last_backup_allocation(str(target_b), "vda")
     assert baseline_b_after_clear is None, "Baseline B should be None after clear"
 
     # Verify baseline A is still intact (independent).
-    baseline_a_after = state.get_last_backup_allocation(str(target_a))
+    baseline_a_after = state.get_last_backup_allocation(str(target_a), "vda")
     assert baseline_a_after == baseline_a, (
         f"Baseline A should be unchanged ({baseline_a}), got {baseline_a_after}"
     )
@@ -683,7 +684,7 @@ def test_per_target_baseline_independent(
     # reliably increase actual-size, we simulate disk growth by
     # lowering the baseline so that current > stale_baseline.
     stale_a = max(baseline_a - 50000, 0)
-    state.set_last_backup_allocation(str(target_a), stale_a)
+    state.set_last_backup_allocation(str(target_a), "vda", stale_a)
 
     # Target A: stale baseline → gate opens
     should_proceed_a2, _ = core._should_backup_onchange(vm_config, target_a_config)
@@ -745,13 +746,13 @@ def test_onchange_first_run_no_baseline_integration(
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
     # Seed last_allocation so detector enters the normal code path.
-    state.set_last_allocation(vm_name, 0)
+    state.set_last_allocation(vm_name, "vda", 0)
 
     target = TargetConfig(path=target_dir, backup_create="onchange",
                           compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         change_detection_mode=change_detection_mode,
         targets=[target],
@@ -764,7 +765,7 @@ def test_onchange_first_run_no_baseline_integration(
     core = Core(config=config, factory=factory, state=state, shell=shell)
 
     # Verify no baseline exists before first run.
-    baseline_before = state.get_last_backup_allocation(str(target_dir))
+    baseline_before = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline_before is None, (
         f"Baseline should be None before first run, got {baseline_before}"
     )
@@ -783,7 +784,7 @@ def test_onchange_first_run_no_baseline_integration(
     first_skip_msgs = [
         r.message
         for r in caplog.records
-        if "disk unchanged since last backup" in r.message
+        if "no disk changed since last backup" in r.message
     ]
     assert len(first_skip_msgs) == 0, (
         f"First run must not skip — no baseline. "
@@ -802,7 +803,7 @@ def test_onchange_first_run_no_baseline_integration(
         pytest.skip("First backup failed — cannot continue first-run test.")
 
     # Verify baseline was recorded.
-    baseline_after = state.get_last_backup_allocation(str(target_dir))
+    baseline_after = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline_after is not None, (
         "Baseline should be recorded after successful backup"
     )
@@ -822,7 +823,7 @@ def test_onchange_first_run_no_baseline_integration(
     skip_msgs = [
         r.message
         for r in caplog.records
-        if "disk unchanged since last backup" in r.message
+        if "no disk changed since last backup" in r.message
     ]
     assert len(skip_msgs) >= 1, (
         f"Second run must skip (disk unchanged). "

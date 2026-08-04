@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsnap.core import Core
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, CheckResult, ShellResult, SnapshotInfo
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR
 from tests.mocks import (
@@ -43,6 +43,8 @@ def _make_incremental_snapshot(name: str = "vm.20250101T000000") -> SnapshotInfo
         path=Path(f"/var/lib/libvirt/snapshots/testvm/{name}.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+    
+        disk="vda",
     )
 
 
@@ -53,7 +55,7 @@ def _make_bitmap_vm(
 ) -> VMConfig:
     return VMConfig(
         name=name,
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path(snapshot_dir),
         targets=[target],
     )
@@ -327,7 +329,7 @@ def test_dependency_visible_in_check_state(
     # Record state: FULL first, then dependency.
     mock_state.record_full_backup(
         str(backup_dir), full_name, datetime(2025, 1, 1, 0, 0, 0)
-    )
+    , "vda")
     mock_state.record_incremental_dependency(str(backup_dir), inc_name, full_name)
 
     config = MockConfigFacade(

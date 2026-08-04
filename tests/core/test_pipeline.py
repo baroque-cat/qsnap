@@ -15,14 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from qsnap.core import Core, PipelineResult
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
@@ -124,6 +124,7 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
         changed=False,
         last_allocation=1000,
         current_allocation=1000,
+        disk="vda",
     )
 
     with (
@@ -357,7 +358,7 @@ def test_prune_command_only_retention(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot(vm.name, info)
 
     snapshot_provider = mock_factory._snapshot_provider
@@ -512,29 +513,14 @@ def test_create_snapshot_single_disk_sda_not_vda(
     mock_state,
     mock_shell,
 ):
-    """Mock domblklist returning 'sda' disk. Verify snapshot name has _sda suffix."""
-    vm = make_vm_config(name="testvm")
+    """Explicit sda disk config. Verify snapshot name has _sda suffix."""
+    vm = make_vm_config(name="testvm", disks=[DiskConfig(target="sda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
         state=mock_state,
         shell=mock_shell,
-    )
-
-    domblklist_output = (
-        " Target   Source\n"
-        "--------------------------------------\n"
-        " sda      /var/lib/libvirt/images/testvm.qcow2\n"
-    )
-    mock_shell.expect_first("domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=domblklist_output,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
     )
 
     snapshot_provider = mock_factory._snapshot_provider
@@ -562,30 +548,17 @@ def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
     mock_state,
     mock_shell,
 ):
-    """Mock domblklist returning vda and vdb. Verify two snapshots with _vda and _vdb."""
-    vm = make_vm_config(name="testvm")
+    """Explicit vda+vdb disk configs. Verify two snapshots with _vda and _vdb."""
+    vm = make_vm_config(name="testvm", disks=[
+        DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+        DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+    ])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
         state=mock_state,
         shell=mock_shell,
-    )
-
-    domblklist_output = (
-        " Target   Source\n"
-        "--------------------------------------\n"
-        " vda      /var/lib/libvirt/images/testvm.qcow2\n"
-        " vdb      /var/lib/libvirt/images/testvm-disk2.qcow2\n"
-    )
-    mock_shell.expect_first("domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=domblklist_output,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
     )
 
     snapshot_provider = mock_factory._snapshot_provider
@@ -614,7 +587,7 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
     mock_shell,
 ):
     """VMConfig.disks=['sda'] explicitly. Verify domblklist is NOT called, snapshot uses sda."""
-    vm = make_vm_config(name="testvm", disks=["sda"])
+    vm = make_vm_config(name="testvm", disks=[DiskConfig(target="sda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -653,7 +626,7 @@ def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
     caplog,
 ):
     """vda snapshot succeeds, vdb fails. Verify vda result recorded, vdb error logged, pipeline continues."""
-    vm = make_vm_config(name="testvm", disks=["vda", "vdb"])
+    vm = make_vm_config(name="testvm", disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")), DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2"))])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -732,7 +705,7 @@ def test_metadata_verification_failure_marks_backup_failed(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot(vm.name, snap)
 
     failed_backup = BackupResult(
@@ -777,7 +750,7 @@ def test_pipeline_always_mode_validation_first(
         ShellResult(success=False, stdout="", stderr="", returncode=1, error="not found")
     )
 
-    vm = make_vm_config(name="testvm", snapshot_create="always", disks=["vda"])
+    vm = make_vm_config(name="testvm", snapshot_create="always")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -827,7 +800,7 @@ def test_pipeline_onchange_no_changes_validation_first(
     environment validation must still execute.  This proves validation runs
     before change detection.
     """
-    vm = make_vm_config(name="testvm", snapshot_create="onchange", disks=["vda"])
+    vm = make_vm_config(name="testvm", snapshot_create="onchange")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -843,6 +816,7 @@ def test_pipeline_onchange_no_changes_validation_first(
         changed=False,
         last_allocation=1000,
         current_allocation=1000,
+        disk="vda",
     )
 
     with (
@@ -905,7 +879,7 @@ def test_first_backup_creates_full_regardless_of_chain_length(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # No FULLs in state — first backup creates FULL unconditionally.
@@ -950,6 +924,7 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
         str(target.path),
         full_name,
         datetime(2025, 7, 13, 2),
+    "vda",
     )
     mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", full_name)
     mock_state.record_incremental_dependency(str(target.path), "inc2.qcow2", full_name)
@@ -960,7 +935,7 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
@@ -1008,6 +983,7 @@ def test_incremental_count_within_chain_skips_full(
         str(target.path),
         full_name,
         datetime(2025, 7, 13, 2),
+    "vda",
     )
     mock_state.record_incremental_dependency(str(target.path), "inc1.qcow2", full_name)
     mock_state.record_incremental_dependency(str(target.path), "inc2.qcow2", full_name)
@@ -1017,7 +993,7 @@ def test_incremental_count_within_chain_skips_full(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
@@ -1067,7 +1043,7 @@ def test_dry_run_logs_full_would_be_created(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     backup_provider = mock_factory._backup_provider
@@ -1106,7 +1082,7 @@ def _add_snapshots_for_chain(state, vm_name: str) -> None:
             path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
             timestamp=datetime(2025, 7, 13, 8, 0),
             allocation=1048576,
-        ),
+        disk="vda",        ),
     )
     state.record_snapshot(
         vm_name,
@@ -1115,7 +1091,7 @@ def _add_snapshots_for_chain(state, vm_name: str) -> None:
             path=Path("/var/lib/libvirt/snapshots/testvm/snap4.qcow2"),
             timestamp=datetime(2025, 7, 13, 14, 0),
             allocation=4194304,
-        ),
+        disk="vda",        ),
     )
 
 
@@ -1138,7 +1114,7 @@ def _add_snapshots_6_for_chain(state, vm_name: str) -> None:
                 path=Path(f"{base_path}/snap{i}.qcow2"),
                 timestamp=ts,
                 allocation=1048576 * i,
-            ),
+            disk="vda",            ),
         )
 
 
@@ -1909,7 +1885,7 @@ def test_get_chain_length_no_use_base_image_param(
     mock_shell.expect_first(f"qemu-img info --force-share --backing-chain.*{re.escape('/var/lib/libvirt/images/testvm.qcow2')}").returns(
         ShellResult(success=True, stdout=chain_3, stderr="", returncode=0, error=None)
     )
-    length = core._get_chain_length(vm)
+    length = core._get_chain_length(vm, disk="vda")
     assert length == 3, f"Expected 3 entries when querying base image, got {length}"
 
     # State has snapshots → should query most recent (snap6)
@@ -1918,7 +1894,7 @@ def test_get_chain_length_no_use_base_image_param(
     mock_shell.expect_first(f"qemu-img info --force-share --backing-chain.*{re.escape(snap6_path)}").returns(
         ShellResult(success=True, stdout=chain_3, stderr="", returncode=0, error=None)
     )
-    length = core._get_chain_length(vm)
+    length = core._get_chain_length(vm, disk="vda")
     assert length == 3, f"Expected 3 entries when querying most recent snapshot, got {length}"
 
     # use_base_image param no longer accepted
@@ -2007,7 +1983,7 @@ def test_backup_retry_transient_error_retried_successfully(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2067,7 +2043,7 @@ def test_backup_retry_all_retries_exhausted(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2117,7 +2093,7 @@ def test_backup_retry_non_retryable_fails_immediately(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2164,7 +2140,7 @@ def test_backup_retry_disabled_when_max_zero(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2216,7 +2192,7 @@ def test_backup_retry_exhausted_returns_last_error(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2271,7 +2247,7 @@ def test_transfer_retries_on_content_comparison_mismatch(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2333,7 +2309,7 @@ def test_transfer_does_not_retry_format_error(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     fail_result = BackupResult(
         success=False,
@@ -2374,7 +2350,7 @@ def test_deferred_blockcommit_passes_deep_verify_true(
     """When ``blockcommit_deep_verify=True``, deferred blockcommit passes it."""
     vm = make_vm_config(
         name="testvm",
-        disks=["vda"],
+
         blockcommit_deep_verify=True,
     )
     config = MockConfigFacade(vms=[vm])
@@ -2393,9 +2369,9 @@ def test_deferred_blockcommit_passes_deep_verify_true(
             path=Path("/tmp/snap1.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
-        ),
+        disk="vda",        ),
     )
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "apparmor")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
 
     # VM is shut off → deferred commit should execute.
     mock_shell.expect("domstate").returns(
@@ -2449,12 +2425,12 @@ def test_full_kept_due_to_active_dependent(
     now = datetime.now()
 
     # Pre-populate state: FULL with dependent incremental
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500, disk="vda"),
     ]
     # Retention keeps the incremental, removes the FULL
     retention = RetentionResult(keep=[inc_name], remove=[full_name])
@@ -2496,7 +2472,7 @@ def test_full_deleted_when_no_active_dependents(
 
     # FULL with no dependents
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
     ]
     retention = RetentionResult(keep=[], remove=[full_name])
 
@@ -2558,7 +2534,7 @@ def test_dry_run_detects_vm_running_state_for_method(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     caplog.set_level(logging.INFO)
@@ -2608,7 +2584,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     caplog.set_level(logging.INFO)
@@ -2667,7 +2643,7 @@ def test_full_creation_works_for_bitmap(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
@@ -2713,7 +2689,7 @@ def test_check_integrity_uses_force_share_on_active_layer(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Override qemu-img info expectations — the fixture doesn't set one,
@@ -2932,7 +2908,7 @@ def test_core_passes_vm_name_to_create_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("3.Projects_opencode", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
@@ -2996,13 +2972,13 @@ def test_blockcommit_stale_guard_all_exist_proceeds(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap2 = SnapshotInfo(
         name="snap2",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap1)
     mock_state.record_snapshot("testvm", snap2)
 
@@ -3072,13 +3048,13 @@ def test_blockcommit_stale_guard_one_stale_removed(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_ok.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap_stale = SnapshotInfo(
         name="snap_stale",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_stale.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap_ok)
     mock_state.record_snapshot("testvm", snap_stale)
 
@@ -3151,13 +3127,13 @@ def test_blockcommit_stale_guard_all_stale_skipped(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap2 = SnapshotInfo(
         name="snap2",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap1)
     mock_state.record_snapshot("testvm", snap2)
 
@@ -3229,19 +3205,19 @@ def test_blockcommit_stale_guard_no_short_circuit(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_a.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap_stale = SnapshotInfo(
         name="snap_stale",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_stale.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     snap_b = SnapshotInfo(
         name="snap_b",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_b.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=3000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap_a)
     mock_state.record_snapshot("testvm", snap_stale)
     mock_state.record_snapshot("testvm", snap_b)
@@ -3324,13 +3300,13 @@ def test_blockcommit_live_commit_when_vm_running(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap2 = SnapshotInfo(
         name="snap2",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap1)
     mock_state.record_snapshot("testvm", snap2)
 
@@ -3419,7 +3395,7 @@ def test_blockcommit_executes_when_vm_shut_off(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # domblklist returns base image (NOT snap1) — snap1 is not the tip.
@@ -3502,7 +3478,7 @@ def test_blockcommit_deferred_when_vm_paused(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Override conftest default — VM is paused.
@@ -3568,7 +3544,7 @@ def test_blockcommit_vm_state_check_failure_non_fatal(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Override conftest default — domstate fails entirely.
@@ -3612,7 +3588,7 @@ def test_deferred_blockcommit_executed_after_vm_shutdown(
     configured lifecycle_mode.  Committed snapshots are removed from
     state (design D5) and the deferred queue is empty afterwards.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -3629,9 +3605,9 @@ def test_deferred_blockcommit_executed_after_vm_shutdown(
             path=Path("/tmp/snap1.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
-        ),
+        disk="vda",        ),
     )
-    mock_state.add_deferred_blockcommit("testvm", ["snap1"], "vm_running")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "vm_running")
 
     # VM is shut off (conftest default for domstate).
     # domblklist returns base image — NOT snap1's path — so snap1 is
@@ -3713,13 +3689,13 @@ def test_preserve_all_vm_running_no_blockcommit(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     snap2 = SnapshotInfo(
         name="snap2",
         path=Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=2000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap1)
     mock_state.record_snapshot("testvm", snap2)
 
@@ -3788,7 +3764,7 @@ def test_offline_commit_refreshes_domain_xml(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # domblklist returns the base image (NOT snap1) — snap1 is committable.
@@ -3897,7 +3873,7 @@ def test_offline_commit_xml_refresh_failure_non_fatal(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # domblklist returns base image — snap1 is committable
@@ -4182,15 +4158,10 @@ def test_resolve_disks_returns_empty_on_failure(
     ) as create_spy:
         core.run()
 
-    # Snapshot was NOT created (no disks to snapshot).
-    assert not create_spy.called, (
-        "Snapshot should not be created when domblklist fails and returns no disks"
-    )
-
-    # WARNING was logged about domblklist failure.
-    warning_messages = [r.message for r in caplog.records]
-    assert any("domblklist failed" in msg for msg in warning_messages), (
-        f"Expected domblklist failure WARNING, got: {warning_messages}"
+    # Snapshot IS created — _resolve_disks uses vm_config.disks,
+    # not domblklist, so domblklist failure does not prevent snapshot creation.
+    assert create_spy.called, (
+        "Snapshot should be created via vm_config.disks, regardless of domblklist failure"
     )
 
 
@@ -4225,7 +4196,7 @@ def test_always_mode_backup_gate_bypassed(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     with patch.object(
         core,
@@ -4262,7 +4233,7 @@ def test_core_passes_convert_parallel_to_create_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
@@ -4307,7 +4278,7 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
@@ -4353,7 +4324,7 @@ def test_core_passes_convert_parallel_to_transfer_missing(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Default count-based check returns False — no FULL,
@@ -4400,7 +4371,7 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # Default count-based check returns False — no FULL,
@@ -4442,10 +4413,10 @@ def test_onchange_skip_runs_retention(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
 
     # Gate: source disk unchanged — set baseline == current_allocation.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
     mock_factory.change_detector.changed = False
 
@@ -4487,10 +4458,10 @@ def test_gate_skip_retention_still_runs(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
 
     # Gate: source disk unchanged — set baseline == current_allocation.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
     mock_factory.change_detector.changed = False
 
@@ -4527,17 +4498,17 @@ def test_onchange_skip_cleans_expired_backups(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
 
     # Gate: source disk unchanged — set baseline == current_allocation.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
 
     # Set up an expired backup on target — retention engine should mark it
     # for removal.
     old_backup = SnapshotInfo(
         name="testvm.FULL.old_backup.qcow2", path=target.path / "testvm.FULL.old_backup.qcow2",
-        timestamp=datetime(2020, 1, 1), allocation=0)
+        timestamp=datetime(2020, 1, 1), allocation=0, disk="vda")
 
     # Mock provider.list() to show the old backup so retention evaluates it.
     with patch.object(
@@ -4584,12 +4555,12 @@ def test_onchange_source_disk_changed_gate_opens(
     )
 
     # Baseline from prior run is smaller than current allocation.
-    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 1000000)
     mock_factory.change_detector.current_allocation = 3000000
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is True
-    assert change_result.current_allocation == 3000000
+    assert change_results["vda"].current_allocation == 3000000
 
 
 def test_onchange_source_disk_unchanged_gate_skips(
@@ -4610,11 +4581,11 @@ def test_onchange_source_disk_unchanged_gate_skips(
         shell=mock_shell,
     )
 
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
     mock_factory.change_detector.changed = False
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is False
 
 
@@ -4637,7 +4608,7 @@ def test_onchange_first_run_no_baseline_gate_opens(
     )
 
     # No baseline set — get_last_backup_allocation returns None.
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is True
 
 
@@ -4662,7 +4633,7 @@ def test_onchange_gate_works_without_snapshots(
     # No snapshots in state, no baseline → gate opens.
     mock_factory.change_detector.current_allocation = 5000000
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is True
 
 
@@ -4684,11 +4655,11 @@ def test_onchange_always_snapshot_disk_unchanged_gate_skips(
         shell=mock_shell,
     )
 
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
     mock_factory.change_detector.changed = False
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is False
 
 
@@ -4712,18 +4683,18 @@ def test_onchange_allocation_size_detector_mode(
 
     # current_allocation > baseline → changed
     mock_factory.change_detector.changed = False
-    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 1000000)
     mock_factory.change_detector.current_allocation = 3000000
     should_proceed, _ = core._should_backup_onchange(vm, target)
     assert should_proceed is True
 
     # current_allocation == baseline → unchanged
-    mock_state.set_last_backup_allocation(str(target.path), 3000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 3000000)
     should_proceed, _ = core._should_backup_onchange(vm, target)
     assert should_proceed is False
 
     # current_allocation < baseline → also unchanged (never shrinks backward)
-    mock_state.set_last_backup_allocation(str(target.path), 5000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 5000000)
     should_proceed, _ = core._should_backup_onchange(vm, target)
     assert should_proceed is False
 
@@ -4748,13 +4719,13 @@ def test_onchange_allocation_map_detector_mode(
 
     # current_allocation != baseline → changed
     mock_factory.change_detector.changed = False
-    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 1000000)
     mock_factory.change_detector.current_allocation = 9999999
     should_proceed, _ = core._should_backup_onchange(vm, target)
     assert should_proceed is True
 
     # current_allocation == baseline → unchanged
-    mock_state.set_last_backup_allocation(str(target.path), 9999999)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 9999999)
     should_proceed, _ = core._should_backup_onchange(vm, target)
     assert should_proceed is False
 
@@ -4782,7 +4753,7 @@ def test_onchange_baseline_updated_after_successful_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Gate opens (no baseline).
     mock_factory.change_detector.current_allocation = 5000000
@@ -4842,7 +4813,7 @@ def test_onchange_baseline_not_updated_on_failure(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Gate opens (no baseline).
     mock_factory.change_detector.current_allocation = 5000000
@@ -4897,10 +4868,10 @@ def test_onchange_baseline_not_updated_when_gate_skips(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Gate: disk unchanged.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
 
     with patch.object(
@@ -4936,10 +4907,10 @@ def test_onchange_skip_runs_retention_and_cleanup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Gate: disk unchanged.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
     mock_factory.change_detector.changed = False
 
@@ -4985,7 +4956,7 @@ def test_onchange_detector_failure_gate_opens_fail_safe(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Simulate a real detector failure: the detector could not query
     # the source disk (virsh/qemu-img error), so it returns
@@ -4993,17 +4964,17 @@ def test_onchange_detector_failure_gate_opens_fail_safe(
     # last_allocation > 0 (snapshot-side baseline exists).
     # Per-target comparison: 0 > 2000000 → False (would skip).
     # Fail-safe override: changed=True + last_allocation>0 + current_allocation=0 → True.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 0
     mock_factory.change_detector.last_allocation = 1000000
     mock_factory.change_detector.changed = True
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is True, (
         "fail-safe: gate must open when change_result.changed=True "
         "even though per-target allocation comparison returns False"
     )
-    assert change_result.changed is True
+    assert change_results["vda"].changed is True
 
     # Also verify through _backup_target that transfer proceeds.
     with patch.object(
@@ -5037,7 +5008,7 @@ def test_onchange_gate_uses_detector_not_snapshot_names(
     )
 
     # Baseline exists.
-    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 1000000)
     mock_factory.change_detector.current_allocation = 3000000
 
     with patch.object(
@@ -5076,10 +5047,10 @@ def test_onchange_transfer_skipped_but_retention_cleans_expired_backups(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime.now(),
         allocation=1000,
-    )
+    disk="vda",    )
 
     # Gate: disk unchanged.
-    mock_state.set_last_backup_allocation(str(target.path), 2000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 2000000)
     mock_factory.change_detector.current_allocation = 2000000
 
     old_backup = SnapshotInfo(
@@ -5087,7 +5058,7 @@ def test_onchange_transfer_skipped_but_retention_cleans_expired_backups(
         path=target.path / "testvm.FULL.old_backup.qcow2",
         timestamp=datetime(2020, 1, 1),
         allocation=0,
-    )
+    disk="vda",    )
 
     with patch.object(
         mock_factory._backup_provider, "list",
@@ -5129,7 +5100,7 @@ def test_onchange_mode_switch_detects_changed(
     )
 
     # Baseline set as if from allocation-size mode.
-    mock_state.set_last_backup_allocation(str(target.path), 1000000)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 1000000)
     # Current allocation for allocation-map mode is different.
     mock_factory.change_detector.current_allocation = 9999999
 
@@ -5160,9 +5131,9 @@ def test_onchange_gate_works_vm_shut_off(
     # No baseline → gate opens (detector works even when VM is shut off).
     mock_factory.change_detector.current_allocation = 5000000
 
-    should_proceed, change_result = core._should_backup_onchange(vm, target)
+    should_proceed, change_results = core._should_backup_onchange(vm, target)
     assert should_proceed is True
-    assert change_result.current_allocation == 5000000
+    assert change_results["vda"].current_allocation == 5000000
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -5193,7 +5164,7 @@ def test_startup_validation_cleans_phantom_fulls(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
     mock_state._full_backups[str(target.path)] = [full_info]
 
     with patch.object(
@@ -5232,15 +5203,15 @@ def test_startup_validation_clears_baseline_after_phantom(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
     mock_state._full_backups[str(target.path)] = [full_info]
     # Set a stale baseline.
-    mock_state.set_last_backup_allocation(str(target.path), 99999)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 99999)
 
     core._validate_state_at_startup(vm)
 
     # Baseline cleared since no FULLs remain.
-    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None, (
         "Stale baseline should be cleared after phantom FULL removal"
     )
 
@@ -5264,12 +5235,12 @@ def test_startup_validation_clears_baseline_no_fulls(
     )
 
     # No FULLs in state, but a stale baseline exists.
-    mock_state.set_last_backup_allocation(str(target.path), 99999)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 99999)
 
     core._validate_state_at_startup(vm)
 
     # Baseline cleared.
-    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None, (
         "Stale baseline should be cleared when no FULLs exist"
     )
 
@@ -5389,7 +5360,7 @@ def test_phantom_full_cascade_dep_cleanup(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
     mock_state.record_snapshot("testvm", snap)
 
     # Set up a phantom FULL in state (file doesn't exist on disk).
@@ -5398,7 +5369,7 @@ def test_phantom_full_cascade_dep_cleanup(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
     mock_state._full_backups[str(target.path)] = [full_info]
 
     with patch.object(
@@ -5434,7 +5405,7 @@ def test_phantom_last_full_clears_baseline(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
     mock_state.record_snapshot("testvm", snap)
 
     # Set up a phantom FULL (file doesn't exist).
@@ -5443,15 +5414,15 @@ def test_phantom_last_full_clears_baseline(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
     mock_state._full_backups[str(target.path)] = [full_info]
     # Set a stale baseline.
-    mock_state.set_last_backup_allocation(str(target.path), 99999)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 99999)
 
     core._backup_target(vm, target, [snap])
 
     # Baseline cleared since no FULLs remain.
-    assert mock_state.get_last_backup_allocation(str(target.path)) is None, (
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None, (
         "Baseline should be cleared when last phantom FULL is removed"
     )
 
@@ -5477,7 +5448,7 @@ def test_phantom_full_keeps_baseline_with_remaining(
 
     snap = SnapshotInfo(
         name="snap1", path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(), allocation=1000)
+        timestamp=datetime.now(), allocation=1000, disk="vda")
     mock_state.record_snapshot("testvm", snap)
 
     # Create a valid FULL file on disk.
@@ -5488,7 +5459,7 @@ def test_phantom_full_keeps_baseline_with_remaining(
         name="valid.FULL.monthly.qcow2",
         path=valid_full_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
 
     # Phantom FULL (file doesn't exist).
     phantom_path = Path("/nonexistent/phantom.FULL.monthly.qcow2")
@@ -5496,10 +5467,10 @@ def test_phantom_full_keeps_baseline_with_remaining(
         name="phantom.FULL.monthly.qcow2",
         path=phantom_path,
         timestamp=datetime.now(),
-    )
+    disk="vda",    )
 
     mock_state._full_backups[str(target.path)] = [valid_full, phantom_full]
-    mock_state.set_last_backup_allocation(str(target.path), 99999)
+    mock_state.set_last_backup_allocation(str(target.path), "vda", 99999)
 
     core._backup_target(vm, target, [snap])
 
@@ -5507,7 +5478,7 @@ def test_phantom_full_keeps_baseline_with_remaining(
     all_fulls = mock_state.get_full_backups(str(target.path))
     assert len(all_fulls) == 1, "Phantom FULL should be removed"
     assert all_fulls[0].name == "valid.FULL.monthly.qcow2"
-    assert mock_state.get_last_backup_allocation(str(target.path)) == 99999, (
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") == 99999, (
         "Baseline should NOT be cleared when valid FULLs remain"
     )
 
@@ -5615,7 +5586,7 @@ def test_per_chain_retention_keeps_entire_chain(
     inc_name = "testvm.T0008.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # Mock _resolve_chain_full_anchor for inc
@@ -5633,8 +5604,8 @@ def test_per_chain_retention_keeps_entire_chain(
     )
 
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500, disk="vda"),
     ]
 
     # Mock backup provider list
@@ -5676,7 +5647,7 @@ def test_per_chain_retention_removes_entire_old_chain(
     inc_name = "testvm.T0008.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # Mock _resolve_chain_full_anchor for inc
@@ -5694,8 +5665,8 @@ def test_per_chain_retention_removes_entire_old_chain(
     )
 
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500, disk="vda"),
     ]
 
     with patch.object(
@@ -5740,7 +5711,7 @@ def test_per_chain_no_middle_deletion(
     now = datetime.now()
 
     for fn in [middle_full, newer_full, older_full]:
-        mock_state.record_full_backup(str(target.path), fn, now)
+        mock_state.record_full_backup(str(target.path), fn, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), middle_inc, middle_full)
     mock_state.record_incremental_dependency(str(target.path), newer_inc, newer_full)
 
@@ -5760,11 +5731,11 @@ def test_per_chain_no_middle_deletion(
         )
 
     backups = [
-        SnapshotInfo(name=middle_full, path=target.path / middle_full, timestamp=now, allocation=10000),
-        SnapshotInfo(name=middle_inc, path=target.path / middle_inc, timestamp=now, allocation=500),
-        SnapshotInfo(name=newer_full, path=target.path / newer_full, timestamp=now, allocation=10000),
-        SnapshotInfo(name=newer_inc, path=target.path / newer_inc, timestamp=now, allocation=500),
-        SnapshotInfo(name=older_full, path=target.path / older_full, timestamp=now, allocation=10000),
+        SnapshotInfo(name=middle_full, path=target.path / middle_full, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=middle_inc, path=target.path / middle_inc, timestamp=now, allocation=500, disk="vda"),
+        SnapshotInfo(name=newer_full, path=target.path / newer_full, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=newer_inc, path=target.path / newer_inc, timestamp=now, allocation=500, disk="vda"),
+        SnapshotInfo(name=older_full, path=target.path / older_full, timestamp=now, allocation=10000, disk="vda"),
     ]
 
     with patch.object(
@@ -5831,8 +5802,8 @@ def test_group_backups_by_chain_correct_full(
     )
 
     backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500, disk="vda"),
     ]
 
     chains = core._group_backups_by_chain(backups)
@@ -5877,7 +5848,7 @@ def test_group_backups_by_chain_orphan_from_broken_chain(
     )
 
     backups = [
-        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500, disk="vda"),
     ]
 
     chains = core._group_backups_by_chain(backups)
@@ -5908,10 +5879,10 @@ def test_per_chain_cleanup_entire_chain_deleted(
 
     full_name = "snap1.FULL.monthly.qcow2"
     now = datetime.now()
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
 
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
     ]
     retention = RetentionResult(keep=[], remove=[full_name])
 
@@ -5958,12 +5929,12 @@ def test_per_chain_cleanup_no_ghost_retention(
     inc_name = "snap2.qcow2"
     now = datetime.now()
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
-        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=target.path / full_name, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=target.path / inc_name, timestamp=now, allocation=500, disk="vda"),
     ]
     # inc in keep, FULL in remove → per-chain: FULL still deleted (no ghost-retention)
     retention = RetentionResult(keep=[inc_name], remove=[full_name])
@@ -6005,7 +5976,7 @@ def test_per_chain_cleanup_incremental_state_cleaned(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     # _resolve_chain_full_anchor: inc → backing = FULL
@@ -6023,8 +5994,8 @@ def test_per_chain_cleanup_incremental_state_cleaned(
     )
 
     backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500, disk="vda"),
     ]
     retention = RetentionResult(keep=[], remove=[full_name, inc_name])
 
@@ -6071,12 +6042,12 @@ def test_per_chain_post_cleanup_verification_pass(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500, disk="vda"),
     ]
     # FULL removed, inc kept → inc will be post-cleanup verified
     retention = RetentionResult(keep=[full_name, inc_name], remove=[])
@@ -6126,12 +6097,12 @@ def test_per_chain_post_cleanup_verification_fail(
     full_path = target.path / full_name
     inc_path = target.path / inc_name
 
-    mock_state.record_full_backup(str(target.path), full_name, now)
+    mock_state.record_full_backup(str(target.path), full_name, now, "vda")
     mock_state.record_incremental_dependency(str(target.path), inc_name, full_name)
 
     backups = [
-        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000),
-        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500),
+        SnapshotInfo(name=full_name, path=full_path, timestamp=now, allocation=10000, disk="vda"),
+        SnapshotInfo(name=inc_name, path=inc_path, timestamp=now, allocation=500, disk="vda"),
     ]
     retention = RetentionResult(keep=[full_name, inc_name], remove=[full_name])
 
@@ -6192,7 +6163,7 @@ def test_snapshot_oldest_prefix_contiguous_removed(
                 path=Path(f"/tmp/snap{i+1}.qcow2"),
                 timestamp=ts,
                 allocation=1000,
-            ),
+            disk="vda",            ),
         )
 
     # Engine returns: remove oldest 2, keep newest 2
@@ -6248,7 +6219,7 @@ def test_snapshot_oldest_prefix_middle_moved_to_keep(
                 path=Path(f"/tmp/snap{i+1}.qcow2"),
                 timestamp=ts,
                 allocation=1000,
-            ),
+            disk="vda",            ),
         )
 
     with patch.object(
@@ -6304,7 +6275,7 @@ def test_snapshot_oldest_prefix_mixed(
                 path=Path(f"/tmp/snap{i+1}.qcow2"),
                 timestamp=ts,
                 allocation=1000,
-            ),
+            disk="vda",            ),
         )
 
     with patch.object(
@@ -6370,7 +6341,7 @@ def test_blockcommit_receives_oldest_prefix(
                 path=Path(f"{base_path}/snap{i+1}.qcow2"),
                 timestamp=ts,
                 allocation=1000,
-            ),
+            disk="vda",            ),
         )
 
     # Oldest-prefix: snap1 removed, snap2-snap4 kept
@@ -6391,6 +6362,297 @@ def test_blockcommit_receives_oldest_prefix(
     merge_names = [s.name for s in bc_spy.call_args[0][1]]
     assert "snap1" in merge_names, "contiguous oldest prefix should be committed"
     assert "snap2" not in merge_names, "non-remove items should NOT be committed"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Multi-Disk Retention Grouping
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_multidisk_retention_groups_by_disk(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Retention evaluates each disk's chain independently.
+
+    vda has 3 snapshots, vdb has 4.  ``_evaluate_disk_retention`` must be
+    called exactly twice — once per disk — with only that disk's
+    snapshots.  The final keep/remove is the union of both disks.
+    """
+    vda_base = Path("/var/lib/libvirt/images/testvm_vda.qcow2")
+    vdb_base = Path("/var/lib/libvirt/images/testvm_vdb.qcow2")
+    disks = [
+        DiskConfig(target="vda", base_image=vda_base),
+        DiskConfig(target="vdb", base_image=vdb_base),
+    ]
+    vm = make_vm_config(name="testvm", disks=disks)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    base = datetime(2025, 7, 13, 10, 0)
+    # vda: 3 snapshots
+    for i in range(3):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vda_snap{i+1}",
+                path=Path(f"/tmp/vda_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i),
+                allocation=1000,
+                disk="vda",
+            ),
+        )
+    # vdb: 4 snapshots
+    for i in range(4):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vdb_snap{i+1}",
+                path=Path(f"/tmp/vdb_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i + 10),
+                allocation=1000,
+                disk="vdb",
+            ),
+        )
+
+    with patch.object(
+        core, "_evaluate_disk_retention", wraps=core._evaluate_disk_retention
+    ) as disk_retention_spy:
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+
+    # Called exactly twice (once per disk)
+    assert disk_retention_spy.call_count == 2, (
+        f"Expected 2 _evaluate_disk_retention calls, got {disk_retention_spy.call_count}"
+    )
+
+    # Each call received only one disk's snapshots
+    vda_call = None
+    vdb_call = None
+    for call in disk_retention_spy.call_args_list:
+        snaps = call[0][0]
+        names = {s.name for s in snaps}
+        if "vda_snap1" in names:
+            vda_call = names
+        else:
+            vdb_call = names
+
+    assert vda_call == {"vda_snap1", "vda_snap2", "vda_snap3"}
+    assert vdb_call == {"vdb_snap1", "vdb_snap2", "vdb_snap3", "vdb_snap4"}
+
+    # Final result is the union of both disks (default MockRetentionEngine keeps all)
+    assert len(result.keep) == 7
+    assert len(result.remove) == 0
+
+
+def test_multidisk_retention_per_disk_independence(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Removal on vda does not affect vdb's keep list.
+
+    Engine removes the oldest of each disk independently; verify
+    per-disk isolation.
+    """
+    vda_base = Path("/var/lib/libvirt/images/testvm_vda.qcow2")
+    vdb_base = Path("/var/lib/libvirt/images/testvm_vdb.qcow2")
+    disks = [
+        DiskConfig(target="vda", base_image=vda_base),
+        DiskConfig(target="vdb", base_image=vdb_base),
+    ]
+    vm = make_vm_config(name="testvm", disks=disks, snapshot_chain_length=0)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    base = datetime(2025, 7, 13, 10, 0)
+    # vda: 3 snapshots
+    for i in range(3):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vda_snap{i+1}",
+                path=Path(f"/tmp/vda_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i),
+                allocation=1000,
+                disk="vda",
+            ),
+        )
+    # vdb: 4 snapshots
+    for i in range(4):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vdb_snap{i+1}",
+                path=Path(f"/tmp/vdb_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i + 10),
+                allocation=1000,
+                disk="vdb",
+            ),
+        )
+
+    # Engine removes the oldest of each call's items, keeps the rest
+    def _custom_evaluate(items, policy, now):
+        names = [item.name for item in items]
+        return RetentionResult(keep=names[1:], remove=names[:1])
+
+    with patch.object(
+        mock_factory._retention_engine, "evaluate", side_effect=_custom_evaluate,
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # vda: oldest removed → vda_snap1 removed, vda_snap2/3 kept
+    assert "vda_snap1" in result.remove
+    assert "vda_snap2" in result.keep
+    assert "vda_snap3" in result.keep
+
+    # vdb: oldest removed → vdb_snap1 removed, vdb_snap2/3/4 kept
+    assert "vdb_snap1" in result.remove
+    assert "vdb_snap2" in result.keep
+    assert "vdb_snap3" in result.keep
+    assert "vdb_snap4" in result.keep
+
+    # Per-disk independence: removal count is 1 per disk, not mixed
+    assert len(result.keep) == 5   # 2 from vda + 3 from vdb
+    assert len(result.remove) == 2  # 1 from each disk
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#     Multi-Disk Blockcommit Dispatch
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_multidisk_blockcommit_dispatches_per_disk(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Blockcommit dispatches per-disk with correct base_image.
+
+    Remove-set contains snapshots of both disks → two blockcommit calls,
+    each with its own disk's base_image and only that disk's snapshots.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vda_base = Path("/var/lib/libvirt/images/testvm_vda.qcow2")
+    vdb_base = Path("/var/lib/libvirt/images/testvm_vdb.qcow2")
+    disks = [
+        DiskConfig(target="vda", base_image=vda_base),
+        DiskConfig(target="vdb", base_image=vdb_base),
+    ]
+    vm = make_vm_config(
+        name="testvm",
+        disks=disks,
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Record snapshots for both disks
+    base = datetime(2025, 7, 13, 10, 0)
+    for i in range(2):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vda_snap{i+1}",
+                path=Path(f"/tmp/vda_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i),
+                allocation=1000,
+                disk="vda",
+            ),
+        )
+    for i in range(2):
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=f"vdb_snap{i+1}",
+                path=Path(f"/tmp/vdb_snap{i+1}.qcow2"),
+                timestamp=base + timedelta(hours=i + 10),
+                allocation=1000,
+                disk="vdb",
+            ),
+        )
+
+    # Remove-set contains snapshots from BOTH disks
+    retention = RetentionResult(
+        keep=[],
+        remove=["vda_snap1", "vda_snap2", "vdb_snap1", "vdb_snap2"],
+    )
+    manager = mock_factory._lifecycle_manager
+
+    # Override domblklist to show tips NOT in the candidate set
+    # (all snapshots committable for both disks)
+    mock_shell.expect_first("domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(
+                "Target   Source\n"
+                "--------------------------------\n"
+                "vda   /tmp/vda_tip.qcow2\n"
+                "vdb   /tmp/vdb_tip.qcow2\n"
+            ),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    assert bc_spy.call_count == 2, (
+        f"Expected 2 blockcommit calls (one per disk), got {bc_spy.call_count}"
+    )
+
+    # Collect per-disk call details
+    calls_by_disk: dict[str, dict] = {}
+    for call in bc_spy.call_args_list:
+        disk = call.kwargs["disk"]
+        calls_by_disk[disk] = {
+            "snapshots": call[0][1],   # positional arg: snapshots_to_merge
+            "base_image": call.kwargs["base_image"],
+        }
+
+    assert "vda" in calls_by_disk
+    assert "vdb" in calls_by_disk
+
+    # vda call: only vda snapshots, correct base_image
+    vda_snap_names = {s.name for s in calls_by_disk["vda"]["snapshots"]}
+    assert vda_snap_names == {"vda_snap1", "vda_snap2"}
+    assert calls_by_disk["vda"]["base_image"] == vda_base
+
+    # vdb call: only vdb snapshots, correct base_image
+    vdb_snap_names = {s.name for s in calls_by_disk["vdb"]["snapshots"]}
+    assert vdb_snap_names == {"vdb_snap1", "vdb_snap2"}
+    assert calls_by_disk["vdb"]["base_image"] == vdb_base
 
 
 # _execute_with_retry tests
@@ -6615,7 +6877,7 @@ def test_full_creation_retried_via_execute_with_retry(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     full_calls = 0
@@ -6691,7 +6953,7 @@ def test_full_creation_not_retried_non_transient(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     full_calls = 0
@@ -6759,7 +7021,7 @@ def test_incremental_transfer_uses_execute_with_retry(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    )
+    disk="vda",    )
 
     transfer_calls = 0
 
@@ -6940,7 +7202,7 @@ def test_snapshot_creation_failure_does_not_record_state(
     Verifies that when ExternalSnapshotProvider.create() returns failure,
     Core does not call record_snapshot() for the failed disk.
     """
-    vm = make_vm_config(name="testvm", disks=["vda", "vdb"])
+    vm = make_vm_config(name="testvm", disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")), DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2"))])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -7002,7 +7264,7 @@ def test_pipeline_skips_blockcommit_when_snapshot_creation_fails(
     """
     vm = make_vm_config(
         name="testvm",
-        disks=["vda"],
+
         snapshot_chain_length=1,  # triggers commit after 1 snapshot
     )
     config = MockConfigFacade(vms=[vm])
@@ -7019,7 +7281,7 @@ def test_pipeline_skips_blockcommit_when_snapshot_creation_fails(
         path=Path("/tmp/testvm.20250101T000000_vda_abc123.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", old_snap)
 
     snapshot_provider = mock_factory._snapshot_provider
@@ -7085,7 +7347,7 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
         path=Path("/tmp/testvm.20250102T000000_vda_abc123.qcow2"),
         timestamp=datetime(2025, 1, 2, 0, 0),
         allocation=1000,
-    )
+    disk="vda",    )
     mock_state.record_snapshot("testvm", snap)
 
     # NO prior FULL in state → _should_create_full returns True →

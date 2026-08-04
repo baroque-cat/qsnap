@@ -36,6 +36,7 @@ def _make_backup(
         path=Path(path),
         timestamp=timestamp,
         allocation=allocation,
+        disk="vda",
     )
 
 

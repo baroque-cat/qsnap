@@ -38,7 +38,7 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import RetentionResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
@@ -137,7 +137,7 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir),
+        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
         snap_name,
         "vda",
         snap_path,
@@ -148,6 +148,7 @@ def _snapshot_create(
         path=result.path,
         timestamp=datetime.now(),
         allocation=result.new_allocation,
+        disk="vda",
     )
 
 
@@ -166,7 +167,7 @@ def _build_core(
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=7,
         targets=[
@@ -251,6 +252,7 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -271,6 +273,7 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         str(target_dir),
         f"{full_name}.qcow2",
         source_snap.timestamp,
+    disk="vda",
     )
 
     # ── Step 2: Create manual backing-chained incrementals ──────────
@@ -419,6 +422,7 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -427,7 +431,7 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
 
     # ── Step 2: Create backing-chained incrementals ─────────────────
     incr1_name = f"{vm_name}.20250201_vda_incr1"
@@ -460,8 +464,10 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     # Ensure our manually-created incrementals are in the list.
     # Use name-based deduplication because SnapshotInfo lacks __eq__.
     incr1_snap = SnapshotInfo(name=incr1_name, path=incr1_path,
+    disk="vda",
                               timestamp=datetime(2025, 2, 1), allocation=0)
     incr2_snap = SnapshotInfo(name=incr2_name, path=incr2_path,
+    disk="vda",
                               timestamp=datetime(2025, 2, 2), allocation=0)
     existing_names = {b.name for b in backups}
     if incr1_name not in existing_names:
@@ -590,6 +596,7 @@ def test_check_state_detects_broken_chains(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
@@ -598,7 +605,7 @@ def test_check_state_detects_broken_chains(test_vm):
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp)
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
 
     # ── Step 2: Create incremental and break its chain ───────────────
     broken_name = f"{vm_name}.20250301_vda_broken"

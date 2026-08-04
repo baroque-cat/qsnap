@@ -17,7 +17,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.interfaces.change import IChangeDetector
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import ChangeResult
 from qsnap.modules.change.allocation_detector import AllocationSizeDetector
 from qsnap.modules.change.map_detector import MapChangeDetector
@@ -71,7 +71,7 @@ def test_change_detector_has_changed_returns_change_result(cls, init_kwargs):
     detector = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     result = detector.has_changed(vm_config, disk="vda")
@@ -92,7 +92,7 @@ def test_change_detector_has_changed_accepts_disk_parameter(cls, init_kwargs):
     detector = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     result = detector.has_changed(vm_config, disk="vda")

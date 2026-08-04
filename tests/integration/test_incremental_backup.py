@@ -36,7 +36,7 @@ try:
 except ImportError:
     _HAS_LIBNBD = False
 
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -258,6 +258,7 @@ def test_incremental_after_full(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -334,11 +335,12 @@ def test_incremental_after_full(test_vm):
         path=overlay_path,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     # Step 5: Incremental transfer via libnbd.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,
@@ -434,6 +436,7 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=True, verify="off")
 
@@ -477,13 +480,14 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         path=overlay,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     # Step 3: transfer_missing with compress=True target.
     import logging
 
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     with caplog.at_level(logging.INFO):
         results = provider_inc.transfer_missing(
@@ -578,6 +582,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -621,11 +626,12 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         path=overlay,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
 
     # Step 4: transfer_missing.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,

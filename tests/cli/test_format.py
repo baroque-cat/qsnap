@@ -129,6 +129,7 @@ def test_format_deferred_table_with_summaries():
     summaries = [
         DeferredSummary(
             vm_name="vm-home",
+            disk="vda",
             snapshot_count=3,
             reason="apparmor",
             age=timedelta(hours=2),
@@ -163,6 +164,7 @@ def test_format_deferred_table_sorted_by_age_desc():
     summaries = [
         DeferredSummary(
             vm_name="vm-young",
+            disk="vda",
             snapshot_count=1,
             reason="apparmor",
             age=timedelta(minutes=5),
@@ -170,6 +172,7 @@ def test_format_deferred_table_sorted_by_age_desc():
         ),
         DeferredSummary(
             vm_name="vm-old",
+            disk="vda",
             snapshot_count=2,
             reason="selinux",
             age=timedelta(days=3),
@@ -177,6 +180,7 @@ def test_format_deferred_table_sorted_by_age_desc():
         ),
         DeferredSummary(
             vm_name="vm-middle",
+            disk="vda",
             snapshot_count=1,
             reason="apparmor",
             age=timedelta(hours=2),
@@ -199,6 +203,7 @@ def test_format_deferred_raw_with_summaries():
     summaries = [
         DeferredSummary(
             vm_name="vm-home",
+            disk="vda",
             snapshot_count=3,
             reason="apparmor",
             age=timedelta(hours=2),

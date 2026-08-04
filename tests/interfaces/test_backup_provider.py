@@ -14,7 +14,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.interfaces.backup import IBackupProvider
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from tests.mocks.mock_modules import MockBitmapBackupProvider
@@ -55,7 +55,7 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
@@ -65,6 +65,7 @@ def test_backup_provider_transfer_missing_returns_list_of_backup_result(cls, ini
             path=Path("/tmp/snap.qcow2"),
             timestamp=datetime.now(),
             allocation=65536,
+            disk="vda",
         )
     ]
     result = provider.transfer_missing(vm_config, target, snapshots)
@@ -107,6 +108,7 @@ def test_backup_provider_delete_returns_shellresult(cls, init_kwargs):
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime.now(),
         allocation=65536,
+        disk="vda",
     )
     result = provider.delete(backup)
     assert isinstance(result, ShellResult)
@@ -158,6 +160,7 @@ def test_ibackup_provider_create_full_backup_abstract():
                 path=Path("/tmp/snap.qcow2"),
                 timestamp=datetime.now(),
                 allocation=65536,
+                disk="vda",
             ),
             target=TargetConfig(path=Path("/mnt/backup/testvm")),
             compress=False,
@@ -188,6 +191,7 @@ def test_backup_provider_create_full_backup_returns_backup_result(cls, init_kwar
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime.now(),
         allocation=65536,
+        disk="vda",
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup("testvm", source_snapshot, target, compress=False)
@@ -223,6 +227,7 @@ def test_backup_provider_create_full_backup_accepts_convert_parallel(
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime.now(),
         allocation=65536,
+        disk="vda",
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup(
@@ -261,6 +266,7 @@ def test_backup_provider_create_full_backup_accepts_convert_out_of_order(
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime.now(),
         allocation=65536,
+        disk="vda",
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
     result = provider.create_full_backup(
@@ -296,7 +302,7 @@ def test_backup_provider_transfer_missing_accepts_convert_parallel(
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))
@@ -333,7 +339,7 @@ def test_backup_provider_transfer_missing_accepts_convert_out_of_order(
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     target = TargetConfig(path=Path("/mnt/backup/testvm"))

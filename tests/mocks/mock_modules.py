@@ -229,11 +229,12 @@ class MockChangeDetector(IChangeDetector):
     def changed(self, value: bool) -> None:
         self._changed = value
 
-    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
+    def has_changed(self, vm_config: VMConfig, disk: str) -> ChangeResult:
         return ChangeResult(
             changed=self._changed,
             last_allocation=self._last_alloc,
             current_allocation=self._current_alloc,
+            disk=disk,
         )
 
 
@@ -245,6 +246,8 @@ class MockLifecycleManager(ILifecycleManager):
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
         *,
+        disk: str,
+        base_image: Path,
         deep_verify: bool = False,
     ) -> CommitResult:
         if not snapshots_to_merge:

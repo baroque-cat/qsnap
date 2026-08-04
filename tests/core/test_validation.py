@@ -235,7 +235,7 @@ def test_pipeline_continues_after_validation_pass(
     mock_shell,
 ):
     """Validation passes → pipeline continues normally (snapshot created)."""
-    vm = make_vm_config(name="testvm", snapshot_create="always", disks=["vda"])
+    vm = make_vm_config(name="testvm", snapshot_create="always")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -338,7 +338,7 @@ def test_dry_run_downgrades_libnbd_missing_to_warning(
     the libnbd failure causes ``PipelineResult.success=False`` with the
     ``MISSING_LIBNBD_ERROR`` captured in the per-VM error.
     """
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
 
     # ── dry-run: WARNING, no RuntimeError ─────────────────────────
@@ -570,6 +570,8 @@ def test_preflight_cleanup_orphan_snapshot_detected(
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.known_vda.qcow2"),
             timestamp=datetime(2025, 1, 1),
             allocation=1024,
+        
+            disk="vda",
         ),
     )
 
@@ -659,6 +661,8 @@ def test_preflight_cleanup_all_snapshots_accounted_no_warning(
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2"),
             timestamp=datetime(2025, 1, 1),
             allocation=1024,
+        
+            disk="vda",
         ),
     )
 
@@ -922,7 +926,7 @@ def test_dry_run_runs_validation_non_fatal_warnings(
     """
     # Make validation fail by overriding snapshot_dir check.
     _override(mock_shell, "test -d", _FAIL)
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1074,7 +1078,7 @@ def test_validate_compress_driver_missing_dry_run_warning(
     )
 
     target = make_target(compress=True)
-    vm = make_vm_config(name="testvm", targets=[target], disks=["vda"])
+    vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,

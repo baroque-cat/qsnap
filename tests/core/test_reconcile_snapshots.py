@@ -70,6 +70,7 @@ def _snap(vm_name: str, snap_dir: Path, tag: str, allocation: int = 0) -> Snapsh
         path=snap_dir / f"{name}.qcow2",
         timestamp=datetime.now(),
         allocation=allocation,
+        disk="vda"
     )
 
 
@@ -466,7 +467,7 @@ def test_reconcile_last_allocation_mismatch(
     snap1.path.write_text("")
 
     mock_state.record_snapshot("testvm", snap1)
-    mock_state.set_last_allocation("testvm", 1000)
+    mock_state.set_last_allocation("testvm", "vda", 1000)
 
     mock_shell.expect_first("virsh dumpxml").returns(
         success_result(_make_xml("testvm", str(snap1.path)))

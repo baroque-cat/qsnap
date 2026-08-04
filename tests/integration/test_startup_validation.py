@@ -34,7 +34,7 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
 from tests.mocks import InMemoryStateManager, MockConfigFacade
@@ -119,7 +119,7 @@ def test_startup_validation(test_vm, caplog):
     target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_create="always",
         targets=[target],

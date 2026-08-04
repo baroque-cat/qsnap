@@ -446,7 +446,7 @@ def test_core_passes_quiesce_true_to_snapshot_provider(
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=True,
-        disks=["vda"],
+
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -486,7 +486,7 @@ def test_core_passes_quiesce_false_to_snapshot_provider(
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=False,
-        disks=["vda"],
+
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -559,7 +559,7 @@ def test_actions_cleared_at_run_start(
     mock_shell,
 ):
     """Run core.run() twice; verify actions from first run don't persist to second run."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -588,7 +588,7 @@ def test_action_appended_on_snapshot_create(
     mock_shell,
 ):
     """Run core.snapshot(); verify PipelineResult.actions contains snapshot_create ActionRecord."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -624,7 +624,7 @@ def test_action_appended_on_snapshot_delete(
     )
     vm = make_vm_config(
         name="testvm",
-        disks=["vda"],
+
         snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -641,6 +641,8 @@ def test_action_appended_on_snapshot_delete(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -696,6 +698,8 @@ def test_action_appended_on_backup_transfer(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -746,6 +750,8 @@ def test_action_appended_on_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -802,6 +808,8 @@ def test_action_appended_on_backup_delete(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -811,6 +819,8 @@ def test_action_appended_on_backup_delete(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
+    
+        disk="vda",
     )
 
     # Ensure auto-recovery does not delete backup1 (valid backing chain).
@@ -845,7 +855,7 @@ def test_error_action_appended_on_failure(
     mock_shell,
 ):
     """Make a VM step raise an exception; verify actions contains error ActionRecord."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -912,7 +922,7 @@ def test_pipeline_result_includes_actions_success(
     mock_shell,
 ):
     """Run core.run() successfully; verify PipelineResult.actions is a list and is populated."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -938,7 +948,7 @@ def test_pipeline_result_includes_error_actions(
     mock_shell,
 ):
     """Run with a failing VM; verify PipelineResult.actions contains error ActionRecords."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -992,6 +1002,8 @@ def test_backup_failed_warning_with_transfer_failures(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1048,6 +1060,8 @@ def test_no_backup_failed_warning_when_all_succeed(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1080,7 +1094,7 @@ def test_transaction_log_not_written_in_dry_run(
     """Set transaction_log config; run in dry-run; verify no transaction log is written."""
     tx_log = tmp_path / "transaction.log"
     global_cfg = make_global_config(transaction_log=str(tx_log))
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
@@ -1115,7 +1129,7 @@ def test_snapshot_create_info_log(
     caplog,
 ):
     """Verify [snapshot] info log is emitted after snapshot creation."""
-    vm = make_vm_config(name="testvm", disks=["vda"])
+    vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
@@ -1151,7 +1165,7 @@ def test_snapshot_delete_info_log(
     )
     vm = make_vm_config(
         name="testvm",
-        disks=["vda"],
+
         snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -1167,6 +1181,8 @@ def test_snapshot_delete_info_log(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1224,6 +1240,8 @@ def test_backup_transfer_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1270,6 +1288,8 @@ def test_full_backup_create_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1318,6 +1338,8 @@ def test_backup_delete_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
+    
+        disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
 
@@ -1326,6 +1348,8 @@ def test_backup_delete_info_log(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
+    
+        disk="vda",
     )
 
     # Ensure startup validation does not delete backup1 (valid FULL).

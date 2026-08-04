@@ -2,8 +2,11 @@
 
 [[vm]]
 name = "vm1"
-base_image = "/var/lib/libvirt/images/vm1.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm1"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm1.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm1"
@@ -11,8 +14,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm1"
 
 [[vm]]
 name = "vm2"
-base_image = "/var/lib/libvirt/images/vm2.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm2"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm2.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm2"

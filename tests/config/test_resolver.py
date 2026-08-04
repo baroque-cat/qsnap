@@ -30,8 +30,12 @@ def test_vm_inherits_chain_length_from_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -51,12 +55,17 @@ def test_target_inherits_chain_length_from_vm(tmp_path: Path) -> None:
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_chain_length = 200\n"
         "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -80,13 +89,18 @@ def test_target_overrides_vm_chain_length(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_chain_length = 200\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         "  target_chain_length = 150\n"
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -111,9 +125,13 @@ def test_vm_overrides_global_chain_length(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "snapshot_chain_length = 336\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -138,13 +156,18 @@ def test_target_overrides_vm_keep_generations(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_keep_generations = 3\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         "  target_keep_generations = 4\n"
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -167,12 +190,17 @@ def test_target_inherits_keep_generations_from_vm(tmp_path: Path) -> None:
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_keep_generations = 3\n"
         "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -196,8 +224,12 @@ def test_vm_inherits_keep_generations_from_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -219,8 +251,12 @@ def test_vm_inherits_snapshot_preserve_min_from_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -242,9 +278,13 @@ def test_vm_overrides_snapshot_preserve_min(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "snapshot_preserve_min = 48\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -269,9 +309,13 @@ def test_vm_sets_snapshot_preserve_min_to_zero(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "snapshot_preserve_min = 0\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -295,8 +339,12 @@ def test_valid_snapshot_preserve_min_accepted(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -322,8 +370,12 @@ def test_negative_snapshot_preserve_min_raises_config_error(
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     from qsnap.config.facade import ConfigError
 

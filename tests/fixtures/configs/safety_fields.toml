@@ -19,11 +19,14 @@ deep_check_schedule = "weekly"
 
 [[vm]]
 name = "critical-vm"
-base_image = "/var/lib/libvirt/images/critical.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/critical"
 snapshot_create = "always"
 snapshot_chain_length = 48
 blockcommit_deep_verify = true
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/critical.qcow2"
 
 [[vm.target]]
 path = "/mnt/backup/critical"
@@ -35,9 +38,12 @@ backup_retry_base = "5s"
 
 [[vm]]
 name = "standard-vm"
-base_image = "/var/lib/libvirt/images/standard.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/standard"
 blockcommit_deep_verify = false
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/standard.qcow2"
 
 [[vm.target]]
 path = "/mnt/backup/standard"

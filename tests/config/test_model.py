@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from qsnap.models.config import GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, RetentionPolicy, TargetConfig, VMConfig
 
 # ---------------------------------------------------------------------------
 # Scenario 1: RetentionPolicy default values
@@ -182,11 +182,11 @@ def test_vm_config_required_fields():
     """VMConfig with required fields sets them; snapshot_create defaults to 'always', targets to empty."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
     )
     assert vm.name == "testvm"
-    assert vm.base_image == Path("/var/lib/libvirt/images/testvm.qcow2")
+    assert vm.disks[0].base_image == Path("/var/lib/libvirt/images/testvm.qcow2")
     assert vm.snapshot_dir == Path("/var/lib/libvirt/images/snapshots")
     assert vm.snapshot_create == "always"
     assert vm.targets == []
@@ -221,7 +221,7 @@ def test_vm_config_with_targets():
 
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
         targets=original,
     )
@@ -244,25 +244,32 @@ def test_vm_config_with_targets():
 # ---------------------------------------------------------------------------
 
 
-def test_vm_config_disks_default_none_auto_discovery():
-    """VMConfig with no disks arg defaults to None (auto-discovery via virsh domblklist)."""
+def test_vm_config_disks_are_required():
+    """VMConfig requires at least one disk via disks= list."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
     )
-    assert vm.disks is None
+    assert len(vm.disks) == 1
+    assert vm.disks[0].target == "vda"
+    assert vm.disks[0].base_image == Path("/var/lib/libvirt/images/testvm.qcow2")
 
 
 def test_vm_config_explicit_disks_list():
-    """VMConfig(disks=['vda', 'vdb']) stores the explicit disk list."""
+    """VMConfig with multiple DiskConfig entries stores the explicit disk list."""
+    disks = [
+        DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+        DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testdb.qcow2")),
+    ]
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=disks,
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
-        disks=["vda", "vdb"],
     )
-    assert vm.disks == ["vda", "vdb"]
+    assert len(vm.disks) == 2
+    assert vm.disks[0].target == "vda"
+    assert vm.disks[1].target == "vdb"
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +311,7 @@ def test_vm_config_snapshot_quiesce_default_false():
     """VMConfig with no snapshot_quiesce arg defaults to False."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
     )
     assert vm.snapshot_quiesce is False
@@ -314,7 +321,7 @@ def test_vm_config_snapshot_quiesce_true():
     """VMConfig(snapshot_quiesce=True) stores True."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
         snapshot_quiesce=True,
     )
@@ -325,7 +332,7 @@ def test_vm_config_snapshot_quiesce_immutable():
     """VMConfig is a frozen dataclass; mutating snapshot_quiesce raises FrozenInstanceError."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
         snapshot_quiesce=True,
     )
@@ -342,7 +349,7 @@ def test_vm_config_lifecycle_mode_default_virsh():
     """VMConfig with no lifecycle_mode arg defaults to 'virsh' (blockcommit)."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
     )
     assert vm.lifecycle_mode == "virsh"
@@ -352,7 +359,7 @@ def test_vm_config_lifecycle_mode_qemu_img():
     """VMConfig(lifecycle_mode='qemu-img') stores 'qemu-img' (qemu-img commit)."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/images/snapshots"),
         lifecycle_mode="qemu-img",
     )
@@ -491,7 +498,7 @@ def test_vm_config_deep_verify_defaults_false():
     """VMConfig blockcommit_deep_verify defaults to False (T2)."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     assert vm.blockcommit_deep_verify is False
@@ -502,7 +509,7 @@ def test_vm_config_deep_verify_blockcommit_only():
     has been removed — accessing it raises AttributeError."""
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
         blockcommit_deep_verify=True,
     )
@@ -852,3 +859,142 @@ def test_change_detection_mode_explicit_allocation_map(make_vm_config):
     vm = make_vm_config(change_detection_mode="allocation-map")
     assert vm.change_detection_mode == "allocation-map"
 
+
+# ---------------------------------------------------------------------------
+# DiskConfig — multi-disk refactor
+# ---------------------------------------------------------------------------
+
+
+def test_disk_config_defaults():
+    """DiskConfig with required fields; snapshot_dir defaults to None."""
+    disk = DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/test.qcow2"))
+    assert disk.target == "vda"
+    assert disk.base_image == Path("/var/lib/libvirt/images/test.qcow2")
+    assert disk.snapshot_dir is None
+
+
+def test_disk_config_with_snapshot_dir():
+    """DiskConfig(snapshot_dir=...) sets per-disk override."""
+    disk = DiskConfig(
+        target="vda",
+        base_image=Path("/var/lib/libvirt/images/test.qcow2"),
+        snapshot_dir=Path("/fast-nvme/snaps/testvm-vda"),
+    )
+    assert disk.snapshot_dir == Path("/fast-nvme/snaps/testvm-vda")
+
+
+def test_disk_config_immutable():
+    """DiskConfig is a frozen dataclass; mutation raises FrozenInstanceError."""
+    disk = DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/test.qcow2"))
+    assert disk.__dataclass_params__.frozen is True
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        disk.target = "vdb"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        disk.base_image = Path("/mutated")  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        disk.snapshot_dir = Path("/mutated")  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# VMConfig.get_disk — disk lookup by target name
+# ---------------------------------------------------------------------------
+
+
+def test_get_disk_returns_correct_disk():
+    """get_disk('vda') returns the DiskConfig with target='vda'."""
+    vm = VMConfig(
+        name="testvm",
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/vdb.qcow2")),
+        ],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    disk = vm.get_disk("vda")
+    assert disk is not None
+    assert disk.target == "vda"
+    assert disk.base_image == Path("/var/lib/libvirt/images/vda.qcow2")
+
+
+def test_get_disk_returns_none_for_missing_target():
+    """get_disk('nonexistent') returns None."""
+    vm = VMConfig(
+        name="testvm",
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2"))],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    assert vm.get_disk("nonexistent") is None
+
+
+def test_get_disk_returns_correct_second_disk():
+    """get_disk('vdb') returns the second disk when present."""
+    vm = VMConfig(
+        name="testvm",
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/vdb.qcow2")),
+        ],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    disk = vm.get_disk("vdb")
+    assert disk is not None
+    assert disk.target == "vdb"
+
+
+# ---------------------------------------------------------------------------
+# VMConfig.snapshot_dir_for — resolve effective snapshot directory for a disk
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_dir_for_uses_per_disk_override():
+    """snapshot_dir_for returns the per-disk snapshot_dir when set."""
+    disk = DiskConfig(
+        target="vda",
+        base_image=Path("/var/lib/libvirt/images/vda.qcow2"),
+        snapshot_dir=Path("/fast-nvme/snaps/vda"),
+    )
+    vm = VMConfig(
+        name="testvm",
+        disks=[disk],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    assert vm.snapshot_dir_for(disk) == Path("/fast-nvme/snaps/vda")
+
+
+def test_snapshot_dir_for_falls_back_to_vm_level():
+    """snapshot_dir_for returns the VM-level snapshot_dir when per-disk is None."""
+    disk = DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2"))
+    vm = VMConfig(
+        name="testvm",
+        disks=[disk],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    assert vm.snapshot_dir_for(disk) == Path("/var/lib/libvirt/snapshots/testvm")
+
+
+def test_snapshot_dir_for_returns_none_when_neither_set():
+    """snapshot_dir_for returns None when neither per-disk nor VM-level snapshot_dir is set."""
+    disk = DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2"))
+    vm = VMConfig(name="testvm", disks=[disk])
+    assert vm.snapshot_dir_for(disk) is None
+
+
+# ---------------------------------------------------------------------------
+# VMConfig disks defensive copy
+# ---------------------------------------------------------------------------
+
+
+def test_vm_config_disks_defensive_copy():
+    """VMConfig stores a defensive copy of the disks list on construction."""
+    original = [
+        DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/vda.qcow2")),
+    ]
+    vm = VMConfig(name="testvm", disks=original, snapshot_dir=Path("/tmp/snaps"))
+
+    # The internal list is a different object.
+    assert vm.disks is not original
+
+    # Mutating the original list does NOT affect the VMConfig.
+    original.append(DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/vdb.qcow2")))
+    assert len(vm.disks) == 1

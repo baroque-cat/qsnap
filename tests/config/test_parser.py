@@ -34,7 +34,7 @@ def test_parse_minimal_valid_config() -> None:
     vm = vms[0]
     assert vm.name == "testvm"
     # Required fields are present and correctly typed.
-    assert vm.base_image == Path("/var/lib/libvirt/images/testvm.qcow2")
+    assert vm.disks[0].base_image == Path("/var/lib/libvirt/images/testvm.qcow2")
     assert vm.snapshot_dir == Path("/var/lib/libvirt/snapshots/testvm")
     # The VM has at least one target.
     assert len(vm.targets) >= 1
@@ -43,13 +43,13 @@ def test_parse_minimal_valid_config() -> None:
 
 @pytest.mark.unit
 def test_parse_missing_required_field_raises(tmp_path: Path) -> None:
-    """Valid TOML that omits a required VM field raises ConfigError."""
-    # Valid TOML syntax, but missing the required ``base_image`` field.
+    """Valid TOML that omits required [[vm.disk]] section raises ConfigError."""
+    # Valid TOML syntax, but missing the required [[vm.disk]] section.
     config_text = '[[vm]]\nname = "testvm"\nsnapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
     config_file = tmp_path / "missing_field.toml"
     config_file.write_text(config_text)
 
-    with pytest.raises(ConfigError, match="Missing required VM field"):
+    with pytest.raises(ConfigError, match="must define at least one"):
         ConfigFacade(config_file)
 
 
@@ -194,8 +194,12 @@ def test_valid_convert_parallel_accepted(tmp_path: Path) -> None:
         "convert_parallel = 8\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
         'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
         "[[vm.target]]\n"
         'path = "/mnt/backup/testvm"\n'
     )
@@ -213,8 +217,12 @@ def test_convert_parallel_below_range_raises_config_error(tmp_path: Path) -> Non
         "convert_parallel = 0\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
         'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
         "[[vm.target]]\n"
         'path = "/mnt/backup/testvm"\n'
     )
@@ -232,8 +240,12 @@ def test_convert_parallel_above_range_raises_config_error(tmp_path: Path) -> Non
         "convert_parallel = 9\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
         'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
         "[[vm.target]]\n"
         'path = "/mnt/backup/testvm"\n'
     )

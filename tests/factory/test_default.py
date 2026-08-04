@@ -417,6 +417,7 @@ def test_factory_create_lifecycle_manager_accepts_deep_verify(
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+        disk="vda",
     )
 
     mock_shell.expect("virsh domblklist").returns(
@@ -447,7 +448,7 @@ def test_factory_create_lifecycle_manager_accepts_deep_verify(
         )
     )
 
-    result = manager.blockcommit(vm_config, [snap], deep_verify=True)
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"), deep_verify=True)
     assert isinstance(result, CommitResult)
     assert result.success is True
     assert result.error is None

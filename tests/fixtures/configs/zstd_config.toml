@@ -9,8 +9,11 @@ backup_stall_timeout = "1h"
 
 [[vm]]
 name = "vm_inherit"
-base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_inherit.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_inherit"
@@ -18,8 +21,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_inherit"
 
 [[vm]]
 name = "vm_override"
-base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_override"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_override.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_override_zstd"

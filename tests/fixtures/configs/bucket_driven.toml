@@ -10,8 +10,11 @@ target_keep_generations = 2
 
 [[vm]]
 name = "vm_bucket"
-base_image = "/var/lib/libvirt/images/vm_bucket.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_bucket"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_bucket.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_bucket"
@@ -21,8 +24,11 @@ snapshot_dir = "/var/lib/libvirt/snapshots/vm_bucket"
 
 [[vm]]
 name = "vm_no_compress"
-base_image = "/var/lib/libvirt/images/vm_no_compress.qcow2"
 snapshot_dir = "/var/lib/libvirt/snapshots/vm_no_compress"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_no_compress.qcow2"
 
   [[vm.target]]
   path = "/mnt/backup/vm_no_compress"

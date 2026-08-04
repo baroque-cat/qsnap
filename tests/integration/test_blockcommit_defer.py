@@ -25,7 +25,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import RetentionResult, SnapshotInfo
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
@@ -48,7 +48,7 @@ def _build_core(
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=24,
         lifecycle_mode=lifecycle_mode,
@@ -438,6 +438,7 @@ def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm):
     # Step 2: Manually add a deferred blockcommit entry for the oldest.
     state.add_deferred_blockcommit(
         vm_name,
+        "vda",
         snapshots=[oldest.name],
         reason="vm_running",
     )

@@ -68,8 +68,12 @@ def test_global_chain_length_parsed(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -93,9 +97,13 @@ def test_vm_chain_length_overrides_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "snapshot_chain_length = 336\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -119,13 +127,18 @@ def test_target_chain_length_overrides_vm(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_chain_length = 200\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         "  target_chain_length = 150\n"
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -149,8 +162,12 @@ def test_valid_chain_length_accepted(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     assert facade.get_global().snapshot_chain_length == 1
@@ -170,8 +187,12 @@ def test_zero_chain_length_rejected(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="snapshot_chain_length must be >= 1"):
         ConfigFacade(config_file)
@@ -191,8 +212,12 @@ def test_negative_keep_generations_rejected(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="target_keep_generations must be >= 1"):
         ConfigFacade(config_file)
@@ -210,8 +235,12 @@ def test_negative_chain_length_rejected(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="target_chain_length must be >= 1"):
         ConfigFacade(config_file)
@@ -229,8 +258,12 @@ def test_non_integer_chain_length_rejected(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="snapshot_chain_length must be an integer"):
         ConfigFacade(config_file)
@@ -248,12 +281,17 @@ def test_full_every_deprecation_warning(tmp_path: Path, caplog: pytest.LogCaptur
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         '  full_every = "14d"\n'
+        "\n"
     )
 
     with caplog.at_level(logging.WARNING, logger="qsnap.config"):
@@ -289,8 +327,12 @@ def test_global_safety_fields_parsed(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -328,13 +370,18 @@ def test_target_retry_fields_parsed(tmp_path: Path) -> None:
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         "  backup_retry_max = 5\n"
         '  backup_retry_base = "10s"\n'
+        "\n"
     )
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
@@ -358,8 +405,12 @@ def test_zero_keep_generations_rejected(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="target_keep_generations must be >= 1"):
         ConfigFacade(config_file)
@@ -379,9 +430,13 @@ def test_vm_target_chain_length_overrides_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_chain_length = 200\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -405,9 +460,13 @@ def test_vm_keep_generations_overrides_global(tmp_path: Path) -> None:
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "target_keep_generations = 3\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     facade = ConfigFacade(config_file)
     global_cfg = facade.get_global()
@@ -433,8 +492,12 @@ def test_deprecated_snapshot_preserve_warning(
         "\n"
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with caplog.at_level(logging.WARNING, logger="qsnap.config"):
         facade = ConfigFacade(config_file)
@@ -462,9 +525,13 @@ def test_vm_zero_chain_length_rejected(tmp_path: Path) -> None:
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
         "snapshot_chain_length = 0\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
     )
     with pytest.raises(ConfigError, match="snapshot_chain_length must be >= 1"):
         ConfigFacade(config_file)
@@ -506,12 +573,17 @@ def test_incremental_toml_key_logs_deprecation_warning(
     config_file.write_text(
         "[[vm]]\n"
         'name = "testvm"\n'
-        'base_image = "/tmp/test.qcow2"\n'
         'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
         "\n"
         "  [[vm.target]]\n"
         '  path = "/mnt/backup/testvm"\n'
         "  incremental = true\n"
+        "\n"
     )
 
     with caplog.at_level(logging.WARNING, logger="qsnap.config"):
@@ -536,3 +608,124 @@ def test_incremental_toml_key_logs_deprecation_warning(
     # Verify the target has no 'incremental' attribute.
     with pytest.raises(AttributeError):
         _ = target.incremental
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Multi-disk parsing & validation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_multi_disk_fixture_parses():
+    """multi_disk.toml parses into a VMConfig with correct per-disk configs.
+
+    - VM has two disks (vda, vdb).
+    - vda has no per-disk snapshot_dir override → inherits VM-level dir.
+    - vdb has its own snapshot_dir override.
+    - Both disks have correct targets and base_images.
+    - The shared [[vm.target]] is present.
+    """
+    facade = ConfigFacade(FIXTURES / "multi_disk.toml")
+    vm = facade.get_vm("multi_disk_vm")
+
+    assert vm.name == "multi_disk_vm"
+    assert len(vm.disks) == 2
+
+    # vda — inherits VM-level snapshot_dir.
+    vda = vm.get_disk("vda")
+    assert vda is not None
+    assert vda.target == "vda"
+    assert vda.base_image == Path("/var/lib/libvirt/images/multi_disk_vm_vda.qcow2")
+    assert vda.snapshot_dir is None  # inherits from VM
+    assert vm.snapshot_dir_for(vda) == Path("/var/lib/libvirt/snapshots/multi_disk_vm")
+
+    # vdb — has its own per-disk snapshot_dir override.
+    vdb = vm.get_disk("vdb")
+    assert vdb is not None
+    assert vdb.target == "vdb"
+    assert vdb.base_image == Path("/var/lib/libvirt/images/multi_disk_vm_vdb.qcow2")
+    assert vdb.snapshot_dir == Path("/var/lib/libvirt/snapshots/multi_disk_vm_vdb")
+    assert vm.snapshot_dir_for(vdb) == Path("/var/lib/libvirt/snapshots/multi_disk_vm_vdb")
+
+    # Shared target is present.
+    assert len(vm.targets) == 1
+    assert vm.targets[0].path == Path("/mnt/backup/multi_disk_vm")
+
+
+@pytest.mark.unit
+def test_multi_disk_shared_snapshot_dir_rejected(tmp_path: Path):
+    """Two disks inheriting the same VM-level snapshot_dir raise ConfigError.
+
+    Both vda and vdb have no per-disk override, so both resolve to the
+    VM-level directory.  The validation must detect the conflict and
+    raise ConfigError with "share snapshot_dir".
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/vda.qcow2"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vdb"\n'
+        '  base_image = "/tmp/vdb.qcow2"\n'
+    )
+    with pytest.raises(ConfigError, match="share snapshot_dir"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_multi_disk_identical_per_disk_override_rejected(tmp_path: Path):
+    """Two disks with the same per-disk snapshot_dir override raise ConfigError.
+
+    Even though both explicitly set snapshot_dir, if they point to the
+    same directory the validation must detect the conflict.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/vda.qcow2"\n'
+        '  snapshot_dir = "/tmp/shared_snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vdb"\n'
+        '  base_image = "/tmp/vdb.qcow2"\n'
+        '  snapshot_dir = "/tmp/shared_snaps"\n'
+    )
+    with pytest.raises(ConfigError, match="share snapshot_dir"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_multi_disk_trailing_slash_equivalent_path_detected(tmp_path: Path):
+    """Paths differing only by trailing slash are detected as shared.
+
+    Uses os.path.normpath, so '/tmp/snaps' and '/tmp/snaps/' are
+    considered the same directory.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/vda.qcow2"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vdb"\n'
+        '  base_image = "/tmp/vdb.qcow2"\n'
+        '  snapshot_dir = "/tmp/snaps/"\n'
+    )
+    with pytest.raises(ConfigError, match="share snapshot_dir"):
+        ConfigFacade(config_file)

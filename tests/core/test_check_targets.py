@@ -81,6 +81,7 @@ def _setup_snapshot_check(
             path=snap_path,
             timestamp=datetime(2025, 7, 13, 14, 0),
             allocation=1000,
+                    disk="vda",
         ),
     )
 
@@ -155,6 +156,7 @@ def test_check_targets_all_consistent(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -170,18 +172,21 @@ def test_check_targets_all_consistent(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
+                    disk="vda",
         ),
         SnapshotInfo(
             name=inc1_name,
             path=inc1_path,
             timestamp=datetime(2025, 7, 13, 15, 0),
             allocation=0,
+                    disk="vda",
         ),
         SnapshotInfo(
             name=inc2_name,
             path=inc2_path,
             timestamp=datetime(2025, 7, 13, 16, 0),
             allocation=0,
+                    disk="vda",
         ),
     ]
 
@@ -247,6 +252,7 @@ def test_check_phantom_full(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
 
     # Provider returns nothing — no files on disk.
@@ -305,6 +311,7 @@ def test_check_phantom_incremental(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     # Incremental in state but no file on disk.
     inc1_name = "testvm.20250713T1500_vda"
@@ -319,6 +326,7 @@ def test_check_phantom_incremental(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
+                    disk="vda",
         ),
     ]
 
@@ -387,6 +395,7 @@ def test_check_orphan_backup_file(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -399,11 +408,11 @@ def test_check_orphan_backup_file(
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
         SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
         SnapshotInfo(name=inc2_name, path=inc2_path,
-                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0, disk="vda"),
     ]
 
     with patch.object(
@@ -470,6 +479,7 @@ def test_check_broken_backup_chain(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -486,9 +496,9 @@ def test_check_broken_backup_chain(
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
         SnapshotInfo(name=inc2_name, path=inc2_path,
-                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0, disk="vda"),
     ]
 
     with patch.object(
@@ -556,6 +566,7 @@ def test_check_broken_backup_chain_full_missing(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -569,7 +580,7 @@ def test_check_broken_backup_chain_full_missing(
 
     backups = [
         SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
     ]
 
     with patch.object(
@@ -634,11 +645,12 @@ def test_check_orphan_checkpoint(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
     ]
 
     # Compute the CORRECT target hash for the configured target.
@@ -716,6 +728,7 @@ def test_check_missing_checkpoint(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -728,9 +741,9 @@ def test_check_missing_checkpoint(
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
         SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
     ]
 
     # checkpoint-list returns empty — no checkpoints at all.
@@ -800,6 +813,7 @@ def test_check_multiple_checkpoints(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc1_name, full_name,
@@ -812,9 +826,9 @@ def test_check_multiple_checkpoints(
 
     backups = [
         SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
         SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0),
+                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
     ]
 
     # 2 checkpoints for the same target.
@@ -892,6 +906,7 @@ def test_check_after_retention_cleanup(
     mock_state.record_full_backup(
         str(backup_dir), full_name,
         datetime(2025, 7, 12, 10, 0),
+        "vda"
     )
     mock_state.record_incremental_dependency(
         str(backup_dir), inc2_name, full_name,
@@ -904,12 +919,14 @@ def test_check_after_retention_cleanup(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
+                    disk="vda",
         ),
         SnapshotInfo(
             name=inc2_name,
             path=inc2_path,
             timestamp=datetime(2025, 7, 13, 16, 0),
             allocation=0,
+                    disk="vda",
         ),
     ]
 
@@ -984,6 +1001,7 @@ def test_check_after_force_full(
     mock_state.record_full_backup(
         str(backup_dir), new_full_name,
         datetime(2025, 7, 13, 14, 0),
+        "vda",
     )
 
     # Provider returns only the new FULL.
@@ -993,6 +1011,7 @@ def test_check_after_force_full(
             path=new_full_path,
             timestamp=datetime(2025, 7, 13, 14, 0),
             allocation=0,
+                    disk="vda",
         ),
     ]
 

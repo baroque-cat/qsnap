@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.models.config import TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -88,9 +88,11 @@ def test_socket_and_tmp_cleanup(test_vm):
     socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
     # Freeze the timestamp so the stale .tmp and actual backup share the
     # same timestamp prefix.  Mock token_hex to get the same hex suffix.
+    # Multi-disk naming: FULL files are {vm}.FULL.{ts}_{disk}_{6hex}, so
+    # the stale name must include the disk segment ("vda") to match.
     frozen_ts = datetime(2025, 7, 30, 12, 0, 0)
     stale_hex = "deadbe"
-    stale_name = f"{vm_name}.FULL.{frozen_ts.strftime('%Y%m%dT%H%M%S')}_{stale_hex}"
+    stale_name = f"{vm_name}.FULL.{frozen_ts.strftime('%Y%m%dT%H%M%S')}_vda_{stale_hex}"
     tmp_file = target_dir / f"{stale_name}.qcow2.tmp"
 
     socket_path.write_text("")  # empty socket file
@@ -113,6 +115,7 @@ def test_socket_and_tmp_cleanup(test_vm):
             path=base_image,
             timestamp=frozen_ts,  # must match stale .tmp timestamp
             allocation=0,
+            disk="vda",
         )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -141,6 +144,7 @@ def test_socket_and_tmp_cleanup(test_vm):
             path=base_image,
             timestamp=datetime.now(),
             allocation=0,
+            disk="vda",
         )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -199,6 +203,7 @@ def test_domjobabort_after_backup(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
@@ -329,6 +334,7 @@ def test_stale_state_self_healing(test_vm):
         path=Path("/tmp/qsnap-stale-integration-test.qcow2"),
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     state.record_snapshot(vm_name, stale)
     assert len(state.get_snapshots(vm_name)) == 1, "Stale snapshot must be recorded"
@@ -336,7 +342,7 @@ def test_stale_state_self_healing(test_vm):
     # Run transfer_missing.
     provider = BitmapBackupProvider(shell, state=state)
     target = TargetConfig(path=target_dir, verify="off")
-    vm_config = VMConfig(name=vm_name, base_image=base_image, snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
 
     results = provider.transfer_missing(
         vm_config=vm_config,

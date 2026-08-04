@@ -66,6 +66,7 @@ def _make_snapshot() -> SnapshotInfo:
         path=Path("/snapshots/testvm.20250101T000000.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
+        disk="vda",
     )
 
 
@@ -80,7 +81,7 @@ def _setup_incr_expectations(mock_shell, target, prev_data: tuple[Path, str, str
     """
     prev_path, disk_target, prev_name = prev_data
     pid = os.getpid()
-    write_socket = f"/tmp/qsnap-write-{pid}.sock"
+    write_socket = f"/tmp/qsnap-write-{pid}-vda.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
     nbd = MockNbdClient(size=65536, max_request_size=33554432)
@@ -100,7 +101,7 @@ def _setup_incr_expectations(mock_shell, target, prev_data: tuple[Path, str, str
             error=None,
         )
     )
-    mock_shell.expect_first("qemu-img info.*" + prev_name).returns(
+    mock_shell.expect("qemu-img info.*" + prev_name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
@@ -159,7 +160,7 @@ def _add_post_validation_mocks(mock_shell, target_path: str | None = None) -> No
     target_hash = hashlib.md5(str(target_path).encode()).hexdigest()[:8] if target_path else "abc12345"
     # A future timestamp (9999) ensures _delete_superseded_checkpoints
     # sees it as NOT superseded (ts >= successor_ts → skip).
-    checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+    checkpoint_name = f"qsnap-{target_hash}-vda-99991231T000000-deadbe"
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -238,7 +239,7 @@ def _setup_convert_expectations(
     # A future timestamp (9999) ensures _delete_superseded_checkpoints
     # sees it as NOT superseded (ts >= successor_ts → skip).
     target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
-    checkpoint_name = f"qsnap-{target_hash}-99991231T000000-deadbe"
+    checkpoint_name = f"qsnap-{target_hash}-vda-99991231T000000-deadbe"
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
@@ -390,9 +391,9 @@ def test_checkpoint_cleanup_after_successful_transfer(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -464,14 +465,14 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
     target_file = target.path / f"{snapshot.name}.qcow2"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     pid = os.getpid()
-    write_socket = f"/tmp/qsnap-write-{pid}.sock"
+    write_socket = f"/tmp/qsnap-write-{pid}-vda.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
     nbd = MockNbdClient(size=65536, max_request_size=33554432)
@@ -490,7 +491,7 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
             error=None,
         )
     )
-    mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
+    mock_shell.expect("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
@@ -551,7 +552,7 @@ def test_transfer_failure_preserves_checkpoint(mock_shell, make_vm_config, make_
     assert "--metadata" not in delete_cmds[0]
     assert vm_config.name in delete_cmds[0]
     assert prior_checkpoint not in delete_cmds[0], "prior checkpoint must NOT be deleted"
-    assert f"qsnap-{target_hash}-" in delete_cmds[0], "successor (not prior) should be deleted"
+    assert f"qsnap-{target_hash}-vda-" in delete_cmds[0], "successor (not prior) should be deleted"
 
     create_cmds = [cmd for cmd in all_run_cmds if "checkpoint-create-as" in cmd]
     assert len(create_cmds) == 0
@@ -1162,7 +1163,7 @@ def test_create_full_backup_dotted_vm_name_passed_untruncated(mock_shell, make_t
 
     result_filename = result.target_path.name
     expected_date = snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
-    assert result_filename.startswith(f"3.Projects_opencode.FULL.{expected_date}_")
+    assert result_filename.startswith(f"3.Projects_opencode.FULL.{expected_date}_vda_")
     assert result_filename.endswith(".qcow2")
     assert snapshot.name == "testvm.20250101T000000"
     assert "3.Projects_opencode" not in snapshot.name
@@ -1257,7 +1258,7 @@ def test_full_pull_lifecycle_shared_by_both_paths(
     shell2.expect("checkpoint-list").returns(
         ShellResult(
             success=True,
-            stdout=f"qsnap-{cfb_hash}-99991231T000000-deadbe\n",
+            stdout=f"qsnap-{cfb_hash}-vda-99991231T000000-deadbe\n",
             stderr="",
             returncode=0,
             error=None,
@@ -1661,13 +1662,13 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
     target_file = target.path / f"{snapshot.name}.qcow2"
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     pid = os.getpid()
-    write_socket = f"/tmp/qsnap-write-{pid}.sock"
+    write_socket = f"/tmp/qsnap-write-{pid}-vda.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
     nbd = MockNbdClient(size=65536, max_request_size=33554432)
@@ -1686,7 +1687,7 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
             error=None,
         )
     )
-    mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
+    mock_shell.expect("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
@@ -1733,7 +1734,7 @@ def test_transfer_failure_deletes_partial_file(mock_shell, make_vm_config, make_
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint not in delete_cmds[0]
-    assert f"qsnap-{target_hash}-" in delete_cmds[0]
+    assert f"qsnap-{target_hash}-vda-" in delete_cmds[0]
 
     # No qemu-img convert
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
@@ -1750,13 +1751,13 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
     target_file = target.path / f"{snapshot.name}.qcow2"
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     pid = os.getpid()
-    write_socket = f"/tmp/qsnap-write-{pid}.sock"
+    write_socket = f"/tmp/qsnap-write-{pid}-vda.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
     nbd = MockNbdClient(size=65536, max_request_size=33554432)
@@ -1774,7 +1775,7 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
             error=None,
         )
     )
-    mock_shell.expect_first("qemu-img info.*" + prev_backup.name).returns(
+    mock_shell.expect("qemu-img info.*" + prev_backup.name).returns(
         ShellResult(
             success=True,
             stdout=json.dumps({"format": "qcow2", "virtual-size": 65536, "actual-size": 100}),
@@ -1833,7 +1834,7 @@ def test_bitmap_verify_failure_deletes_file(mock_shell, make_vm_config, make_tar
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
     assert len(delete_cmds) == 1
     assert prior_checkpoint not in delete_cmds[0]
-    assert f"qsnap-{target_hash}-" in delete_cmds[0]
+    assert f"qsnap-{target_hash}-vda-" in delete_cmds[0]
 
     # No qemu-img convert
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
@@ -1903,9 +1904,9 @@ def test_atomic_incremental_passes_checkpoint_xml_and_incremental(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -1976,7 +1977,7 @@ def test_backup_begin_failure_preserves_prior_checkpoint(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
     mock_shell.expect("rm -f").returns(success_result())
@@ -2018,9 +2019,9 @@ def test_prior_discovery_newest_wins(mock_shell):
     """_newest_checkpoint returns newest by embedded timestamp.
     Non-qsnap checkpoints are ignored.  New-format timestamps compared correctly."""
     target_hash = "abc12345"
-    newest = "qsnap-abc12345-20260721T010000"
-    middle = "qsnap-abc12345-20260720T120000"
-    oldest = "qsnap-abc12345-20260719T080000"
+    newest = "qsnap-abc12345-vda-20260721T010000"
+    middle = "qsnap-abc12345-vda-20260720T120000"
+    oldest = "qsnap-abc12345-vda-20260719T080000"
     foreign = "manual-one"
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
@@ -2036,7 +2037,7 @@ def test_prior_discovery_newest_wins(mock_shell):
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        prior = provider._newest_checkpoint("testvm", target_hash)
+        prior = provider._newest_checkpoint("testvm", target_hash, "vda")
 
     assert prior == newest, f"Expected newest checkpoint {newest!r}, got {prior!r}"
 
@@ -2059,9 +2060,9 @@ def test_prior_discovery_legacy_name_parsed(mock_shell):
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        prior = provider._newest_checkpoint("testvm", target_hash)
+        prior = provider._newest_checkpoint("testvm", target_hash, "vda")
 
-    assert prior == legacy, f"Legacy checkpoint should be recognized, got {prior!r}"
+    assert prior is None, f"Legacy name {legacy!r} should not be found by per-disk filter, got {prior!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     cp_list_cmds = [cmd for cmd in all_run_cmds if "checkpoint-list" in cmd]
@@ -2082,9 +2083,9 @@ def test_atomic_rotation_deletes_older_after_success(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior = f"qsnap-{target_hash}-old_snap"
+    prior = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -2148,9 +2149,9 @@ def test_checkpoint_delete_failure_non_fatal(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior = f"qsnap-{target_hash}-old_snap"
+    prior = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -2234,13 +2235,11 @@ def test_new_checkpoint_name_bumps_on_collision():
         # first-iteration name collides with the taken set, forcing a bump.
         with patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"):
             collision_candidate = (
-                f"qsnap-{target_hash}-"
+                f"qsnap-{target_hash}-vda-"
                 f"{frozen_time.strftime('%Y%m%dT%H%M%S')}"
                 f"-deadbe"
             )
-            bumped = BitmapBackupProvider._new_checkpoint_name(
-                target_hash, taken={collision_candidate}
-            )
+            bumped = BitmapBackupProvider._new_checkpoint_name(target_hash, "vda", taken={collision_candidate})
 
     assert bumped != collision_candidate, (
         f"Bumped name {bumped!r} must differ from collision candidate {collision_candidate!r}"
@@ -2249,13 +2248,13 @@ def test_new_checkpoint_name_bumps_on_collision():
     import re
 
     # New format: qsnap-{target_hash}-YYYYMMDDTHHMMSS-{6_hex_chars}
-    assert re.fullmatch(rf"qsnap-{target_hash}-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}", bumped), (
+    assert re.fullmatch(rf"qsnap-{target_hash}-vda-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}", bumped), (
         f"Bumped name {bumped!r} must match qsnap-{target_hash}-YYYYMMDDTHHMMSS-XXXXXX"
     )
 
     # With predictable hex=deadbe, the bump shifts timestamp by +1 second
     expected_bumped = (
-        f"qsnap-{target_hash}-"
+        f"qsnap-{target_hash}-vda-"
         f"{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
         f"-deadbe"
     )
@@ -2282,12 +2281,12 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
     # Prior checkpoint in new format with predictable hex suffix to trigger collision.
     prior_checkpoint = (
-        f"qsnap-{target_hash}-"
+        f"qsnap-{target_hash}-vda-"
         f"{frozen_time.strftime('%Y%m%dT%H%M%S')}"
         f"-deadbe"
     )
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -2341,11 +2340,11 @@ def test_transfer_missing_collision_successor_differs_from_prior(
     assert successor_name != prior_checkpoint, (
         f"Successor checkpoint name {successor_name!r} must differ from prior {prior_checkpoint!r}"
     )
-    assert successor_name.startswith(f"qsnap-{target_hash}-")
+    assert successor_name.startswith(f"qsnap-{target_hash}-vda-")
 
     # With predictable hex=deadbe colliding with prior, bump shifts by +1 second.
     expected_successor = (
-        f"qsnap-{target_hash}-"
+        f"qsnap-{target_hash}-vda-"
         f"{(frozen_time + timedelta(seconds=1)).strftime('%Y%m%dT%H%M%S')}"
         f"-deadbe"
     )
@@ -2363,8 +2362,8 @@ def test_newest_checkpoint_unchanged_contract(mock_shell):
     """_newest_checkpoint(vm_name, target_hash) still returns the newest
     checkpoint by embedded timestamp."""
     target_hash = "xyz12345"
-    newest = f"qsnap-{target_hash}-20260721T120000"
-    older = f"qsnap-{target_hash}-20260720T080000"
+    newest = f"qsnap-{target_hash}-vda-20260721T120000"
+    older = f"qsnap-{target_hash}-vda-20260720T080000"
 
     mock_shell.expect("virsh --version").returns(_ok_version_result())
     mock_shell.expect("checkpoint-list").returns(
@@ -2375,7 +2374,7 @@ def test_newest_checkpoint_unchanged_contract(mock_shell):
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        prior = provider._newest_checkpoint("testvm", target_hash)
+        prior = provider._newest_checkpoint("testvm", target_hash, "vda")
 
     assert prior == newest, f"Expected {newest!r}, got {prior!r}"
 
@@ -2403,7 +2402,7 @@ def test_create_full_backup_stopped_vm_returns_error(mock_shell, make_target, tm
     mock_shell.expect("qemu-img create -f qcow2").returns(success_result())
 
     pid = os.getpid()
-    write_socket = f"/tmp/qsnap-write-{pid}.sock"
+    write_socket = f"/tmp/qsnap-write-{pid}-vda.sock"
     pid_file = f"/tmp/qsnap-qemu-nbd-{pid}.pid"
 
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(success_result())
@@ -2763,8 +2762,8 @@ def test_create_full_backup_stopped_vm_custom_flags(mock_shell, make_target, tmp
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
         patch(
-            "qsnap.modules.backup.bitmap.get_first_disk_path",
-            return_value="/var/lib/libvirt/images/testvm.qcow2",
+            "qsnap.modules.backup.bitmap.get_disk_targets",
+            return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")],
         ),
     ):
         # No virsh backup-begin for stopped VM — direct convert from source
@@ -2819,8 +2818,8 @@ def test_create_full_backup_stopped_vm_no_compression(mock_shell, make_target, t
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
         patch(
-            "qsnap.modules.backup.bitmap.get_first_disk_path",
-            return_value="/var/lib/libvirt/images/testvm.qcow2",
+            "qsnap.modules.backup.bitmap.get_disk_targets",
+            return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")],
         ),
     ):
         mock_shell.expect("qemu-img convert").returns(success_result())
@@ -2869,8 +2868,8 @@ def test_create_full_backup_stopped_vm_direct_convert(mock_shell, make_target, t
     with (
         patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
         patch(
-            "qsnap.modules.backup.bitmap.get_first_disk_path",
-            return_value="/var/lib/libvirt/images/testvm.qcow2",
+            "qsnap.modules.backup.bitmap.get_disk_targets",
+            return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")],
         ),
     ):
         mock_shell.expect("qemu-img convert").returns(success_result())
@@ -3169,7 +3168,7 @@ def test_previous_backup_vanished_retryable_failure(
     target_path.mkdir()
     target = make_target(path=str(target_path), verify="off")
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     backups = [
@@ -3178,6 +3177,7 @@ def test_previous_backup_vanished_retryable_failure(
             path=prev_backup,
             timestamp=datetime(2024, 12, 30, 0, 0, 0),
             allocation=100,
+            disk="vda",
         ),
     ]
 
@@ -3254,12 +3254,14 @@ def test_broken_chain_newest_backup_skipped_walk_to_valid(
             path=older_backup,
             timestamp=datetime(2024, 12, 30, 0, 0, 0),
             allocation=100,
+            disk="vda",
         ),
         SnapshotInfo(
             name=newer_backup.stem,
             path=newer_backup,
             timestamp=datetime(2025, 1, 1, 0, 0, 0),
             allocation=200,
+            disk="vda",
         ),
     ]
 
@@ -3344,18 +3346,21 @@ def test_all_non_full_broken_fall_back_to_full(
             path=full_backup,
             timestamp=datetime(2024, 12, 1, 0, 0, 0),
             allocation=1024,
+            disk="vda",
         ),
         SnapshotInfo(
             name=incr1.stem,
             path=incr1,
             timestamp=datetime(2024, 12, 15, 0, 0, 0),
             allocation=200,
+            disk="vda",
         ),
         SnapshotInfo(
             name=incr2.stem,
             path=incr2,
             timestamp=datetime(2024, 12, 30, 0, 0, 0),
             allocation=150,
+            disk="vda",
         ),
     ]
 
@@ -3426,6 +3431,7 @@ def test_no_valid_backup_found_error_with_guidance(
             path=incr,
             timestamp=datetime(2024, 12, 30, 0, 0, 0),
             allocation=100,
+            disk="vda",
         ),
     ]
 
@@ -3534,9 +3540,9 @@ def test_new_checkpoint_name_includes_uuid_suffix():
     import re
 
     target_hash = "abc12345"
-    name = BitmapBackupProvider._new_checkpoint_name(target_hash, taken=set())
+    name = BitmapBackupProvider._new_checkpoint_name(target_hash, "vda", taken=set())
 
-    pattern = rf"^qsnap-{re.escape(target_hash)}-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}$"
+    pattern = rf"^qsnap-{re.escape(target_hash)}-vda-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}$"
     assert re.fullmatch(pattern, name), (
         f"Name {name!r} must match qsnap-{target_hash}-YYYYMMDDTHHMMSS-XXXXXX"
     )
@@ -3551,14 +3557,14 @@ def test_parse_checkpoint_timestamp_with_uuid_suffix():
     target_hash = "abc12345"
 
     # Old format: no suffix
-    old_name = f"qsnap-{target_hash}-20240101T120000"
-    old_ts = BitmapBackupProvider._parse_checkpoint_timestamp(old_name, target_hash)
+    old_name = f"qsnap-{target_hash}-vda-20240101T120000"
+    old_ts = BitmapBackupProvider._parse_checkpoint_timestamp(old_name, target_hash, "vda")
     assert old_ts is not None, f"Failed to parse old-format name {old_name!r}"
     assert old_ts == datetime(2024, 1, 1, 12, 0, 0), f"Expected 2024-01-01T12:00:00, got {old_ts}"
 
     # New format: with hex suffix
-    new_name = f"qsnap-{target_hash}-20240101T120000-a1b2c3"
-    new_ts = BitmapBackupProvider._parse_checkpoint_timestamp(new_name, target_hash)
+    new_name = f"qsnap-{target_hash}-vda-20240101T120000-a1b2c3"
+    new_ts = BitmapBackupProvider._parse_checkpoint_timestamp(new_name, target_hash, "vda")
     assert new_ts is not None, f"Failed to parse new-format name {new_name!r}"
     assert new_ts == datetime(2024, 1, 1, 12, 0, 0), f"Expected 2024-01-01T12:00:00, got {new_ts}"
 
@@ -3578,7 +3584,7 @@ def test_checkpoint_collision_force_cleanup_and_retry(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
     # Pre-register basic expectations.
     mock_shell.expect_first("checkpoint-list").returns(
@@ -3625,7 +3631,7 @@ def test_checkpoint_collision_force_cleanup_and_retry(
             BitmapBackupProvider, "_force_cleanup_checkpoints"
         ) as mock_force_cleanup,
         patch(
-            "qsnap.modules.backup.bitmap.get_first_disk_target", return_value="vda"
+            "qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")]
         ),
         patch.object(
             BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
@@ -3640,7 +3646,7 @@ def test_checkpoint_collision_force_cleanup_and_retry(
     )
 
     # _force_cleanup_checkpoints was called with correct args.
-    mock_force_cleanup.assert_called_once_with(vm_config.name, target_hash)
+    mock_force_cleanup.assert_called_once_with(vm_config.name, target_hash, "vda")
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
@@ -3654,7 +3660,7 @@ def test_force_cleanup_checkpoints_deletes_all(mock_shell, success_result):
     VM+target via _delete_checkpoint_best_effort."""
     vm_name = "testvm"
     target_hash = "abc12345"
-    prefix = f"qsnap-{target_hash}-"
+    prefix = f"qsnap-{target_hash}-vda-"
 
     checkpoints = [
         f"{prefix}20240101T120000",
@@ -3688,7 +3694,7 @@ def test_force_cleanup_checkpoints_deletes_all(mock_shell, success_result):
         ) as mock_delete,
     ):
         provider = BitmapBackupProvider(mock_shell)
-        provider._force_cleanup_checkpoints(vm_name, target_hash)
+        provider._force_cleanup_checkpoints(vm_name, target_hash, "vda")
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
@@ -3735,9 +3741,9 @@ def test_incremental_chain_to_full_traversable(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -3792,10 +3798,10 @@ def test_incremental_chain_to_full_broken(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
     target_file = target.path / f"{snapshot.name}.qcow2"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(
@@ -3869,10 +3875,10 @@ def test_incremental_checkpoint_missing(
     snapshot = _make_snapshot()
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    prior_checkpoint = f"qsnap-{target_hash}-old_snap"
+    prior_checkpoint = f"qsnap-{target_hash}-vda-20241230T000000-dead01"
     target_file = target.path / f"{snapshot.name}.qcow2"
 
-    prev_backup = target_path / "testvm.20241230T000000.qcow2"
+    prev_backup = target_path / "testvm.20241230T000000_vda_a1b2c3.qcow2"
     prev_backup.write_bytes(b"")
 
     nbd = _setup_incr_expectations(

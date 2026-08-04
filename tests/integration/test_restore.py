@@ -37,6 +37,7 @@ def _make_snapshot(
         path=Path(path),
         timestamp=timestamp,
         allocation=allocation,
+        disk="vda",
     )
 
 
@@ -127,8 +128,8 @@ def test_restore_full_pipeline_replaces_disk(
     assert isinstance(result, RestoreResult)
     assert result.success is True
     assert result.snapshot_name == "snap1"
-    assert result.restored_path == vm.base_image
-    assert vm.base_image in result.chain_files
+    assert result.restored_path == vm.disks[0].base_image
+    assert vm.disks[0].base_image in result.chain_files
     assert result.error is None
 
     # Verify qemu-img convert was called
@@ -246,16 +247,16 @@ def test_restore_pipeline_resets_state(
 
     # Pre-populate state: full backups, deps, allocation baselines
     target_path = str(target.path)
-    mock_state.record_full_backup(target_path, "testvm.FULL.20250713.qcow2", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_full_backup(target_path, "testvm.FULL.20250713.qcow2", datetime(2025, 7, 13, 8, 0), disk="vda")
     mock_state.record_incremental_dependency(target_path, "snap1_inc.qcow2", "testvm.FULL.20250713.qcow2")
-    mock_state.set_last_backup_allocation(target_path, 1048576)
-    mock_state.set_last_allocation("testvm", 2097152)
+    mock_state.set_last_backup_allocation(target_path, "vda", 1048576)
+    mock_state.set_last_allocation("testvm", "vda", 2097152)
 
     # Verify state is populated before restore
     assert len(mock_state.get_full_backups(target_path)) == 1
     assert len(mock_state.get_incremental_dependencies(target_path, "testvm.FULL.20250713.qcow2")) == 1
-    assert mock_state.get_last_backup_allocation(target_path) == 1048576
-    assert mock_state.get_last_allocation("testvm") == 2097152
+    assert mock_state.get_last_backup_allocation(target_path, "vda") == 1048576
+    assert mock_state.get_last_allocation("testvm", "vda") == 2097152
     assert len(mock_state.get_snapshots("testvm")) == 1
 
     _setup_restore_shell(mock_shell)
@@ -277,7 +278,7 @@ def test_restore_pipeline_resets_state(
     assert deps_after == [], f"Expected empty deps, got {deps_after}"
 
     # Verify last_allocation was reset
-    assert mock_state.get_last_allocation("testvm") is None
+    assert mock_state.get_last_allocation("testvm", "vda") is None
 
 
 # ── test_restore_pipeline_strips_backing_store ──────────────────────────────
@@ -308,7 +309,7 @@ def test_restore_pipeline_strips_backing_store(
     assert len(define_calls) >= 1, "virsh define should be called for domain XML update"
 
     # Verify the restored_path points to the base image
-    assert result.restored_path == vm.base_image
+    assert result.restored_path == vm.disks[0].base_image
 
 
 # ── test_restore_cleanup_libvirt_checkpoints ────────────────────────────────

@@ -36,7 +36,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
@@ -86,7 +86,7 @@ def _build_core(
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
-        base_image=base_image,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         targets=[
             TargetConfig(
@@ -144,6 +144,7 @@ def test_backup_retry_max_zero_calls_once(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     state.record_snapshot(vm_name, snap)
 
@@ -155,6 +156,7 @@ def test_backup_retry_max_zero_calls_once(test_vm):
         str(target_dir),
         f"{vm_name}.retry-zero-full.qcow2",
         datetime.now(),
+    disk="vda",
     )
 
     # Spy on _execute_with_retry.
@@ -221,6 +223,7 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
         path=base_image,
         timestamp=datetime.now(),
         allocation=0,
+        disk="vda",
     )
     state.record_snapshot(vm_name, snap)
 
@@ -229,6 +232,7 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
         str(target_dir),
         f"{vm_name}.retry-two-full.qcow2",
         datetime.now(),
+    disk="vda",
     )
 
     # Spy on _execute_with_retry.

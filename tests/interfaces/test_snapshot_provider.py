@@ -13,7 +13,7 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.interfaces.snapshot import ISnapshotProvider
-from qsnap.models.config import VMConfig
+from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from tests.mocks.mock_modules import MockSnapshotProvider
@@ -60,7 +60,7 @@ def test_snapshot_provider_create_returns_result(cls, init_kwargs):
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     result = provider.create(vm_config, "test-snap", "vda", Path("/tmp/snap.qcow2"), quiesce=False)
@@ -81,7 +81,7 @@ def test_snapshot_provider_list_returns_list_of_snapshotinfo(cls, init_kwargs):
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     result = provider.list(vm_config)
@@ -106,6 +106,7 @@ def test_snapshot_provider_delete_returns_shellresult(cls, init_kwargs):
         path=Path("/tmp/snap.qcow2"),
         timestamp=datetime.now(),
         allocation=65536,
+        disk="vda",
     )
     result = provider.delete(snapshot)
     assert isinstance(result, ShellResult)

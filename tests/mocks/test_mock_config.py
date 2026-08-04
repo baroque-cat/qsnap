@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from qsnap.interfaces.config import IConfigFacade
-from qsnap.models.config import GlobalConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, VMConfig
 from tests.mocks.mock_config import MockConfigFacade
 
 
@@ -24,7 +24,7 @@ def test_mock_config_is_iconfigfacade():
     # Facade with a preconfigured VM — verify get_vms and get_vm.
     vm = VMConfig(
         name="testvm",
-        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
         snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
     )
     facade_with_vm = MockConfigFacade(vms=[vm])
