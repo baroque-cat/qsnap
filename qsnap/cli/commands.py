@@ -147,7 +147,8 @@ def _print_tree(
         for snap in snapshots:
             by_disk.setdefault(snap.disk, []).append(snap)
         for disk, disk_snaps in by_disk.items():
-            base = vm.get_disk(disk).base_image if vm and vm.get_disk(disk) else None
+            disk_cfg = vm.get_disk(disk) if vm else None
+            base = disk_cfg.base_image if disk_cfg is not None else None
             if base is not None:
                 print(f"[{disk}] {base.name}")
             else:

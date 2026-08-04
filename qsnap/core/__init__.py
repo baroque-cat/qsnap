@@ -1755,7 +1755,17 @@ class Core:
             #    orphan snapshot files (not in state, not in XML)
             try:
                 recorded = {sn.path.name for sn in self._state.get_snapshots(vm.name)}
-                for qcow2_file in vm.snapshot_dir.glob(f"{vm.name}.*.qcow2"):
+                # Multi-disk: scan every distinct snapshot directory of this
+                # VM (per-disk overrides or the VM-level default).
+                qcow2_files: list[Path] = []
+                seen_dirs: set[Path] = set()
+                for disk_cfg in vm.disks:
+                    resolved_dir = vm.snapshot_dir_for(disk_cfg)
+                    if resolved_dir is None or resolved_dir in seen_dirs:
+                        continue
+                    seen_dirs.add(resolved_dir)
+                    qcow2_files.extend(resolved_dir.glob(f"{vm.name}.*.qcow2"))
+                for qcow2_file in qcow2_files:
                     if qcow2_file.name in recorded:
                         # Cross-check: file in state + on disk → XML
                         # must also reference it.
@@ -2343,8 +2353,15 @@ class Core:
             return
 
         try:
-            # (a) Remove stale .tmp and .partial files
-            dirs_to_clean: list[Path] = [vm_config.snapshot_dir]
+            # (a) Remove stale .tmp and .partial files.  Multi-disk: cover
+            # every distinct snapshot directory (per-disk overrides included).
+            dirs_to_clean: list[Path] = []
+            seen_cleanup_dirs: set[Path] = set()
+            for disk_cfg in vm_config.disks:
+                resolved_dir = vm_config.snapshot_dir_for(disk_cfg)
+                if resolved_dir is not None and resolved_dir not in seen_cleanup_dirs:
+                    seen_cleanup_dirs.add(resolved_dir)
+                    dirs_to_clean.append(resolved_dir)
             dirs_to_clean.extend(t.path for t in vm_config.targets)
 
             removed_count = 0
@@ -2433,25 +2450,42 @@ class Core:
 
             # (c) Detect orphan .qcow2 files (warning only, do NOT delete)
             # Only consider files matching the qsnap naming pattern:
-            # {vm_name}.{timestamp}.qcow2
+            # {vm_name}.{timestamp}[_{disk}_{6hex}].qcow2
             recorded_names = {s.path.name for s in self._state.get_snapshots(vm_config.name)}
             orphan_pattern = f"{vm_config.name}.*.qcow2"
-            orphan_result = self._shell.run(
-                [
-                    "find",
-                    str(vm_config.snapshot_dir),
-                    "-maxdepth",
-                    "1",
-                    "-name",
-                    orphan_pattern,
-                    "-print",
-                ],
-                timeout=10,
-                check=True,
-            )
-            if orphan_result.success and orphan_result.stdout.strip():
-                qsnap_re = re.compile(rf"^{re.escape(vm_config.name)}\.\d{{8}}T\d{{6}}\.qcow2$")
-                for line in orphan_result.stdout.strip().splitlines():
+            # Multi-disk: scan every distinct snapshot directory of this VM.
+            orphan_dirs: list[Path] = []
+            seen_orphan_dirs: set[Path] = set()
+            for disk_cfg in vm_config.disks:
+                resolved_dir = vm_config.snapshot_dir_for(disk_cfg)
+                if resolved_dir is not None and resolved_dir not in seen_orphan_dirs:
+                    seen_orphan_dirs.add(resolved_dir)
+                    orphan_dirs.append(resolved_dir)
+            orphan_lines: list[str] = []
+            for orphan_dir in orphan_dirs:
+                orphan_result = self._shell.run(
+                    [
+                        "find",
+                        str(orphan_dir),
+                        "-maxdepth",
+                        "1",
+                        "-name",
+                        orphan_pattern,
+                        "-print",
+                    ],
+                    timeout=10,
+                    check=True,
+                )
+                if orphan_result.success and orphan_result.stdout.strip():
+                    orphan_lines.extend(orphan_result.stdout.strip().splitlines())
+            if orphan_lines:
+                # Match both the legacy {vm}.{ts}.qcow2 and the current
+                # {vm}.{ts}_{disk}_{6hex}.qcow2 naming formats.
+                qsnap_re = re.compile(
+                    rf"^{re.escape(vm_config.name)}\.\d{{8}}T\d{{6}}"
+                    rf"(?:_[^_]+_[0-9a-fA-F]{{6}})?\.qcow2$"
+                )
+                for line in orphan_lines:
                     filepath = line.strip()
                     if filepath:
                         filename = Path(filepath).name
@@ -5022,10 +5056,17 @@ class Core:
         hex_suffix = secrets.token_hex(3)
         base_name = f"{vm_config.name}.{timestamp}_{disk}_{hex_suffix}"
 
-        # Collision suffix: append _N if the file already exists.
+        # Collision suffix: append _N if the file already exists in the
+        # disk's snapshot directory (per-disk dir, multi-disk refactor).
+        disk_cfg = vm_config.get_disk(disk)
+        snapshot_dir = (
+            vm_config.snapshot_dir_for(disk_cfg)
+            if disk_cfg is not None
+            else vm_config.snapshot_dir
+        )
         name = base_name
         counter = 1
-        while (vm_config.snapshot_dir / f"{name}.qcow2").exists():
+        while snapshot_dir is not None and (snapshot_dir / f"{name}.qcow2").exists():
             name = f"{base_name}_{counter}"
             counter += 1
         return name
