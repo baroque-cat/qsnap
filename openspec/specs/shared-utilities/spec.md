@@ -6,31 +6,13 @@ Cross-cutting utility functions shared across domain module boundaries. These ar
 
 ## Requirements
 
-### Requirement: Shared hash utility in qsnap.utils (REMOVED)
-
-`file_sha256()` in `qsnap/utils/hash.py` was deleted. The file `qsnap/utils/hash.py` no longer exists. No code references `file_sha256` or imports from `qsnap.utils.hash`.
-
-**Migration**: No action needed. No code imports `file_sha256`.
-
-#### Scenario: File hashing used by ExternalSnapshotProvider
-
-- **WHEN** `ExternalSnapshotProvider.create()` computes a content hash for the new snapshot
-- **THEN** it SHALL import `file_sha256` from `qsnap.utils.hash`
-- **AND** it SHALL NOT import from `qsnap.modules.backup`
-
-#### Scenario: File hashing used by backup verification
-
-- **WHEN** `verify_backup()` in `qsnap/utils/verification.py` needs to hash a transferred backup
-- **THEN** it SHALL import `file_sha256` from `qsnap.utils.hash`
-- **AND** it SHALL NOT define its own `_file_sha256` private function
-
 ### Requirement: Shared NBD utility functions in qsnap.utils
 
-The system SHALL provide NBD-related utility functions in `qsnap/utils/nbd.py`. These SHALL include `is_libvirt_new_enough(shell: IShell) -> bool`, `is_vm_running(shell: IShell, vm_name: str) -> bool`, `get_first_disk_target(shell: IShell, vm_name: str) -> str`, `write_backup_xml(socket_path: str, incremental: str | None = None) -> Path`, and `write_checkpoint_xml(checkpoint_name: str) -> Path`. These functions SHALL be stateless — they accept `IShell` and config data as parameters and do NOT implement any ABC. They SHALL NOT live under `qsnap/modules/backup/`.
+The system SHALL provide NBD-related utility functions in `qsnap/utils/nbd.py`. These SHALL include `is_libvirt_new_enough(shell: IShell) -> bool`, `is_vm_running(shell: IShell, vm_name: str) -> bool`, `get_disk_targets(shell: IShell, vm_name: str) -> list[tuple[str, str]]` (all disk `(target, source_path)` pairs), `write_backup_xml(socket_path: str, incremental: str | None = None, disk: str | None = None) -> Path`, and `write_checkpoint_xml(checkpoint_name: str) -> Path`. These functions SHALL be stateless — they accept `IShell` and config data as parameters and do NOT implement any ABC. They SHALL NOT live under `qsnap/modules/backup/`.
 
-The `nbd_full_export()` function is REMOVED — it was deleted in the `2026-07-23-unify-nbd-transfer` change. The function is no longer referenced by any code.
+The single-disk helpers `get_first_disk_target()` and `get_first_disk_path()` are REMOVED — replaced by the multi-disk `get_disk_targets()`. The `nbd_full_export()` function is REMOVED — it was deleted in the `2026-07-23-unify-nbd-transfer` change.
 
-The `write_backup_xml()` function SHALL accept an optional `incremental` parameter. When non-None, the generated XML SHALL include `<incremental>{incremental}</incremental>` as a child of `<domainbackup>`, before the `<server>` element. When `None`, the XML SHALL NOT contain an `<incremental>` element (full export).
+The `write_backup_xml()` function SHALL accept optional `incremental` and `disk` parameters. When `incremental` is non-None, the generated XML SHALL include `<incremental>{incremental}</incremental>` as a child of `<domainbackup>`, before the `<server>` element. When `disk` is non-None, the XML SHALL include a `<disks><disk name='{disk}'/></disks>` element restricting the export to that disk. When `incremental` is `None`, the XML SHALL NOT contain an `<incremental>` element (full export).
 
 No duplicate `_write_backup_xml` method SHALL exist in `qsnap/modules/backup/bitmap.py`. `BitmapBackupProvider` SHALL import and call `write_backup_xml` from `qsnap.utils.nbd`.
 
@@ -44,17 +26,19 @@ No duplicate `_write_backup_xml` method SHALL exist in `qsnap/modules/backup/bit
 - **WHEN** `BitmapBackupProvider.transfer_missing()` needs to write a backup XML
 - **THEN** it SHALL import `write_backup_xml` from `qsnap.utils.nbd`
 - **AND** it SHALL NOT define its own `_write_backup_xml` static method
-- **AND** it SHALL call `write_backup_xml(socket_path, incremental=prior)` where `prior` is the checkpoint name or `None`
+- **AND** it SHALL call `write_backup_xml(socket_path, incremental=prior, disk=snapshot.disk)`
 
 #### Scenario: write_backup_xml with incremental parameter
 - **WHEN** `write_backup_xml(socket_path, incremental="qsnap-abc123-snap1")` is called
 - **THEN** the generated XML contains `<incremental>qsnap-abc123-snap1</incremental>`
-- **AND** the XML structure is `<domainbackup mode='pull'><incremental>...</incremental><server .../></domainbackup>`
+
+#### Scenario: write_backup_xml with disk parameter
+- **WHEN** `write_backup_xml(socket_path, disk="vdb")` is called
+- **THEN** the generated XML contains `<disks><disk name='vdb'/></disks>`
 
 #### Scenario: write_backup_xml without incremental parameter
 - **WHEN** `write_backup_xml(socket_path)` is called (incremental defaults to None)
 - **THEN** the generated XML does NOT contain an `<incremental>` element
-- **AND** the XML structure is `<domainbackup mode='pull'><server .../></domainbackup>`
 
 ### Requirement: Shared verification functions in qsnap.utils
 

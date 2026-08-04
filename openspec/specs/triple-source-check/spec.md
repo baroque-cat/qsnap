@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Triple-source verification for `qsnap check` that cross-references qsnap state JSON, disk qcow2 files, and libvirt domain XML to detect inconsistencies (phantom entries, orphans, stale XML, broken chains) without modifying anything — allowing the operator to review and then run `reconcile` to fix.
+Triple-source verification for `qsnap check` that cross-references qsnap state JSON, disk qcow2 files per disk, and libvirt domain XML to detect inconsistencies (phantom entries, orphans, stale XML, broken chains) without modifying anything — allowing the operator to review and then run `reconcile` to fix.
 
 ## Requirements
 
-### Requirement: Triple-source snapshot verification
+### Requirement: Triple-source snapshot verification per disk
 
-`Core.check()` SHALL perform triple-source verification for snapshots by cross-referencing three sources of truth: (1) qsnap state JSON (`{vm_name}.json`), (2) disk qcow2 files in `snapshot_dir`, (3) libvirt domain XML (`virsh dumpxml`). The verification SHALL use the following matrix:
+`Core.check()` SHALL perform triple-source verification for snapshots by cross-referencing three sources of truth: (1) qsnap state JSON (`{vm_name}.json`), (2) disk qcow2 files — backing chains scanned per disk via `scan_backing_chain()` in `qsnap/utils/verification.py`, (3) libvirt domain XML (`virsh dumpxml`). The verification SHALL use the following matrix:
 
 | state_has | disk_has | xml_has | Classification |
 |---|---|---|---|
@@ -20,18 +20,18 @@ Triple-source verification for `qsnap check` that cross-references qsnap state J
 | no | no | no | OK (legitimately deleted) |
 
 The check SHALL:
-1. Read snapshots from `IStateManager.get_snapshots(vm_name)` — state source
-2. Run `qemu-img info --force-share --backing-chain --output=json` on the active layer — disk source (single call traverses entire chain)
-3. Run `virsh dumpxml --domain <vm>` and parse `<disk><source file="...">` and `<backingStore><source file="...">` elements — XML source
-4. Run `virsh domblklist --domain <vm>` — verify active layer matches
+1. Read snapshots from `IStateManager.get_snapshots(vm_name)` — state source (each `SnapshotInfo` has a `.disk` field)
+2. Iterate all configured disks, detect each disk's active layer via `_detect_active_layer_path(vm, disk.target)`, then run `scan_backing_chain()` on each active layer — disk source (per-disk walking of each chain)
+3. Run `virsh dumpxml --domain <vm>` and parse `<source file="...">` from all `<disk>` and `<backingStore>` elements — XML source
+4. Run `virsh domblklist --domain <vm>` — verify active layers match newest snapshots per disk
 5. Cross-reference all three sources using the matrix above
 
 The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistencies in `CheckResult`.
 
 #### Scenario: All three sources consistent
 
-- **WHEN** state has 3 snapshots, disk has 3 files, domain XML references all 3
-- **AND** domblklist active layer matches the newest snapshot
+- **WHEN** state has 3 snapshots across disks, disk chains match, domain XML references all paths
+- **AND** domblklist active layers match the newest snapshots per disk
 - **THEN** `CheckResult(status="ok", broken_snapshots=[])` is returned
 
 #### Scenario: Phantom snapshot — state has, disk and XML do not
@@ -44,7 +44,7 @@ The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistenc
 #### Scenario: Stale domain XML — state and disk agree, XML references missing file
 
 - **WHEN** state has snap2 and snap3 (snap1 deleted via blockcommit)
-- **AND** disk has snap2 and snap3 (snap1 deleted)
+- **AND** disk chains have snap2 and snap3 (snap1 deleted)
 - **AND** domain XML `<backingStore>` still references snap1 (stale after offline commit)
 - **THEN** `CheckResult(status="broken", broken_snapshots=["snap1"])` is returned
 - **AND** the result notes: "stale domain XML — run reconcile to fix"
@@ -52,29 +52,29 @@ The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistenc
 #### Scenario: Orphan file — disk has, state does not, XML references
 
 - **WHEN** state has snap1 and snap3
-- **AND** disk has snap1, snap2, and snap3
+- **AND** disk chain has snap1, snap2, and snap3
 - **AND** domain XML references snap2 in `<backingStore>`
 - **THEN** `CheckResult(status="ok")` is returned with a WARNING: "orphan file snap2 exists on disk and in XML but not in state"
 
 #### Scenario: Legitimate deletion — all three sources agree file is gone
 
 - **WHEN** state does not have snap1 (removed via blockcommit)
-- **AND** disk does not have snap1 (deleted)
-- **AND** domain XML does not reference snap1 (updated by libvirt or _refresh_domain_backing_store)
+- **AND** disk chain does not have snap1 (deleted)
+- **AND** domain XML does not reference snap1 (updated by libvirt or `_refresh_domain_backing_store`)
 - **THEN** `CheckResult(status="ok")` is returned — no alarm
 
 #### Scenario: Broken backing chain — file missing from middle
 
 - **WHEN** state has snap1, snap2, snap3
-- **AND** disk has snap1 and snap3 (snap2 deleted externally)
-- **AND** `qemu-img info --backing-chain` fails or shows truncated chain
+- **AND** disk chain has snap1 and snap3 (snap2 deleted externally)
+- **AND** `scan_backing_chain()` reports broken_files
 - **THEN** `CheckResult(status="broken", broken_snapshots=["snap2"])` is returned
 - **AND** a CRITICAL log is emitted: "chain broken at snap2 — blockcommit impossible, restore from backup"
 
 #### Scenario: Active layer mismatch
 
-- **WHEN** state's newest snapshot is snap3
-- **AND** `virsh domblklist` shows source = snap2 (not snap3)
+- **WHEN** state's newest snapshot for a disk is snap3
+- **AND** `virsh domblklist` shows source = snap2 (not snap3) for that disk
 - **THEN** `CheckResult(status="broken")` is returned with issue="domblklist active layer ≠ newest snapshot in state"
 
 ### Requirement: Triple-source target verification
@@ -84,7 +84,7 @@ The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistenc
 The check SHALL:
 1. Read FULLs from `IStateManager.get_full_backups(target_path)` and incrementals from `IStateManager.get_incremental_dependencies(target_path, full_name)`
 2. List backup files on disk via `provider.list(target)`
-3. Run `qemu-img info --backing-chain` on the last incremental per chain (single call traverses to FULL)
+3. Run `scan_backing_chain()` on the last incremental per chain (single call traverses to FULL)
 4. Run `virsh checkpoint-list --name --domain <vm>` and filter by `qsnap-{target_hash}-` prefix
 5. Verify: each FULL in state exists on disk, each incremental in state exists on disk, each file on disk is tracked in state, each chain is traversable, exactly one checkpoint per target
 
@@ -92,7 +92,7 @@ The check SHALL:
 
 - **WHEN** state has 1 FULL and 2 incrementals
 - **AND** disk has FULL + inc1 + inc2
-- **AND** `qemu-img info --backing-chain` on inc2 traverses to FULL
+- **AND** `scan_backing_chain()` on inc2 traverses to FULL
 - **AND** `virsh checkpoint-list` shows 1 checkpoint with matching target_hash
 - **THEN** `CheckResult(status="ok")` is returned
 
@@ -105,7 +105,7 @@ The check SHALL:
 
 - **WHEN** state has FULL + inc1 + inc2
 - **AND** disk has FULL + inc2 (inc1 deleted)
-- **AND** `qemu-img info --backing-chain` on inc2 fails (backing file inc1 missing)
+- **AND** `scan_backing_chain()` on inc2 reports broken_files (backing file inc1 missing)
 - **THEN** `CheckResult(status="broken")` is returned with CRITICAL: "backup chain broken at inc1"
 
 #### Scenario: Orphan checkpoint — target_hash does not match
@@ -135,12 +135,12 @@ The check SHALL:
 - **THEN** the file is NOT deleted
 - **AND** the orphan is reported in `CheckResult`
 
-### Requirement: Shallow check uses JSON parsing
+### Requirement: Shallow check uses scan_backing_chain
 
-The shallow check (default, no `--deep` flag) SHALL parse the JSON output of `qemu-img info --backing-chain --output=json` and verify: (a) every file in the chain exists, (b) every file has format `"qcow2"`, (c) `backing-filename` references are consistent, (d) no cycles. The shallow check SHALL NOT rely solely on the command's exit code.
+The shallow check (default, no `--deep` flag) SHALL delegate chain integrity verification to `scan_backing_chain()` in `qsnap/utils/verification.py`. This function parses the JSON output of `qemu-img info --backing-chain --output=json` and verifies: (a) every file in the chain exists, (b) every file has format `"qcow2"`, (c) `backing-filename` references are consistent, (d) no cycles. The shallow check SHALL NOT rely solely on the command's exit code.
 
 #### Scenario: Shallow check detects inconsistent backing-filename
 
-- **WHEN** `qemu-img info --backing-chain` returns exit code 0
-- **AND** the JSON output shows a `backing-filename` that does not match the next file in the chain
-- **THEN** `CheckResult(status="broken")` is returned with the inconsistency reported
+- **WHEN** `scan_backing_chain()` runs and the JSON output shows a `backing-filename` that does not match the next file in the chain
+- **THEN** the inconsistency is reported in `ChainScanResult.broken_files`
+- **AND** `CheckResult` reports the issue

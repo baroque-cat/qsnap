@@ -1,3 +1,9 @@
+# Timestamp Formatting
+
+## Purpose
+
+The unified naming and timestamp format for snapshots and backups. Names embed a seconds-resolution timestamp, the disk target, and a 6-hex uniqueness suffix; timestamps are parsed back from names via regex.
+
 ## Requirements
 
 ### Requirement: Unified snapshot naming format

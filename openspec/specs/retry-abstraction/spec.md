@@ -4,7 +4,7 @@
 
 Extracts the duplicated retry-loop pattern from `_transfer_with_retry()` and the inline FULL backup creation loop in `Core._backup_target()` into a single generic `_execute_with_retry()` method. Fixes the `backup_retry_max = 0` bug where the FULL creation path produces an empty retry loop.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Generic retry wrapper _execute_with_retry
 

@@ -1,3 +1,9 @@
+# Module Factory
+
+## Purpose
+
+The abstract factory (`IVMModuleFactory`) that creates all domain module instances for a VM. Core holds a reference to the factory interface and calls it per-VM, keeping Core unaware of concrete module types. Production injects `DefaultFactory`; tests inject mocks.
+
 ## Requirements
 
 ### Requirement: IVMModuleFactory ABC

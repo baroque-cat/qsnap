@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Provides `qsnap reconcile` — an active state-vs-disk repair command that deletes stale state entries, clears stale baselines, deletes orphaned libvirt checkpoints, and deletes orphaned files on disk that are not tracked in state. Unlike `qsnap check --state` (read-only), `reconcile` actively fixes inconsistencies in both directions.
+Provides `qsnap reconcile` — an active state-vs-disk repair command that deletes stale state entries, clears stale per-disk baselines, deletes orphaned libvirt checkpoints, and deletes orphaned files on disk that are not tracked in state. Unlike `qsnap check --state` (read-only), `reconcile` actively fixes inconsistencies in both directions. Operates per disk for snapshot state supplementation and per target for backup state.
 
 ## Requirements
 
 ### Requirement: Reconcile command actively repairs state
 
-The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check` (read-only), `reconcile` SHALL fix inconsistencies by: (a) removing phantom state entries (state has record, file missing), (b) supplementing state from disk+XML reality (file exists on disk and in domain XML but not in state → record in state), (c) refreshing stale domain XML via `_refresh_domain_backing_store()`, (d) deleting orphan files not referenced by state or domain XML, (e) deleting orphaned libvirt checkpoints, (f) clearing stale baselines. Reconcile SHALL NOT perform unsafe `qemu-img rebase -u` on broken chains — it SHALL only log CRITICAL and leave the chain for operator intervention. Reconcile SHALL NOT enforce retention policy (deletion of old chains is the pipeline's job).
+The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repairs state-vs-disk inconsistencies. Unlike `qsnap check` (read-only), `reconcile` SHALL fix inconsistencies by: (a) removing phantom state entries (state has record, file missing), (b) supplementing state from disk+XML reality (file exists on disk and in domain XML but not in state → record in state with per-disk SnapshotInfo), (c) refreshing stale domain XML via `_refresh_domain_backing_store()`, (d) deleting orphan files not referenced by state or domain XML, (e) deleting orphaned libvirt checkpoints, (f) clearing stale per-disk baselines. Reconcile SHALL NOT perform unsafe `qemu-img rebase -u` on broken chains — it SHALL only log CRITICAL and leave the chain for operator intervention. Reconcile SHALL NOT enforce retention policy (deletion of old chains is the pipeline's job).
 
 #### Scenario: Reconcile removes phantom FULLs with cascade cleanup
 
@@ -16,10 +16,10 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 - **AND** domain XML does not reference the FULL (backups are not in domain XML)
 - **THEN** the system SHALL remove the FULL record from `_full_backups.json`, remove all linked incremental dependencies from `_dependencies.json`, and log a WARNING with the count of cleaned dependency records
 
-#### Scenario: Reconcile clears stale last_backup_allocation
+#### Scenario: Reconcile clears stale per-disk last_backup_allocation
 
-- **WHEN** `qsnap reconcile` is invoked and `last_backup_allocation` exists in `_target_state.json` for a target that has no FULL backup records (all removed as phantoms)
-- **THEN** the system SHALL clear the `last_backup_allocation` entry and log an INFO message
+- **WHEN** `qsnap reconcile` is invoked and `last_backup_allocation` exists for a disk in `_target_state.json` for a target that has no FULL backup records (all removed as phantoms)
+- **THEN** the system SHALL clear the `last_backup_allocation` entry for that disk and log an INFO message
 
 #### Scenario: Reconcile removes phantom snapshots
 
@@ -32,12 +32,13 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 - **WHEN** `qsnap reconcile` is invoked and an incremental dependency record exists in `_dependencies.json` whose incremental file does not exist on disk
 - **THEN** the system SHALL remove the dependency record and log a WARNING
 
-#### Scenario: Reconcile supplements state from disk+XML reality
+#### Scenario: Reconcile supplements state from disk+XML reality per disk
 
 - **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on disk in the snapshot directory
 - **AND** the file is NOT tracked in `{vm_name}.json` state
 - **AND** domain XML references the file in `<backingStore>` (the file is part of the active chain)
 - **THEN** the system SHALL call `record_snapshot()` to add the file to state
+- **AND** the disk target SHALL be parsed from the snapshot name (via `parse_disk_from_snapshot_name()`) with fallback to `vm.disks[0].target` for legacy names
 - **AND** log an INFO message: "state supplemented: <snapshot_name> recorded from disk+XML reality"
 - **AND** `ReconcileResult.state_supplemented` SHALL be incremented
 
@@ -101,7 +102,7 @@ The system SHALL provide a `qsnap reconcile` CLI subcommand that actively repair
 
 - **WHEN** `qsnap reconcile` is invoked and a `.qcow2` file exists on a target directory
 - **AND** the file is NOT tracked in `_full_backups.json` or `_dependencies.json`
-- **AND** `qemu-img info --backing-chain` shows the file has an intact chain to a FULL that IS tracked in state
+- **AND** `scan_backing_chain()` shows the file has an intact chain to a FULL that IS tracked in state
 - **THEN** the system SHALL call `record_incremental_dependency()` to add the file to state
 - **AND** log an INFO: "state supplemented: <backup_name> recorded from disk reality"
 - **AND** `ReconcileResult.state_supplemented` SHALL be incremented
@@ -131,7 +132,7 @@ The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results
 
 ### Requirement: Broken backing chain detection in reconcile
 
-`Core.reconcile()` SHALL detect broken backing chains on backup files at each target before classifying them as orphans. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `qemu-img info --force-share --backing-chain --output=json <path>` via `IShell.run()` and check whether the command succeeds. Files where the command fails SHALL be logged with a CRITICAL message indicating a broken backing chain was detected. The system SHALL NOT attempt to repair broken chains via `qemu-img rebase -u`. The `ReconcileResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing the names of backups with broken backing chains.
+`Core.reconcile()` SHALL detect broken backing chains on backup files at each target before classifying them as orphans. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `scan_backing_chain()` via `IShell` and check whether the command succeeds. Files where the command fails SHALL be logged with a CRITICAL message indicating a broken backing chain was detected. The system SHALL NOT attempt to repair broken chains via `qemu-img rebase -u`. The `ReconcileResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing the names of backups with broken backing chains.
 
 #### Scenario: Reconcile detects broken chain — no auto-rebase
 
@@ -156,12 +157,6 @@ The system SHALL provide a `ReconcileResult` frozen dataclass in `models/results
 - **AND** the backup name is added to `ReconcileResult.broken_chains`
 - **AND** the file is NOT deleted (dry-run mode)
 - **AND** no `qemu-img rebase` is attempted
-
----
-
-# state-reconciliation — Delta Spec
-
-## ADDED Requirements
 
 ### Requirement: Reconcile uses shared detection methods from Core
 

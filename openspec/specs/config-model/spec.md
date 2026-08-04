@@ -1,442 +1,322 @@
+# Configuration Model
+
+## Purpose
+Immutable frozen dataclasses representing all qsnap configuration: global defaults, per-VM settings, per-disk base images, and per-target backup destinations.
+
 ## Requirements
 
 ### Requirement: GlobalConfig default values
-
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including timestamp format, state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=0` (snapshot preservation floor, 0 = inactive), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, and backup stall timeout. The fields `preserve_day_of_week`, `snapshot_preserve`, `target_preserve`, and `target_preserve_min` SHALL NOT exist on `GlobalConfig`.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=0` (snapshot preservation floor, 0 = inactive), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, convert parallelism, and backup stall timeout.
 
 #### Scenario: GlobalConfig default values
-
-- **WHEN** a GlobalConfig is created with only required fields
-- **THEN** optional fields have documented defaults (`state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `compress=True`, `compression_type="zstd"`, `backup_stall_timeout="30m"`, `snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=0`, `auto_cleanup=true`, `state_backup_count=2`, `chain_verify_before_commit=true`, `chain_verify_after_commit=true`, `deep_check_schedule="off"`)
-
+- **WHEN** a `GlobalConfig` is created with only required fields
+- **THEN** optional fields have documented defaults: `state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=0`, `compress=True`, `compression_type="zstd"`, `convert_parallel=4`, `convert_out_of_order=True`, `backup_stall_timeout="30m"`, `auto_cleanup=True`, `state_backup_count=2`, `chain_verify_before_commit=True`, `chain_verify_after_commit=True`, `deep_check_schedule="off"`, `full_verify_after_create="check"`, `full_verify_before_delete="check"`, `transaction_log=None`, `backup_create="always"`
 
 ### Requirement: compression_type field in GlobalConfig
-
-`GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. This field selects the compression algorithm used by `qemu-img convert -c` (via `-o compression_type=<type>`) when `compress=True`. The field is immutable (frozen dataclass).
+`GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. The field is immutable (frozen dataclass).
 
 #### Scenario: GlobalConfig default compression_type is zstd
-- **WHEN** a GlobalConfig is created with only required fields
+- **WHEN** a `GlobalConfig` is created with only required fields
 - **THEN** `compression_type` defaults to `"zstd"`
 
 #### Scenario: GlobalConfig compression_type is immutable
-- **WHEN** a GlobalConfig is created with `compression_type="zlib"`
+- **WHEN** a `GlobalConfig` is created with `compression_type="zlib"`
 - **THEN** attempting to mutate `compression_type` raises `FrozenInstanceError`
 
-#### Scenario: GlobalConfig compression_type set to zlib
-- **WHEN** a GlobalConfig is created with `compression_type="zlib"`
-- **THEN** `config.compression_type == "zlib"`
-
-
 ### Requirement: backup_stall_timeout field in GlobalConfig
-
-`GlobalConfig` SHALL include a `backup_stall_timeout: str = "30m"` field. The value is a duration string (e.g., `"30m"`, `"1h"`, `"0s"`) parsed to seconds via `parse_stall_timeout()`. When set to `"0s"`, stall detection is disabled and the system falls back to fixed timeout behavior. This field is the global default for all VMs and targets, overridable per-target.
+`GlobalConfig` SHALL include a `backup_stall_timeout: str = "30m"` field. The value is a duration string (e.g. `"30m"`, `"1h"`, `"0s"`) parsed to seconds via `parse_stall_timeout()`. When set to `"0s"`, stall detection is disabled. This field is the global default for all VMs and targets, overridable per-target.
 
 #### Scenario: GlobalConfig default stall timeout is 30m
-- **WHEN** a GlobalConfig is created with only required fields
+- **WHEN** a `GlobalConfig` is created with only required fields
 - **THEN** `backup_stall_timeout` defaults to `"30m"`
 
 #### Scenario: GlobalConfig stall timeout is immutable
-- **WHEN** a GlobalConfig is created with `backup_stall_timeout="1h"`
+- **WHEN** a `GlobalConfig` is created with `backup_stall_timeout="1h"`
 - **THEN** attempting to mutate `backup_stall_timeout` raises `FrozenInstanceError`
 
+### Requirement: DiskConfig dataclass
+The system SHALL provide an immutable `DiskConfig` dataclass representing a single disk within a VM. It SHALL have required fields `target: str` (the libvirt device target name, e.g. `"vda"`) and `base_image: Path` (the path to the base qcow2 image for this disk). It SHALL have an optional field `snapshot_dir: Path | None = None` for per-disk snapshot directory override. When `None`, the VM-level `VMConfig.snapshot_dir` is used.
+
+#### Scenario: DiskConfig with required fields
+- **WHEN** a `DiskConfig` is created with `target="vda"` and `base_image=Path("/var/lib/libvirt/images/vm.qcow2")`
+- **THEN** `disk.target` is `"vda"`, `disk.base_image` is the path, and `disk.snapshot_dir` is `None`
+
+#### Scenario: DiskConfig with per-disk snapshot_dir override
+- **WHEN** a `DiskConfig` is created with `target="vdb"`, `base_image=Path("/data/vdb.qcow2")`, `snapshot_dir=Path("/snapshots/vdb")`
+- **THEN** `disk.snapshot_dir` is `Path("/snapshots/vdb")`
 
 ### Requirement: VMConfig dataclass
-The system SHALL provide an immutable `VMConfig` dataclass representing a single VM's configuration, including its name, base image path, snapshot directory, snapshot creation mode, count-based retention overrides (`snapshot_chain_length`, `target_chain_length`, `target_keep_generations`), `snapshot_preserve_min` (snapshot preservation floor, inherits from global, 0 = inactive), optional targets, and fault-tolerance deep verification controls. The fields `snapshot_preserve`, `target_preserve`, and `target_preserve_min` SHALL NOT exist on `VMConfig`.
+The system SHALL provide an immutable `VMConfig` dataclass representing a single VM's configuration. Required fields SHALL be `name: str` and `disks: list[DiskConfig]` (one or more disks, each carrying its own `base_image`). Optional fields include `snapshot_dir: Path | None = None` (VM-level default snapshot directory), `snapshot_create="always"`, `snapshot_chain_length=None`, `target_chain_length=None`, `target_keep_generations=None`, `snapshot_preserve_min=None`, `snapshot_quiesce=False`, `lifecycle_mode="virsh"`, `change_detection_mode="allocation-map"`, `blockcommit_deep_verify=False`, and `targets=[]`. There SHALL be NO VM-level `base_image` field. `VMConfig` SHALL provide methods `get_disk(target: str) -> DiskConfig | None` and `snapshot_dir_for(disk: DiskConfig) -> Path | None`.
 
 #### Scenario: VMConfig with required fields
-- **WHEN** a VMConfig is created with `name="myvm"`, `base_image=Path(...)`, `snapshot_dir=Path(...)`
-- **THEN** the instance has all required fields populated and `snapshot_create` defaults to `"always"`, `blockcommit_deep_verify` defaults to `False`, `snapshot_chain_length` defaults to `None`, `snapshot_preserve_min` defaults to `None`
+- **WHEN** a `VMConfig` is created with `name="myvm"` and `disks=[DiskConfig(target="vda", base_image=Path("..."))]`
+- **THEN** the instance has all required fields populated, `snapshot_create` defaults to `"always"`, `blockcommit_deep_verify` defaults to `False`, retention overrides default to `None`, and there is no `base_image` field
+
+#### Scenario: VMConfig get_disk finds matching disk
+- **WHEN** `vm.get_disk("vda")` is called and a disk with `target="vda"` exists
+- **THEN** the matching `DiskConfig` is returned
+
+#### Scenario: VMConfig get_disk returns None for unknown target
+- **WHEN** `vm.get_disk("vdz")` is called and no disk with `target="vdz"` exists
+- **THEN** `None` is returned
+
+#### Scenario: VMConfig snapshot_dir_for uses per-disk override
+- **WHEN** `vm.snapshot_dir_for(disk)` is called and `disk.snapshot_dir` is set to `Path("/overrides/vda")`
+- **THEN** `Path("/overrides/vda")` is returned, ignoring the VM-level default
+
+#### Scenario: VMConfig snapshot_dir_for falls back to VM-level
+- **WHEN** `vm.snapshot_dir_for(disk)` is called and `disk.snapshot_dir` is `None`, but `vm.snapshot_dir` is `Path("/snapshots")`
+- **THEN** `Path("/snapshots")` is returned
+
+#### Scenario: VMConfig snapshot_dir_for returns None when neither is set
+- **WHEN** `vm.snapshot_dir_for(disk)` is called and both `disk.snapshot_dir` and `vm.snapshot_dir` are `None`
+- **THEN** `None` is returned
 
 #### Scenario: VMConfig with targets
-- **WHEN** a VMConfig is created with a list of TargetConfig objects
+- **WHEN** a `VMConfig` is created with a list of `TargetConfig` objects
 - **THEN** `vm.targets` contains those targets in order
 
+#### Scenario: VMConfig disks defensive copy
+- **WHEN** a `VMConfig` is created with a list of disks
+- **AND** the original list is mutated externally after construction
+- **THEN** `vm.disks` is unaffected (defensive copy)
 
 ### Requirement: TargetConfig dataclass
-
-The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target: its path, count-based retention overrides (`target_chain_length`, `target_keep_generations`), verification mode, retry controls, compression setting, compression type, backup stall timeout, and backup_create mode. The fields `target_preserve`, `target_preserve_min`, `incremental`, and `incremental_mode` SHALL NOT exist on `TargetConfig`. The `verify` field SHALL default to `"metadata"` at the dataclass level. When the user explicitly sets `verify` in the TOML config, the explicit value takes precedence. The `compression_type` field SHALL default to `"zstd"` and inherit from `GlobalConfig.compression_type` when not explicitly set. The `backup_stall_timeout` field SHALL default to `"30m"` and inherit from `GlobalConfig.backup_stall_timeout` when not explicitly set. If the deprecated `incremental` key appears in TOML, `ConfigFacade` SHALL log a WARNING: `"incremental is deprecated and ignored — all backups are now bitmap-based"` and silently ignore the value.
+The system SHALL provide an immutable `TargetConfig` dataclass representing a backup target. Required field: `path: Path`. Optional fields: `target_chain_length: int | None = None`, `target_keep_generations: int | None = None`, `verify: str = "metadata"`, `compress: bool = True`, `compression_type: str = "zstd"`, `convert_parallel: int = 4`, `convert_out_of_order: bool = True`, `backup_stall_timeout: str = "30m"`, `backup_retry_max: int = 3`, `backup_retry_base: str = "2s"`, `backup_create: str = "always"`. There SHALL be NO `incremental` field.
 
 #### Scenario: TargetConfig with path only — all defaults
-
-- **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")`
-- **THEN** `backup_retry_max` defaults to `3`, `backup_retry_base` defaults to `"2s"`, `compress` defaults to `True`, `compression_type` defaults to `"zstd"`, `backup_stall_timeout` defaults to `"30m"`, `target_chain_length` defaults to `None`, `target_keep_generations` defaults to `None`, and the instance is frozen
-- **AND** there is no `incremental` field on the dataclass
-
-#### Scenario: TOML with incremental key logs deprecation WARNING
-
-- **WHEN** a TOML config contains `incremental = false` under `[[vm.target]]`
-- **THEN** `ConfigFacade` logs a WARNING: "incremental is deprecated and ignored — all backups are now bitmap-based"
-- **AND** `TargetConfig` is created without the `incremental` field
-- **AND** no `ConfigError` is raised
+- **WHEN** a `TargetConfig` is created with `path=Path("/mnt/backup/myvm")`
+- **THEN** `target_chain_length` is `None`, `target_keep_generations` is `None`, `verify` is `"metadata"`, `compress` is `True`, `compression_type` is `"zstd"`, `convert_parallel` is `4`, `convert_out_of_order` is `True`, `backup_stall_timeout` is `"30m"`, `backup_retry_max` is `3`, `backup_retry_base` is `"2s"`, `backup_create` is `"always"`, and there is no `incremental` field
 
 ### Requirement: compression_type field in TargetConfig
-
-`TargetConfig` SHALL include a `compression_type: str = "zstd"` field. This field is resolved via option inheritance: if not set in the target's TOML section, it inherits from `GlobalConfig.compression_type`. Valid values are `"zstd"` and `"zlib"`.
+`TargetConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` and `"zlib"`.
 
 #### Scenario: TargetConfig compression_type inherits from global
-- **WHEN** a TargetConfig is created without explicit `compression_type`
-- **AND** the GlobalConfig has `compression_type="zstd"`
+- **WHEN** a `TargetConfig` is created without explicit `compression_type`
+- **AND** the `GlobalConfig` has `compression_type="zstd"`
 - **THEN** `target.compression_type == "zstd"`
 
 #### Scenario: TargetConfig compression_type overrides global
-- **WHEN** a TargetConfig is created with `compression_type="zlib"`
-- **AND** the GlobalConfig has `compression_type="zstd"`
-- **THEN** `target.compression_type == "zlib"` (target overrides global)
-
+- **WHEN** a `TargetConfig` is created with `compression_type="zlib"`
+- **AND** the `GlobalConfig` has `compression_type="zstd"`
+- **THEN** `target.compression_type == "zlib"`
 
 ### Requirement: backup_stall_timeout field in TargetConfig
-
-`TargetConfig` SHALL include a `backup_stall_timeout: str = "30m"` field. This field is resolved via option inheritance: if not set in the target's TOML section, it inherits from `GlobalConfig.backup_stall_timeout`. The value is a duration string parsed to seconds via `parse_stall_timeout()`.
+`TargetConfig` SHALL include a `backup_stall_timeout: str = "30m"` field. The value is a duration string parsed to seconds via `parse_stall_timeout()`.
 
 #### Scenario: TargetConfig stall timeout inherits from global
-- **WHEN** a TargetConfig is created without explicit `backup_stall_timeout`
-- **AND** the GlobalConfig has `backup_stall_timeout="1h"`
+- **WHEN** a `TargetConfig` is created without explicit `backup_stall_timeout`
+- **AND** the `GlobalConfig` has `backup_stall_timeout="1h"`
 - **THEN** `target.backup_stall_timeout == "1h"`
 
 #### Scenario: TargetConfig stall timeout overrides global
-- **WHEN** a TargetConfig is created with `backup_stall_timeout="15m"`
-- **AND** the GlobalConfig has `backup_stall_timeout="30m"`
-- **THEN** `target.backup_stall_timeout == "15m"` (target overrides global)
-
-
-
+- **WHEN** a `TargetConfig` is created with `backup_stall_timeout="15m"`
+- **AND** the `GlobalConfig` has `backup_stall_timeout="30m"`
+- **THEN** `target.backup_stall_timeout == "15m"`
 
 ### Requirement: GlobalConfig lockfile field is consumed
-The `lockfile` field on `GlobalConfig` (already defined, default `None`) SHALL be consumed by the locking mechanism. If `lockfile` is not `None`, the process SHALL acquire a lock on this path before pipeline execution.
+The `lockfile` field on `GlobalConfig` (default `None`) SHALL be consumed by the locking mechanism. If `lockfile` is not `None`, the process SHALL acquire a lock on this path before pipeline execution.
 
 #### Scenario: Lockfile from config is used
 - **WHEN** the config has `lockfile = "/var/lock/qsnap.lock"` and no `--lockfile` CLI flag is passed
 - **THEN** a lock is acquired on `/var/lock/qsnap.lock`
 
-
-
-### Requirement: VMConfig disks field
-`VMConfig` SHALL gain an optional `disks: list[str] | None` field (default `None`). When `None`, `Core` SHALL auto-discover all disks via `virsh domblklist`. When a list is provided, only those disks are snapshotted.
-
-#### Scenario: Disks list is None — auto-discovery
-- **WHEN** a VMConfig is created without `disks`
-- **THEN** `vm_config.disks` is `None`
-- **THEN** Core discovers disks dynamically at runtime
-
-#### Scenario: Explicit disk list
-- **WHEN** a VMConfig is created with `disks=["vda", "vdb"]`
-- **THEN** only `vda` and `vdb` are snapshotted
-
-
 ### Requirement: TargetConfig verify field
-`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. The default SHALL be `"metadata"`. When the user explicitly sets `verify` in TOML, the explicit value SHALL take precedence. Accepted values SHALL be `"off"` (no verification), `"metadata"` (structural checks), `"compare"` (qemu-img compare chain-traversing content verification). The `"hash"` and `"full"` values are deprecated and treated as `"compare"`. Deprecated values SHALL log a WARNING naming the value. The field SHALL be immutable (`frozen=True`).
+`TargetConfig` SHALL have a `verify: str` field with dataclass-level default `"metadata"`. Valid values SHALL be `"off"` (no verification), `"metadata"` (structural checks), `"compare"` (qemu-img compare chain-traversing content verification). The `"hash"` and `"full"` values are deprecated and treated as `"compare"`.
 
 #### Scenario: Dataclass-level verify default is metadata
-- **WHEN** a TargetConfig is created with `path=Path("/mnt/backup/myvm")` and no `verify`
+- **WHEN** a `TargetConfig` is created with `path=Path("/mnt/backup/myvm")` and no `verify`
 - **THEN** `target.verify` is `"metadata"`
 
 #### Scenario: Explicit compare verification
-- **WHEN** a TargetConfig is created with `verify="compare"`
+- **WHEN** a `TargetConfig` is created with `verify="compare"`
 - **THEN** `target.verify` is `"compare"`
 
-#### Scenario: Deprecated hash treated as compare
-- **WHEN** `verify = "hash"` is set
-- **THEN** a WARNING is logged
-- **AND** the effective value is `"compare"`
-
-
 ### Requirement: VMConfig snapshot_quiesce field
-`VMConfig` SHALL gain a `snapshot_quiesce: bool` field with default `False`. When `True`, snapshot creation SHALL request guest-agent filesystem freeze via `--quiesce`.
+`VMConfig` SHALL include a `snapshot_quiesce: bool` field with default `False`. When `True`, snapshot creation SHALL request guest-agent filesystem freeze via `--quiesce`.
 
 #### Scenario: Quiesce default is disabled
-- **WHEN** a VMConfig is created without `snapshot_quiesce`
+- **WHEN** a `VMConfig` is created without `snapshot_quiesce`
 - **THEN** `vm_config.snapshot_quiesce` is `False`
 
-
-
-
 ### Requirement: GlobalConfig deferred threshold fields
+`GlobalConfig` SHALL include deferred threshold fields: `deferred_warn_count: str = "5"`, `deferred_crit_count: str = "10"`, `deferred_warn_age: str = "7d"`, `deferred_crit_age: str = "14d"`.
 
-`GlobalConfig` SHALL include optional deferred threshold fields: `deferred_warn_count` (default `"5"`), `deferred_crit_count` (default `"10"`), `deferred_warn_age` (default `"7d"`), `deferred_crit_age` (default `"14d"`). All SHALL be of type `str`. See `specs/deferred-monitoring/spec.md` for full semantics.
+#### Scenario: Deferred threshold defaults
 
+- **WHEN** a `GlobalConfig` is constructed without overrides
+- **THEN** `deferred_warn_count == "5"`, `deferred_crit_count == "10"`, `deferred_warn_age == "7d"`, and `deferred_crit_age == "14d"`
 
 ### Requirement: GlobalConfig auto_cleanup field
-`GlobalConfig` SHALL include an `auto_cleanup: bool` field with default `True`. See `specs/pre-flight-cleanup/spec.md` for full semantics.
+`GlobalConfig` SHALL include an `auto_cleanup: bool` field with default `True`.
 
 #### Scenario: Default auto_cleanup is true
 - **WHEN** `GlobalConfig` is constructed without `auto_cleanup`
 - **THEN** `auto_cleanup` is `True`
 
-
 ### Requirement: GlobalConfig state_backup_count field
-`GlobalConfig` SHALL include a `state_backup_count: int` field with default `2`. See `specs/state-recovery/spec.md` for full semantics.
+`GlobalConfig` SHALL include a `state_backup_count: int` field with default `2`.
 
 #### Scenario: Default state_backup_count
 - **WHEN** `GlobalConfig` is constructed without `state_backup_count`
 - **THEN** `state_backup_count` is `2`
 
-
 ### Requirement: GlobalConfig chain verification fields
-`GlobalConfig` SHALL include `chain_verify_before_commit: bool` (default `True`) and `chain_verify_after_commit: bool` (default `True`). See `specs/chain-integrity-verification/spec.md` for full semantics.
+`GlobalConfig` SHALL include `chain_verify_before_commit: bool` (default `True`) and `chain_verify_after_commit: bool` (default `True`).
 
 #### Scenario: Chain verification enabled by default
 - **WHEN** `GlobalConfig` is constructed without chain verify fields
 - **THEN** both are `True`
 
-
 ### Requirement: GlobalConfig deep_check_schedule field
-`GlobalConfig` SHALL include a `deep_check_schedule: str` field with default `"off"`. See `specs/deep-verification-circuit/spec.md` for full semantics.
+`GlobalConfig` SHALL include a `deep_check_schedule: str` field with default `"off"`.
 
 #### Scenario: deep_check_schedule defaults to off
 - **WHEN** `GlobalConfig` is constructed without `deep_check_schedule`
 - **THEN** `deep_check_schedule` is `"off"`
 
-
-### Requirement: VMConfig blockcommit_deep_verify and snapshot_deep_verify fields
-
-`VMConfig` SHALL include `blockcommit_deep_verify: bool` (default `False`). The `snapshot_deep_verify` field is REMOVED from `VMConfig` — it was parsed and stored but never consumed by any code path. `ConfigFacade` SHALL NOT parse or validate `snapshot_deep_verify`. If the field appears in a TOML config, it SHALL be silently ignored as an unknown key.
+### Requirement: VMConfig blockcommit_deep_verify field
+`VMConfig` SHALL include `blockcommit_deep_verify: bool` with default `False`. There SHALL be NO `snapshot_deep_verify` field on `VMConfig`.
 
 #### Scenario: VMConfig has blockcommit_deep_verify only
-
 - **WHEN** `VMConfig` is constructed
 - **THEN** `blockcommit_deep_verify` exists with default `False`
 - **AND** `snapshot_deep_verify` does not exist on the dataclass
 
-#### Scenario: TOML with snapshot_deep_verify is silently ignored
-
-- **WHEN** a TOML config contains `snapshot_deep_verify = true`
-- **THEN** `ConfigFacade` does not raise an error
-- **AND** the value is not stored in `VMConfig`
-
-
 ### Requirement: VMConfig snapshot_create validation
-
-`ConfigFacade._build_vm()` SHALL validate that `snapshot_create` is one of `{"always", "onchange", "ondemand"}`. Invalid values SHALL raise `ConfigError` with a message listing the valid values. The default value when not specified in TOML SHALL be `"always"`.
+`ConfigFacade._build_vm()` SHALL validate that `snapshot_create` is one of `{"always", "onchange", "ondemand"}`. Invalid values SHALL raise `ConfigError`. The default when not specified SHALL be `"always"`.
 
 #### Scenario: Valid snapshot_create value
-
 - **WHEN** the config has `snapshot_create = "onchange"`
 - **THEN** `ConfigFacade` accepts it and stores `"onchange"` in `VMConfig.snapshot_create`
 
 #### Scenario: Invalid snapshot_create value raises ConfigError
-
 - **WHEN** the config has `snapshot_create = "on-changed"`
 - **THEN** `ConfigFacade` raises `ConfigError` with a message listing valid values: `"always"`, `"onchange"`, `"ondemand"`
 
 #### Scenario: Default snapshot_create is always
-
 - **WHEN** the config does not specify `snapshot_create`
 - **THEN** `VMConfig.snapshot_create` defaults to `"always"`
 
-
 ### Requirement: TargetConfig backup_retry_max and backup_retry_base fields
-`TargetConfig` SHALL include `backup_retry_max: int` (default `3`) and `backup_retry_base: str` (default `"2s"`). See `specs/backup-retry/spec.md` for full semantics.
+`TargetConfig` SHALL include `backup_retry_max: int` (default `3`) and `backup_retry_base: str` (default `"2s"`).
 
 #### Scenario: Default retry values
 - **WHEN** `TargetConfig` is constructed without retry fields
 - **THEN** `backup_retry_max` is `3`, `backup_retry_base` is `"2s"`
 
-
 ### Requirement: TargetConfig compress field
-`TargetConfig` SHALL have a `compress: bool` field with default `True`. When `True`, FULL backups SHALL be created with `qemu-img convert -c` using the compression algorithm selected by `compression_type` (default `"zstd"`, alternative `"zlib"`). The field SHALL be immutable (`frozen=True`). It SHALL inherit from `GlobalConfig.compress` when not explicitly set on the target.
+`TargetConfig` SHALL have a `compress: bool` field with default `True`. The field SHALL be immutable (`frozen=True`).
 
 #### Scenario: Default compress is true
-- **WHEN** a TargetConfig is created without `compress`
+- **WHEN** a `TargetConfig` is created without `compress`
 - **THEN** `target.compress` is `True`
 
 #### Scenario: Explicit compress disabled
-- **WHEN** a TargetConfig is created with `compress=False`
+- **WHEN** a `TargetConfig` is created with `compress=False`
 - **THEN** `target.compress` is `False`
 
-
 ### Requirement: GlobalConfig compress field
-`GlobalConfig` SHALL have a `compress: bool` field with default `True`. This serves as the global default for `TargetConfig.compress` when the target does not explicitly set it.
+`GlobalConfig` SHALL have a `compress: bool` field with default `True`.
 
 #### Scenario: Global compress default
 - **WHEN** `GlobalConfig` is constructed without `compress`
 - **THEN** `compress` is `True`
 
-#### Scenario: Target inherits compress from global
-- **WHEN** global config sets `compress = false` and a target does not specify `compress`
-- **THEN** `TargetConfig.compress` resolves to `False`
-
-
 ### Requirement: GlobalConfig full_verify_after_create field
-
-`GlobalConfig` SHALL include a `full_verify_after_create: str` field with default `"check"`. Accepted values: `"metadata"` (M1 only), `"check"` (M1+M2), `"compare"` (M1+M2+M3 via qemu-img compare), `"off"` (no verification). The `"hash"` value is deprecated and treated as `"compare"`. Controls FULL backup verification immediately after creation.
+`GlobalConfig` SHALL include a `full_verify_after_create: str` field with default `"check"`. Accepted values: `"metadata"` (M1 only), `"check"` (M1+M2), `"compare"` (M1+M2+M3), `"off"` (no verification). The `"hash"` value is deprecated and treated as `"compare"`.
 
 #### Scenario: Default is check
 - **WHEN** `full_verify_after_create` is not set
 - **THEN** the value is `"check"`
 
-#### Scenario: Deprecated hash treated as compare
-- **WHEN** `full_verify_after_create = "hash"` is set
-- **THEN** a WARNING is logged
-- **AND** the effective value is `"compare"`
-
-
-### Requirement: GlobalConfig full_verify_before_rebase field (REMOVED)
-
-The `full_verify_before_rebase` field is REMOVED from `GlobalConfig`. It was parsed, validated, and stored, but never consumed by any code path. The rebase step it was intended to protect died with `FileCopyBackupProvider`. `ConfigFacade` SHALL NOT parse or validate this field. If the field appears in a TOML config, it SHALL be silently ignored as an unknown key.
+### Requirement: full_verify_before_rebase field REMOVED
+There SHALL be NO `full_verify_before_rebase` field on `GlobalConfig`. It was parsed, validated, and stored, but never consumed by any code path.
 
 #### Scenario: full_verify_before_rebase not in GlobalConfig
-
 - **WHEN** `GlobalConfig` is constructed
 - **THEN** the dataclass does not have a `full_verify_before_rebase` field
-- **AND** attempting to access `config.full_verify_before_rebase` raises `AttributeError`
-
-#### Scenario: TOML with full_verify_before_rebase is silently ignored
-
-- **WHEN** a TOML config contains `full_verify_before_rebase = "metadata"`
-- **THEN** `ConfigFacade` does not raise an error
-- **AND** the value is not stored in any config dataclass
-
 
 ### Requirement: GlobalConfig full_verify_before_delete field
-
 `GlobalConfig` SHALL include a `full_verify_before_delete: str` field with default `"check"`. Controls optional M2 verification before cascade-deletion. M1 is always enforced regardless of this setting.
 
+#### Scenario: Default full_verify_before_delete is check
+- **WHEN** `GlobalConfig` is constructed without `full_verify_before_delete`
+- **THEN** `full_verify_before_delete` is `"check"`
 
 ### Requirement: backup_create field in TargetConfig
-
-`TargetConfig` SHALL include a `backup_create: str = "always"` field. Valid values are `"always"` (default — always transfer backups to this target) and `"onchange"` (skip backup transfer when the VM disk has not changed since the last backup to this target). The field SHALL be immutable (`frozen=True`). It SHALL inherit from `GlobalConfig.backup_create` when not explicitly set on the target.
+`TargetConfig` SHALL include a `backup_create: str = "always"` field. Valid values are `"always"` and `"onchange"`. The field SHALL be immutable (`frozen=True`).
 
 #### Scenario: Default backup_create is always
-- **WHEN** a TargetConfig is created without `backup_create`
+- **WHEN** a `TargetConfig` is created without `backup_create`
 - **THEN** `target.backup_create` is `"always"`
 
 #### Scenario: Explicit onchange mode
-- **WHEN** a TargetConfig is created with `backup_create="onchange"`
+- **WHEN** a `TargetConfig` is created with `backup_create="onchange"`
 - **THEN** `target.backup_create` is `"onchange"`
 
-#### Scenario: Target inherits backup_create from global
-- **WHEN** global config sets `backup_create = "onchange"` and a target does not specify `backup_create`
-- **THEN** `TargetConfig.backup_create` resolves to `"onchange"`
-
-#### Scenario: Target overrides global backup_create
-- **WHEN** global config sets `backup_create = "onchange"` and a target sets `backup_create = "always"`
-- **THEN** `TargetConfig.backup_create` resolves to `"always"` (target overrides global)
-
-
 ### Requirement: backup_create field in GlobalConfig
-
-`GlobalConfig` SHALL include a `backup_create: str = "always"` field. This serves as the global default for `TargetConfig.backup_create` when the target does not explicitly set it.
+`GlobalConfig` SHALL include a `backup_create: str = "always"` field.
 
 #### Scenario: Global backup_create default
 - **WHEN** `GlobalConfig` is constructed without `backup_create`
 - **THEN** `backup_create` is `"always"`
 
-#### Scenario: Global backup_create set to onchange
-- **WHEN** `GlobalConfig` is constructed with `backup_create="onchange"`
-- **THEN** `backup_create` is `"onchange"`
-
-
 ### Requirement: convert_parallel field in GlobalConfig
-
-`GlobalConfig` SHALL include a `convert_parallel: int = 4` field. This field maps to the `qemu-img convert -m` flag (number of parallel coroutines). Valid range is 1-8. The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_parallel`.
+`GlobalConfig` SHALL include a `convert_parallel: int = 4` field. Valid range is 1-8. The field is immutable.
 
 #### Scenario: GlobalConfig default convert_parallel is 4
-
-- **WHEN** a GlobalConfig is created with only required fields
+- **WHEN** a `GlobalConfig` is created with only required fields
 - **THEN** `convert_parallel` defaults to `4`
 
-#### Scenario: GlobalConfig convert_parallel is immutable
-
-- **WHEN** a GlobalConfig is created with `convert_parallel=2`
-- **THEN** attempting to mutate `convert_parallel` raises `FrozenInstanceError`
-
-
 ### Requirement: convert_parallel field in TargetConfig
-
-`TargetConfig` SHALL include a `convert_parallel: int = 4` field. This field is resolved via option inheritance: if not set in the target's TOML section, it inherits from `GlobalConfig.convert_parallel`. Valid range is 1-8.
+`TargetConfig` SHALL include a `convert_parallel: int = 4` field. Valid range is 1-8.
 
 #### Scenario: TargetConfig convert_parallel inherits from global
-
-- **WHEN** a TargetConfig is created without explicit `convert_parallel`
-- **AND** the GlobalConfig has `convert_parallel=2`
+- **WHEN** a `TargetConfig` is created without explicit `convert_parallel`
+- **AND** the `GlobalConfig` has `convert_parallel=2`
 - **THEN** `target.convert_parallel == 2`
 
 #### Scenario: TargetConfig convert_parallel overrides global
-
-- **WHEN** a TargetConfig is created with `convert_parallel=8`
-- **AND** the GlobalConfig has `convert_parallel=4`
-- **THEN** `target.convert_parallel == 8` (target overrides global)
-
-
-### Requirement: convert_parallel validation
-
-`ConfigFacade` SHALL validate that `convert_parallel` is an integer in the range 1-8. Values outside this range SHALL raise `ConfigError` with a message indicating the valid range.
-
-#### Scenario: Valid convert_parallel value
-
-- **WHEN** the config has `convert_parallel = 2`
-- **THEN** ConfigFacade accepts it and stores `2` in the config dataclass
-
-#### Scenario: convert_parallel below range raises ConfigError
-
-- **WHEN** the config has `convert_parallel = 0`
-- **THEN** ConfigFacade raises `ConfigError` with a message indicating the valid range is 1-8
-
-#### Scenario: convert_parallel above range raises ConfigError
-
-- **WHEN** the config has `convert_parallel = 9`
-- **THEN** ConfigFacade raises `ConfigError` with a message indicating the valid range is 1-8
-
+- **WHEN** a `TargetConfig` is created with `convert_parallel=8`
+- **AND** the `GlobalConfig` has `convert_parallel=4`
+- **THEN** `target.convert_parallel == 8`
 
 ### Requirement: convert_out_of_order field in GlobalConfig
-
-`GlobalConfig` SHALL include a `convert_out_of_order: bool = True` field. This field maps to the `qemu-img convert -W` flag (out-of-order writes). When `True`, `qemu-img convert` writes data in out-of-order fashion for optimal throughput on HDDs. When `False`, writes are in-order (may be preferred on some SSDs). The field is immutable (frozen dataclass). It serves as the global default for `TargetConfig.convert_out_of_order`.
+`GlobalConfig` SHALL include a `convert_out_of_order: bool = True` field. The field is immutable.
 
 #### Scenario: GlobalConfig default convert_out_of_order is true
-
-- **WHEN** a GlobalConfig is created with only required fields
+- **WHEN** a `GlobalConfig` is created with only required fields
 - **THEN** `convert_out_of_order` defaults to `True`
 
-#### Scenario: GlobalConfig convert_out_of_order is immutable
-
-- **WHEN** a GlobalConfig is created with `convert_out_of_order=False`
-- **THEN** attempting to mutate `convert_out_of_order` raises `FrozenInstanceError`
-
-
 ### Requirement: convert_out_of_order field in TargetConfig
-
-`TargetConfig` SHALL include a `convert_out_of_order: bool = True` field. This field is resolved via option inheritance: if not set in the target's TOML section, it inherits from `GlobalConfig.convert_out_of_order`.
+`TargetConfig` SHALL include a `convert_out_of_order: bool = True` field.
 
 #### Scenario: TargetConfig convert_out_of_order inherits from global
-
-- **WHEN** a TargetConfig is created without explicit `convert_out_of_order`
-- **AND** the GlobalConfig has `convert_out_of_order=False`
+- **WHEN** a `TargetConfig` is created without explicit `convert_out_of_order`
+- **AND** the `GlobalConfig` has `convert_out_of_order=False`
 - **THEN** `target.convert_out_of_order == False`
 
-#### Scenario: TargetConfig convert_out_of_order overrides global
-
-- **WHEN** a TargetConfig is created with `convert_out_of_order=False`
-- **AND** the GlobalConfig has `convert_out_of_order=True`
-- **THEN** `target.convert_out_of_order == False` (target overrides global)
-
-
 ### Requirement: GlobalConfig count-based retention fields
-
-`GlobalConfig` SHALL include `snapshot_chain_length: int | None = 24`, `target_chain_length: int | None = 168`, and `target_keep_generations: int | None = 2`. These serve as global defaults for VM-level and target-level overrides. The previous default of `None` (which resolved to 0/1 via `or` operators, causing extremely aggressive behavior) is replaced with sensible defaults: 24 snapshots (24 hours at hourly runs), 168 incrementals (7 days between FULLs), 2 generations (2 weeks of backup redundancy).
+`GlobalConfig` SHALL include `snapshot_chain_length: int | None = 24`, `target_chain_length: int | None = 168`, and `target_keep_generations: int | None = 2`.
 
 #### Scenario: Defaults are 24/168/2
 - **WHEN** `GlobalConfig` is constructed without chain_length keys
-- **THEN** `snapshot_chain_length` is `24`
-- **AND** `target_chain_length` is `168`
-- **AND** `target_keep_generations` is `2`
+- **THEN** `snapshot_chain_length` is `24`, `target_chain_length` is `168`, `target_keep_generations` is `2`
 
 #### Scenario: Explicit override still works
 - **WHEN** `GlobalConfig` is constructed with `snapshot_chain_length=48`
-- **THEN** `snapshot_chain_length` is `48` (explicit override takes precedence)
-
+- **THEN** `snapshot_chain_length` is `48`
 
 ### Requirement: VMConfig count-based retention fields
-
-`VMConfig` SHALL include `snapshot_chain_length: int | None = None`, `target_chain_length: int | None = None`, and `target_keep_generations: int | None = None`. These override global defaults when set.
+`VMConfig` SHALL include `snapshot_chain_length: int | None = None`, `target_chain_length: int | None = None`, and `target_keep_generations: int | None = None`.
 
 #### Scenario: VM inherits from global
 - **WHEN** global sets `snapshot_chain_length = 168` and VM omits it
 - **THEN** `VMConfig.snapshot_chain_length` resolves to `168`
 
-
 ### Requirement: TargetConfig count-based retention fields
-
-`TargetConfig` SHALL include `target_chain_length: int | None = None` and `target_keep_generations: int | None = None`. These override VM-level and global defaults when set.
+`TargetConfig` SHALL include `target_chain_length: int | None = None` and `target_keep_generations: int | None = None`.
 
 #### Scenario: Target inherits from VM
 - **WHEN** VM sets `target_chain_length = 168` and target omits it
@@ -446,54 +326,27 @@ The `full_verify_before_rebase` field is REMOVED from `GlobalConfig`. It was par
 - **WHEN** VM sets `target_chain_length = 168` and target sets `target_chain_length = 336`
 - **THEN** `TargetConfig.target_chain_length` resolves to `336`
 
-
-### Requirement: parse_duration and parse_stall_timeout in utils
-
-The functions `parse_duration()` and `parse_stall_timeout()` SHALL be moved from `qsnap/retention/time_based.py` to `qsnap/utils/time.py`. Both `qsnap/core/__init__.py` and `qsnap/retention/time_based.py` SHALL import them from their new location. The functions' behavior SHALL remain identical — this is a pure relocation to reflect that these are general-purpose time-parsing utilities, not retention-specific logic.
-
 ### Requirement: GlobalConfig snapshot_preserve_min field
-
-`GlobalConfig` SHALL include a `snapshot_preserve_min: int = 0` field. This field is the global default for the snapshot preservation floor. When set to 0 (default), the preservation floor is inactive. When set to a positive integer N, the newest N snapshots SHALL always be preserved (never blockcommitted) regardless of `snapshot_chain_length`. The field is immutable (frozen dataclass). It SHALL be inherited by `VMConfig.snapshot_preserve_min` via option inheritance when the VM does not explicitly set it.
+`GlobalConfig` SHALL include a `snapshot_preserve_min: int = 0` field. When set to 0 (default), the preservation floor is inactive. The field is immutable.
 
 #### Scenario: GlobalConfig default snapshot_preserve_min is 0
-
-- **WHEN** a GlobalConfig is created with only required fields
-- **THEN** `snapshot_preserve_min` defaults to `0` (inactive)
-
-#### Scenario: GlobalConfig snapshot_preserve_min is immutable
-
-- **WHEN** a GlobalConfig is created with `snapshot_preserve_min=24`
-- **THEN** attempting to mutate `snapshot_preserve_min` raises `FrozenInstanceError`
+- **WHEN** a `GlobalConfig` is created with only required fields
+- **THEN** `snapshot_preserve_min` defaults to `0`
 
 ### Requirement: VMConfig snapshot_preserve_min field
-
-`VMConfig` SHALL include a `snapshot_preserve_min: int | None = None` field. This field overrides `GlobalConfig.snapshot_preserve_min` when set. When `None`, the value is resolved via option inheritance from `GlobalConfig.snapshot_preserve_min`. The resolved value SHALL be a non-negative integer (0 = inactive).
+`VMConfig` SHALL include a `snapshot_preserve_min: int | None = None` field. When `None`, the value is resolved via option inheritance from `GlobalConfig.snapshot_preserve_min`.
 
 #### Scenario: VM inherits snapshot_preserve_min from global
-
 - **WHEN** global sets `snapshot_preserve_min = 24` and VM omits it
 - **THEN** `VMConfig.snapshot_preserve_min` resolves to `24`
 
 #### Scenario: VM overrides global snapshot_preserve_min
-
 - **WHEN** global sets `snapshot_preserve_min = 24` and VM sets `snapshot_preserve_min = 48`
-- **THEN** `VMConfig.snapshot_preserve_min` resolves to `48` (VM overrides global)
+- **THEN** `VMConfig.snapshot_preserve_min` resolves to `48`
 
-#### Scenario: VM sets snapshot_preserve_min to 0 (explicitly inactive)
+### Requirement: GlobalConfig transaction_log field
+`GlobalConfig` SHALL include a `transaction_log: str | None = None` field. When `None`, no transaction log is written.
 
-- **WHEN** global sets `snapshot_preserve_min = 24` and VM sets `snapshot_preserve_min = 0`
-- **THEN** `VMConfig.snapshot_preserve_min` resolves to `0` (VM disables the floor)
-
-### Requirement: snapshot_preserve_min validation
-
-`ConfigFacade._build_vm()` SHALL validate that `snapshot_preserve_min` is a non-negative integer. Negative values SHALL raise `ConfigError` with a message indicating the valid range. The default value when not specified in TOML SHALL be `None` (inherits from global).
-
-#### Scenario: Valid snapshot_preserve_min value
-
-- **WHEN** the config has `snapshot_preserve_min = 24`
-- **THEN** `ConfigFacade` accepts it and stores `24` in `VMConfig.snapshot_preserve_min`
-
-#### Scenario: Negative snapshot_preserve_min raises ConfigError
-
-- **WHEN** the config has `snapshot_preserve_min = -1`
-- **THEN** `ConfigFacade` raises `ConfigError` with a message indicating the valid range is >= 0
+#### Scenario: Default transaction_log is None
+- **WHEN** `GlobalConfig` is constructed without `transaction_log`
+- **THEN** `transaction_log` is `None`

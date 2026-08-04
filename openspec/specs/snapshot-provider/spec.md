@@ -2,120 +2,110 @@
 
 ## Purpose
 
-External disk-only snapshot creation, listing, and deletion via `virsh snapshot-create-as` and `qemu-img info`.
-Provides the `ISnapshotProvider` interface — the primary mechanism for creating qcow2 external snapshots of QEMU/KVM VMs.
+External disk-only snapshot creation, listing, and deletion via `virsh snapshot-create-as` and `qemu-img info`. Snapshots are per-disk — each configured disk gets its own snapshot file. Listing scans all disks' backing chains and tags each `SnapshotInfo` with its disk.
 
 ## Requirements
 
-### Requirement: External disk-only snapshot creation
+### Requirement: Per-disk external snapshot creation
+The system SHALL create external disk-only snapshots per-disk via `virsh snapshot-create-as` with flags `--disk-only --atomic --no-metadata` and `--diskspec {disk},file={path},snapshot=external`. The method SHALL accept parameters `(vm_config, snapshot_name, disk, snapshot_path, quiesce=False)`. After creation, the system SHALL determine the allocation-size of the new image via `qemu-img info --force-share --output=json`. The `--force-share` flag is REQUIRED because the newly created snapshot file IS the active layer — the running VM holds an exclusive write lock on it.
 
-The system SHALL create external disk-only snapshots via `virsh snapshot-create-as` with flags `--disk-only --atomic --no-metadata`. After snapshot creation, the system SHALL determine the allocation-size of the new image via `qemu-img info --force-share --output=json`. The `--force-share` flag is REQUIRED because the newly created snapshot file IS the active layer — the running VM holds an exclusive write lock on it. Without `--force-share`, `qemu-img info` fails with a lock error. The method SHALL accept an optional `quiesce: bool = False` parameter to request guest-agent filesystem freeze. The method SHALL NOT compute a `content_hash` — the SHA-256 hash of the raw qcow2 file is semantically incorrect for NBD-created backups and has no consumers. The `content_hash` field is removed from `SnapshotResult`.
-
-After `virsh snapshot-create-as` returns exit code 0, the method SHALL perform post-creation validation before returning `SnapshotResult(success=True)`:
+After `virsh snapshot-create-as` returns exit code 0, the method SHALL perform post-creation validation:
 
 1. **File existence**: `test -f <snapshot_path>` — verify the file landed on disk
-2. **qcow2 metadata** (from already-obtained `qemu-img info`): verify `format == "qcow2"`, `incompatible-features` does not contain `"corrupt"`, `backing-filename` points to the previous active layer
+2. **qcow2 metadata** (from `qemu-img info`): verify `format == "qcow2"`, check `virtual-size` matches the base image, verify `actual-size` is reasonable for an overlay (≤ 50% of `virtual-size`), confirm `incompatible-features` does not contain `"corrupt"`, and verify `backing-filename` points to the previous active layer
 3. **libvirt pivot**: `virsh domblklist --domain <vm>` — verify source path = snapshot_path
 
-If ANY validation step fails, return `SnapshotResult(success=False, error=<message>)`.
-
 #### Scenario: Successful snapshot creation with validation
-
-- **WHEN** `virsh snapshot-create-as` returns exit code 0
+- **WHEN** `create(vm_config, name, "vda", path, quiesce=False)` is called
+- **AND** `virsh snapshot-create-as` returns exit code 0
 - **AND** the snapshot file exists on disk (`test -f` succeeds)
-- **AND** `qemu-img info` reports format `"qcow2"`, no corrupt bit, correct backing-filename
-- **AND** `virsh domblklist` shows the snapshot path as the active source
+- **AND** `qemu-img info` reports format `"qcow2"`, matching `virtual-size`, reasonable `actual-size`, no corrupt bit, correct `backing-filename`
+- **AND** `virsh domblklist` shows the snapshot path as the active source for `vda`
 - **THEN** the module returns `SnapshotResult(success=True, new_allocation=<parsed actual-size>)`
-- **AND** no SHA-256 hash is computed
 
 #### Scenario: virsh command fails
-
 - **WHEN** `virsh snapshot-create-as` returns a non-zero exit code
 - **THEN** the module returns `SnapshotResult(success=False, error=<stderr from virsh>)`
 
 #### Scenario: virsh command times out
-
 - **WHEN** `virsh snapshot-create-as` exceeds the timeout (120 seconds, 180 for quiesce)
 - **THEN** the module returns `SnapshotResult(success=False)` with error containing "timed out"
 
 #### Scenario: Post-snapshot qemu-img info uses --force-share on running VM
-
 - **WHEN** a snapshot is created on a running VM
 - **THEN** the subsequent `qemu-img info` command includes `--force-share`
 - **AND** the command succeeds despite the VM holding a write lock on the new active layer
 
-#### Scenario: Post-snapshot qemu-img info without --force-share fails (regression guard)
-
-- **WHEN** a snapshot is created on a running VM
-- **AND** the `qemu-img info` command does NOT include `--force-share`
-- **THEN** the command fails with "Failed to get shared lock" or similar lock error
-- **AND** `SnapshotResult(success=False)` would be returned (this scenario documents the bug being fixed)
-
 #### Scenario: Validation fails — file missing despite virsh success
-
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
 - **AND** `test -f <snapshot_path>` fails (file does not exist)
 - **THEN** `SnapshotResult(success=False, error="snapshot file not found on disk after virsh success")` is returned
 
 #### Scenario: Validation fails — wrong backing-filename
-
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
 - **AND** `qemu-img info` reports `backing-filename` pointing to a file that is NOT the previous active layer
 - **THEN** `SnapshotResult(success=False, error="backing-filename mismatch")` is returned
 
 #### Scenario: Validation fails — corrupt bit set
-
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
 - **AND** `qemu-img info` reports `incompatible-features` containing `"corrupt"`
 - **THEN** `SnapshotResult(success=False, error="snapshot has corrupt bit set")` is returned
 
-#### Scenario: Validation fails — libvirt pivot not confirmed
-
+#### Scenario: Validation fails — virtual-size mismatch
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
-- **AND** `virsh domblklist` still shows the previous active layer (not the new snapshot)
+- **AND** the new snapshot's `virtual-size` differs from the previous active layer's `virtual-size`
+- **THEN** `SnapshotResult(success=False, error="virtual-size mismatch")` is returned
+
+#### Scenario: Validation fails — unreasonable actual-size
+- **WHEN** `virsh snapshot-create-as` returns exit code 0
+- **AND** the new snapshot's `actual-size` exceeds 50% of `virtual-size` (indicating a full copy, not an overlay)
+- **THEN** `SnapshotResult(success=False, error="actual-size ... is unreasonable for a new overlay")` is returned
+
+#### Scenario: Validation fails — libvirt pivot not confirmed
+- **WHEN** `virsh snapshot-create-as` returns exit code 0
+- **AND** `virsh domblklist` still shows the previous active layer (not the new snapshot path) for the disk
 - **THEN** `SnapshotResult(success=False, error="libvirt pivot not confirmed")` is returned
 
-### Requirement: Snapshot listing via backing chain
+### Requirement: Multi-disk snapshot listing via backing chain
+The system SHALL obtain the list of existing snapshots by iterating all configured disks in `vm_config.disks`, resolving each disk's active path via `virsh domblklist`, scanning each disk's backing chain via `qemu-img info --backing-chain --output=json`, and building `SnapshotInfo` for every chain element except the base image. Each `SnapshotInfo` SHALL be tagged with its `disk` target. Results from all disks SHALL be merged into a single flat list sorted by timestamp.
 
-The system SHALL obtain the list of existing snapshots via `qemu-img info --backing-chain --output=json` on the active VM disk image. For each chain element (except the base image itself) the system SHALL create a `SnapshotInfo` with name, path, timestamp, and allocation.
-
-#### Scenario: Backing chain with snapshots
-
-- **WHEN** the active image has a backing chain of 3 elements (base ← snap1 ← snap2)
-- **THEN** `list()` returns a list of 2 `SnapshotInfo` (for snap1 and snap2)
+#### Scenario: Multi-disk backing chains with snapshots
+- **WHEN** VM has disks `vda` (3-element chain: base ← snap1 ← snap2) and `vdb` (2-element chain: base ← snap3)
+- **THEN** `list()` returns a flat list of 3 `SnapshotInfo` (snap1, snap2 tagged `disk="vda"`; snap3 tagged `disk="vdb"`)
 - **AND** snapshots are sorted oldest-first
 
 #### Scenario: No snapshots exist (fresh VM)
-
-- **WHEN** the active image has no backing chain (only base)
+- **WHEN** no disk has a chain longer than 1 element
 - **THEN** `list()` returns an empty list
 
-### Requirement: Snapshot file deletion
+#### Scenario: Disk not found in domblklist
+- **WHEN** a configured disk's target is not present in `virsh domblklist` output
+- **THEN** a WARNING is logged and the disk's chain is skipped
 
+### Requirement: Snapshot file deletion
 The system SHALL delete a snapshot `.qcow2` file via `rm -f`. The method accepts a `SnapshotInfo` and returns a `ShellResult`.
 
 #### Scenario: Successful file deletion
-
 - **WHEN** `rm -f <snapshot.path>` completes successfully
 - **THEN** the module returns `ShellResult(success=True)`
 
 #### Scenario: File does not exist
-
 - **WHEN** the snapshot file does not exist
 - **THEN** `rm -f` returns success (idempotent operation)
 - **AND** the module returns `ShellResult(success=True)`
 
-### Requirement: Quiesce support in snapshot creation
-`ExternalSnapshotProvider.create()` SHALL accept an optional `quiesce: bool = False` parameter. When `True`, SHALL pass `--quiesce` to `virsh snapshot-create-as`. Timeout SHALL be extended to 180 seconds for quiesce operations.
-
-#### Scenario: Snapshot with quiesce enabled
-- **WHEN** `provider.create(vm_config, name, disk, path, quiesce=True)` is called
-- **THEN** `virsh snapshot-create-as --quiesce` is executed
-
-#### Scenario: Snapshot without quiesce (default)
-- **WHEN** `provider.create(vm_config, name, disk, path)` is called without quiesce
-- **THEN** `virsh snapshot-create-as` is executed without `--quiesce`
-
 ### Requirement: Snapshot creation retry on lock conflict
-
 `ExternalSnapshotProvider.create()` SHALL retry `virsh snapshot-create-as` up to 3 total attempts (1 initial + 2 retries) when the error message contains "cannot acquire state change lock". Retry backoff SHALL be exponential: 2 seconds, then 4 seconds. Non-lock errors SHALL NOT be retried.
+
+#### Scenario: Lock conflict resolved on retry
+- **WHEN** the first `virsh snapshot-create-as` attempt fails with "cannot acquire state change lock"
+- **AND** the second attempt (after 2s backoff) succeeds
+- **THEN** the module returns `SnapshotResult(success=True)`
+
+#### Scenario: Lock conflict exhausted
+- **WHEN** all 3 attempts fail with "cannot acquire state change lock"
+- **THEN** the module returns `SnapshotResult(success=False)`
+
+#### Scenario: Non-lock error not retried
+- **WHEN** `virsh snapshot-create-as` fails with "domain not found"
+- **THEN** the module returns `SnapshotResult(success=False)` without retrying

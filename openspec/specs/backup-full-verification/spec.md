@@ -2,25 +2,54 @@
 
 ## Purpose
 
-Defines mandatory and configurable verification of FULL backup files at three lifecycle points: post-creation (before state recording), pre-rebase (before linking incrementals), and pre-deletion (before cascade-deletion). Verification uses three tiers: M1 (metadata — format + corrupt-bit), M2 (structural — qemu-img check), and M3 (content comparison — qemu-img compare).
+Defines mandatory and configurable verification of FULL backup files at three lifecycle points: post-creation (before state recording), pre-deletion (before cascade-deletion), and post-transfer (via `transfer_missing` safety net). Verification uses three tiers: M1 (metadata — format + corrupt-bit), M2 (structural — `qemu-img check`), and M3 (content comparison — `qemu-img compare`).
 
 ## Requirements
 
-### Requirement: M1 metadata verification of FULL after creation
+### Requirement: Post-create FULL verification via full_verify_after_create
 
-When `Core._backup_target()` creates a FULL backup, it SHALL call `verify_full_backup()` on the FULL file BEFORE calling `record_full_backup()`. On failure, the FULL file SHALL be deleted and NOT recorded in state.
+When `Core._backup_target()` creates a FULL backup, it SHALL call `verify_full_backup()` on the FULL file BEFORE calling `record_full_backup()`. The verification mode is controlled by `GlobalConfig.full_verify_after_create` (default `"check"`). Valid values: `"off"`, `"metadata"`, `"check"`, `"compare"`. The legacy value `"hash"` SHALL be treated as `"compare"` with a deprecation WARNING. On failure, the FULL file SHALL be deleted and NOT recorded in state, and any checkpoints created during the failed FULL attempt SHALL be cleaned up.
 
-### Requirement: M1 metadata verification of FULL before rebase (REMOVED)
+#### Scenario: Full verify after create passes
 
-This requirement has been removed. The `full_verify_before_rebase` config field was never wired into Core — it was parsed, validated, and stored in `GlobalConfig`, but zero code paths consumed it. The rebase step it was intended to protect died with `FileCopyBackupProvider`. The `BitmapBackupProvider` does not rebase incrementals to FULL anchors — it creates backing-chained COW deltas via `qemu-img create -b`. The `full_verify_before_rebase` field has been removed from `GlobalConfig`. If the field appears in a TOML config, it is silently ignored as an unknown key.
+- **WHEN** `full_verify_after_create = "check"` and FULL creation succeeds
+- **THEN** `verify_full_backup(shell, full_path, "check", source_path=snapshot.path)` is called
+- **AND** on success, `record_full_backup()` is called
+- **AND** the FULL is available for subsequent incrementals
 
-### Requirement: M1 metadata verification of FULL before cascade-deletion (NON-CONFIGURABLE)
+#### Scenario: Full verify after create fails
 
-Before `Core._cleanup_backups()` deletes a FULL backup, Core SHALL run M1 verification. This check is always enforced — it cannot be disabled by configuration. On failure, deletion of the FULL and all dependent incrementals is blocked with a CRITICAL log.
+- **WHEN** `full_verify_after_create = "check"` and verification returns an error
+- **THEN** the FULL file is deleted via `rm -f`
+- **AND** checkpoints created during the failed FULL attempt are cleaned up
+- **AND** `record_full_backup()` is NOT called
+- **AND** `BackupResult(success=False)` is returned
+- **AND** old generations are preserved (verify-before-delete gate)
+
+
+### Requirement: Pre-delete FULL verification (NON-CONFIGURABLE M1, configurable M2)
+
+Before `Core._cleanup_backups()` deletes a FULL backup, Core SHALL run M1 metadata verification (`verify_full_backup(shell, full_path, "metadata")`). This check is always enforced — it cannot be disabled by configuration. On failure, deletion of the FULL and all dependent incrementals is blocked with a CRITICAL log.
+
+When `GlobalConfig.full_verify_before_delete = "check"` (default), Core SHALL additionally run M2 structural verification (`verify_full_backup(shell, full_path, "check")`) before deletion. M2 failure also blocks deletion with a CRITICAL log.
+
+#### Scenario: M1 passes — FULL deletion proceeds
+
+- **WHEN** M1 verification passes
+- **AND** `full_verify_before_delete != "check"`
+- **THEN** the FULL backup is deleted
+
+#### Scenario: M1 fails — deletion blocked
+
+- **WHEN** M1 verification returns an error (corrupt format or corrupt bit set)
+- **THEN** a CRITICAL log is emitted: "FULL backup <name> is corrupt — blocking deletion. Run: qsnap check --deep <target>"
+- **AND** the FULL is NOT deleted
+- **AND** all dependent incrementals are NOT deleted
+
 
 ### Requirement: M2 structural verification of FULL (qemu-img check)
 
-When configured (`GlobalConfig.full_verify_after_create = "check"` or `"compare"`, or `full_verify_before_delete = "check"`), Core SHALL additionally run `qemu-img check --output=json` and verify that ALL of `errors`, `leaks`, AND `corruptions` are zero. Any non-zero value among the three fields SHALL fail verification.
+When triggered by `verify_mode = "check"` or `"compare"`, Core or the verification function SHALL run `qemu-img check --output=json` and verify that ALL of `errors`, `leaks`, AND `corruptions` are zero. Any non-zero value among the three fields SHALL fail verification.
 
 #### Scenario: M2 passes when all fields are zero
 
@@ -42,9 +71,10 @@ When configured (`GlobalConfig.full_verify_after_create = "check"` or `"compare"
 - **WHEN** `qemu-img check --output=json` returns `{"errors": 0, "leaks": 5, "corruptions": 0}`
 - **THEN** M2 verification fails with an error message naming the leak count
 
-### Requirement: M3 — Content comparison tier
 
-The M3 tier runs `qemu-img compare -q --force-share <source> <target>` — a chain-traversing byte-level content comparison. M3 is triggered by `verify_mode = "compare"` (was `"hash"`). The `"hash"` and `"full"` values are deprecated and treated as `"compare"`. M3 is available at the post-create lifecycle point (controlled by `GlobalConfig.full_verify_after_create`) and in `TargetConfig.verify` for post-transfer verification. A WARNING is logged when comparing a live source (the guest may write during the comparison).
+### Requirement: M3 — Content comparison tier via qemu-img compare
+
+The M3 tier SHALL run `qemu-img compare -q --force-share <source> <target>` — a chain-traversing byte-level content comparison. M3 is triggered by `verify_mode = "compare"`. The `"hash"` value is deprecated and SHALL be treated as `"compare"` with a deprecation WARNING. M3 is available at the post-create lifecycle point (controlled by `GlobalConfig.full_verify_after_create`) and in post-transfer verification.
 
 #### Scenario: M3 triggered by compare mode
 
@@ -57,3 +87,35 @@ The M3 tier runs `qemu-img compare -q --force-share <source> <target>` — a cha
 - **WHEN** `verify_mode = "hash"` (deprecated)
 - **THEN** a WARNING is logged
 - **AND** M3 is triggered (same as `"compare"`)
+
+
+### Requirement: verify_full_backup function signature
+
+`verify_full_backup(shell, target_path, verify_mode, source_path=None, expected_virtual_size=None) -> str | None` SHALL verify a standalone FULL backup file. Supported modes: `"off"` (skip), `"metadata"` (M1: format is qcow2, no corrupt bit), `"check"` (M1+M2: M1 + `qemu-img check` returns zero errors/leaks/corruptions), `"compare"` (M1+M2+M3: additionally `qemu-img compare`). The `"hash"` value SHALL be treated as `"compare"` with a deprecation WARNING. Returns `None` on success or an error string on failure.
+
+#### Scenario: verify_full_backup with off mode
+
+- **WHEN** `verify_mode = "off"`
+- **THEN** the function returns `None` immediately without running any commands
+
+#### Scenario: verify_full_backup with metadata mode catches corrupt bit
+
+- **WHEN** `verify_mode = "metadata"` and the FULL has the corrupt bit set
+- **THEN** the function returns an error string: "verification failed: FULL backup has corrupt bit set — file is damaged"
+
+#### Scenario: verify_full_backup with check mode catches qemu-img check errors
+
+- **WHEN** `verify_mode = "check"` and `qemu-img check` reports non-zero errors
+- **THEN** the function returns an error string: "verification failed: qemu-img check found N errors"
+
+
+### Requirement: Verify-before-delete gate for FULL backups
+
+When FULL backup creation fails (post-create verification, all retries exhausted), Core SHALL set `full_verification_failed = True` which prevents `_cleanup_backups()` from running. This ensures old generations are not deleted when the new FULL is unverified — implementing the verify-before-delete gate.
+
+#### Scenario: Failed FULL preserves old generations
+
+- **WHEN** FULL creation fails after all retries
+- **THEN** `full_verification_failed` is set to `True`
+- **AND** `_cleanup_backups()` is not called
+- **AND** old FULLs and their dependent incrementals are preserved

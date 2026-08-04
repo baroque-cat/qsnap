@@ -4,7 +4,7 @@
 
 Shared verification utility functions extracted from duplicated code in lifecycle managers and Core. Consolidates 4 independent backing-chain verification implementations and 2 identical deep-verify blocks into reusable, testable functions.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Shared deep_verify_base_image function
 
@@ -81,20 +81,20 @@ The JSON parsing SHALL accept both `"image"` (legacy QEMU) and `"filename"` (QEM
 
 ### Requirement: Both BlockCommitManager and QemuImgCommitManager use deep_verify_base_image
 
-Both `BlockCommitManager.blockcommit()` and `QemuImgCommitManager.blockcommit()` SHALL replace their inline `qemu-img check` implementations with a call to `deep_verify_base_image()`. When `deep_verify=True`, each manager SHALL call `fail = deep_verify_base_image(self._shell, vm_config.base_image)`. If the result is not `None`, the manager SHALL return it immediately as the `CommitResult`. This replaces the previous ~44-line duplicated block in each manager.
+Both `BlockCommitManager.blockcommit()` and `QemuImgCommitManager.blockcommit()` SHALL replace their inline `qemu-img check` implementations with a call to `deep_verify_base_image()`. When `deep_verify=True`, each manager SHALL call `fail = deep_verify_base_image(self._shell, base_image)`, where `base_image` is the per-disk `Path` keyword parameter of `blockcommit()` (multi-disk refactor — there is no VM-level `vm_config.base_image`). If the result is not `None`, the manager SHALL return it immediately as the `CommitResult`. This replaces the previous ~44-line duplicated block in each manager.
 
 #### Scenario: BlockCommitManager uses shared deep_verify
 
-- **WHEN** `BlockCommitManager.blockcommit(vm_config, snapshots, deep_verify=True)` is called
+- **WHEN** `BlockCommitManager.blockcommit(vm_config, snapshots, disk="vda", base_image=<path>, deep_verify=True)` is called
 - **AND** the commit succeeds
-- **THEN** `deep_verify_base_image(self._shell, vm_config.base_image)` is called
+- **THEN** `deep_verify_base_image(self._shell, base_image)` is called with that disk's base image
 - **AND** the return value (CommitResult or None) determines the final result
 
 #### Scenario: QemuImgCommitManager uses shared deep_verify
 
-- **WHEN** `QemuImgCommitManager.blockcommit(vm_config, snapshots, deep_verify=True)` is called
+- **WHEN** `QemuImgCommitManager.blockcommit(vm_config, snapshots, disk="vda", base_image=<path>, deep_verify=True)` is called
 - **AND** the commit succeeds
-- **THEN** `deep_verify_base_image(self._shell, vm_config.base_image)` is called
+- **THEN** `deep_verify_base_image(self._shell, base_image)` is called with that disk's base image
 - **AND** the return value (CommitResult or None) determines the final result
 
 ### Requirement: All chain verification uses scan_backing_chain

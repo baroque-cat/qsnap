@@ -2,38 +2,55 @@
 
 ## Purpose
 
-Provides a `qsnap check --state` command that cross-references recorded snapshots, FULL backups, and incremental dependencies against the actual files on disk, detecting and reporting phantom entries (state records pointing to non-existent files) and corrupt state files.
+Provides a `qsnap check --state` command that cross-references recorded snapshots (with per-disk SnapshotInfo), FULL backups, and incremental dependencies against the actual files on disk, detecting and reporting phantom entries (state records pointing to non-existent files) and corrupt state files. Uses shared detector methods also used by `reconcile`.
 
 ## Requirements
 
 ### Requirement: Phantom snapshot detection in state
 
-`Core.check_state()` SHALL iterate all recorded snapshots in `IStateManager` for each VM and verify the snapshot file exists on disk via `os.path.exists()`. Entries where the file does not exist SHALL be reported as phantom snapshots with status `"stale"`. The check SHALL NOT automatically remove phantom entries.
+`Core.check_state()` SHALL delegate phantom snapshot detection to `_detect_phantom_snapshots(vm)` — a shared detector method that iterates all recorded `SnapshotInfo` entries in `IStateManager` for the VM and verifies each snapshot file exists on disk via `os.path.exists()`. Each `SnapshotInfo` has a `disk` field identifying which disk the snapshot belongs to. Entries where the file does not exist SHALL be reported as phantom snapshots with status `"stale"`. The check SHALL NOT automatically remove phantom entries.
 
 #### Scenario: All snapshot files exist — clean state
+
 - **WHEN** `qsnap check --state` is run
-- **AND** all recorded snapshots have corresponding files on disk
+- **AND** all recorded snapshots across all disks have corresponding files on disk
 - **THEN** no phantom entries are reported
 - **AND** status is `"ok"`
 
 #### Scenario: Phantom snapshot detected — reported but not auto-cleaned
+
 - **WHEN** `qsnap check --state` is run
 - **AND** a recorded snapshot's file does not exist on disk
 - **THEN** the snapshot is reported as phantom with path and VM name
-- **AND** status is `"stale_snapshots"`
+- **AND** status includes `"stale_snapshots"`
 - **AND** the phantom entry is NOT automatically removed
 
 ### Requirement: Phantom FULL backup detection in state
 
-`Core.check_state()` SHALL iterate all recorded FULL backups and verify each FULL file exists on disk. Phantom FULLs SHALL be reported with status `"stale_fulls"`.
+`Core.check_state()` SHALL delegate phantom FULL detection to `_detect_phantom_fulls(vm)` — a shared detector method that iterates all recorded FULL backups and verifies each FULL file exists on disk. Phantom FULLs SHALL be reported with status `"stale_fulls"`.
+
+#### Scenario: Phantom FULL detected
+
+- **WHEN** state records a FULL backup whose file is missing on disk
+- **THEN** `check_state` reports it under `"stale_fulls"` without deleting anything
 
 ### Requirement: Orphaned incremental dependency detection
 
-`Core.check_state()` SHALL iterate all recorded incremental→FULL dependencies and verify both files exist on disk. Dependencies where either file is missing SHALL be reported.
+`Core.check_state()` SHALL delegate stale dependency detection to `_detect_stale_deps(vm)` — a shared detector method that iterates all recorded incremental→FULL dependencies and verifies both files exist on disk. Dependencies where either file is missing SHALL be reported.
+
+#### Scenario: Stale dependency detected
+
+- **WHEN** an incremental→FULL dependency record references a file that is missing on disk
+- **THEN** `check_state` reports the stale dependency without deleting anything
 
 ### Requirement: State file integrity check
 
 `Core.check_state()` SHALL verify that state JSON files are readable and parseable. Corrupted or unreadable state files SHALL be reported with status `"corrupt_state"`.
+
+#### Scenario: Corrupt state file reported
+
+- **WHEN** a VM's state JSON file is malformed or unreadable
+- **THEN** `check_state` reports it under `"corrupt_state"`
 
 ### Requirement: Orphan checkpoint auto-cleanup parameter
 
@@ -42,7 +59,7 @@ The `_detect_orphan_checkpoints()` method SHALL accept an `auto_cleanup: bool = 
 #### Scenario: Auto-cleanup disabled by default
 
 - **WHEN** `_detect_orphan_checkpoints(vm_config)` is called without `auto_cleanup`
-- **THEN** the method SHALL only report orphaned checkpoints without deleting them (backward-compatible behavior)
+- **THEN** the method SHALL only report orphaned checkpoints without deleting them
 
 #### Scenario: Auto-cleanup enabled deletes orphans
 
@@ -78,33 +95,30 @@ The `_validate_state_at_startup()` method SHALL NOT call `_detect_orphan_checkpo
 
 ### Requirement: Broken backing chain detection in check --state
 
-`Core.check_state()` SHALL detect broken backing chains on backup files at each target. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `qemu-img info --force-share --backing-chain --output=json <path>` via `IShell.run()` and check whether the command succeeds. Files where the command fails SHALL be reported as `broken_chains` with the backup name and target path. The status string SHALL include `"broken_chains"` when any broken chains are detected. FULL backups (standalone files with no backing) SHALL be skipped — they have no backing chain to validate.
+`Core.check_state()` SHALL delegate broken chain detection to `_detect_broken_chains(vm)` — a shared detector method. For each non-FULL backup file (filename not containing `.FULL.`), the method SHALL run `scan_backing_chain()` and check whether the chain is intact. Files where the scan fails SHALL be reported as `broken_chains` with the backup name and target path. The status string SHALL include `"broken_chains"` when any broken chains are detected. FULL backups (standalone files with no backing) SHALL be skipped — they have no backing chain to validate.
 
 The `StateCheckResult` dataclass SHALL include a `broken_chains: list[str]` field (defaulting to an empty list) containing human-readable descriptions of each broken chain (format: `"{backup_name} (target: {target_path})"`).
 
 #### Scenario: Broken backing chain detected
+
 - **WHEN** `qsnap check --state` is run
 - **AND** a non-FULL backup file at a target has a broken backing chain (its backing file was deleted)
 - **THEN** the backup is reported in `broken_chains`
 - **AND** the status string includes `"broken_chains"`
 
 #### Scenario: All backing chains intact — clean state
+
 - **WHEN** `qsnap check --state` is run
 - **AND** all non-FULL backup files have intact backing chains
 - **THEN** `broken_chains` is an empty list
 - **AND** the status string does NOT include `"broken_chains"`
 
 #### Scenario: FULL backups skipped in chain validation
+
 - **WHEN** `qsnap check --state` is run
 - **AND** a FULL backup exists at the target
 - **THEN** the FULL backup is NOT checked for backing-chain integrity (it has no backing file)
 - **AND** only non-FULL backups are validated
-
----
-
-# state-consistency-check — Delta Spec
-
-## ADDED Requirements
 
 ### Requirement: check_state uses shared detection methods from Core
 

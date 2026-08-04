@@ -1,3 +1,9 @@
+# Systemd Integration
+
+## Purpose
+
+Systemd service and timer units for scheduling qsnap runs. The service delegates all timeout authority to qsnap's internal stall detection, and the timer provides periodic invocation.
+
 ## Requirements
 
 ### Requirement: Systemd service unit

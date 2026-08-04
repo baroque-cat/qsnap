@@ -1,3 +1,9 @@
+# Shell Abstraction
+
+## Purpose
+
+The `IShell` interface that wraps all external command execution (`virsh`, `qemu-img`, filesystem calls). It provides timeout enforcement, stall detection for long transfers, structured logging, and full mockability in tests.
+
 ## Requirements
 
 ### Requirement: IShell ABC
@@ -95,7 +101,7 @@ The system SHALL classify `qemu-img` operations into two categories for `--force
 All `shell.run()` calls that are probing or testing (where command failure is expected and handled by the caller in conditional logic) SHALL use `check=True` to avoid misleading ERROR-level logs. The criterion is: if the calling code handles the failure result in a conditional branch (if/else, try/except) rather than treating it as an unexpected error, the call is a probe and SHALL use `check=True`.
 
 The following call sites SHALL be audited and updated to `check=True` where applicable:
-- `utils/nbd.py`: `is_vm_running()`, `is_libvirt_new_enough()`, `get_first_disk_target()`
+- `utils/nbd.py`: `is_vm_running()`, `is_libvirt_new_enough()`, `get_disk_targets()`
 - `modules/snapshot/external.py`: `virsh domblklist`, `qemu-img info --backing-chain`
 - `modules/change/allocation_detector.py`: `qemu-img info`
 - `modules/change/map_detector.py`: `qemu-img map`

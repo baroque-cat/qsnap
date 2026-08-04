@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Core is the pipeline runner and dependency-injection host: it coordinates environment validation, deferred-operation draining, change detection, snapshot creation, retention evaluation, adaptive blockcommit lifecycle, and per-target backup steps. Modules are stateless workers invoked through ABC interfaces; Core owns the execution order and all VM-state-aware decisions.
+Core is the pipeline runner and dependency-injection host: it coordinates environment validation, deferred-operation draining, change detection, per-disk snapshot creation, per-disk retention evaluation, per-disk adaptive blockcommit lifecycle, and per-target backup steps. Modules are stateless workers invoked through ABC interfaces; Core owns the execution order and all VM-state-aware decisions.
 
 ## Requirements
 
@@ -27,18 +27,19 @@ Core SHALL accept `IConfigFacade`, `IVMModuleFactory`, `IStateManager`, and `ISh
 ### Requirement: Pipeline step order
 `Core._execute_pipeline(vm_config)` SHALL execute steps in this order:
 1. Pre-flight environment validation (including stale file cleanup per `auto_cleanup`, compress driver availability check)
-2. Deferred blockcommit check — state-adaptive drain per the `deferred-operations` capability
-3. Change detection — if `snapshot_create` mode requires it
-4. Snapshot creation — if detector says we should, or if mode is "always"
-5. Snapshot retention evaluation — which snapshots to keep/remove
-6. Snapshots to merge: pre-commit backing chain integrity verification (per `chain_verify_before_commit`)
-7. Snapshot lifecycle — **adaptive blockcommit**: Core SHALL determine the VM power state via `virsh domstate` and the active overlay path via `virsh domblklist`, split the remove set into committable and deferrable subsets, execute the committable subset with the mechanism valid for the current state, and defer the rest. MAC denial deferral applies as before.
-8. Post-commit chain length verification (per `chain_verify_after_commit`)
-9. For each target: backup transfer (with retry per `backup_retry_max`) → backup verification → backup retention → cleanup
+2. Startup state-vs-disk validation (`_validate_state_at_startup`)
+3. Deferred blockcommit check (state-adaptive drain per `deferred-operations` capability)
+4. Change detection — if `snapshot_create` mode requires it
+5. Snapshot creation — if detector says we should, or if mode is "always"
+6. Snapshot retention evaluation — per-disk, which snapshots to keep/remove
+7. Snapshots to merge: pre-commit backing chain integrity verification (per `chain_verify_before_commit`)
+8. Snapshot lifecycle — **adaptive blockcommit** per disk: Core SHALL determine the VM power state via `virsh domstate` and the active overlay path per-disk via `virsh domblklist`, split the remove set into committable and deferrable subsets per disk, execute the committable subset with the mechanism valid for the current state, and defer the rest. MAC denial deferral applies as before.
+9. Post-commit chain length verification (per `chain_verify_after_commit`)
+10. For each target: backup transfer (with retry per `backup_retry_max`) → backup verification → backup retention → cleanup
 
 The `--preserve-snapshots` and `--dry-run` guards SHALL run before any `virsh` state-detection calls.
 
-The adaptive fork in step 7 SHALL behave as follows:
+The adaptive fork in step 8 SHALL behave as follows per disk:
 
 | VM state (`domstate`) | `lifecycle_mode` | Committable subset | Executor | Deferred subset and reason |
 |---|---|---|---|---|
@@ -48,7 +49,7 @@ The adaptive fork in step 7 SHALL behave as follows:
 | paused / other | any | (none) | — | entire remove set, reason `"vm_running"` |
 | domstate call failed | any | entire remove set (legacy fallback) | manager for configured mode | (none) |
 
-The active-layer path SHALL be obtained from `virsh domblklist` (via `parse_domblklist_path()`); on failure Core SHALL fall back to the newest snapshot recorded in `IStateManager` and log a WARNING. When the executor is `QemuImgCommitManager`, Core SHALL re-check `virsh domstate` immediately before invoking the manager; if the VM is no longer shut off, Core SHALL defer the committable subset with reason `"vm_running"` instead.
+The active-layer path SHALL be obtained from `virsh domblklist` (via `parse_domblklist_path_map()`) per-disk; on failure Core SHALL fall back to the newest snapshot of that disk recorded in `IStateManager` and log a WARNING. When the executor is `QemuImgCommitManager`, Core SHALL re-check `virsh domstate` immediately before invoking the manager; if the VM is no longer shut off, Core SHALL defer the committable subset with reason `"vm_running"` instead.
 
 After any successful commit (any branch), Core SHALL remove the committed snapshots from `IStateManager` unconditionally — independent of `chain_verify_after_commit` — and append one `ActionRecord("snapshot_delete")` per committed snapshot.
 
@@ -58,11 +59,13 @@ After all VMs are processed, `_check_deferred_thresholds()` SHALL be called.
 
 Core SHALL NOT directly instantiate `BitmapBackupProvider` or any other domain module. ALL module instantiation SHALL go through `IVMModuleFactory`. This includes orphan checkpoint detection — `Core._detect_orphan_checkpoints()` SHALL obtain the backup provider via `self._factory.create_backup_provider(vm_config, target)`.
 
-Core SHALL NOT hardcode a disk target fallback. When `virsh domblklist` fails or returns no disks in `Core._resolve_disks()`, Core SHALL return an empty list and log a WARNING. The caller SHALL skip snapshot creation when the disk list is empty.
+Core SHALL NOT hardcode a disk target fallback. `Core._resolve_disks(vm_config)` SHALL return `vm_config.disks` — the explicitly configured disk list. There is no auto-discovery.
+
+Core SHALL NOT import from `qsnap.modules.backup` or `qsnap.modules.*` except through the factory.
 
 #### Scenario: Pipeline with always mode
 - **WHEN** a VM has `snapshot_create = "always"` and the pipeline runs
-- **THEN** validation runs first, then a snapshot is created regardless of change detection result
+- **THEN** validation runs first, then a snapshot is created for each disk regardless of change detection result
 
 #### Scenario: Orphan checkpoint detection uses factory
 
@@ -70,62 +73,54 @@ Core SHALL NOT hardcode a disk target fallback. When `virsh domblklist` fails or
 - **THEN** it SHALL call `self._factory.create_backup_provider(vm_config, target)`
 - **AND** it SHALL NOT directly import or instantiate `BitmapBackupProvider`
 
-#### Scenario: domblklist failure returns empty list
-
-- **WHEN** `virsh domblklist` fails or returns no disk entries
-- **THEN** `Core._resolve_disks()` returns an empty list
-- **AND** a WARNING is logged
-- **AND** snapshot creation is skipped for this VM
-- **AND** no hardcoded disk target (e.g., `"vda"`) is used as fallback
-
 #### Scenario: Pipeline with onchange mode, no changes
-- **WHEN** a VM has `snapshot_create = "onchange"` and the change detector reports `has_changed = False`
+- **WHEN** a VM has `snapshot_create = "onchange"` and no disk has changed
 - **THEN** no snapshot is created, but retention is still evaluated
 
 #### Scenario: Non-active snapshots committed live when VM is running (virsh mode)
-- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains only non-active snapshots
-- **THEN** `factory.create_lifecycle_manager(mode="virsh")` is used
-- **AND** `manager.blockcommit()` is called with the full remove set
-- **AND** no deferred entry is created
+- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains only non-active snapshots for a disk
+- **THEN** `factory.create_lifecycle_manager(mode="virsh")` is used for that disk
+- **AND** `manager.blockcommit()` is called with the full remove set for that disk
+- **AND** no deferred entry is created for that disk
 
 #### Scenario: Active layer deferred when VM is running (virsh mode)
-- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains the active overlay (per `domblklist`)
-- **THEN** the non-active prefix is committed live via `BlockCommitManager`
-- **AND** the active snapshot is deferred via `add_deferred_blockcommit()` with reason `"vm_running"`
+- **WHEN** `lifecycle_mode = "virsh"`, `virsh domstate` returns "running", and the remove set contains the active overlay for a disk (per `domblklist`)
+- **THEN** the non-active prefix is committed live via `BlockCommitManager` for that disk
+- **AND** the active snapshot is deferred via `add_deferred_blockcommit()` with disk and reason `"vm_running"`
 - **AND** an INFO log records the split decision
 
 #### Scenario: qemu-img mode defers everything when VM is running
 - **WHEN** `lifecycle_mode = "qemu-img"` and `virsh domstate` returns "running"
-- **THEN** no manager is invoked
-- **AND** the entire remove set is deferred with reason `"vm_running"`
+- **THEN** no manager is invoked for any disk
+- **AND** the entire remove set for each disk is deferred with reason `"vm_running"`
 - **AND** the pipeline continues to backup steps
 
 #### Scenario: Blockcommit deferred when VM is paused
 - **WHEN** `virsh domstate` returns "paused"
 - **THEN** no manager is invoked regardless of `lifecycle_mode`
-- **AND** the entire remove set is deferred with reason `"vm_running"`
+- **AND** the entire remove set for each disk is deferred with reason `"vm_running"`
 
 #### Scenario: Offline commit via qemu-img when VM is shut off
-- **WHEN** `virsh domstate` returns "shut off" (either lifecycle mode) and the remove set does not contain the XML-referenced tip overlay
-- **THEN** `factory.create_lifecycle_manager(mode="qemu-img")` is used
-- **AND** `manager.blockcommit()` is called with the full remove set
-- **AND** no deferred entry is created
+- **WHEN** `virsh domstate` returns "shut off" (either lifecycle mode) and the remove set for a disk does not contain the XML-referenced tip overlay
+- **THEN** `factory.create_lifecycle_manager(mode="qemu-img")` is used for that disk
+- **AND** `manager.blockcommit()` is called with the full remove set for that disk
+- **AND** no deferred entry is created for that disk
 
 #### Scenario: XML-referenced tip excluded from offline commit
-- **WHEN** `virsh domstate` returns "shut off" and the remove set contains the overlay referenced by the inactive domain XML (per `domblklist`)
-- **THEN** the remaining snapshots are committed via `QemuImgCommitManager`
+- **WHEN** `virsh domstate` returns "shut off" and the remove set for a disk contains the overlay referenced by the inactive domain XML (per `domblklist`)
+- **THEN** the remaining snapshots for that disk are committed via `QemuImgCommitManager`
 - **AND** the tip overlay is deferred with reason `"active_layer"`
 - **AND** the tip file is never passed to the manager, so the domain remains bootable
 
 #### Scenario: VM state check failure is non-fatal
 - **WHEN** `virsh domstate` fails (e.g., VM not defined, libvirt not running)
-- **THEN** blockcommit proceeds with the manager for the configured `lifecycle_mode` and the full remove set (legacy behavior)
+- **THEN** blockcommit proceeds for each disk with the manager for the configured `lifecycle_mode` and the full remove set (legacy behavior)
 - **AND** no deferral occurs
 
 #### Scenario: Race guard before offline commit
-- **WHEN** the plan selected the `QemuImgCommitManager` executor but the immediate `virsh domstate` re-check no longer returns "shut off"
-- **THEN** the manager is not invoked
-- **AND** the committable subset is deferred with reason `"vm_running"`
+- **WHEN** the plan selected the `QemuImgCommitManager` executor for a disk but the immediate `virsh domstate` re-check no longer returns "shut off"
+- **THEN** the manager is not invoked for that disk
+- **AND** the committable subset for that disk is deferred with reason `"vm_running"`
 
 #### Scenario: State entries removed unconditionally after commit
 - **WHEN** a blockcommit succeeds and `chain_verify_after_commit` is disabled
@@ -134,12 +129,12 @@ Core SHALL NOT hardcode a disk target fallback. When `virsh domblklist` fails or
 
 #### Scenario: Domain XML refreshed after offline commit
 - **WHEN** an offline commit via `QemuImgCommitManager` succeeds and committed overlay files are deleted
-- **THEN** the domain's persistent XML no longer contains `<backingStore>` elements referencing the deleted files
+- **THEN** the domain's persistent XML no longer contains `<backingStore>` elements referencing the deleted files in any disk
 - **AND** `virsh start` on the domain succeeds (libvirt re-probes the shortened chain)
 
 #### Scenario: preserve="all" with VM running — no blockcommit attempted
 - **WHEN** `snapshot_preserve = "all"` and the VM is running
-- **THEN** the retention engine keeps all snapshots (after D1 fix)
+- **THEN** the retention engine keeps all snapshots
 - **AND** `_blockcommit_snapshots()` is not called (empty remove list)
 - **AND** no blockcommit error occurs
 
@@ -151,14 +146,14 @@ An error processing one VM SHALL NOT prevent other VMs from being processed.
 - **THEN** "vm2" is still processed, and the error for "vm1" is logged
 
 ### Requirement: Core.snapshot() runs only snapshot steps
-`Core.snapshot(vm_filter=None)` SHALL execute only steps 1-4 (change detection, snapshot creation, snapshot retention, lifecycle). No backup steps.
+`Core.snapshot(vm_filter=None)` SHALL execute only steps 1-9 (change detection, snapshot creation, snapshot retention, lifecycle). No backup steps.
 
 #### Scenario: snapshot command skips backup
 - **WHEN** `core.snapshot()` is called
 - **THEN** backup methods on the factory are never called
 
 ### Requirement: Core.backup() runs only backup steps
-`Core.backup(vm_filter=None)` SHALL execute only step 5 (backup transfer, backup retention, cleanup). No snapshot steps.
+`Core.backup(vm_filter=None)` SHALL execute only step 10 (backup transfer, backup retention, cleanup). No snapshot steps.
 
 #### Scenario: backup command skips snapshot creation
 - **WHEN** `core.backup()` is called
@@ -172,7 +167,7 @@ An error processing one VM SHALL NOT prevent other VMs from being processed.
 - **THEN** no snapshots or backups are created, only retention evaluation and cleanup run
 
 ### Requirement: Dry-run mode
-Core SHALL support dry-run mode where all pipeline steps are evaluated but no mutation occurs (no snapshot creation, no blockcommit, no file deletion). Dry-run mode SHALL be activated via the `dry_run` boolean property on the Core instance, settable by the CLI `--dry-run` / `-n` flag. In dry-run mode, `_backup_target()` SHALL pass `full_verify_before_rebase` to the backup provider (retention evaluation and bucket strategy still execute as pure logic). The dry-run SHALL NOT accumulate `ActionRecord` entries — since no mutations occur, no actions are recorded. The `PipelineResult.dry_run` flag SHALL be set to `True` to indicate the run was a dry-run.
+Core SHALL support dry-run mode where all pipeline steps are evaluated but no mutation occurs (no snapshot creation, no blockcommit, no file deletion). Dry-run mode SHALL be activated via the `dry_run` boolean property on the Core instance, settable by the CLI `--dry-run` / `-n` flag. The dry-run SHALL NOT accumulate `ActionRecord` entries — since no mutations occur, no actions are recorded. The `PipelineResult.dry_run` flag SHALL be set to `True` to indicate the run was a dry-run.
 
 #### Scenario: Dry-run logs planned actions
 - **WHEN** `core.run()` is called in dry-run mode
@@ -213,47 +208,20 @@ When `--preserve` flags are active, snapshot and backup creation steps that fail
 - **WHEN** `qsnap --preserve run` is executed and a backup transfer fails
 - **THEN** the error is reported in the result, but no backup deletion is attempted
 
-### Requirement: Dynamic disk resolution in snapshot creation
-`Core._create_snapshot()` SHALL resolve the active disk(s) via `virsh domblklist --domain <vm>` rather than using a hardcoded `"vda"` string. It SHALL iterate over all discovered disks, creating one snapshot file per disk.
-
-#### Scenario: VM with a single disk named sda
-- **WHEN** `virsh domblklist` returns `sda /path/to/image.qcow2`
-- **THEN** snapshot is created for disk `sda`, not `vda`
+### Requirement: Per-disk snapshot creation with configured disk list
+`Core._create_snapshot()` SHALL iterate over `vm_config.disks` (the explicitly configured disk list, via `_resolve_disks()`). It SHALL NOT auto-discover disks via `virsh domblklist`. For each disk, it SHALL create one snapshot with naming convention `{vm_name}.{timestamp}_{disk_target}.qcow2`, using that disk's effective snapshot directory (`vm_config.snapshot_dir_for(disk)`). Quiesce (guest-agent freeze) is VM-wide — it SHALL be applied only to the first disk's snapshot (index==0). Each successful snapshot SHALL be recorded in state as `SnapshotInfo` with `disk=disk.target`. Partial failure SHALL be tolerated — if one disk fails, the next disk is still attempted.
 
 #### Scenario: VM with multiple disks (vda, vdb)
-- **WHEN** `virsh domblklist` returns both `vda` and `vdb`
+- **WHEN** VM config has disks `vda` and `vdb`
 - **THEN** two snapshots are created: one for each disk
-- **THEN** snapshot files are named `{vm}.{ts}_vda_{6hex}.qcow2` and `{vm}.{ts}_vdb_{6hex}.qcow2`
+- **AND** snapshot files are named `{vm}.{ts}_vda_{6hex}.qcow2` and `{vm}.{ts}_vdb_{6hex}.qcow2`
+- **AND** `SnapshotInfo` records have `disk="vda"` and `disk="vdb"` respectively
+- **AND** quiesce is applied only to the first disk's snapshot
 
-#### Scenario: Explicit disk list in config overrides auto-discovery
-- **WHEN** `VMConfig.disks` is `["vda"]` for a VM that also has `vdb`
-- **THEN** only `vda` is snapshotted
-
-### Requirement: Multi-disk snapshot result collection
-When multiple disks are snapshotted, the `_create_snapshot()` method SHALL collect all `SnapshotResult` objects. If any disk fails, the partial results SHALL be logged, but the method SHALL continue processing the next VM in the pipeline.
-
-#### Scenario: vda succeeds, vdb fails
+#### Scenario: vda succeeds, vdb fails — partial failure tolerance
 - **WHEN** snapshot of `vda` succeeds but `vdb` fails
 - **THEN** `vda` snapshot is recorded in state; `vdb` error is logged
-- **THEN** the pipeline continues to retention evaluation
-
-### Requirement: Backup retention in print_schedule
-`Core.print_schedule()` SHALL evaluate and return retention decisions for backup targets in addition to snapshots. The result SHALL include per-target keep/remove lists via `ScheduleResult`.
-
-#### Scenario: Schedule shows snapshot and backup decisions
-- **WHEN** `core.print_schedule("vm1")` is called and VM has one target
-- **THEN** the result shows snapshot retention (keep/remove) AND per-target backup retention (keep/remove)
-
-### Requirement: check --deep via qemu-img check
-`Core.check()` SHALL accept a `deep: bool = False` parameter. When `deep=True`, it SHALL execute `qemu-img check --output=json` on each snapshot and backup file. Files with `corruptions > 0` SHALL be reported as broken in `CheckResult`.
-
-#### Scenario: Deep check finds corruption
-- **WHEN** `qemu-img check --output=json` returns `{"corruptions": 2}`
-- **THEN** the snapshot is marked as broken in `CheckResult` with status `"corrupted"`
-
-#### Scenario: Deep check on clean image
-- **WHEN** `qemu-img check` returns `{"corruptions": 0}`
-- **THEN** the snapshot is marked as healthy
+- **AND** the pipeline continues to retention evaluation
 
 ### Requirement: EXIT_BACKUP_ABORT wired into PipelineResult
 `VMRunResult` SHALL gain a `backup_failed: bool` field. When at least one backup task failed, `Core` SHALL return exit code 10 (`EXIT_BACKUP_ABORT`).
@@ -278,22 +246,27 @@ When `VMConfig.snapshot_create == "ondemand"`, `Core` SHALL check whether at lea
 - **THEN** snapshot creation is skipped with an INFO log message
 
 ### Requirement: Pre-flight environment validation before pipeline
-Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify: (a) `snapshot_dir` exists and is writable, (b) `base_image` file exists, (c) `virsh` and `qemu-img` binaries are in PATH, (d) VM is defined in libvirt. Validation failure SHALL return a `CheckResult` with `status = "validation_failed"` and prevent pipeline execution for that VM.
+Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(vm_config)`. Validation SHALL verify per-disk: (a) each distinct effective snapshot directory exists and is writable (via `test -d` and `test -w`), (b) each disk's `base_image` file exists (via `test -f`). Validation SHALL also verify: (c) `virsh` and `qemu-img` binaries are in PATH, (d) VM is defined in libvirt, (e) target paths exist (mode-dependent), (f) libnbd is available, (g) qemu-nbd compress driver is available when any target has `compress=true`. Validation failure SHALL return a `CheckResult` with `status = "validation_failed"` and prevent pipeline execution for that VM.
 
 #### Scenario: All validations pass
-- **WHEN** `_validate_environment()` checks a properly configured VM
-- **THEN** pipeline continues to `_execute_snapshot_steps()`
+- **WHEN** `_validate_environment()` checks a properly configured VM with multiple disks
+- **THEN** each disk's base_image file is verified, each distinct snapshot dir is verified
+- **AND** pipeline continues to `_execute_snapshot_steps()`
 
 #### Scenario: snapshot_dir does not exist
-- **WHEN** `snapshot_dir` path is missing
-- **THEN** pipeline returns `VMRunResult(success=False, error="snapshot_dir not found: ...")` without executing any steps
+- **WHEN** a disk's effective snapshot directory is missing
+- **THEN** validation returns `CheckResult(status="validation_failed")` without executing any steps
+
+#### Scenario: base_image missing for one disk
+- **WHEN** `test -f` fails for one disk's `base_image`
+- **THEN** validation returns `CheckResult(status="validation_failed")` with the disk name in the error
 
 ### Requirement: Deferred operations integrated into snapshot steps
-`Core._execute_snapshot_steps()` SHALL check `IStateManager` for deferred blockcommit operations before step 2 (snapshot creation). The drain is state-adaptive (see `specs/deferred-operations/spec.md`): on a shut-off VM deferred blockcommits SHALL be executed via the qemu-img executor (excluding the XML-referenced tip); on a running VM in `virsh` mode, entries whose snapshots are all non-active SHALL be executed live; otherwise they SHALL be skipped. After blockcommit steps (step 4), snapshots whose blockcommit was deferred or failed due to MAC denial SHALL be recorded as deferred operations.
+`Core._execute_snapshot_steps()` SHALL check `IStateManager` for deferred blockcommit operations before step 2 (snapshot creation). The drain is per-disk and state-adaptive (see `specs/deferred-operations/spec.md`): on a shut-off VM, deferred blockcommits per disk SHALL be executed via the qemu-img executor (excluding the XML-referenced tip); on a running VM in `virsh` mode, entries whose snapshots are all non-active SHALL be executed live; otherwise they SHALL be skipped. After blockcommit steps (step 8), snapshots whose blockcommit was deferred or failed due to MAC denial SHALL be recorded as deferred operations per disk.
 
 #### Scenario: Deferred blockcommits executed on shut-off VM
-- **WHEN** `virsh domstate` returns "shut off" and deferred queue has 2 snapshots
-- **THEN** the lifecycle manager's `blockcommit()` is called with the committable snapshots before any new snapshot creation
+- **WHEN** `virsh domstate` returns "shut off" and deferred queue has 2 snapshots for a disk
+- **THEN** the lifecycle manager's `blockcommit()` is called with the committable snapshots for that disk before any new snapshot creation
 
 #### Scenario: Deferred blockcommits skipped on running VM in qemu-img mode
 - **WHEN** VM is running, `lifecycle_mode = "qemu-img"`, and deferred queue has entries
@@ -306,20 +279,21 @@ Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(
 - **WHEN** target has `verify = "metadata"` and verification detects format mismatch
 - **THEN** `backup_failed` flag is set to True in the pipeline result
 
-### Requirement: Core._evaluate_snapshot_retention uses count-based policy
+### Requirement: Core._evaluate_snapshot_retention evaluates per-disk
+`Core._evaluate_snapshot_retention(vm_config)` SHALL group all recorded snapshots by `SnapshotInfo.disk`, then evaluate retention independently per disk via `_evaluate_disk_retention()`. Each disk's snapshots SHALL be evaluated with the VM-level `snapshot_chain_length` and `snapshot_preserve_min` values. The per-disk keep/remove lists SHALL be merged into a single `RetentionResult`. Within each disk, the oldest-prefix and preserve-min post-processing filters SHALL be applied (see `snapshot-oldest-prefix` and `snapshot-preserve-min` specs).
 
-`Core._evaluate_snapshot_retention(vm_config, snapshots)` SHALL construct a `RetentionPolicy(chain_length=vm_config.snapshot_chain_length or 0, keep_generations=1)` and pass it to `IRetentionEngine.evaluate()`. The method SHALL NOT call `_parse_preserve()`. The oldest-prefix post-processing SHALL remain as a safety net for blockcommit.
+The method SHALL construct a `RetentionPolicy(chain_length=vm_config.snapshot_chain_length or 0, keep_generations=1, preserve_min=vm_config.snapshot_preserve_min or 0)`. The method SHALL NOT call `_parse_preserve()`.
 
-#### Scenario: Snapshot retention with chain_length
-- **WHEN** VM has `snapshot_chain_length = 168` and 200 snapshots exist
-- **THEN** the retention engine keeps the newest 168 snapshots and marks the oldest 32 for removal
+#### Scenario: Per-disk retention with chain_length
+- **WHEN** VM has `snapshot_chain_length = 168`, disk `vda` has 200 snapshots, and disk `vdb` has 50 snapshots
+- **THEN** the retention engine keeps the newest 168 `vda` snapshots and all 50 `vdb` snapshots
+- **AND** marks the oldest 32 `vda` snapshots for removal
 
 #### Scenario: Snapshot retention with no chain_length
 - **WHEN** VM has `snapshot_chain_length = None` (unset)
-- **THEN** the retention engine uses `chain_length=0` and marks all snapshots for removal
+- **THEN** the retention engine uses `chain_length=0` and marks all snapshots for removal (subject to preserve_min)
 
 ### Requirement: Core._evaluate_backup_retention uses count-based policy
-
 `Core._evaluate_backup_retention(vm_config, target, backups)` SHALL group backups by chain via `_group_backups_by_chain()` (unchanged), construct a `RetentionPolicy(chain_length=0, keep_generations=target.keep_generations or 1)`, and pass chain-level items to `IRetentionEngine.evaluate()`. The method SHALL NOT call `_parse_preserve()`.
 
 #### Scenario: Backup retention with keep_generations
@@ -327,8 +301,7 @@ Core SHALL execute `_validate_environment(vm_config)` before `_execute_pipeline(
 - **THEN** the retention engine keeps the 2 newest chains and marks the oldest for removal
 
 ### Requirement: Core._backup_target triggers full backup when due
-
-`Core._backup_target(vm_config, target, snapshots)` SHALL, before the incremental transfer loop, count the incrementals in the newest chain by calling `state.get_full_backups(target.path)` and `state.get_incremental_dependencies(target_path, newest_full.name)`. When `incremental_count > target.chain_length` (or no FULLs exist), Core SHALL create a new FULL backup via `provider.create_full_backup()`. Core SHALL NOT obtain an `IBucketFullStrategy` from the factory. Core SHALL NOT contain private methods `_should_create_bucket_full`, `_active_buckets`, `_f_anchor_buckets`, `_period_key`, or `_parse_preserve`.
+`Core._backup_target(vm_config, target, snapshots)` SHALL, before the incremental transfer loop, count the incrementals in the newest chain by calling `state.get_full_backups(target.path)` and `state.get_incremental_dependencies(target_path, newest_full.name)`. When `incremental_count > target.chain_length` (or no FULLs exist), Core SHALL create a new FULL backup via `provider.create_full_backup()`. Core SHALL NOT obtain an `IBucketFullStrategy` from the factory.
 
 After FULL creation, Core SHALL verify it (M1/M2 per `full_verify_after_create`). Only after verification succeeds SHALL Core record the FULL in state and evaluate retention + cleanup old generations. If verification fails, Core SHALL rollback (delete FULL file + checkpoint + state records) and retry up to `backup_retry_max` times. If retries are exhausted, Core SHALL log CRITICAL and keep old generations.
 
@@ -358,85 +331,61 @@ After FULL creation, Core SHALL verify it (M1/M2 per `full_verify_after_create`)
 - **THEN** Core logs CRITICAL
 - **AND** old generations are NOT deleted (verify-before-delete gate)
 
-#### Scenario: No bucket strategy obtained from factory
-- **WHEN** `_backup_target()` runs
-- **THEN** it does NOT call `self._factory.create_bucket_full_strategy()`
-- **AND** no `IBucketFullStrategy` is used
+### Requirement: Core.schedule_summary and estimate produce per-disk output
+`Core.schedule_summary(vm_filter=None) -> str` and `Core.estimate(vm_filter=None) -> str` SHALL display per-disk base image actual-size lines (one per `DiskConfig` in `vm.disks`) using `qemu-img info --force-share`. The output SHALL show count-based retention information for each VM and each target. The methods SHALL NOT generate synthetic timestamps or compute retention windows.
 
-### Requirement: Core imports shared utilities from qsnap.utils
-
-Core SHALL import `is_vm_running` from `qsnap.utils.nbd`, `verify_full_backup` and `scan_backing_chain` from `qsnap.utils.verification`, and `compute_backoff`, `is_retryable`, `parse_retry_duration` from `qsnap.utils.retry`. Core SHALL NOT import from `qsnap.modules.backup` or `qsnap.modules.*` except through the factory.
-
-#### Scenario: Core has no domain module imports
-- **WHEN** `qsnap/core/__init__.py` is inspected
-- **THEN** there is NO `from qsnap.modules.backup` import
-- **AND** there is NO `from qsnap.modules.snapshot` import
-- **AND** all utility imports come from `qsnap.utils`
-
-### Requirement: Core.schedule_summary produces count-based summary
-
-`Core.schedule_summary(vm_filter=None) -> str` SHALL display count-based retention information for each VM and each target. The output SHALL show `chain_length`, `keep_generations`, current snapshot/chain counts, and real size projections. The method SHALL NOT generate synthetic timestamps or compute retention windows. The methods `_retention_window()` and `_generate_synthetic_items()` SHALL NOT exist.
-
-#### Scenario: Summary includes all VMs when no filter
-- **WHEN** `schedule_summary()` is called with no filter
-- **THEN** output includes sections for every configured VM and every target
+#### Scenario: Summary includes per-disk base image sizes
+- **WHEN** `schedule_summary()` is called for a VM with disks vda and vdb
+- **THEN** output includes `[vda]` and `[vdb]` lines with base image actual-size
 
 #### Scenario: Summary filters by VM name
 - **WHEN** `schedule_summary(vm_filter="debiantest")` is called
 - **THEN** output includes only the "debiantest" VM section
 
 ### Requirement: Post-pipeline deferred threshold check
-
 At the end of `Core._run_pipeline()`, the system SHALL call `_check_deferred_thresholds()` which iterates over all VMs, retrieves their deferred operations from `IStateManager`, and compares count and age against `GlobalConfig` thresholds (`deferred_warn_count`, `deferred_crit_count`, `deferred_warn_age`, `deferred_crit_age`). WARNING or CRITICAL log messages SHALL be emitted for threshold violations. The check SHALL NOT affect the pipeline exit code.
 
 #### Scenario: Deferred threshold WARNING logged
-
 - **WHEN** a VM has 5 deferred operations and `deferred_warn_count = "5"`
 - **AND** `run()` completes successfully
 - **THEN** a WARNING log message is emitted for that VM
 - **AND** exit code is 0
 
 #### Scenario: Deferred threshold CRITICAL logged
-
 - **WHEN** a VM has 10 deferred operations and `deferred_crit_count = "10"`
 - **AND** `run()` completes successfully
 - **THEN** a CRITICAL log message is emitted for that VM
 
 ### Requirement: Core.list_deferred() method
-
 Core SHALL expose a `list_deferred(vm_filter=None)` method returning per-VM deferred operation summaries: VM name, snapshot count, reason, and age of the oldest operation. The method SHALL use `IStateManager.get_deferred_operations()` to retrieve data.
 
 #### Scenario: list_deferred returns summaries for all VMs
-
 - **WHEN** `core.list_deferred()` is called with two VMs having deferred operations
 - **THEN** the result contains two entries with vm_name, snapshots count, reason, and age
 
 #### Scenario: list_deferred with VM filter
-
 - **WHEN** `core.list_deferred(vm_filter="vm-home")` is called
 - **THEN** only the "vm-home" entry is returned
 
 ### Requirement: Core.check() includes deferred status with remediation
-
 `Core.check()` SHALL include deferred operation count, age, and reason for each VM. When deferred operations are present, the output SHALL include actionable remediation guidance.
 
 #### Scenario: Check includes deferred status
-
 - **WHEN** `core.check()` is called on a VM with 3 deferred operations (reason: apparmor)
 - **THEN** the output includes the deferred count and reason
 - **AND** the output includes remediation guidance: "Merge blocked by AppArmor. Consider: aa-disable /etc/apparmor.d/libvirt/libvirt-<uuid>"
 
 ### Requirement: Pre-commit chain verification before blockcommit
-When `chain_verify_before_commit = true` and there are snapshots to merge, Core SHALL call `_verify_backing_chain(vm_config)` before `lifecycle.blockcommit()`. If verification fails, blockcommit SHALL be skipped. See `specs/chain-integrity-verification/spec.md`.
+When `chain_verify_before_commit = true` and there are snapshots to merge, Core SHALL call `_verify_backing_chain(vm_config, disk)` per disk before `lifecycle.blockcommit()`. If verification fails for a disk, blockcommit for that disk SHALL be skipped (or partial blockcommit attempted). See `specs/chain-integrity-verification/spec.md`.
 
 #### Scenario: Chain verification blocks broken chain
-- **WHEN** `_verify_backing_chain()` detects a missing file in the backing chain
-- **THEN** blockcommit is skipped for this VM
+- **WHEN** `_verify_backing_chain(vm_config, disk)` detects a missing file in the backing chain for a specific disk
+- **THEN** blockcommit is skipped for this disk
 - **AND** a CRITICAL log is emitted
 - **AND** remaining VMs are processed normally
 
 ### Requirement: Post-commit chain verification after blockcommit
-When `chain_verify_after_commit = true` and blockcommit succeeded, Core SHALL verify the chain length decreased. See `specs/chain-integrity-verification/spec.md`. The "Post-commit chain verification passed" INFO message SHALL be logged ONLY when the post-commit verification actually ran (i.e., inside the `else` branch where `chain_length_before` was not `None` and `remove_snapshot()` was called). When `chain_length_before` is `None` and verification is skipped, the message SHALL NOT be logged.
+When `chain_verify_after_commit = true` and blockcommit succeeded, Core SHALL verify the chain length decreased per disk via `_get_chain_length(vm_config, disk)`. See `specs/chain-integrity-verification/spec.md`.
 
 #### Scenario: Post-commit chain check passes
 - **WHEN** chain length decreased after blockcommit AND `chain_length_before` was not `None`
@@ -444,9 +393,9 @@ When `chain_verify_after_commit = true` and blockcommit succeeded, Core SHALL ve
 
 #### Scenario: Post-commit skipped when chain_length_before is None
 - **WHEN** `chain_length_before` is `None` and `chain_verify_after_commit` is `True`
-- **THEN** "Post-commit chain verification skipped" is logged (existing message)
+- **THEN** "Post-commit chain verification skipped" is logged
 - **AND** "Post-commit chain verification passed" is NOT logged
-- **AND** merged snapshots are still removed from state (state cleanup is unconditional per the pipeline step order requirement)
+- **AND** merged snapshots are still removed from state
 
 ### Requirement: Retry wrapper for backup transfers
 Core's `_backup_target()` method SHALL wrap provider transfer calls in a retry loop when `target.backup_retry_max > 0`. See `specs/backup-retry/spec.md`.
@@ -483,15 +432,14 @@ The `--as-vm`, `--storage`, and `--add-to-config` flags are REMOVED. The `deploy
 - **THEN** `qemu-img convert --force-share -O qcow2` flattens the entire backing chain (FULL + all dependents) into a single standalone file
 
 ### Requirement: Core.restore method
-`Core` SHALL provide a `restore(name: str, vm_filter: str | None = None) -> RestoreResult` method. The `target_dir` parameter is REMOVED — the result is written to `vm_config.base_image`. It SHALL:
-
-1. Resolve the snapshot/backup via `_resolve_snapshot()`.
+`Core` SHALL provide a `restore(name: str, vm_filter: str | None = None) -> RestoreResult` method. The `target_dir` parameter is REMOVED. Multi-disk: the restored disk is resolved from the snapshot record (`SnapshotInfo.disk`, falling back to `parse_disk_from_snapshot_name(name)`), and the result is written to THAT disk's base image (`vm_config.get_disk(disk).base_image`) — other disks of the VM are not touched. It SHALL:
+1. Resolve the snapshot/backup via `_resolve_snapshot()` and determine the target disk.
 2. Verify the VM is stopped via `is_vm_running()` — abort with error `"VM must be stopped for restore"` if running.
 3. Pre-verify source chain integrity via `scan_backing_chain()` — abort if broken.
-4. Create a standalone image at `<snapshot_dir>/<vm_name>.restored.qcow2.tmp` via `qemu-img convert --force-share -O qcow2`.
-5. Delete old snapshot overlay files from `snapshot_dir` (best-effort, WARNING on failures).
-6. Atomically replace the base image via `os.replace(tmp_path, base_image)`.
-7. Strip `<backingStore>` from domain XML and update `<source file>` to the new base image, then `virsh define`.
+4. Create a standalone image at `<snapshot_dir>/<vm_name>.<disk>.restored.qcow2.tmp` via `qemu-img convert --force-share -O qcow2`.
+5. Delete old snapshot overlay files of the restored disk only from `snapshot_dir` (best-effort, WARNING on failures; snapshots of other disks are kept).
+6. Atomically replace the disk's base image via `os.replace(tmp_path, base_image)`.
+7. Strip `<backingStore>` and update `<source file>` ONLY on the `<disk>` element whose `<target dev>` equals the restored disk, then `virsh define`.
 8. Reset all VM state via `IStateManager.reset_vm_state(vm_name)` and `IStateManager.reset_target_state(target_path)` for each target.
 9. Perform best-effort libvirt checkpoint cleanup via `virsh checkpoint-delete --metadata`.
 
@@ -519,50 +467,40 @@ The CLI SHALL offer `--dry-run` (log planned actions, execute nothing) and `--ye
 - **AND** returns `RestoreResult(success=True)`
 
 ### Requirement: Phantom FULL detection with cascade cleanup
-
-The phantom FULL detection in `_backup_target()` SHALL, when a FULL backup file is missing on disk, remove the FULL record from `_full_backups.json` AND remove all linked incremental dependencies from `_dependencies.json` AND clear `last_backup_allocation` if no FULLs remain after cleanup.
+The phantom FULL detection in `_backup_target()` SHALL, when a FULL backup file is missing on disk, remove the FULL record from `_full_backups.json` AND remove all linked incremental dependencies from `_dependencies.json` AND clear per-disk `last_backup_allocation` if no FULLs remain after cleanup.
 
 #### Scenario: Phantom FULL triggers cascade dependency cleanup
-
 - **WHEN** a FULL backup file does not exist on disk and the FULL record is removed from state
 - **THEN** the system SHALL also call `remove_all_incremental_dependencies(target_path, full_name)` and log the count of cleaned dependency records
 
-#### Scenario: Last phantom FULL clears baseline
-
+#### Scenario: Last phantom FULL clears per-disk baselines
 - **WHEN** all FULL records for a target are removed as phantoms and no FULLs remain
-- **THEN** the system SHALL call `clear_last_backup_allocation(target_path)` and log an INFO message
+- **THEN** the system SHALL call `clear_last_backup_allocation(target_path, disk.target)` for each disk and log an INFO message
 
 #### Scenario: Phantom FULL with remaining valid FULLs does not clear baseline
-
 - **WHEN** a phantom FULL is removed but other valid FULL records remain for the target
 - **THEN** the system SHALL NOT clear `last_backup_allocation`
 
 ### Requirement: Backup target pipeline with gate/retention separation
-
 The `_backup_target()` method SHALL separate the onchange gate from retention execution. When the gate skips transfer, retention evaluation and cleanup SHALL still run.
 
 #### Scenario: Gate skip does not block retention
-
-- **WHEN** `backup_create = "onchange"` and the gate returns False (no new snapshots)
+- **WHEN** `backup_create = "onchange"` and the gate returns False (no disk changed)
 - **THEN** the system SHALL skip the bucket FULL check and `transfer_missing()` section
 - **AND** SHALL still execute `_evaluate_backup_retention()` and `_cleanup_backups()`
 
 ### Requirement: Startup state validation in pipeline
-
-The `_execute_pipeline()` method SHALL call `_validate_state_at_startup()` before `_execute_snapshot_steps()` and `_execute_backup_steps()`. The `_execute_backup_steps()` method SHALL also call `_validate_state_at_startup()` for standalone `qsnap backup` invocations.
+The `_validate_state_at_startup()` method SHALL be called before snapshot steps and before backup steps. It SHALL run phantom FULL detection, stale baseline cleanup per-disk (per `IStateManager.get_last_backup_allocation(target_path, disk.target)`), and auto-recovery of broken backup chains, BEFORE the onchange gate and retention evaluation. Non-fatal: logs warnings, never raises.
 
 #### Scenario: Pipeline calls startup validation
-
 - **WHEN** `_execute_pipeline(vm_config)` is called
 - **THEN** `_validate_state_at_startup(vm_config)` SHALL be called before `_execute_snapshot_steps(vm_config)`
 
 #### Scenario: Standalone backup calls startup validation
-
 - **WHEN** `_execute_backup_steps(vm_config)` is called (via `qsnap backup`)
 - **THEN** `_validate_state_at_startup(vm_config)` SHALL be called before the target iteration loop
 
 ### Requirement: Post-create FULL backup verification with source_path
-
 When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_full_backup()` after `create_full_backup()` completes. When the mode is `"hash"`, Core SHALL pass `source_path=most_recent.path` for `qemu-img compare` content verification. On success, `record_full_backup()` is called; on failure, the FULL file is deleted and NOT recorded.
 
 #### Scenario: Failed post-create verification deletes the FULL
@@ -570,7 +508,6 @@ When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_ful
 - **THEN** the new FULL file is deleted and no `record_full_backup()` call occurs
 
 ### Requirement: backup_failed WARNING in Core._backup_target
-
 `Core._backup_target()` SHALL emit a `logger.warning` when `backup_failed` is set to `True` due to any incremental transfer returning `BackupResult(success=False)`. The warning SHALL include the VM name, target path, count of failed snapshots, and the specific snapshot names with their error messages.
 
 #### Scenario: backup_failed warning with transfer failures
@@ -584,7 +521,6 @@ When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_ful
 - **AND** `backup_failed` is `False`
 
 ### Requirement: ActionRecord accumulation in Core pipeline
-
 Core SHALL accumulate `ActionRecord` instances during pipeline execution (see `specs/action-audit-trail/spec.md` for the full spec). Core SHALL attach the accumulated list to `PipelineResult.actions` at the end of `_run_pipeline()`.
 
 #### Scenario: Actions attached to PipelineResult
@@ -592,12 +528,11 @@ Core SHALL accumulate `ActionRecord` instances during pipeline execution (see `s
 - **THEN** `PipelineResult.actions` contains all `ActionRecord` entries accumulated during execution
 
 ### Requirement: Per-operation INFO logging in Core
-
-Core SHALL emit `logger.info` messages in btrbk-style format for each pipeline operation:
+Core SHALL emit `logger.info` messages in btrbk-style format for each pipeline operation.
 
 #### Scenario: Snapshot creation INFO
-- **WHEN** `_create_snapshot()` successfully creates a snapshot
-- **THEN** an INFO message is logged: `"[snapshot] <vm_name>: created <snapshot_name> (<size> B)"`
+- **WHEN** `_create_snapshot()` successfully creates a snapshot for a disk
+- **THEN** an INFO message is logged: `"[snapshot] <vm_name>/<disk_target>: created <snapshot_name> (<size> B)"`
 
 #### Scenario: Snapshot deletion INFO
 - **WHEN** `_blockcommit_snapshots()` successfully merges snapshots
@@ -616,8 +551,7 @@ Core SHALL emit `logger.info` messages in btrbk-style format for each pipeline o
 - **THEN** an INFO message is logged: `"[delete] <vm_name>: removed backup <backup_name> from <target_path>"`
 
 ### Requirement: Per-target backup onchange gate
-
-When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._backup_target()` SHALL call `_should_backup_onchange(vm_config, target, snapshots)` before proceeding with backup transfer. If `_should_backup_onchange()` returns `False`, the backup transfer SHALL be skipped for this target. The skip SHALL be logged at INFO level. If `_should_backup_onchange()` returns `True`, the existing backup logic SHALL proceed unchanged. See `specs/change-detection/spec.md` for the gate's Approach B logic and retention separation behavior.
+When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._backup_target()` SHALL call `_should_backup_onchange(vm_config, target)` before proceeding with backup transfer. The gate SHALL be per-disk: it opens when ANY disk has changed since its last backup to this target. See `specs/independent-target-onchange/spec.md` for the gate logic.
 
 #### Scenario: always mode — gate bypassed
 - **WHEN** `backup_create = "always"` (default)
@@ -631,10 +565,25 @@ When `TargetConfig.backup_create == "onchange"` and snapshots exist, `Core._back
 - **AND** an INFO log message is emitted
 
 ### Requirement: Core._cleanup_failed_checkpoint rollback method
-
 Core SHALL provide a private method `_cleanup_failed_checkpoint(vm_config, target, full_result)` that deletes the libvirt checkpoint created during a failed FULL attempt. The method SHALL list checkpoints via `virsh checkpoint-list --name --domain <vm>`, filter for `qsnap-{target_hash}-*` prefix, and delete each via `virsh checkpoint-delete --domain <vm> <checkpoint>`.
 
 #### Scenario: Checkpoint cleaned up after failed FULL
 - **WHEN** FULL verification fails and `_cleanup_failed_checkpoint()` is called
 - **THEN** the checkpoint created by `virsh backup-begin` is deleted
 - **AND** no orphaned checkpoint remains for the next `transfer_missing()` call
+
+### Requirement: Core imports shared utilities from qsnap.utils
+Core SHALL import `is_vm_running` from `qsnap.utils.nbd`, `verify_full_backup` and `scan_backing_chain` from `qsnap.utils.verification`, and `compute_backoff`, `is_retryable`, `parse_retry_duration` from `qsnap.utils.retry`. Core SHALL NOT import from `qsnap.modules.backup` or `qsnap.modules.*` except through the factory.
+
+#### Scenario: Core has no domain module imports
+- **WHEN** `qsnap/core/__init__.py` is inspected
+- **THEN** there is NO `from qsnap.modules.backup` import
+- **AND** there is NO `from qsnap.modules.snapshot` import
+- **AND** all utility imports come from `qsnap.utils`
+
+### Requirement: Core._check_deferred_operations is per-disk
+`Core._check_deferred_operations(vm_config)` SHALL drain deferred operations per disk. Each `DeferredBlockcommit` entry has a `disk` field. Entries whose disk is no longer configured SHALL be dropped. Per-disk `_plan_blockcommit(vm_config, disk, snapshots)` determines which snapshots are committable and with which executor. An entry leaves the queue only when ALL of its snapshots are committed.
+
+#### Scenario: Deferred entry dropped when disk removed from config
+- **WHEN** a deferred entry references a disk not in `vm_config.disks`
+- **THEN** the entry is dropped with a WARNING log

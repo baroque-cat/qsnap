@@ -1,3 +1,9 @@
+# Locking
+
+## Purpose
+
+Prevents concurrent qsnap runs via an exclusive `flock` lockfile. When a lockfile path is configured, qsnap acquires the lock before any pipeline execution and exits cleanly if another instance holds it.
+
 ## Requirements
 
 ### Requirement: Lockfile acquisition on startup
