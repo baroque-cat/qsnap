@@ -475,17 +475,21 @@ def test_json_implements_remove_all_deps(tmp_path):
 
 
 def test_istate_manager_reset_methods_abstract():
-    """reset_vm_state and reset_target_state are abstract on IStateManager.
+    """reset_vm_state, reset_target_state, and per-disk resets are abstract on IStateManager.
 
-    A subclass missing only these two new methods must fail to instantiate
-    with TypeError because the ABC enforces all abstract methods.
+    A subclass missing the VM-level reset methods must fail to instantiate
+    with TypeError because the ABC enforces all abstract methods.  The
+    per-disk counterparts (``reset_vm_disk_state``, ``reset_target_disk_state``)
+    are also verified as abstract, completing the full reset-method contract.
     """
     abstract_methods = IStateManager.__abstractmethods__
     assert "reset_vm_state" in abstract_methods
     assert "reset_target_state" in abstract_methods
+    assert "reset_vm_disk_state" in abstract_methods
+    assert "reset_target_disk_state" in abstract_methods
 
-    # A subclass that implements everything EXCEPT the reset methods
-    # must fail to instantiate.
+    # A subclass that implements everything EXCEPT the VM-level reset
+    # methods must fail to instantiate.
     class _MissingResetMethods(IStateManager):
         def get_last_allocation(self, vm_name): ...
         def set_last_allocation(self, vm_name, alloc): ...
@@ -524,3 +528,81 @@ def test_istate_manager_concrete_implementations_have_reset_methods(tmp_path):
     ]:
         assert callable(mgr.reset_vm_state), f"{label} missing reset_vm_state"
         assert callable(mgr.reset_target_state), f"{label} missing reset_target_state"
+
+
+# ── per-disk state reset contract (design D4) ────────────────────────────
+
+
+def test_istate_manager_per_disk_reset_methods_abstract():
+    """reset_vm_disk_state and reset_target_disk_state are abstract on IStateManager.
+
+    The per-disk reset methods declared by ``IStateManager`` for the
+    fix-per-disk-isolation change (design D4) MUST be present in
+    ``__abstractmethods__`` so that every concrete implementation is forced
+    to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "reset_vm_disk_state" in abstract_methods
+    assert "reset_target_disk_state" in abstract_methods
+
+
+def test_concrete_implementations_have_per_disk_reset_methods(tmp_path):
+    """JsonStateManager and InMemoryStateManager implement the per-disk reset methods.
+
+    Both concrete managers provide callable ``reset_vm_disk_state`` and
+    ``reset_target_disk_state`` implementations matching the signatures
+    declared in ``IStateManager``.
+    """
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+
+    for mgr, label in [
+        (json_mgr, "JsonStateManager"),
+        (inmemory_mgr, "InMemoryStateManager"),
+    ]:
+        assert callable(mgr.reset_vm_disk_state), f"{label} missing reset_vm_disk_state"
+        assert callable(mgr.reset_target_disk_state), f"{label} missing reset_target_disk_state"
+
+
+def test_missing_per_disk_reset_fails_instantiation():
+    """A subclass missing per-disk reset methods raises TypeError on instantiation.
+
+    When a concrete subclass of ``IStateManager`` provides every abstract
+    method EXCEPT ``reset_vm_disk_state`` and ``reset_target_disk_state``,
+    instantiation MUST raise ``TypeError`` because the ABC enforces all
+    abstract methods.  This guarantees that no future implementation can
+    silently omit the per-disk reset contract (design D4).
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "reset_vm_disk_state" in abstract_methods
+    assert "reset_target_disk_state" in abstract_methods
+
+    # A subclass that implements everything EXCEPT the two per-disk reset
+    # methods — including reset_vm_state and reset_target_state.
+    class _MissingPerDiskReset(IStateManager):
+        def get_last_allocation(self, vm_name, disk): ...
+        def set_last_allocation(self, vm_name, disk, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, disk, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp, disk): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, disk): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path, disk): ...
+        def set_last_backup_allocation(self, target_path, disk, alloc): ...
+        def clear_last_backup_allocation(self, target_path, disk): ...
+        def remove_all_incremental_dependencies(self, target_path, full_name): ...
+        def reset_vm_state(self, vm_name): ...
+        def reset_target_state(self, target_path): ...
+
+    with pytest.raises(TypeError):
+        _MissingPerDiskReset()

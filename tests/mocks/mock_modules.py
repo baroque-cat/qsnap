@@ -90,6 +90,7 @@ class MockBitmapBackupProvider(IBackupProvider):
                 target_path=target.path / f"{s.name}.qcow2",
                 bytes_transferred=1048576,
                 error=None,
+                disk=s.disk,
             )
             for s in snapshots
         ]
@@ -124,6 +125,7 @@ class MockBitmapBackupProvider(IBackupProvider):
             target_path=target.path / f"{vm_name}.FULL.qcow2",
             bytes_transferred=1048576,
             error=None,
+            disk=source_snapshot.disk,
         )
 
     def list_checkpoints(self, vm_name: str) -> list[str]:

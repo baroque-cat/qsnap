@@ -336,6 +336,12 @@ def test_fork_requires_output(cli_app):
         cli_app.parse_args(["fork", "snap1"])
 
 
+def test_fork_parses_dry_run_flag(cli_app):
+    """Parse fork with --dry-run and verify ns.dry_run is True."""
+    ns = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/o.qcow2", "--dry-run"])
+    assert ns.dry_run is True
+
+
 # ── dispatch map entry tests ─────────────────────────────────────────────
 
 

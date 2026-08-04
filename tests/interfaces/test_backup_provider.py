@@ -351,3 +351,129 @@ def test_backup_provider_transfer_missing_accepts_convert_out_of_order(
         convert_out_of_order=False,
     )
     assert isinstance(result, list)
+
+
+# ── Per-disk contract tests ────────────────────────────────────────────
+
+
+def _make_transfer_missing_shell() -> MockShell:
+    """Configure a MockShell so that ``transfer_missing`` produces results.
+
+    Only the ``test -f`` existence check and ``virsh backup-begin`` are
+    mocked — the first succeeds (so source snapshots are seen as present
+    on disk), the second fails (which is the simplest path for
+    ``BitmapBackupProvider`` to return a ``BackupResult`` carrying
+    ``disk``).  Unmocked commands in the ``finally`` block (``rm -f``,
+    ``virsh domjobabort``) fail silently and are harmless.
+    """
+    shell = MockShell()
+    shell.expect(r"test -f /tmp/snap").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None),
+    )
+    shell.expect(r"virsh backup-begin --domain testvm").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="backup-begin failed",
+            returncode=1,
+            error="backup-begin failed",
+        ),
+    )
+    return shell
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (BitmapBackupProvider, {"shell": _make_transfer_missing_shell()}),
+        (MockBitmapBackupProvider, {}),
+    ],
+    ids=["bitmap", "mock_bitmap"],
+)
+def test_transfer_missing_result_carries_disk(
+    cls,
+    init_kwargs,
+):
+    """``transfer_missing`` returns every ``BackupResult`` with ``.disk``
+    populated from the source snapshot — multi-disk input produces
+    per-disk results.
+
+    - For ``MockBitmapBackupProvider`` the mock already sets
+      ``disk=s.disk`` on every result.
+    - For ``BitmapBackupProvider`` the mock shell is configured to let
+      the ``virsh backup-begin`` failure path produce a result; the
+      implementation sets ``disk=snapshot.disk`` on every result (all
+      paths).
+    """
+    provider = cls(**init_kwargs)
+    vm_config = VMConfig(
+        name="testvm",
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-data.qcow2")),
+        ],
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    snapshots = [
+        SnapshotInfo(
+            name="snap-vda",
+            path=Path("/tmp/snap-vda.qcow2"),
+            timestamp=datetime.now(),
+            allocation=65536,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name="snap-vdb",
+            path=Path("/tmp/snap-vdb.qcow2"),
+            timestamp=datetime.now(),
+            allocation=131072,
+            disk="vdb",
+        ),
+    ]
+    results = provider.transfer_missing(vm_config, target, snapshots)
+
+    # Every snapshot must produce a result.
+    assert len(results) == len(snapshots), f"Expected {len(snapshots)} results, got {len(results)}"
+    for result, snapshot in zip(results, snapshots, strict=True):
+        assert isinstance(result, BackupResult)
+        assert result.disk == snapshot.disk, (
+            f"Expected disk={snapshot.disk!r}, got disk={result.disk!r}"
+            f" for snapshot {snapshot.name}"
+        )
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (BitmapBackupProvider, {"shell": MockShell()}),
+        (MockBitmapBackupProvider, {}),
+    ],
+    ids=["bitmap", "mock_bitmap"],
+)
+def test_create_full_backup_result_carries_disk(
+    cls,
+    init_kwargs,
+):
+    """``create_full_backup`` returns a ``BackupResult`` with
+    ``.disk == source_snapshot.disk``.
+
+    - ``MockBitmapBackupProvider`` sets ``disk=source_snapshot.disk``.
+    - ``BitmapBackupProvider`` with bare ``MockShell`` enters the
+      stopped-VM path and returns a failure result with
+      ``disk=source_snapshot.disk`` (all paths set it).
+    """
+    provider = cls(**init_kwargs)
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+        disk="vdb",
+    )
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    result = provider.create_full_backup("testvm", source_snapshot, target, compress=False)
+    assert isinstance(result, BackupResult)
+    assert result.disk == source_snapshot.disk, (
+        f"Expected disk={source_snapshot.disk!r}, got disk={result.disk!r}"
+    )

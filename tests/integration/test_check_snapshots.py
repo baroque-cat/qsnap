@@ -50,7 +50,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -94,6 +98,31 @@ def _build_core_snapshot_only(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
+        targets=[],  # No targets — avoids BitmapBackupProvider / libnbd
+    )
+    config = MockConfigFacade(
+        global_config=GlobalConfig(),
+        vms=[vm_config],
+    )
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+    return core
+
+
+def _build_core_snapshot_only_multi(
+    shell: SubprocessShell,
+    vm_name: str,
+    disk_configs: list[DiskConfig],
+    state: InMemoryStateManager,
+) -> Core:
+    """Build a Core instance for a multi-disk VM with NO targets — snapshot-only.
+
+    Using ``targets=[]`` avoids creating a ``BitmapBackupProvider``,
+    which would require libnbd (unavailable on some CI systems).
+    """
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=disk_configs,
         targets=[],  # No targets — avoids BitmapBackupProvider / libnbd
     )
     config = MockConfigFacade(
@@ -153,12 +182,9 @@ def test_check_real_vm_all_consistent(test_vm):
     assert vm_name in results, f"Expected check result for {vm_name}"
     cr = results[vm_name]
     assert cr.status == "ok", (
-        f"Expected status='ok', got '{cr.status}'. "
-        f"broken_snapshots={cr.broken_snapshots}"
+        f"Expected status='ok', got '{cr.status}'. broken_snapshots={cr.broken_snapshots}"
     )
-    assert cr.broken_snapshots == [], (
-        f"Expected empty broken_snapshots, got {cr.broken_snapshots}"
-    )
+    assert cr.broken_snapshots == [], f"Expected empty broken_snapshots, got {cr.broken_snapshots}"
 
 
 @pytest.mark.integration
@@ -210,11 +236,18 @@ def test_check_real_vm_after_blockcommit(test_vm):
     # then libvirt deletes snap1 and adjusts the chain.
     commit = shell.run(
         [
-            "virsh", "blockcommit", vm_name, "vda",
-            "--base", str(base_image),
-            "--top", str(snap2.path),
-            "--wait", "--verbose",
-            "--bandwidth", "0",
+            "virsh",
+            "blockcommit",
+            vm_name,
+            "vda",
+            "--base",
+            str(base_image),
+            "--top",
+            str(snap2.path),
+            "--wait",
+            "--verbose",
+            "--bandwidth",
+            "0",
         ],
         timeout=120,
     )
@@ -296,9 +329,7 @@ def test_check_real_vm_phantom_snapshot(test_vm):
         f"Expected status='broken' when snap2 is deleted from middle of chain, "
         f"got '{cr.status}'. broken_snapshots={cr.broken_snapshots}"
     )
-    assert len(cr.broken_snapshots) > 0, (
-        "Expected non-empty broken_snapshots when chain is broken"
-    )
+    assert len(cr.broken_snapshots) > 0, "Expected non-empty broken_snapshots when chain is broken"
 
 
 @pytest.mark.integration
@@ -361,8 +392,12 @@ def test_check_real_vm_stale_xml_after_offline_commit(test_vm):
     # is committed into base. -d deletes intermediate files.
     commit = shell.run(
         [
-            "qemu-img", "commit", "-b", str(base_image),
-            "-d", str(snap2.path),
+            "qemu-img",
+            "commit",
+            "-b",
+            str(base_image),
+            "-d",
+            str(snap2.path),
         ],
         timeout=60,
     )
@@ -389,9 +424,7 @@ def test_check_real_vm_stale_xml_after_offline_commit(test_vm):
         f"Expected status='broken' due to stale domain XML (snap1 deleted but "
         f"still in XML), got '{cr.status}'. broken_snapshots={cr.broken_snapshots}"
     )
-    assert len(cr.broken_snapshots) > 0, (
-        "Expected non-empty broken_snapshots from stale XML"
-    )
+    assert len(cr.broken_snapshots) > 0, "Expected non-empty broken_snapshots from stale XML"
 
 
 @pytest.mark.integration
@@ -461,8 +494,12 @@ def test_check_real_vm_after_refresh_xml(test_vm):
     # Offline commit — merge snap1 into base
     commit = shell.run(
         [
-            "qemu-img", "commit", "-b", str(base_image),
-            "-d", str(snap2.path),
+            "qemu-img",
+            "commit",
+            "-b",
+            str(base_image),
+            "-d",
+            str(snap2.path),
         ],
         timeout=60,
     )
@@ -606,3 +643,209 @@ def test_check_uses_force_share_on_active_layer(test_vm):
         f"If this fails, check() may not be using --force-share on "
         f"qemu-img info commands against the active layer."
     )
+
+
+# ── Multi-disk tests ──────────────────────────────────────────────────
+
+
+def _virsh_snapshot_create_multi(
+    shell: SubprocessShell,
+    vm_name: str,
+    snapshot_name: str,
+    diskspecs: list[str],
+) -> bool:
+    """Create a ``--disk-only --no-metadata`` snapshot via direct virsh call.
+
+    *diskspecs* is a list of ``--diskspec`` arguments, each of the form
+    ``"disk,snapshot=external,file=/path"`` or ``"disk,snapshot=no"``.
+    Returns ``True`` on success.
+    """
+    cmd = [
+        "virsh",
+        "snapshot-create-as",
+        "--domain",
+        vm_name,
+        "--name",
+        snapshot_name,
+        "--disk-only",
+        "--no-metadata",
+        "--atomic",
+    ]
+    for spec in diskspecs:
+        cmd.append("--diskspec")
+        cmd.append(spec)
+    result = shell.run(cmd, timeout=120)
+    return result.success
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+def test_check_multi_disk_per_group_matching(test_vm_multi_disk):
+    """Multi-disk VM: each disk compared against its own newest snapshot.
+
+    Creates 2 rounds of snapshots.  Round 1 snapshots both disks (vda
+    and vdb); round 2 snapshots vda only (``snapshot=no`` for vdb).
+    The per-disk comparison in ``_verify_active_layer_match`` groups
+    snapshots by ``SnapshotInfo.disk`` and selects the max-timestamp
+    independently within each group — vdb's newest (round 1, older)
+    is NOT flagged even though vda's newest (round 2, newer) has a
+    later timestamp.
+
+    1. Start VM.
+    2. Round 1: snapshot both disks → record vda.snap1, vdb.snap1.
+    3. Round 2: snapshot vda only → record vda.snap2.
+    4. Run ``core.check()``.
+    5. Assert ``status == "ok"``.
+    """
+    shell: SubprocessShell = test_vm_multi_disk["shell"]
+    vm_name: str = test_vm_multi_disk["vm_name"]
+    snapshot_dirs: dict[str, Path] = test_vm_multi_disk["snapshot_dirs"]
+    disk_configs: list[DiskConfig] = test_vm_multi_disk["disk_configs"]
+
+    # Start VM
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not _vm_is_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    # Round 1: snapshot both disks.
+    vda_snap1_path = snapshot_dirs["vda"] / f"{vm_name}.vda.snap1.qcow2"
+    vdb_snap1_path = snapshot_dirs["vdb"] / f"{vm_name}.vdb.snap1.qcow2"
+    ok = _virsh_snapshot_create_multi(
+        shell,
+        vm_name,
+        f"{vm_name}.round1",
+        [
+            f"vda,snapshot=external,file={vda_snap1_path}",
+            f"vdb,snapshot=external,file={vdb_snap1_path}",
+        ],
+    )
+    assert ok, "round1 snapshot-create-as failed"
+    vdb_snap1_info = SnapshotInfo(
+        name=f"{vm_name}.vdb.snap1",
+        path=vdb_snap1_path,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vdb",
+    )
+    time.sleep(0.5)
+
+    # Round 2: snapshot vda only (vdb skipped via snapshot=no).
+    vda_snap2_path = snapshot_dirs["vda"] / f"{vm_name}.vda.snap2.qcow2"
+    ok = _virsh_snapshot_create_multi(
+        shell,
+        vm_name,
+        f"{vm_name}.round2",
+        [
+            f"vda,snapshot=external,file={vda_snap2_path}",
+            "vdb,snapshot=no",
+        ],
+    )
+    assert ok, "round2 snapshot-create-as failed"
+    vda_snap2_info = SnapshotInfo(
+        name=f"{vm_name}.vda.snap2",
+        path=vda_snap2_path,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+
+    # vda.snap2 is newer than vdb.snap1 (created later).
+    assert vda_snap2_info.timestamp > vdb_snap1_info.timestamp, (
+        "vda.snap2 must be newer than vdb.snap1 for the cross-disk timestamp test to be meaningful"
+    )
+
+    # Record snapshots in state: vda snap1, vdb snap1, vda snap2.
+    state = InMemoryStateManager()
+    vda_snap1_info = SnapshotInfo(
+        name=f"{vm_name}.vda.snap1",
+        path=vda_snap1_path,
+        timestamp=vdb_snap1_info.timestamp.replace(microsecond=0),
+        allocation=0,
+        disk="vda",
+    )
+    state.record_snapshot(vm_name, vda_snap1_info)
+    state.record_snapshot(vm_name, vdb_snap1_info)
+    state.record_snapshot(vm_name, vda_snap2_info)
+
+    # Build Core with multi-disk VMConfig and run check
+    core = _build_core_snapshot_only_multi(shell, vm_name, disk_configs, state)
+    results = core.check(vm_name)
+
+    assert vm_name in results, f"Expected check result for {vm_name}"
+    cr = results[vm_name]
+    assert cr.status == "ok", (
+        f"Expected status='ok' (each disk compared to its own newest "
+        f"snapshot — vdb should NOT be flagged despite older timestamp), "
+        f"got '{cr.status}'. broken_snapshots={cr.broken_snapshots}"
+    )
+    assert cr.broken_snapshots == [], f"Expected empty broken_snapshots, got {cr.broken_snapshots}"
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+def test_check_disk_without_snapshots_skipped(test_vm_multi_disk):
+    """Disk without snapshots in state is skipped during active-layer check.
+
+    Creates a snapshot on vda only (``snapshot=no`` for vdb), leaving
+    vdb with no snapshots recorded in state.  ``_verify_active_layer_match``
+    skips any domblklist disk whose target has no snapshots — no mismatch
+    is reported for vdb.
+
+    1. Start VM, create 1 snapshot on vda (vdb excluded).
+    2. Record only the vda snapshot in state.
+    3. Run ``core.check()``.
+    4. Assert ``status == "ok"``.
+    """
+    shell: SubprocessShell = test_vm_multi_disk["shell"]
+    vm_name: str = test_vm_multi_disk["vm_name"]
+    snapshot_dirs: dict[str, Path] = test_vm_multi_disk["snapshot_dirs"]
+    disk_configs: list[DiskConfig] = test_vm_multi_disk["disk_configs"]
+
+    # Start VM
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not _vm_is_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    # Create 1 snapshot on vda only — vdb excluded via snapshot=no.
+    vda_snap1_path = snapshot_dirs["vda"] / f"{vm_name}.vda.snap1.qcow2"
+    ok = _virsh_snapshot_create_multi(
+        shell,
+        vm_name,
+        f"{vm_name}.round1",
+        [
+            f"vda,snapshot=external,file={vda_snap1_path}",
+            "vdb,snapshot=no",
+        ],
+    )
+    assert ok, "vda-only snapshot-create-as failed"
+
+    vda_snap1_info = SnapshotInfo(
+        name=f"{vm_name}.vda.snap1",
+        path=vda_snap1_path,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+
+    # Record only vda snapshot in state (vdb has none)
+    state = InMemoryStateManager()
+    state.record_snapshot(vm_name, vda_snap1_info)
+
+    # Build Core with multi-disk VMConfig and run check
+    core = _build_core_snapshot_only_multi(shell, vm_name, disk_configs, state)
+    results = core.check(vm_name)
+
+    assert vm_name in results, f"Expected check result for {vm_name}"
+    cr = results[vm_name]
+    assert cr.status == "ok", (
+        f"Expected status='ok' (disk without snapshots is skipped — no "
+        f"mismatch for vdb), got '{cr.status}'. "
+        f"broken_snapshots={cr.broken_snapshots}"
+    )
+    assert cr.broken_snapshots == [], f"Expected empty broken_snapshots, got {cr.broken_snapshots}"

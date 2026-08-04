@@ -111,8 +111,12 @@ def test_snapshot_blockcommit_isolation(test_vm_multi_disk):
         snap_name = f"{vm_name}.20250801T00000{i}_vda_{hex_sfx}"
         time.sleep(0.6)  # unique timestamps
         snap = snapshot_create(
-            shell, vm_name, snap_name, "vda",
-            snapshot_dirs["vda"], base_images["vda"],
+            shell,
+            vm_name,
+            snap_name,
+            "vda",
+            snapshot_dirs["vda"],
+            base_images["vda"],
         )
         state.record_snapshot(vm_name, snap)
         vda_snaps.append(snap)
@@ -121,8 +125,12 @@ def test_snapshot_blockcommit_isolation(test_vm_multi_disk):
     hex_sfx = secrets.token_hex(3)
     snap_name = f"{vm_name}.20250801T000009_vdb_{hex_sfx}"
     vdb_snap = snapshot_create(
-        shell, vm_name, snap_name, "vdb",
-        snapshot_dirs["vdb"], base_images["vdb"],
+        shell,
+        vm_name,
+        snap_name,
+        "vdb",
+        snapshot_dirs["vdb"],
+        base_images["vdb"],
     )
     state.record_snapshot(vm_name, vdb_snap)
 
@@ -147,15 +155,16 @@ def test_snapshot_blockcommit_isolation(test_vm_multi_disk):
     # --- Blockcommit the 2 oldest vda snapshots ---
     snapshots_sorted = sorted(vda_snaps, key=lambda s: s.timestamp)
     oldest_two = snapshots_sorted[:2]  # merge these
-    newest = snapshots_sorted[2]  # should remain as active
 
     vm_config = VMConfig(
         name=vm_name,
         disks=[
-            DiskConfig(target="vda", base_image=base_images["vda"],
-                       snapshot_dir=snapshot_dirs["vda"]),
-            DiskConfig(target="vdb", base_image=base_images["vdb"],
-                       snapshot_dir=snapshot_dirs["vdb"]),
+            DiskConfig(
+                target="vda", base_image=base_images["vda"], snapshot_dir=snapshot_dirs["vda"]
+            ),
+            DiskConfig(
+                target="vdb", base_image=base_images["vdb"], snapshot_dir=snapshot_dirs["vdb"]
+            ),
         ],
     )
     manager = BlockCommitManager(shell)
@@ -168,15 +177,12 @@ def test_snapshot_blockcommit_isolation(test_vm_multi_disk):
 
     # Blockcommit should succeed (even live)
     if not commit_result.success:
-        pytest.skip(
-            f"Live blockcommit not supported in this environment: {commit_result.error}"
-        )
+        pytest.skip(f"Live blockcommit not supported in this environment: {commit_result.error}")
 
     # --- Verify vda chain shortened ---
     vda_chain_after = _backing_chain_count(shell, active_vda)
     assert vda_chain_after < vda_chain_before, (
-        f"VDA chain should have shortened after blockcommit: "
-        f"{vda_chain_before} → {vda_chain_after}"
+        f"VDA chain should have shortened after blockcommit: {vda_chain_before} → {vda_chain_after}"
     )
 
     # Oldest snapshot files may or may not exist (--delete is version-dependent).
@@ -190,9 +196,7 @@ def test_snapshot_blockcommit_isolation(test_vm_multi_disk):
     )
 
     # Verify vdb snapshot file still exists
-    assert vdb_snap.path.exists(), (
-        f"VDB snapshot file should still exist: {vdb_snap.path}"
-    )
+    assert vdb_snap.path.exists(), f"VDB snapshot file should still exist: {vdb_snap.path}"
 
     # VM should still be running
     assert _vm_is_running(shell, vm_name), "VM should still be running"
@@ -230,29 +234,35 @@ def test_snapshots_land_in_correct_dirs(test_vm_multi_disk):
     hex_vda = secrets.token_hex(3)
     snap_name_vda = f"{vm_name}.20250801T100000_vda_{hex_vda}"
     snap_vda = snapshot_create(
-        shell, vm_name, snap_name_vda, "vda",
-        snapshot_dirs["vda"], base_images["vda"],
+        shell,
+        vm_name,
+        snap_name_vda,
+        "vda",
+        snapshot_dirs["vda"],
+        base_images["vda"],
     )
 
     # Create snapshot on vdb
     hex_vdb = secrets.token_hex(3)
     snap_name_vdb = f"{vm_name}.20250801T100001_vdb_{hex_vdb}"
     snap_vdb = snapshot_create(
-        shell, vm_name, snap_name_vdb, "vdb",
-        snapshot_dirs["vdb"], base_images["vdb"],
+        shell,
+        vm_name,
+        snap_name_vdb,
+        "vdb",
+        snapshot_dirs["vdb"],
+        base_images["vdb"],
     )
 
     # Verify vda snapshot is in vda's directory
     assert snap_vda.path.parent == snapshot_dirs["vda"], (
-        f"VDA snapshot should be in {snapshot_dirs['vda']}, "
-        f"got {snap_vda.path.parent}"
+        f"VDA snapshot should be in {snapshot_dirs['vda']}, got {snap_vda.path.parent}"
     )
     assert snap_vda.path.exists(), f"VDA snapshot missing: {snap_vda.path}"
 
     # Verify vdb snapshot is in vdb's directory
     assert snap_vdb.path.parent == snapshot_dirs["vdb"], (
-        f"VDB snapshot should be in {snapshot_dirs['vdb']}, "
-        f"got {snap_vdb.path.parent}"
+        f"VDB snapshot should be in {snapshot_dirs['vdb']}, got {snap_vdb.path.parent}"
     )
     assert snap_vdb.path.exists(), f"VDB snapshot missing: {snap_vdb.path}"
 
@@ -311,8 +321,12 @@ def test_restore_single_disk_isolation(test_vm_multi_disk):
     hex_sfx = secrets.token_hex(3)
     snap_name = f"{vm_name}.20250801T200000_vdb_{hex_sfx}"
     vdb_snap = snapshot_create(
-        shell, vm_name, snap_name, "vdb",
-        snapshot_dirs["vdb"], base_images["vdb"],
+        shell,
+        vm_name,
+        snap_name,
+        "vdb",
+        snapshot_dirs["vdb"],
+        base_images["vdb"],
     )
 
     # Stop VM (restore requires stopped VM)
@@ -376,9 +390,7 @@ def test_restore_single_disk_isolation(test_vm_multi_disk):
     )
 
     # --- Verify domain XML: vda unchanged, vdb points at restored base ---
-    dumpxml = shell.run(
-        ["virsh", "dumpxml", "--domain", vm_name], timeout=30
-    )
+    dumpxml = shell.run(["virsh", "dumpxml", "--domain", vm_name], timeout=30)
     assert dumpxml.success, f"virsh dumpxml failed: {dumpxml.error}"
 
     xml_text = dumpxml.stdout
@@ -393,8 +405,24 @@ def test_restore_single_disk_isolation(test_vm_multi_disk):
     )
 
     # Verify restore result includes the disk
-    assert result.disk == "vdb", (
-        f"Restore should report disk='vdb', got {result.disk}"
+    assert result.disk == "vdb", f"Restore should report disk='vdb', got {result.disk}"
+
+    # Verify per-disk state reset: vdb state cleared, vda state intact.
+    # Core.restore() step 8 calls reset_vm_disk_state / reset_target_disk_state,
+    # NOT the old full reset_vm_state / reset_target_state.
+    vdb_allocation_after = state.get_last_allocation(vm_name, "vdb")
+    assert vdb_allocation_after is None, (
+        f"VDB last_allocation should be cleared after restore, got {vdb_allocation_after}"
+    )
+    vda_allocation_after = state.get_last_allocation(vm_name, "vda")
+    assert vda_allocation_after == 0, (
+        f"VDA last_allocation should survive restore, got {vda_allocation_after}"
+    )
+
+    # vdb snapshot record should be cleared from state
+    vdb_snapshots_after = [s for s in state.get_snapshots(vm_name) if s.disk == "vdb"]
+    assert vdb_snapshots_after == [], (
+        f"VDB snapshots should be cleared after restore, got {vdb_snapshots_after}"
     )
 
 
@@ -446,16 +474,24 @@ def test_backup_both_disks(test_vm_multi_disk):
     hex_vda = secrets.token_hex(3)
     snap_name_vda = f"{vm_name}.20250801T300000_vda_{hex_vda}"
     snap_vda = snapshot_create(
-        shell, vm_name, snap_name_vda, "vda",
-        snapshot_dirs["vda"], base_images["vda"],
+        shell,
+        vm_name,
+        snap_name_vda,
+        "vda",
+        snapshot_dirs["vda"],
+        base_images["vda"],
     )
 
     # Create snapshot on vdb
     hex_vdb = secrets.token_hex(3)
     snap_name_vdb = f"{vm_name}.20250801T300001_vdb_{hex_vdb}"
     snap_vdb = snapshot_create(
-        shell, vm_name, snap_name_vdb, "vdb",
-        snapshot_dirs["vdb"], base_images["vdb"],
+        shell,
+        vm_name,
+        snap_name_vdb,
+        "vdb",
+        snapshot_dirs["vdb"],
+        base_images["vdb"],
     )
 
     target = TargetConfig(path=target_dir, compress=False, verify="off")

@@ -150,6 +150,13 @@ class ConfigFacade(IConfigFacade):
         if "backup_stall_timeout" in raw:
             global_kwargs["backup_stall_timeout"] = str(raw["backup_stall_timeout"])
 
+        # Backup retry controls (global defaults, reused by fork/restore
+        # standalone-image conversion — design D5).
+        if "backup_retry_max" in raw:
+            global_kwargs["backup_retry_max"] = int(raw["backup_retry_max"])
+        if "backup_retry_base" in raw:
+            global_kwargs["backup_retry_base"] = str(raw["backup_retry_base"])
+
         # FULL backup integrity verification tiers (M1/M2/M3).
         if "full_verify_after_create" in raw:
             global_kwargs["full_verify_after_create"] = str(raw["full_verify_after_create"])
@@ -167,11 +174,17 @@ class ConfigFacade(IConfigFacade):
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate count-based retention fields (when set).
-        if self._global.snapshot_chain_length is not None and self._global.snapshot_chain_length < 1:
+        if (
+            self._global.snapshot_chain_length is not None
+            and self._global.snapshot_chain_length < 1
+        ):
             raise ConfigError("snapshot_chain_length must be >= 1")
         if self._global.target_chain_length is not None and self._global.target_chain_length < 1:
             raise ConfigError("target_chain_length must be >= 1")
-        if self._global.target_keep_generations is not None and self._global.target_keep_generations < 1:
+        if (
+            self._global.target_keep_generations is not None
+            and self._global.target_keep_generations < 1
+        ):
             raise ConfigError("target_keep_generations must be >= 1")
         if self._global.snapshot_preserve_min < 0:
             raise ConfigError(
@@ -348,9 +361,7 @@ class ConfigFacade(IConfigFacade):
         if target_keep_generations is not None and target_keep_generations < 1:
             raise ConfigError("target_keep_generations must be >= 1")
         if snapshot_preserve_min is not None and snapshot_preserve_min < 0:
-            raise ConfigError(
-                f"snapshot_preserve_min must be >= 0, got {snapshot_preserve_min}"
-            )
+            raise ConfigError(f"snapshot_preserve_min must be >= 0, got {snapshot_preserve_min}")
 
         # backup_create: VM overrides global (target may override VM).
         vm_backup_create: str
@@ -469,9 +480,7 @@ class ConfigFacade(IConfigFacade):
         seen_targets.add(target)
 
         base_image = Path(str(disk_raw["base_image"]))
-        snapshot_dir = (
-            Path(str(disk_raw["snapshot_dir"])) if "snapshot_dir" in disk_raw else None
-        )
+        snapshot_dir = Path(str(disk_raw["snapshot_dir"])) if "snapshot_dir" in disk_raw else None
 
         return DiskConfig(target=target, base_image=base_image, snapshot_dir=snapshot_dir)
 

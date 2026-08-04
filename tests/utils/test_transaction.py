@@ -98,6 +98,109 @@ def test_write_backup_transfer_line(tmp_path: Path) -> None:
     assert fields[5] == "-"
 
 
+def test_write_snapshot_create_line_unchanged_six_fields(tmp_path: Path) -> None:
+    """Snapshot line has exactly 6 fields even when ActionRecord.disk is set.
+
+    The disk name MUST appear only inside the source_url path (via per-disk
+    naming conventions like ``{vm}.{ts}_{disk}_{6hex}.qcow2``) and NEVER as
+    a standalone 7th `disk` column.  This guarantees btrbk compatibility.
+    """
+    log = tmp_path / "transaction.log"
+    path_str = "/images/testvm.20260718T140000_vda_a1b2c3.qcow2"
+    record = ActionRecord(
+        action="snapshot_create",
+        vm_name="testvm",
+        name="testvm.20260718T140000_vda_a1b2c3",
+        path=Path(path_str),
+        disk="vda",
+    )
+    TransactionWriter.write(log, record)
+
+    content = _read_file(log).strip()
+    fields = content.split(" ")
+
+    assert len(fields) == 6, f"Expected exactly 6 fields, got {len(fields)}: {fields}"
+    assert fields[1] == "snapshot"
+    assert fields[2] == "success"
+    assert fields[3] == "-"  # target_url unused
+    assert fields[4] == path_str  # source_url — disk inside path
+    assert fields[5] == "-"  # parent_url unused
+
+    # Disk "vda" is present ONLY inside the path, never as a standalone field
+    assert "vda" in fields[4], f"disk vda must appear inside source_url path: {fields[4]}"
+    for i, fld in enumerate(fields):
+        if i == 4:
+            continue  # source_url — allowed
+        assert "vda" not in fld, f"disk vda leaked into field {i}: {fld}"
+
+
+def test_write_backup_transfer_line_unchanged_six_fields(tmp_path: Path) -> None:
+    """Backup transfer line has exactly 6 fields even when ActionRecord.disk is set.
+
+    The disk name MUST appear only inside the target_url path and NEVER as
+    a standalone 7th field.
+    """
+    log = tmp_path / "transaction.log"
+    path_str = "/backup/testvm.20260718T140000_vdb_d4e5f6.qcow2"
+    record = ActionRecord(
+        action="backup_transfer",
+        vm_name="testvm",
+        name="testvm.20260718T140000_vdb_d4e5f6",
+        path=Path(path_str),
+        disk="vdb",
+    )
+    TransactionWriter.write(log, record)
+
+    content = _read_file(log).strip()
+    fields = content.split(" ")
+
+    assert len(fields) == 6, f"Expected exactly 6 fields, got {len(fields)}: {fields}"
+    assert fields[1] == "backup"
+    assert fields[2] == "success"
+    assert fields[3] == path_str  # target_url — disk inside path
+    assert fields[4] == "-"  # source_url unused
+    assert fields[5] == "-"  # parent_url unused
+
+    # Disk "vdb" is present ONLY inside the path, never as a standalone field
+    assert "vdb" in fields[3], f"disk vdb must appear inside target_url path: {fields[3]}"
+    for i, fld in enumerate(fields):
+        if i == 3:
+            continue  # target_url — allowed
+        assert "vdb" not in fld, f"disk vdb leaked into field {i}: {fld}"
+
+
+def test_write_error_line_unchanged(tmp_path: Path) -> None:
+    """VM-level error line uses the same six-field structure with disk=None.
+
+    When ``ActionRecord.disk`` is ``None`` (VM-level error), the line still
+    contains exactly 6 space-separated top-level fields with ``status=ERROR``
+    and the error message in the ``parent_url`` field.
+    """
+    log = tmp_path / "transaction.log"
+    record = ActionRecord(
+        action="error",
+        vm_name="testvm",
+        name="err1",
+        path=Path("/tmp"),
+        error="disk full",
+        disk=None,
+    )
+    TransactionWriter.write(log, record)
+
+    content = _read_file(log).strip()
+    # Use maxsplit=5 to count the six top-level fields exactly
+    fields = content.split(" ", 5)
+
+    assert len(fields) == 6, f"Expected exactly 6 top-level fields, got {len(fields)}: {fields}"
+    # fields map: localtime, type, status, target_url, source_url, parent_url
+    assert fields[1] == "error"
+    assert fields[2] == "ERROR"
+    assert fields[3] == "-"
+    assert fields[4] == "-"
+    assert fields[5].startswith("# "), f"parent_url must start with '# ', got: {fields[5]!r}"
+    assert "disk full" in fields[5], f"error message must appear in parent_url: {fields[5]!r}"
+
+
 def test_write_full_backup_line(tmp_path: Path) -> None:
     """Write a backup_full ActionRecord — verify btrbk format.
 

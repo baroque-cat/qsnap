@@ -84,6 +84,14 @@ class GlobalConfig:
     # shows no growth for this duration, the process is killed.  ``"0s"``
     # disables stall detection (falls back to fixed-timeout ``run()``).
     backup_stall_timeout: str = "30m"
+    # Backup retry controls (global defaults).  ``backup_retry_max`` is
+    # the maximum number of attempts for a retryable operation;
+    # ``backup_retry_base`` is the exponential-backoff base duration
+    # (e.g. ``"2s"``).  Reused by the standalone-image conversion helpers
+    # (``convert_with_retry``) in ``fork``/``restore`` — no separate
+    # conversion-retry options are introduced (design D5).
+    backup_retry_max: int = 3
+    backup_retry_base: str = "2s"
     # FULL backup integrity verification tiers (M1/M2/M3).
     # ``full_verify_after_create``: verification after ``create_full_backup()``
     #   completes, before state recording.  ``"metadata"`` (M1 — qemu-img info

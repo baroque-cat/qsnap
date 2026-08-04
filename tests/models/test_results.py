@@ -80,6 +80,52 @@ def test_backup_result_success():
     assert result.error is None
 
 
+def test_backup_result_with_disk():
+    """A successful BackupResult constructs with the disk field and is frozen."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="myvm.20250101T120000_vda_a1b2c3",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=1048576,
+        error=None,
+        disk="vda",
+    )
+    assert result.success is True
+    assert result.bytes_transferred > 0
+    assert result.disk == "vda"
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+
+
+def test_backup_result_carries_disk():
+    """BackupResult carries the disk identifier for the transferred snapshot."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="myvm.20250101T120000_vda_a1b2c3",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=4096,
+        error=None,
+        disk="vda",
+    )
+    assert result.disk == "vda"
+    assert result.__dataclass_params__.frozen is True
+
+
+def test_backup_result_disk_defaults_none():
+    """BackupResult.disk defaults to None when the disk argument is omitted."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+    )
+    assert result.disk is None
+
+
 def test_commit_result_success():
     """A successful CommitResult carries all fields."""
     result = CommitResult(
@@ -379,6 +425,60 @@ def test_action_record_handles_unicode_error():
     assert isinstance(s, str)
     # Sanity: the unicode error text is present in the repr.
     assert "失败 — disk full 💾" in r
+
+
+def test_action_record_disk_frozen():
+    """ActionRecord is immutable — disk field cannot be mutated."""
+    record = ActionRecord(
+        action="snapshot_create",
+        vm_name="testvm",
+        name="testvm.20260701T1200_vda",
+        path=Path("/snapshots/testvm.20260701T1200_vda"),
+        disk="vda",
+    )
+    assert record.__dataclass_params__.frozen is True
+    assert record.disk == "vda"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.disk = "vdb"
+
+
+def test_action_record_disk_defaults():
+    """ActionRecord size/duration default to zero, disk defaults to None when omitted."""
+    record = ActionRecord(
+        action="backup_transfer",
+        vm_name="testvm",
+        name="backup-snap1.qcow2",
+        path=Path("/mnt/backup/backup-snap1.qcow2"),
+    )
+    assert record.size == 0
+    assert record.duration == 0.0
+    assert record.disk is None
+
+
+def test_action_record_carries_disk():
+    """ActionRecord carries the disk field for disk-scoped actions."""
+    record = ActionRecord(
+        action="snapshot_create",
+        vm_name="testvm",
+        name="testvm.20260701T120000_vda_a1b2c3",
+        path=Path("/snapshots/testvm.20260701T120000_vda_a1b2c3"),
+        disk="vda",
+    )
+    assert record.disk == "vda"
+
+
+def test_action_record_error_disk_none():
+    """VM-level error ActionRecord has no disk (disk=None)."""
+    record = ActionRecord(
+        action="error",
+        vm_name="testvm",
+        name="",
+        path=Path(""),
+        error="pipeline failure",
+    )
+    assert record.action == "error"
+    assert record.error == "pipeline failure"
+    assert record.disk is None
 
 
 # ── ReconcileResult ─────────────────────────────────────────────────────────

@@ -70,29 +70,36 @@ def _format_speed(bytes_transferred: int, duration: float) -> str:
 
 
 def _format_action(action: ActionRecord) -> str:
-    """Format a single ActionRecord as one table row."""
+    """Format a single ActionRecord as one table row.
+
+    When ``action.disk`` is not None, a disk prefix ``[<disk>]`` is
+    rendered immediately after the action symbol (spec: backup-summary,
+    "Summary lines carry disk prefix").  VM-level records (``disk`` is
+    None) are rendered without the prefix, exactly as before.
+    """
     symbol = _SYMBOLS.get(action.action, "???")
     indent = "    "  # 4 spaces for table rows
+    lead = f"{symbol} [{action.disk}] " if action.disk is not None else f"{symbol}  "
 
     if action.action == "snapshot_create":
-        return f"{indent}{symbol}  {action.name}  ({_format_size(action.size)})"
+        return f"{indent}{lead}{action.name}  ({_format_size(action.size)})"
     if action.action == "snapshot_delete":
-        return f"{indent}{symbol}  {action.name}"
+        return f"{indent}{lead}{action.name}"
     if action.action == "backup_transfer":
         target = str(action.path) if action.path else "-"
         return (
-            f"{indent}{symbol}  {action.name}  → {target}  "
+            f"{indent}{lead}{action.name}  → {target}  "
             f"({_format_size(action.size)} in {action.duration:.1f}s, "
             f"{_format_speed(action.size, action.duration)})"
         )
     if action.action == "backup_full":
-        return f"{indent}{symbol}  {action.name}  ({_format_size(action.size)})"
+        return f"{indent}{lead}{action.name}  ({_format_size(action.size)})"
     if action.action == "backup_delete":
         target = str(action.path.parent) if action.path else "-"
-        return f"{indent}{symbol}  {action.name}  from {target}"
+        return f"{indent}{lead}{action.name}  from {target}"
     if action.action == "error":
-        return f"{indent}{symbol}  {action.name}  {action.error or 'unknown error'}"
-    return f"{indent}{symbol}  {action.name}"
+        return f"{indent}{lead}{action.name}  {action.error or 'unknown error'}"
+    return f"{indent}{lead}{action.name}"
 
 
 def _group_by_vm(actions: list[ActionRecord]) -> list[tuple[str, list[ActionRecord]]]:

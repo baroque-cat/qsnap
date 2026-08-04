@@ -281,9 +281,7 @@ class BitmapBackupProvider(IBackupProvider):
             candidates = self._list_checkpoints_for_target(
                 vm_config.name, target_hash, snapshot.disk
             )
-            prior = self._select_newest(
-                candidates, target_hash, snapshot.disk, vm_config.name
-            )
+            prior = self._select_newest(candidates, target_hash, snapshot.disk, vm_config.name)
 
             # Temporal cross-check (design D5): if the prior
             # checkpoint's timestamp is newer than the snapshot being
@@ -293,9 +291,7 @@ class BitmapBackupProvider(IBackupProvider):
             # snapshot with a clear error rather than producing an
             # incomplete backup.
             if prior is not None:
-                prior_ts = self._parse_checkpoint_timestamp(
-                    prior, target_hash, snapshot.disk
-                )
+                prior_ts = self._parse_checkpoint_timestamp(prior, target_hash, snapshot.disk)
                 if (
                     prior_ts is not None
                     and snapshot.timestamp is not None
@@ -324,6 +320,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 f"{snapshot.name} (ts={snapshot.timestamp}) "
                                 "— incremental export would be incomplete"
                             ),
+                            disk=snapshot.disk,
                         )
                     )
                     continue
@@ -331,9 +328,7 @@ class BitmapBackupProvider(IBackupProvider):
             # The successor checkpoint is created atomically with this
             # export's backup-begin (design D1/D2): its dirty-bitmap
             # baseline coincides with the export's freeze point.
-            successor = self._new_checkpoint_name(
-                target_hash, snapshot.disk, taken=set(candidates)
-            )
+            successor = self._new_checkpoint_name(target_hash, snapshot.disk, taken=set(candidates))
 
             # Step 1: Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
@@ -343,9 +338,7 @@ class BitmapBackupProvider(IBackupProvider):
             # element, NOT via a --incremental CLI flag (the flag does
             # not exist in any version of virsh backup-begin).  The export
             # is restricted to this snapshot's disk (multi-disk refactor).
-            backup_xml_path = write_backup_xml(
-                socket_path, incremental=prior, disk=snapshot.disk
-            )
+            backup_xml_path = write_backup_xml(socket_path, incremental=prior, disk=snapshot.disk)
             checkpoint_xml_path = write_checkpoint_xml(successor)
 
             try:
@@ -378,19 +371,24 @@ class BitmapBackupProvider(IBackupProvider):
                             vm_config.name,
                             backup_result.error,
                         )
-                        self._force_cleanup_checkpoints(
-                            vm_config.name, target_hash, snapshot.disk
-                        )
+                        self._force_cleanup_checkpoints(vm_config.name, target_hash, snapshot.disk)
                         # Re-list candidates after cleanup and generate
                         # a fresh successor name.
                         candidates = self._list_checkpoints_for_target(
-                            vm_config.name, target_hash, snapshot.disk,
+                            vm_config.name,
+                            target_hash,
+                            snapshot.disk,
                         )
                         prior = self._select_newest(
-                            candidates, target_hash, snapshot.disk, vm_config.name,
+                            candidates,
+                            target_hash,
+                            snapshot.disk,
+                            vm_config.name,
                         )
                         successor = self._new_checkpoint_name(
-                            target_hash, snapshot.disk, taken=set(candidates),
+                            target_hash,
+                            snapshot.disk,
+                            taken=set(candidates),
                         )
                         checkpoint_xml_path = write_checkpoint_xml(successor)
                         backup_cmd = [
@@ -402,7 +400,9 @@ class BitmapBackupProvider(IBackupProvider):
                             str(checkpoint_xml_path),
                         ]
                         backup_result = self._shell.run(
-                            backup_cmd, timeout=120, check=True,
+                            backup_cmd,
+                            timeout=120,
+                            check=True,
                         )
                     if not backup_result.success:
                         # backup-begin is atomic: the successor checkpoint
@@ -416,6 +416,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 target_path=target_file,
                                 bytes_transferred=0,
                                 error=backup_result.error,
+                                disk=snapshot.disk,
                             )
                         )
                         continue
@@ -485,10 +486,7 @@ class BitmapBackupProvider(IBackupProvider):
                     # amount of changes (stale bitmap, misconfigured
                     # baseline, or genuine large write burst).  Log a
                     # WARNING but do not fail — the data is real.
-                    if (
-                        snapshot.allocation > 0
-                        and dirty_bytes > snapshot.allocation * 10
-                    ):
+                    if snapshot.allocation > 0 and dirty_bytes > snapshot.allocation * 10:
                         logger.warning(
                             "[backup] %s: dirty bytes (%d) exceeds 10× "
                             "snapshot allocation (%d) for %s — possible "
@@ -518,6 +516,7 @@ class BitmapBackupProvider(IBackupProvider):
                             target_path=target_file,
                             bytes_transferred=0,
                             error=transfer_error,
+                            disk=snapshot.disk,
                         )
                     )
                     continue
@@ -559,6 +558,7 @@ class BitmapBackupProvider(IBackupProvider):
                             target_path=target_file,
                             bytes_transferred=0,
                             error=verify_error,
+                            disk=snapshot.disk,
                         )
                     )
                     continue
@@ -583,7 +583,9 @@ class BitmapBackupProvider(IBackupProvider):
                         str(target_file),
                     ]
                     chain_result = self._shell.run(
-                        chain_cmd, timeout=60, check=True,
+                        chain_cmd,
+                        timeout=60,
+                        check=True,
                     )
                     chain_ok = False
                     if chain_result.success:
@@ -600,7 +602,8 @@ class BitmapBackupProvider(IBackupProvider):
                         )
                         self._cleanup_partial_file(target_file)
                         self._delete_checkpoint_best_effort(
-                            vm_config.name, successor,
+                            vm_config.name,
+                            successor,
                         )
                         results.append(
                             BackupResult(
@@ -610,6 +613,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 target_path=target_file,
                                 bytes_transferred=0,
                                 error="chain-to-FULL not traversable",
+                                disk=snapshot.disk,
                             )
                         )
                         continue
@@ -618,17 +622,19 @@ class BitmapBackupProvider(IBackupProvider):
                     # qsnap- checkpoint exists for this VM+target
                     # (dirty-bitmap baseline for next incremental).
                     checkpoints = self._list_checkpoints_for_target(
-                        vm_config.name, target_hash, snapshot.disk,
+                        vm_config.name,
+                        target_hash,
+                        snapshot.disk,
                     )
                     if not checkpoints:
                         logger.critical(
-                            "no checkpoint found after incremental "
-                            "transfer for VM %s",
+                            "no checkpoint found after incremental transfer for VM %s",
                             vm_config.name,
                         )
                         self._cleanup_partial_file(target_file)
                         self._delete_checkpoint_best_effort(
-                            vm_config.name, successor,
+                            vm_config.name,
+                            successor,
                         )
                         results.append(
                             BackupResult(
@@ -638,6 +644,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 target_path=target_file,
                                 bytes_transferred=0,
                                 error="checkpoint missing — next incremental impossible",
+                                disk=snapshot.disk,
                             )
                         )
                         continue
@@ -667,6 +674,7 @@ class BitmapBackupProvider(IBackupProvider):
                         bytes_transferred=bytes_transferred,
                         error=None,
                         duration=elapsed,
+                        disk=snapshot.disk,
                     )
                 )
 
@@ -1428,9 +1436,7 @@ class BitmapBackupProvider(IBackupProvider):
 
             # Write backup XML (full, no <incremental>, restricted to this
             # snapshot's disk) + checkpoint XML.
-            backup_xml_path = write_backup_xml(
-                socket_path, disk=source_snapshot.disk
-            )
+            backup_xml_path = write_backup_xml(socket_path, disk=source_snapshot.disk)
             checkpoint_xml_path = write_checkpoint_xml(checkpoint_name)
 
             # Start NBD export via virsh backup-begin (no <incremental> —
@@ -1461,6 +1467,7 @@ class BitmapBackupProvider(IBackupProvider):
                     target_path=target_file,
                     bytes_transferred=0,
                     error=backup_result.error,
+                    disk=source_snapshot.disk,
                 )
 
             # Full-pull lifecycle via the shared helper (design D7).
@@ -1496,6 +1503,7 @@ class BitmapBackupProvider(IBackupProvider):
                     target_path=target_file,
                     bytes_transferred=0,
                     error=transfer_error,
+                    disk=source_snapshot.disk,
                 )
         else:
             # Stopped VM: direct qemu-img convert from source qcow2.
@@ -1521,6 +1529,7 @@ class BitmapBackupProvider(IBackupProvider):
                         f"{vm_name} via virsh domblklist — required for "
                         f"direct qemu-img convert"
                     ),
+                    disk=source_snapshot.disk,
                 )
             source_path = Path(source_path_str)
 
@@ -1549,6 +1558,7 @@ class BitmapBackupProvider(IBackupProvider):
                     target_path=target_file,
                     bytes_transferred=0,
                     error=transfer_error,
+                    disk=source_snapshot.disk,
                 )
 
         # Clean up superseded checkpoints after successful transfer
@@ -1588,18 +1598,20 @@ class BitmapBackupProvider(IBackupProvider):
                         target_path=target_file,
                         bytes_transferred=0,
                         error="FULL backup has unexpected backing file",
+                        disk=source_snapshot.disk,
                     )
             except json.JSONDecodeError:
                 pass  # Non-fatal — cannot parse metadata
 
         if running:
             checkpoints = self._list_checkpoints_for_target(
-                vm_name, target_hash, source_snapshot.disk,
+                vm_name,
+                target_hash,
+                source_snapshot.disk,
             )
             if not checkpoints:
                 logger.critical(
-                    "no checkpoint found after FULL backup creation "
-                    "for VM %s",
+                    "no checkpoint found after FULL backup creation for VM %s",
                     vm_name,
                 )
                 return BackupResult(
@@ -1609,6 +1621,7 @@ class BitmapBackupProvider(IBackupProvider):
                     target_path=target_file,
                     bytes_transferred=0,
                     error="checkpoint missing — next incremental impossible",
+                    disk=source_snapshot.disk,
                 )
 
         # Get file size
@@ -1628,6 +1641,7 @@ class BitmapBackupProvider(IBackupProvider):
             target_path=target_file,
             bytes_transferred=bytes_transferred,
             error=None,
+            disk=source_snapshot.disk,
         )
 
     def list(self, target: TargetConfig) -> list[SnapshotInfo]:
@@ -1716,9 +1730,7 @@ class BitmapBackupProvider(IBackupProvider):
                 checkpoints.append(name)
         return checkpoints
 
-    def _list_checkpoints_for_target(
-        self, vm_name: str, target_hash: str, disk: str
-    ) -> list[str]:
+    def _list_checkpoints_for_target(self, vm_name: str, target_hash: str, disk: str) -> list[str]:
         """Return qsnap checkpoints matching *target_hash* and *disk*.
 
         Checkpoint names are scoped per disk (multi-disk refactor) so the
@@ -1728,9 +1740,7 @@ class BitmapBackupProvider(IBackupProvider):
         return [cp for cp in self.list_checkpoints(vm_name) if cp.startswith(prefix)]
 
     @staticmethod
-    def _new_checkpoint_name(
-        target_hash: str, disk: str, taken: set[str] | None = None
-    ) -> str:
+    def _new_checkpoint_name(target_hash: str, disk: str, taken: set[str] | None = None) -> str:
         """Generate a unique successor checkpoint name (design D2/D6).
 
         Format:
@@ -1762,15 +1772,10 @@ class BitmapBackupProvider(IBackupProvider):
                 return candidate
         # Practically unreachable (60 same-name collisions in a row);
         # fall back to microsecond resolution to guarantee uniqueness.
-        return (
-            f"qsnap-{target_hash}-{disk}-"
-            f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
-        )
+        return f"qsnap-{target_hash}-{disk}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
 
     @staticmethod
-    def _parse_checkpoint_timestamp(
-        name: str, target_hash: str, disk: str
-    ) -> datetime | None:
+    def _parse_checkpoint_timestamp(name: str, target_hash: str, disk: str) -> datetime | None:
         """Parse the creation timestamp embedded in a checkpoint name.
 
         Checkpoint names are scoped per disk (multi-disk refactor):
@@ -1815,9 +1820,7 @@ class BitmapBackupProvider(IBackupProvider):
             return parsed
         return None
 
-    def _newest_checkpoint(
-        self, vm_name: str, target_hash: str, disk: str
-    ) -> str | None:
+    def _newest_checkpoint(self, vm_name: str, target_hash: str, disk: str) -> str | None:
         """Return the newest qsnap checkpoint for this VM+target+disk.
 
         Thin wrapper over :meth:`_select_newest` that fetches the
@@ -1905,8 +1908,7 @@ class BitmapBackupProvider(IBackupProvider):
         meta_result = self._shell.run(meta_cmd, timeout=30, check=True)
         if not meta_result.success:
             logger.warning(
-                "Failed to delete checkpoint %s for VM %s "
-                "(full: %s; metadata fallback: %s)",
+                "Failed to delete checkpoint %s for VM %s (full: %s; metadata fallback: %s)",
                 checkpoint_name,
                 vm_name,
                 full_result.error,
@@ -1954,9 +1956,7 @@ class BitmapBackupProvider(IBackupProvider):
         lower = error.lower()
         return "bitmap already exists" in lower or "already exists" in lower
 
-    def _force_cleanup_checkpoints(
-        self, vm_name: str, target_hash: str, disk: str
-    ) -> None:
+    def _force_cleanup_checkpoints(self, vm_name: str, target_hash: str, disk: str) -> None:
         """Force-delete ALL qsnap checkpoints for this VM+target+disk.
 
         Used by collision recovery (design D6) when a stale

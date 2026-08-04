@@ -10,6 +10,7 @@ from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.utils.parsing import parse_disk_from_snapshot_name
 
 
 class InMemoryStateManager(IStateManager):
@@ -224,9 +225,7 @@ class InMemoryStateManager(IStateManager):
         del entry[disk]
         return True
 
-    def remove_all_incremental_dependencies(
-        self, target_path: str, full_name: str
-    ) -> int:
+    def remove_all_incremental_dependencies(self, target_path: str, full_name: str) -> int:
         """Remove ALL incremental dependencies linked to *full_name*.
 
         Accepts both stem and extended forms of *full_name* — normalizes
@@ -258,3 +257,72 @@ class InMemoryStateManager(IStateManager):
         self._full_backups.pop(target_path, None)
         self._dependencies.pop(target_path, None)
         self._target_state.pop(target_path, None)
+
+    # ── Per-disk state reset (restore support, design D4) ─────────────
+
+    def reset_vm_disk_state(self, vm_name: str, disk: str) -> None:
+        """Clear only the per-VM state that belongs to *disk* (mock parity).
+
+        Mirrors :meth:`JsonStateManager.reset_vm_disk_state`: removes the
+        snapshots, ``last_allocation`` entry, and deferred operations that
+        belong to *disk*; state of the VM's other disks is preserved.
+        """
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return
+
+        snapshots = vm_state.get("snapshots", [])
+        if isinstance(snapshots, list):
+            vm_state["snapshots"] = [s for s in snapshots if getattr(s, "disk", None) != disk]
+
+        last_alloc = vm_state.get("last_allocation")
+        if isinstance(last_alloc, dict) and disk in last_alloc:
+            del last_alloc[disk]
+
+        deferred = vm_state.get("deferred_operations", [])
+        if isinstance(deferred, list):
+            vm_state["deferred_operations"] = [
+                d for d in deferred if getattr(d, "disk", None) != disk
+            ]
+
+    def reset_target_disk_state(self, target_path: str, vm_name: str, disk: str) -> None:
+        """Clear only the per-target state that belongs to (vm_name, disk).
+
+        Mirrors :meth:`JsonStateManager.reset_target_disk_state`: removes
+        the full-backup records, incremental dependencies, and
+        ``last_backup_allocation`` entry that belong to ``(vm_name, disk)``;
+        backup state of other VMs and other disks is preserved.
+        """
+        vm_prefix = f"{vm_name}."
+
+        entries = self._full_backups.get(target_path)
+        # Remember the stored disk of every original FULL record so the
+        # dependency cleanup below removes exactly the deps of the removed
+        # FULL records (legacy FULL names without a parseable disk segment
+        # still match via their stored disk field).
+        full_disk_by_name: dict[str, str | None] = {}
+        if entries is not None:
+            # Dependency keys are stored in normalized stem form (see
+            # _normalize_full_name), so the map uses the same form.
+            full_disk_by_name = {self._normalize_full_name(e.name): e.disk for e in entries}
+            self._full_backups[target_path] = [
+                e for e in entries if not (e.name.startswith(vm_prefix) and e.disk == disk)
+            ]
+
+        target_deps = self._dependencies.get(target_path)
+        if target_deps is not None:
+            removable = []
+            for full_key in target_deps:
+                if not full_key.startswith(vm_prefix):
+                    continue
+                resolved = full_disk_by_name.get(full_key)
+                if resolved is None:
+                    resolved = parse_disk_from_snapshot_name(full_key)
+                if resolved == disk:
+                    removable.append(full_key)
+            for full_key in removable:
+                del target_deps[full_key]
+
+        entry = self._target_state.get(target_path)
+        if entry is not None and disk in entry:
+            del entry[disk]

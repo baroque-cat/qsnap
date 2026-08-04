@@ -128,7 +128,9 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     with open(crash_state_file, encoding="utf-8") as fh:
         data = json.load(fh)  # must parse without error
-    assert data.get("last_allocation", {}).get("vda", None) == 100, "original data must be unchanged after crash"
+    assert data.get("last_allocation", {}).get("vda", None) == 100, (
+        "original data must be unchanged after crash"
+    )
 
     # Re-reading through the manager must yield the original value.
     assert manager.get_last_allocation("crashvm", "vda") == 100
@@ -519,9 +521,7 @@ def test_get_incremental_deps_with_qcow2_key_finds_stem_stored(tmp_path: Path) -
     assert deps == ["incr-001"]
 
     # Lookup via .qcow2 form also works (normalized both ways).
-    deps_qcow2 = manager.get_incremental_dependencies(
-        target, "vm.FULL.20260727.qcow2"
-    )
+    deps_qcow2 = manager.get_incremental_dependencies(target, "vm.FULL.20260727.qcow2")
     assert deps_qcow2 == ["incr-001"]
 
 
@@ -550,9 +550,7 @@ def test_legacy_qcow2_keys_migrated_to_stem_on_load(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=state_dir)
 
     # Lookup with stem form must find the migrated entry.
-    deps = manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "vm.FULL.20260727"
-    )
+    deps = manager.get_incremental_dependencies("/mnt/backup/testvm", "vm.FULL.20260727")
     assert deps == ["incr-001"]
 
     # Lookup with .qcow2 form also works after migration.
@@ -595,14 +593,10 @@ def test_already_migrated_deps_file_loaded_unchanged(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=state_dir)
 
     # Both entries are accessible after load (no data loss).
-    deps1 = manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "vm.FULL.20260727"
-    )
+    deps1 = manager.get_incremental_dependencies("/mnt/backup/testvm", "vm.FULL.20260727")
     assert deps1 == ["incr-001"]
 
-    deps2 = manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "vm.FULL.20260728"
-    )
+    deps2 = manager.get_incremental_dependencies("/mnt/backup/testvm", "vm.FULL.20260728")
     assert deps2 == ["incr-002", "incr-003"]
 
     # The file must remain unchanged — no migration rewrite triggered.
@@ -635,15 +629,11 @@ def test_mixed_keys_migrated_correctly(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=state_dir)
 
     # Migrated .qcow2 key must be accessible via stem.
-    deps_old = manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "vm.FULL.20260727"
-    )
+    deps_old = manager.get_incremental_dependencies("/mnt/backup/testvm", "vm.FULL.20260727")
     assert deps_old == ["incr-old"]
 
     # Unchanged stem key must still be accessible.
-    deps_new = manager.get_incremental_dependencies(
-        "/mnt/backup/testvm", "vm.FULL.20260728"
-    )
+    deps_new = manager.get_incremental_dependencies("/mnt/backup/testvm", "vm.FULL.20260728")
     assert deps_new == ["incr-new"]
 
     # The .qcow2 key must also be accessible via .qcow2 lookup
@@ -701,9 +691,7 @@ def test_inmemory_record_qcow2_key_finds_stem_stored() -> None:
     assert deps == ["incr-001"]
 
     # Lookup with .qcow2 form also works (normalized both ways).
-    deps_qcow2 = manager.get_incremental_dependencies(
-        target, "vm.FULL.20260727.qcow2"
-    )
+    deps_qcow2 = manager.get_incremental_dependencies(target, "vm.FULL.20260727.qcow2")
     assert deps_qcow2 == ["incr-001"]
 
 
@@ -1287,9 +1275,7 @@ def test_remove_all_incremental_deps_nonexistent(tmp_path: Path) -> None:
     """remove_all_incremental_dependencies for a FULL with no deps returns 0."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    count = manager.remove_all_incremental_dependencies(
-        "/mnt/backup/testvm", "full-orphan"
-    )
+    count = manager.remove_all_incremental_dependencies("/mnt/backup/testvm", "full-orphan")
     assert count == 0
 
 
@@ -1330,14 +1316,12 @@ def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
         manager.clear_last_backup_allocation(target, "vda")
 
     # The original state file must still exist and contain the original data.
-    assert target_state_file.exists(), (
-        "_target_state.json must still exist after crash"
-    )
+    assert target_state_file.exists(), "_target_state.json must still exist after crash"
     with open(target_state_file, encoding="utf-8") as fh:
         data_after_crash = json.load(fh)
-    assert (
-        data_after_crash == original_data
-    ), "original data must be unchanged after simulated crash"
+    assert data_after_crash == original_data, (
+        "original data must be unchanged after simulated crash"
+    )
 
     # Re-reading through the manager must yield the original value.
     assert manager.get_last_backup_allocation(target, "vda") == 12345
@@ -1433,9 +1417,7 @@ def test_reset_vm_state_saves_atomically(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     manager.set_last_allocation("testvm", "vda", 4096)
-    manager.record_snapshot(
-        "testvm", _make_snapshot("snap1", datetime(2024, 1, 1, 12, 0, 0))
-    )
+    manager.record_snapshot("testvm", _make_snapshot("snap1", datetime(2024, 1, 1, 12, 0, 0)))
 
     # Verify state file exists before reset.
     state_file = tmp_path / "testvm.json"
@@ -1562,6 +1544,503 @@ def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
     assert target not in ts_data
 
 
+# ── per-disk state reset (reset_vm_disk_state) ──────────────────────────
+
+
+def test_reset_vm_disk_state_clears_only_given_disk(tmp_path: Path) -> None:
+    """reset_vm_disk_state for vda clears only vda data; vdb data preserved.
+
+    Pre-populate snapshots, last_allocation, and deferred operations for both
+    vda and vdb.  Then call reset_vm_disk_state("myvm", "vda").  Only the vda
+    records must be removed; vdb records must remain intact.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # ── populate vda state ───────────────────────────────────────────
+    snap_vda1 = SnapshotInfo(
+        name="myvm.20250101T120000_vda_a1b2c3",
+        path=Path("/tmp/snap_vda1.qcow2"),
+        timestamp=datetime(2025, 1, 1, 12, 0, 0),
+        allocation=1024,
+        disk="vda",
+    )
+    snap_vda2 = SnapshotInfo(
+        name="myvm.20250101T130000_vda_d3e4f5",
+        path=Path("/tmp/snap_vda2.qcow2"),
+        timestamp=datetime(2025, 1, 1, 13, 0, 0),
+        allocation=2048,
+        disk="vda",
+    )
+
+    # ── populate vdb state ───────────────────────────────────────────
+    snap_vdb1 = SnapshotInfo(
+        name="myvm.20250101T120000_vdb_111111",
+        path=Path("/tmp/snap_vdb1.qcow2"),
+        timestamp=datetime(2025, 1, 1, 12, 0, 0),
+        allocation=512,
+        disk="vdb",
+    )
+    snap_vdb2 = SnapshotInfo(
+        name="myvm.20250101T130000_vdb_222222",
+        path=Path("/tmp/snap_vdb2.qcow2"),
+        timestamp=datetime(2025, 1, 1, 13, 0, 0),
+        allocation=768,
+        disk="vdb",
+    )
+
+    manager.record_snapshot("myvm", snap_vda1)
+    manager.record_snapshot("myvm", snap_vda2)
+    manager.record_snapshot("myvm", snap_vdb1)
+    manager.record_snapshot("myvm", snap_vdb2)
+
+    manager.set_last_allocation("myvm", "vda", 1000)
+    manager.set_last_allocation("myvm", "vdb", 2000)
+
+    manager.add_deferred_blockcommit("myvm", "vda", ["snap_vda.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("myvm", "vdb", ["snap_vdb.qcow2"], "vm_running")
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    assert len(manager.get_snapshots("myvm")) == 4
+    assert manager.get_last_allocation("myvm", "vda") == 1000
+    assert manager.get_last_allocation("myvm", "vdb") == 2000
+    assert len(manager.get_deferred_operations("myvm")) == 2
+
+    # ── reset vda disk ───────────────────────────────────────────────
+    manager.reset_vm_disk_state("myvm", "vda")
+
+    # ── vda is gone ──────────────────────────────────────────────────
+    snaps = manager.get_snapshots("myvm")
+    assert len(snaps) == 2, f"Expected 2 vdb snapshots, got {len(snaps)}"
+    assert all(s.disk == "vdb" for s in snaps), (
+        f"Only vdb snapshots should remain, got disks: {[s.disk for s in snaps]}"
+    )
+
+    assert manager.get_last_allocation("myvm", "vda") is None, (
+        "vda last_allocation must be None after reset"
+    )
+
+    ops = manager.get_deferred_operations("myvm")
+    assert len(ops) == 1, f"Expected 1 vdb deferred op, got {len(ops)}"
+    assert ops[0].disk == "vdb", f"Only vdb deferred should remain, got disk={ops[0].disk!r}"
+
+    # ── vdb is preserved ─────────────────────────────────────────────
+    assert manager.get_last_allocation("myvm", "vdb") == 2000, (
+        "vdb last_allocation must be preserved"
+    )
+
+
+def test_reset_vm_disk_state_legacy_bare_int(tmp_path: Path) -> None:
+    """Legacy bare-integer last_allocation treated as absent after reset.
+
+    When the state file contains a bare-integer ``last_allocation``
+    (pre-per-disk format), reset_vm_disk_state must not error, and
+    get_last_allocation must return None (the bare int is not attributable
+    to any specific disk).
+    """
+    state_file = tmp_path / "myvm.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "name": "myvm.20250101T120000_vda_a1b2c3",
+                        "path": "/tmp/snap.qcow2",
+                        "timestamp": "2025-01-01T12:00:00",
+                        "allocation": 1024,
+                        "disk": "vda",
+                    },
+                ],
+                # Legacy: bare integer, not a per-disk dict.
+                "last_allocation": 4096,
+                "deferred_operations": [
+                    {
+                        "snapshots": ["myvm.20250101T120000_vda_a1b2c3"],
+                        "reason": "apparmor",
+                        "since": "2025-01-01T12:00:00",
+                        "disk": "vda",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # Must not raise.
+    manager.reset_vm_disk_state("myvm", "vda")
+
+    # Bare-integer last_allocation cannot be attributed to any disk → None.
+    assert manager.get_last_allocation("myvm", "vda") is None, (
+        "Legacy bare-int last_allocation must yield None after reset"
+    )
+
+
+def test_reset_vm_disk_state_unknown_noop(tmp_path: Path) -> None:
+    """reset_vm_disk_state for non-existent VM or unknown disk is a no-op."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # No state file — must not raise and must not create one.
+    manager.reset_vm_disk_state("nonexistent", "vda")
+    assert not (tmp_path / "nonexistent.json").exists(), (
+        "No state file should be created for unknown VM"
+    )
+
+    # VM with state but disk not present — must not raise.
+    manager.set_last_allocation("myvm", "vda", 1000)
+    manager.reset_vm_disk_state("myvm", "vdz")
+
+    # vda allocation still intact.
+    assert manager.get_last_allocation("myvm", "vda") == 1000, (
+        "Unmatched disk reset must not affect existing disk state"
+    )
+
+
+def test_reset_vm_disk_state_atomic(tmp_path: Path) -> None:
+    """Crash during os.replace leaves original state file unchanged.
+
+    Pre-populate snapshots, last_allocation, and deferred operations for
+    both vda and vdb.  Mock os.replace to raise OSError, then call
+    reset_vm_disk_state for vda.  The original state file must remain
+    valid JSON with all vda data intact.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # ── populate vda + vdb state ─────────────────────────────────────
+    snap_vda = SnapshotInfo(
+        name="myvm.20250101T120000_vda_a1b2c3",
+        path=Path("/tmp/snap_vda.qcow2"),
+        timestamp=datetime(2025, 1, 1, 12, 0, 0),
+        allocation=1024,
+        disk="vda",
+    )
+    snap_vdb = SnapshotInfo(
+        name="myvm.20250101T130000_vdb_111111",
+        path=Path("/tmp/snap_vdb.qcow2"),
+        timestamp=datetime(2025, 1, 1, 13, 0, 0),
+        allocation=512,
+        disk="vdb",
+    )
+
+    manager.record_snapshot("myvm", snap_vda)
+    manager.record_snapshot("myvm", snap_vdb)
+    manager.set_last_allocation("myvm", "vda", 1000)
+    manager.set_last_allocation("myvm", "vdb", 2000)
+    manager.add_deferred_blockcommit("myvm", "vda", ["snap_vda.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("myvm", "vdb", ["snap_vdb.qcow2"], "vm_running")
+
+    state_file = tmp_path / "myvm.json"
+    assert state_file.exists()
+
+    # Read original content for post-crash comparison.
+    with open(state_file, encoding="utf-8") as fh:
+        original_data = json.load(fh)
+
+    # ── simulate crash during os.replace ─────────────────────────────
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError("simulated crash during rename"),
+        ),
+        pytest.raises(OSError, match="simulated crash"),
+    ):
+        manager.reset_vm_disk_state("myvm", "vda")
+
+    # ── original state file must be intact ───────────────────────────
+    assert state_file.exists(), "state file must still exist after crash"
+
+    with open(state_file, encoding="utf-8") as fh:
+        data_after = json.load(fh)
+    assert data_after == original_data, "state file must be unchanged after crash"
+
+    # Re-reading through the manager must yield original vda data.
+    assert manager.get_last_allocation("myvm", "vda") == 1000
+    snaps = manager.get_snapshots("myvm")
+    assert len(snaps) == 2
+    assert any(s.disk == "vda" for s in snaps)
+
+
+# ── per-disk target state reset (reset_target_disk_state) ───────────────
+
+
+def test_reset_target_disk_state_clears_only_given_vm_disk(
+    tmp_path: Path,
+) -> None:
+    """reset_target_disk_state for (myvm, vda) removes only those records.
+
+    Populate a target with FULLs for (myvm, vda), (myvm, vdb), and
+    (othervm, vda).  After reset, only the (myvm, vda) FULLs are removed;
+    the vdb and othervm FULLs persist.  Likewise for backup allocation
+    baselines.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/shared"
+
+    ts_vda = datetime(2025, 1, 1, 12, 0, 0)
+    ts_vdb = datetime(2025, 2, 1, 12, 0, 0)
+    ts_other = datetime(2025, 3, 1, 12, 0, 0)
+
+    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3"
+    full_vdb = "myvm.FULL.20250201T120000_vdb_d3e4f5"
+    full_other = "othervm.FULL.20250301T120000_vda_111111"
+
+    manager.record_full_backup(target, full_vda, ts_vda, "vda")
+    manager.record_full_backup(target, full_vdb, ts_vdb, "vdb")
+    manager.record_full_backup(target, full_other, ts_other, "vda")
+
+    manager.record_incremental_dependency(target, "incr-vda-001", full_vda)
+    manager.record_incremental_dependency(target, "incr-vdb-001", full_vdb)
+    manager.record_incremental_dependency(target, "incr-other-001", full_other)
+
+    manager.set_last_backup_allocation(target, "vda", 1000)
+    manager.set_last_backup_allocation(target, "vdb", 2000)
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    assert len(manager.get_full_backups(target)) == 3
+    assert manager.get_last_backup_allocation(target, "vda") == 1000
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+    # ── reset (myvm, vda) ────────────────────────────────────────────
+    manager.reset_target_disk_state(target, "myvm", "vda")
+
+    # ── (myvm, vda) FULL is gone ─────────────────────────────────────
+    backups = manager.get_full_backups(target)
+    backup_names = {b.name for b in backups}
+    assert full_vda not in backup_names, (
+        f"(myvm,vda) FULL must be removed, got names: {backup_names}"
+    )
+    assert full_vdb in backup_names, "(myvm,vdb) FULL must be preserved"
+    assert full_other in backup_names, "(othervm,vda) FULL must be preserved"
+    assert len(backups) == 2
+
+    # ── vda allocation cleared, vdb preserved ───────────────────────
+    assert manager.get_last_backup_allocation(target, "vda") is None, (
+        "vda backup allocation must be None after reset"
+    )
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000, (
+        "vdb backup allocation must be preserved"
+    )
+
+
+def test_reset_target_disk_state_removes_only_disk_deps(
+    tmp_path: Path,
+) -> None:
+    """reset_target_disk_state removes only the dependencies for the given disk.
+
+    _dependencies.json holds FULL keys for (myvm, vda) and (myvm, vdb).
+    After reset for (myvm, vda), only the vda FULL key is removed; the vdb
+    FULL key and its incrementals remain intact.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/shared"
+
+    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3"
+    full_vdb = "myvm.FULL.20250201T120000_vdb_d3e4f5"
+
+    # Record dependencies via the manager so normalisation happens.
+    manager.record_incremental_dependency(target, "incr-vda-001", full_vda)
+    manager.record_incremental_dependency(target, "incr-vda-002", full_vda)
+    manager.record_incremental_dependency(target, "incr-vdb-001", full_vdb)
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    deps_vda = manager.get_incremental_dependencies(target, full_vda)
+    assert len(deps_vda) == 2
+    deps_vdb = manager.get_incremental_dependencies(target, full_vdb)
+    assert len(deps_vdb) == 1
+
+    # ── reset (myvm, vda) ────────────────────────────────────────────
+    manager.reset_target_disk_state(target, "myvm", "vda")
+
+    # ── vda dependency key removed ───────────────────────────────────
+    deps_vda_after = manager.get_incremental_dependencies(target, full_vda)
+    assert deps_vda_after == [], f"vda deps must be empty after reset, got {deps_vda_after}"
+
+    # ── vdb dependency key preserved ─────────────────────────────────
+    deps_vdb_after = manager.get_incremental_dependencies(target, full_vdb)
+    assert deps_vdb_after == ["incr-vdb-001"], (
+        f"vdb deps must be preserved after reset, got {deps_vdb_after}"
+    )
+
+
+def test_reset_target_disk_state_unknown_noop(tmp_path: Path) -> None:
+    """reset_target_disk_state for unknown target is a no-op (no error)."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # No state files — must not raise.
+    manager.reset_target_disk_state("/nonexistent", "myvm", "vda")
+
+    # Verify no files were created.
+    for name in ("_full_backups.json", "_dependencies.json", "_target_state.json"):
+        assert not (tmp_path / name).exists(), f"No {name} should be created for unknown target"
+
+
+def test_reset_target_disk_state_atomic(tmp_path: Path) -> None:
+    """Crash during os.replace leaves all target state files unchanged.
+
+    Populate _full_backups.json, _dependencies.json, and _target_state.json
+    with data for (myvm, vda).  Mock os.replace to raise OSError, then call
+    reset_target_disk_state.  All three files must remain intact with their
+    original content.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/shared"
+
+    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3"
+    ts_vda = datetime(2025, 1, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, full_vda, ts_vda, "vda")
+    manager.record_incremental_dependency(target, "incr-vda-001", full_vda)
+    manager.set_last_backup_allocation(target, "vda", 1000)
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    fb_file = tmp_path / "_full_backups.json"
+    dep_file = tmp_path / "_dependencies.json"
+    ts_file = tmp_path / "_target_state.json"
+
+    assert fb_file.exists()
+    assert dep_file.exists()
+    assert ts_file.exists()
+
+    with open(fb_file, encoding="utf-8") as fh:
+        original_fb = json.load(fh)
+    with open(dep_file, encoding="utf-8") as fh:
+        original_dep = json.load(fh)
+    with open(ts_file, encoding="utf-8") as fh:
+        original_ts = json.load(fh)
+
+    # ── simulate crash during os.replace ─────────────────────────────
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError("simulated crash during rename"),
+        ),
+        pytest.raises(OSError, match="simulated crash"),
+    ):
+        manager.reset_target_disk_state(target, "myvm", "vda")
+
+    # ── all files must be intact ─────────────────────────────────────
+    with open(fb_file, encoding="utf-8") as fh:
+        assert json.load(fh) == original_fb, "_full_backups.json must be unchanged after crash"
+    with open(dep_file, encoding="utf-8") as fh:
+        assert json.load(fh) == original_dep, "_dependencies.json must be unchanged after crash"
+    with open(ts_file, encoding="utf-8") as fh:
+        assert json.load(fh) == original_ts, "_target_state.json must be unchanged after crash"
+
+    # Re-reading through the manager must yield original values.
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == full_vda
+
+
+# ── legacy FULL name deps cleanup regression (design D4) ─────────────────
+
+
+def test_reset_target_disk_state_removes_deps_of_legacy_full_names(
+    tmp_path: Path,
+) -> None:
+    """Legacy FULL name without parseable disk segment: deps removed via stored disk.
+
+    Create a FULL backup entry whose name ``myvm.FULL.20250713`` has no
+    parseable disk segment (parse_disk_from_snapshot_name returns None)
+    but whose stored ``disk`` field is ``"vda"``.  Add dependency entries
+    under that FULL key.  Also add a healthy FULL
+    ``myvm.FULL.20250714T090000_vdb_b2c3d4.qcow2`` (with parseable
+    ``vdb``) and its own deps.
+
+    After ``reset_target_disk_state(target, "myvm", "vda")``, the
+    legacy-named FULL and its deps MUST be removed.  The vdb FULL and its
+    deps MUST survive — even though their dep key name differs from the
+    stored FULL name (stem vs .qcow2), the fallback name-parsing correctly
+    identifies them as ``vdb``.
+    """
+    target = "/mnt/backup/shared"
+    legacy_full_name = "myvm.FULL.20250713"
+    vdb_full_name_stem = "myvm.FULL.20250714T090000_vdb_b2c3d4"
+    vdb_full_name_qcow2 = f"{vdb_full_name_stem}.qcow2"
+
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── write _full_backups.json directly ────────────────────────────
+    # Legacy vda entry: name has NO parseable disk, but stored disk="vda".
+    # Healthy vdb entry: name contains parseable _vdb_ segment.
+    fb_data = {
+        target: [
+            {
+                "name": legacy_full_name,
+                "path": f"{target}/{legacy_full_name}",
+                "timestamp": "2025-07-13T00:00:00",
+                "disk": "vda",
+            },
+            {
+                "name": vdb_full_name_qcow2,
+                "path": f"{target}/{vdb_full_name_qcow2}",
+                "timestamp": "2025-07-14T09:00:00",
+                "disk": "vdb",
+            },
+        ],
+    }
+    (state_dir / "_full_backups.json").write_text(json.dumps(fb_data), encoding="utf-8")
+
+    # ── write _dependencies.json directly ────────────────────────────
+    # Dep keys are stem-form (as stored by record_incremental_dependency).
+    dep_data = {
+        target: {
+            legacy_full_name: ["incr-legacy-001"],
+            vdb_full_name_stem: ["incr-vdb-001"],
+        },
+    }
+    (state_dir / "_dependencies.json").write_text(json.dumps(dep_data), encoding="utf-8")
+
+    # ── write _target_state.json ─────────────────────────────────────
+    ts_data = {
+        target: {
+            "last_backup_allocation": {"vda": 1000, "vdb": 2000},
+        },
+    }
+    (state_dir / "_target_state.json").write_text(json.dumps(ts_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 2
+
+    deps_legacy = manager.get_incremental_dependencies(target, legacy_full_name)
+    assert deps_legacy == ["incr-legacy-001"]
+
+    deps_vdb = manager.get_incremental_dependencies(target, vdb_full_name_stem)
+    assert deps_vdb == ["incr-vdb-001"]
+
+    assert manager.get_last_backup_allocation(target, "vda") == 1000
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+    # ── reset (myvm, vda) ────────────────────────────────────────────
+    manager.reset_target_disk_state(target, "myvm", "vda")
+
+    # ── legacy vda FULL removed ──────────────────────────────────────
+    backups_after = manager.get_full_backups(target)
+    backup_names = {b.name for b in backups_after}
+    assert legacy_full_name not in backup_names, "Legacy-named vda FULL must be removed"
+    assert vdb_full_name_qcow2 in backup_names, "vdb FULL must be preserved"
+    assert len(backups_after) == 1
+
+    # ── legacy deps removed (via full_disk_by_name lookup) ───────────
+    assert manager.get_incremental_dependencies(target, legacy_full_name) == [], (
+        "Legacy FULL deps must be empty after reset — "
+        "disk resolved from stored field, not parsed from name"
+    )
+
+    # ── vdb deps preserved (fallback name-parsing returns "vdb") ────
+    assert manager.get_incremental_dependencies(target, vdb_full_name_stem) == ["incr-vdb-001"], (
+        "vdb FULL deps must be preserved"
+    )
+
+    # ── backup allocation cleared for vda, preserved for vdb ─────────
+    assert manager.get_last_backup_allocation(target, "vda") is None
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+
 # ── State migration: legacy records without disk field ─────────────────
 
 
@@ -1633,9 +2112,7 @@ def test_snapshot_migration_no_disk_fallback_vda(tmp_path: Path) -> None:
 
     assert len(snapshots) == 1
     assert snapshots[0].name == "unparseable.qcow2"
-    assert snapshots[0].disk == "vda", (
-        f"Expected fallback disk='vda', got {snapshots[0].disk!r}"
-    )
+    assert snapshots[0].disk == "vda", f"Expected fallback disk='vda', got {snapshots[0].disk!r}"
 
 
 def test_deferred_migration_no_disk_recovered_from_first_snapshot(
@@ -1706,9 +2183,7 @@ def test_deferred_migration_no_disk_unparseable_fallback_vda(
     ops = manager.get_deferred_operations("testvm")
 
     assert len(ops) == 1
-    assert ops[0].disk == "vda", (
-        f"Expected fallback disk='vda', got {ops[0].disk!r}"
-    )
+    assert ops[0].disk == "vda", f"Expected fallback disk='vda', got {ops[0].disk!r}"
 
 
 def test_deferred_migration_no_disk_empty_snapshots_fallback_vda(
@@ -1807,6 +2282,4 @@ def test_full_backup_migration_no_disk_unparseable_fallback_vda(
     backups = manager.get_full_backups("/mnt/backup/testvm")
 
     assert len(backups) == 1
-    assert backups[0].disk == "vda", (
-        f"Expected fallback disk='vda', got {backups[0].disk!r}"
-    )
+    assert backups[0].disk == "vda", f"Expected fallback disk='vda', got {backups[0].disk!r}"

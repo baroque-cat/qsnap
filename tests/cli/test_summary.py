@@ -28,6 +28,7 @@ def _make_action(
     size: int = 0,
     duration: float = 0.0,
     error: str | None = None,
+    disk: str | None = None,
 ) -> ActionRecord:
     """Create a fully-specified ActionRecord with minimal ceremony."""
     return ActionRecord(
@@ -38,6 +39,7 @@ def _make_action(
         size=size,
         duration=duration,
         error=error,
+        disk=disk,
     )
 
 
@@ -453,3 +455,112 @@ def test_format_summary_handles_missing_actions():
     assert "Legend:" in output
     assert isinstance(output, str)
     assert len(output) > 0
+
+
+# ---------------------------------------------------------------------------
+# test_summary_disk_scoped_shows_prefix (15)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_disk_scoped_shows_prefix():
+    """ActionRecord with disk='vda' SHALL render a [vda] prefix after the
+    action symbol (spec: backup-summary, “Disk-scoped action line shows
+    disk prefix”)."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=True),
+        ],
+        actions=[
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-test",
+                name="snap_vda_001",
+                size=1048576,
+                disk="vda",
+            ),
+        ],
+        dry_run=False,
+    )
+    output = format_summary(result)
+
+    assert "vm-test:" in output
+    # The disk prefix appears immediately after the action symbol
+    assert "+++ [vda]" in output
+    assert "snap_vda_001" in output
+    assert "1.0 MiB" in output
+
+
+# ---------------------------------------------------------------------------
+# test_summary_vm_level_error_no_prefix (16)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_vm_level_error_no_prefix():
+    """ActionRecord with disk=None (VM-level) SHALL NOT render a [disk]
+    bracket; the output line SHALL be byte-identical to the old format
+    (spec: backup-summary, “VM-level error line has no disk prefix”)."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-broken", success=False, error="disk full"),
+        ],
+        actions=[
+            _make_action(
+                "error",
+                vm_name="vm-broken",
+                name="vm-broken",
+                error="virsh snapshot-create-as failed: No space left on device",
+                disk=None,
+            ),
+        ],
+        dry_run=False,
+    )
+    output = format_summary(result)
+
+    assert "vm-broken:" in output
+    assert "!!!" in output
+    # No disk prefix should appear — the symbol is followed by two spaces
+    assert "!!!  " in output
+    assert "No space left on device" in output
+    # Explicitly verify no bracket leaked in
+    assert "[None]" not in output
+    assert "[disk]" not in output
+
+
+# ---------------------------------------------------------------------------
+# test_summary_multi_disk_distinguishes_disks (17)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_multi_disk_distinguishes_disks():
+    """Two actions with disk='vda' and disk='vdb' SHALL produce lines
+    with distinct [vda] and [vdb] prefixes (spec: backup-summary,
+    “Multi-disk run distinguishes disks in summary”)."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-multi", success=True),
+        ],
+        actions=[
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-multi",
+                name="snap_vda",
+                size=512000,
+                disk="vda",
+            ),
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-multi",
+                name="snap_vdb",
+                size=256000,
+                disk="vdb",
+            ),
+        ],
+        dry_run=False,
+    )
+    output = format_summary(result)
+
+    assert "vm-multi:" in output
+    assert "+++ [vda]" in output
+    assert "snap_vda" in output
+    assert "+++ [vdb]" in output
+    assert "snap_vdb" in output

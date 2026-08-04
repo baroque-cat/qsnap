@@ -183,3 +183,43 @@ class IStateManager(ABC):
         replacement.
         """
         ...
+
+    @abstractmethod
+    def reset_vm_disk_state(self, vm_name: str, disk: str) -> None:
+        """Atomically clear the per-VM state that belongs to *disk* only.
+
+        Per-disk counterpart of :meth:`reset_vm_state`, used by
+        :meth:`Core.restore` after replacing a single disk so that the
+        state of the VM's *other* disks is preserved (design D4).
+
+        Clears, for *vm_name*:
+
+        - every recorded snapshot whose ``disk`` equals *disk* (snapshots
+          of other disks are kept);
+        - the ``last_allocation`` entry keyed by *disk* (a legacy bare-int
+          ``last_allocation`` without per-disk keys is treated as absent
+          and left untouched);
+        - every deferred blockcommit operation whose ``disk`` equals
+          *disk* (deferred operations for other disks are kept).
+        """
+        ...
+
+    @abstractmethod
+    def reset_target_disk_state(self, target_path: str, vm_name: str, disk: str) -> None:
+        """Atomically clear the per-target state that belongs to one disk.
+
+        Per-disk counterpart of :meth:`reset_target_state`, used by
+        :meth:`Core.restore` after replacing a single disk so that backup
+        state of *other* VMs and *other* disks on the same target is
+        preserved (design D4).
+
+        Clears, for *target_path*:
+
+        - every full backup record whose name starts with
+          ``"{vm_name}."`` **and** whose ``disk`` equals *disk*;
+        - every incremental-dependency entry whose FULL anchor belongs to
+          ``(vm_name, disk)`` — the disk is derived from the FULL backup
+          name via :func:`parse_disk_from_snapshot_name`;
+        - the ``last_backup_allocation`` entry keyed by *disk*.
+        """
+        ...

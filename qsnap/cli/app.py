@@ -230,6 +230,13 @@ def build_argparser() -> argparse.ArgumentParser:
         default=[],
         help="VM name filter for snapshot resolution (optional)",
     )
+    fork_parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show the planned conversion without executing it",
+    )
 
     return parser
 

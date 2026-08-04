@@ -80,7 +80,14 @@ class SnapshotResult:
 
 @dataclass(frozen=True)
 class BackupResult:
-    """Outcome of a backup transfer operation."""
+    """Outcome of a backup transfer operation.
+
+    ``disk`` identifies the disk target (e.g. ``"vda"``) the transferred
+    snapshot belongs to — it mirrors ``SnapshotInfo.disk`` of the source
+    snapshot so audit trails and summaries can attribute the transfer to
+    a specific disk.  ``None`` only when the source snapshot carries no
+    disk information.
+    """
 
     success: bool
     snapshot_name: str
@@ -89,6 +96,7 @@ class BackupResult:
     bytes_transferred: int
     error: str | None
     duration: float = 0.0
+    disk: str | None = None
 
 
 # ── Commit (blockcommit) ─────────────────────────────────────────────────
@@ -416,6 +424,11 @@ class ActionRecord:
     ``"error"``.  ``size`` is bytes transferred/created (0 for
     deletions).  ``duration`` is seconds elapsed (0.0 when not measured).
     ``error`` is non-None iff ``action == "error"``.
+
+    ``disk`` identifies the disk target (e.g. ``"vda"``) the action
+    applies to, so multi-disk VMs produce per-disk audit rows.  It is
+    ``None`` for VM-level actions (e.g. pipeline ``"error"`` records
+    that are not attributable to a single disk).
     """
 
     action: str
@@ -425,3 +438,4 @@ class ActionRecord:
     size: int = 0
     duration: float = 0.0
     error: str | None = None
+    disk: str | None = None

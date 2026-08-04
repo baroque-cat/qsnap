@@ -49,11 +49,11 @@ from qsnap.models.results import (
     SnapshotResult,
     StateCheckResult,
 )
+from qsnap.utils.convert import convert_with_retry, verify_standalone_image
 from qsnap.utils.nbd import is_vm_running
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
 from qsnap.utils.parsing import (
     parse_disk_from_snapshot_name,
-    parse_domblklist_disks,
     parse_domblklist_path_map,
     parse_timestamp,
 )
@@ -569,9 +569,7 @@ class Core:
             # ── Triple-source snapshot verification ─────────────
             # 1. State source — snapshots recorded in state JSON
             snapshots = self._state.get_snapshots(vm.name)
-            state_paths: dict[str, str] = {
-                str(snap.path): snap.name for snap in snapshots
-            }
+            state_paths: dict[str, str] = {str(snap.path): snap.name for snap in snapshots}
 
             # 2. Disk source — qemu-img info --backing-chain on active
             #    layer (single call traverses entire chain)
@@ -776,10 +774,18 @@ class Core:
         snapshots: list[SnapshotInfo],
         broken: list[str],
     ) -> None:
-        """Verify ``virsh domblklist`` active layer matches newest snapshot.
+        """Verify ``virsh domblklist`` active layers match newest snapshots.
 
-        If the active layer shown by domblklist does not match the newest
-        snapshot in state, appends an issue to *broken*.
+        Multi-disk comparison: state snapshots are grouped by
+        ``SnapshotInfo.disk`` and the newest snapshot (max timestamp) is
+        selected independently within each disk group.  Each disk target
+        listed by domblklist is then compared ONLY against the newest
+        snapshot of the same disk.  A domblklist disk that has no
+        snapshots recorded in state is skipped (nothing to compare).
+
+        If a disk's active layer shown by domblklist does not match that
+        disk's newest snapshot in state, appends an issue naming the disk
+        target to *broken*.
         """
         if not snapshots:
             return
@@ -790,16 +796,20 @@ class Core:
         )
         if not result.success:
             return
-        try:
-            disks = parse_domblklist_disks(result.stdout)
-        except ValueError:
-            return
-        newest = max(snapshots, key=lambda s: s.timestamp)
-        for _target_dev, source_path in disks:
+        path_map = parse_domblklist_path_map(result.stdout)
+        newest_by_disk: dict[str, SnapshotInfo] = {}
+        for snap in snapshots:
+            current = newest_by_disk.get(snap.disk)
+            if current is None or snap.timestamp > current.timestamp:
+                newest_by_disk[snap.disk] = snap
+        for disk, source_path in path_map.items():
+            newest = newest_by_disk.get(disk)
+            if newest is None:
+                continue
             if source_path != str(newest.path):
                 broken.append(
-                    f"domblklist active layer ≠ newest snapshot in state "
-                    f"(domblklist={source_path}, state={newest.path})",
+                    f"disk {disk}: domblklist active layer ≠ newest snapshot "
+                    f"in state (domblklist={source_path}, state={newest.path})",
                 )
 
     def _cross_reference_snapshots(
@@ -898,9 +908,7 @@ class Core:
         # 3. Checkpoint source — virsh checkpoint-list filtered by target_hash
         checkpoints = provider.list_checkpoints(vm.name)
         tgt_hash = provider.target_hash(target_str)
-        target_checkpoints = [
-            cp for cp in checkpoints if cp.startswith(f"qsnap-{tgt_hash}-")
-        ]
+        target_checkpoints = [cp for cp in checkpoints if cp.startswith(f"qsnap-{tgt_hash}-")]
 
         # Orphan checkpoints — target_hash does not match
         orphan_cps = [cp for cp in checkpoints if not cp.startswith(f"qsnap-{tgt_hash}-")]
@@ -1047,9 +1055,15 @@ class Core:
 
         Resolves *name* via ``_resolve_snapshot()``, verifies the VM is
         stopped, pre-verifies source chain integrity, creates a
-        standalone image via ``qemu-img convert``, atomically replaces
-        the VM's base image, strips ``<backingStore>`` from domain XML,
-        resets all state, and performs best-effort checkpoint cleanup.
+        standalone image at a temporary path via the shared conversion
+        helper (:func:`convert_with_retry`) and verifies it
+        (:func:`verify_standalone_image`) BEFORE atomically replacing the
+        disk's base image, strips ``<backingStore>`` from that disk's
+        domain XML element, resets only the restored disk's state
+        (``reset_vm_disk_state`` / ``reset_target_disk_state`` — spec:
+        restore-command, state-management), and performs best-effort
+        cleanup of the restored disk's checkpoints.  The state and
+        checkpoints of the VM's other disks are left untouched (design D4).
 
         Returns a ``RestoreResult``; never raises for expected failures.
         """
@@ -1129,8 +1143,14 @@ class Core:
         if self._dry_run:
             logger.info("[dry-run] Would convert %s to %s", source_path, tmp_path)
             logger.info("[dry-run] Would replace %s with %s", base_image, tmp_path)
-            logger.info("[dry-run] Would delete old snapshot overlays for %s disk %s", vm_name, disk)
-            logger.info("[dry-run] Would strip <backingStore> and update <source file> in domain XML for %s disk %s", vm_name, disk)
+            logger.info(
+                "[dry-run] Would delete old snapshot overlays for %s disk %s", vm_name, disk
+            )
+            logger.info(
+                "[dry-run] Would strip <backingStore> and update <source file> in domain XML for %s disk %s",
+                vm_name,
+                disk,
+            )
             logger.info("[dry-run] Would reset state for %s", vm_name)
             logger.info("[dry-run] Would clean up qsnap-* checkpoints for %s", vm_name)
             return RestoreResult(
@@ -1142,19 +1162,14 @@ class Core:
                 disk=disk,
             )
 
-        # Step 4: Create standalone image at temporary path
-        convert_result = self._shell.run(
-            [
-                "qemu-img",
-                "convert",
-                "--force-share",
-                "-O",
-                "qcow2",
-                str(source_path),
-                str(tmp_path),
-            ],
-            timeout=7200,
-            check=True,
+        # Step 4: Create standalone image at temporary path (with retry — D5)
+        global_cfg = self._config.get_global()
+        convert_result = convert_with_retry(
+            self._shell,
+            source_path,
+            tmp_path,
+            global_cfg.backup_retry_max,
+            global_cfg.backup_retry_base,
         )
         if not convert_result.success:
             # Original base image and snapshot chain remain intact (D2)
@@ -1164,6 +1179,21 @@ class Core:
                 restored_path=base_image,
                 chain_files=[],
                 error=f"image conversion failed: {convert_result.error}",
+                disk=disk,
+            )
+
+        # Step 4b: Verify the tmp image BEFORE replacing the base image —
+        # a corrupt image never becomes the base (D5).  On failure remove
+        # tmp and abort; the base image stays untouched.
+        verify_error = verify_standalone_image(self._shell, source_path, tmp_path)
+        if verify_error is not None:
+            self._shell.run(["rm", "-f", str(tmp_path)], timeout=10)
+            return RestoreResult(
+                success=False,
+                snapshot_name=name,
+                restored_path=base_image,
+                chain_files=[],
+                error=f"converted image verification failed: {verify_error}",
                 disk=disk,
             )
 
@@ -1244,13 +1274,15 @@ class Core:
                 dumpxml.error,
             )
 
-        # Step 8: Reset all VM state (design D4)
-        self._state.reset_vm_state(vm_name)
+        # Step 8: Reset only the restored disk's state (design D4) — the
+        # state of the VM's other disks and of other VMs' backups on the
+        # same targets is preserved.
+        self._state.reset_vm_disk_state(vm_name, disk)
         for target in vm_config.targets:
-            self._state.reset_target_state(str(target.path))
+            self._state.reset_target_disk_state(str(target.path), vm_name, disk)
 
-        # Step 9: Best-effort checkpoint cleanup (design D5)
-        self._cleanup_checkpoints_after_restore(vm_config)
+        # Step 9: Best-effort checkpoint cleanup of the restored disk (D5)
+        self._cleanup_checkpoints_after_restore(vm_config, disk)
 
         return RestoreResult(
             success=True,
@@ -1261,21 +1293,24 @@ class Core:
             disk=disk,
         )
 
-    def _cleanup_checkpoints_after_restore(self, vm_config: VMConfig) -> None:
-        """Best-effort cleanup of all qsnap-* checkpoints after restore.
+    def _cleanup_checkpoints_after_restore(self, vm_config: VMConfig, disk: str) -> None:
+        """Best-effort cleanup of the restored disk's qsnap-* checkpoints.
 
-        Lists all libvirt checkpoints with ``qsnap-`` prefix and deletes
-        each via ``virsh checkpoint-delete --metadata``.  Failures are
-        logged at WARNING level and do not block the restore operation
-        (design D5).
+        Lists all libvirt checkpoints with the ``qsnap-`` prefix and
+        deletes only those that belong to the restored *disk*, via
+        ``virsh checkpoint-delete --metadata``.  Checkpoint names follow
+        ``qsnap-{target_hash}-{disk}-{timestamp}-{hex}``, so the disk is
+        the 3rd dash-separated segment.  Checkpoints of other disks are
+        never deleted.  Legacy names that lack a disk segment cannot be
+        attributed to a specific disk and are skipped with a WARNING.
+        Failures are logged at WARNING level and do not block the restore
+        operation (design D5, spec: restore-command / state-management).
         """
         # Use the first target's provider to list checkpoints; if no
         # targets, list directly via virsh.
         checkpoints: list[str] = []
         if vm_config.targets:
-            provider = self._factory.create_backup_provider(
-                vm_config, vm_config.targets[0]
-            )
+            provider = self._factory.create_backup_provider(vm_config, vm_config.targets[0])
             checkpoints = provider.list_checkpoints(vm_config.name)
         else:
             # Fallback: list directly via virsh checkpoint-list
@@ -1295,6 +1330,25 @@ class Core:
             return
 
         for cp in checkpoints:
+            parts = cp.split("-")
+            # Current per-disk format has 5 segments with the timestamp at
+            # index 3: qsnap-{target_hash}-{disk}-{timestamp}-{hex}.
+            has_disk_segment = (
+                len(parts) == 5 and re.fullmatch(r"\d{8}T\d{6}", parts[3]) is not None
+            )
+            if not has_disk_segment:
+                # Legacy checkpoint without a disk segment — cannot be
+                # attributed to a specific disk, so it is left in place.
+                logger.warning(
+                    "[restore] %s: skipping legacy checkpoint without a disk segment: %s",
+                    vm_config.name,
+                    cp,
+                )
+                continue
+            if parts[2] != disk:
+                # Another disk's checkpoint — never delete it.
+                continue
+
             cmd = [
                 "virsh",
                 "checkpoint-delete",
@@ -1384,19 +1438,35 @@ class Core:
             size_str,
         )
 
-        # Step 4: Execute image conversion (always direct, no NBD — D1)
-        convert_result = self._shell.run(
-            [
-                "qemu-img",
-                "convert",
-                "--force-share",
-                "-O",
-                "qcow2",
-                str(source_path),
-                str(output_path),
-            ],
-            timeout=7200,
-            check=True,
+        # Dry-run gate (D3): the chain-size estimate above is read-only
+        # (qemu-img info --force-share), so it runs even in dry-run mode.
+        # Beyond this point the conversion mutates the filesystem, so in
+        # dry-run mode log the plan and return without creating any file.
+        if self._dry_run:
+            logger.info(
+                "[dry-run] Would convert %s (chain size ~%s) -> %s",
+                source_path,
+                size_str,
+                output_path,
+            )
+            return RestoreResult(
+                success=True,
+                snapshot_name=name,
+                restored_path=output_path,
+                chain_files=[],
+                error=None,
+                disk=snapshot_info.disk,
+            )
+
+        # Step 4: Execute image conversion with retry (always direct, no
+        # NBD — D1).  Retry limits reuse the backup retry policy (D5).
+        global_cfg = self._config.get_global()
+        convert_result = convert_with_retry(
+            self._shell,
+            source_path,
+            output_path,
+            global_cfg.backup_retry_max,
+            global_cfg.backup_retry_base,
         )
         if not convert_result.success:
             return RestoreResult(
@@ -1405,6 +1475,22 @@ class Core:
                 restored_path=output_path,
                 chain_files=[],
                 error=f"image conversion failed: {convert_result.error}",
+                disk=snapshot_info.disk,
+            )
+
+        # Step 5: Verify the standalone image (M1 virtual-size + M2
+        # qemu-img check).  On verification failure remove the output
+        # file and report failure — a corrupt image is never handed to
+        # the operator (D5).
+        verify_error = verify_standalone_image(self._shell, source_path, output_path)
+        if verify_error is not None:
+            self._shell.run(["rm", "-f", str(output_path)], timeout=10)
+            return RestoreResult(
+                success=False,
+                snapshot_name=name,
+                restored_path=output_path,
+                chain_files=[],
+                error=f"converted image verification failed: {verify_error}",
                 disk=snapshot_info.disk,
             )
 
@@ -1516,17 +1602,14 @@ class Core:
 
             # ── Phantom snapshots ────────────────────────────────────
             phantom_snaps = self._detect_phantom_snapshots(vm)
-            phantom_snapshots = [
-                f"{sn.name} (expected: {sn.path})" for sn in phantom_snaps
-            ]
+            phantom_snapshots = [f"{sn.name} (expected: {sn.path})" for sn in phantom_snaps]
             if phantom_snapshots:
                 status_parts.append("stale_snapshots")
 
             # ── Phantom FULLs ────────────────────────────────────────
             phantom_full_pairs = self._detect_phantom_fulls(vm)
             phantom_fulls = [
-                f"{full.name} (target: {target.path})"
-                for target, full in phantom_full_pairs
+                f"{full.name} (target: {target.path})" for target, full in phantom_full_pairs
             ]
             if phantom_fulls:
                 status_parts.append("stale_fulls")
@@ -1785,9 +1868,7 @@ class Core:
                                 )
                                 phantom_snapshots += 1
                             else:
-                                self._state.remove_snapshot(
-                                    vm.name, qcow2_file.stem
-                                )
+                                self._state.remove_snapshot(vm.name, qcow2_file.stem)
                                 logger.warning(
                                     "[reconcile] %s: removed snapshot %s "
                                     "from state (file on disk but not "
@@ -1811,9 +1892,9 @@ class Core:
                             # Disk target is encoded in the snapshot name
                             # ({vm}.{ts}_{disk}_{6hex}); fall back to the
                             # first configured disk for legacy names.
-                            supplemented_disk = parse_disk_from_snapshot_name(
-                                qcow2_file.stem
-                            ) or (vm.disks[0].target if vm.disks else "")
+                            supplemented_disk = parse_disk_from_snapshot_name(qcow2_file.stem) or (
+                                vm.disks[0].target if vm.disks else ""
+                            )
                             info = SnapshotInfo(
                                 name=qcow2_file.stem,
                                 path=qcow2_file,
@@ -1873,8 +1954,7 @@ class Core:
                     else:
                         self._refresh_domain_backing_store(vm)
                         logger.warning(
-                            "[reconcile] %s: stripped stale <backingStore> "
-                            "from domain XML",
+                            "[reconcile] %s: stripped stale <backingStore> from domain XML",
                             vm.name,
                         )
                         xml_refreshed = True
@@ -1894,18 +1974,16 @@ class Core:
                         continue
                     # Determine this disk's active layer path.
                     disk_snaps = [
-                        s
-                        for s in self._state.get_snapshots(vm.name)
-                        if s.disk == disk.target
+                        s for s in self._state.get_snapshots(vm.name) if s.disk == disk.target
                     ]
-                    if disk_snaps:
-                        active_path = str(disk_snaps[-1].path)
-                    else:
-                        active_path = str(disk.base_image)
+                    active_path = str(disk_snaps[-1].path) if disk_snaps else str(disk.base_image)
                     info_result = self._shell.run(
                         [
-                            "qemu-img", "info", "--force-share",
-                            "--output=json", active_path,
+                            "qemu-img",
+                            "info",
+                            "--force-share",
+                            "--output=json",
+                            active_path,
                         ],
                         timeout=30,
                         check=True,
@@ -1930,8 +2008,7 @@ class Core:
                                         vm.name, disk.target, actual_size
                                     )
                                     logger.info(
-                                        "[reconcile] %s/%s: fixed last_allocation: "
-                                        "%d → %d",
+                                        "[reconcile] %s/%s: fixed last_allocation: %d → %d",
                                         vm.name,
                                         disk.target,
                                         last_alloc,
@@ -1955,8 +2032,7 @@ class Core:
                     target_path = str(target.path)
                     if self._dry_run:
                         logger.info(
-                            "[dry-run reconcile] %s: would remove phantom FULL %s "
-                            "(cascade deps)",
+                            "[dry-run reconcile] %s: would remove phantom FULL %s (cascade deps)",
                             vm.name,
                             full.name,
                         )
@@ -1967,8 +2043,7 @@ class Core:
                             target_path, full.name
                         )
                         logger.warning(
-                            "[reconcile] %s: removed phantom FULL %s "
-                            "(cascade: %d deps cleaned)",
+                            "[reconcile] %s: removed phantom FULL %s (cascade: %d deps cleaned)",
                             vm.name,
                             full.name,
                             removed,
@@ -1990,9 +2065,7 @@ class Core:
                     if not remaining:
                         for disk in vm.disks:
                             if (
-                                self._state.get_last_backup_allocation(
-                                    target_path, disk.target
-                                )
+                                self._state.get_last_backup_allocation(target_path, disk.target)
                                 is not None
                             ):
                                 if self._dry_run:
@@ -2040,12 +2113,9 @@ class Core:
                         )
                         stale_deps += 1
                     else:
-                        self._state.remove_incremental_dependency(
-                            target_path, dep_name, full_name
-                        )
+                        self._state.remove_incremental_dependency(target_path, dep_name, full_name)
                         logger.warning(
-                            "[reconcile] %s: removed stale dependency "
-                            "%s → %s (file not found: %s)",
+                            "[reconcile] %s: removed stale dependency %s → %s (file not found: %s)",
                             vm.name,
                             dep_name,
                             full_name,
@@ -2221,6 +2291,7 @@ class Core:
                         name=vm.name,
                         path=Path(),
                         error=str(exc),
+                        disk=None,
                     )
                 )
                 results.append(
@@ -2555,9 +2626,7 @@ class Core:
                 check=True,
             )
             if not img_check.success:
-                broken.append(
-                    f"base_image not found for disk {disk.target}: {disk.base_image}"
-                )
+                broken.append(f"base_image not found for disk {disk.target}: {disk.base_image}")
 
         # (c) virsh and qemu-img in PATH
         for binary in ("virsh", "qemu-img"):
@@ -2673,14 +2742,10 @@ class Core:
                 try:
                     for disk in vm_config.disks:
                         if (
-                            self._state.get_last_backup_allocation(
-                                str(target.path), disk.target
-                            )
+                            self._state.get_last_backup_allocation(str(target.path), disk.target)
                             is not None
                         ):
-                            self._state.clear_last_backup_allocation(
-                                str(target.path), disk.target
-                            )
+                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
                             logger.info(
                                 "[startup] %s: cleared stale last_backup_allocation "
                                 "for target %s disk %s (no FULLs in state)",
@@ -2726,9 +2791,7 @@ class Core:
                     remaining = self._state.get_full_backups(str(target.path))
                     if not remaining:
                         for disk in vm_config.disks:
-                            self._state.clear_last_backup_allocation(
-                                str(target.path), disk.target
-                            )
+                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
                         logger.info(
                             "[startup] %s: cleared last_backup_allocation "
                             "for target %s (no FULLs remain after phantom cleanup)",
@@ -2776,8 +2839,11 @@ class Core:
                 # Non-FULL — verify backing chain integrity
                 verify_result = self._shell.run(
                     [
-                        "qemu-img", "info", "--force-share",
-                        "--backing-chain", "--output=json",
+                        "qemu-img",
+                        "info",
+                        "--force-share",
+                        "--backing-chain",
+                        "--output=json",
                         str(backup.path),
                     ],
                     timeout=60,
@@ -2809,8 +2875,7 @@ class Core:
 
             if broken_count:
                 logger.critical(
-                    "[startup] %s: %d broken-chain backup(s) on %s — "
-                    "preserved for operator review",
+                    "[startup] %s: %d broken-chain backup(s) on %s — preserved for operator review",
                     vm_config.name,
                     broken_count,
                     target.path,
@@ -2820,16 +2885,13 @@ class Core:
             if not full_exists:
                 try:
                     remaining_fulls = self._state.get_full_backups(str(target.path))
-                    valid_fulls = [
-                        f for f in remaining_fulls if os.path.exists(str(f.path))
-                    ]
+                    valid_fulls = [f for f in remaining_fulls if os.path.exists(str(f.path))]
                 except Exception:
                     valid_fulls = []
                 if not valid_fulls:
                     self._force_full_targets.add(str(target.path))
                     logger.info(
-                        "[startup] %s: force-full flag set for target %s "
-                        "(no valid FULL remains)",
+                        "[startup] %s: force-full flag set for target %s (no valid FULL remains)",
                         vm_config.name,
                         target.path,
                     )
@@ -3114,9 +3176,7 @@ class Core:
                     disk=disk.target,
                 )
                 self._state.record_snapshot(vm_config.name, info)
-                self._state.set_last_allocation(
-                    vm_config.name, disk.target, result.new_allocation
-                )
+                self._state.set_last_allocation(vm_config.name, disk.target, result.new_allocation)
                 # Audit trail + btrbk-style INFO log (design D4, D5).
                 self._actions.append(
                     ActionRecord(
@@ -3125,6 +3185,7 @@ class Core:
                         name=result.name,
                         path=result.path,
                         size=result.new_allocation,
+                        disk=disk.target,
                     )
                 )
                 logger.info(
@@ -3264,9 +3325,7 @@ class Core:
         Returns ``ChainVerifyResult`` — never raises.
         """
         disk_cfg = vm_config.get_disk(disk)
-        snapshots = [
-            s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
-        ]
+        snapshots = [s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk]
         # Use the most recent snapshot of this disk as the chain entry
         # point, or fall back to the disk's base image if none exist.
         if snapshots:
@@ -3367,9 +3426,7 @@ class Core:
         could not be queried.
         """
         disk_cfg = vm_config.get_disk(disk)
-        snapshots = [
-            s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
-        ]
+        snapshots = [s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk]
         if snapshots:
             active_path = max(snapshots, key=lambda s: s.timestamp).path
         elif disk_cfg is not None:
@@ -3421,9 +3478,7 @@ class Core:
                     return path_map[disk]
             except ValueError:
                 pass  # fall through to the state heuristic
-        snapshots = [
-            s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
-        ]
+        snapshots = [s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk]
         if snapshots:
             newest = max(snapshots, key=lambda s: s.timestamp)
             logger.warning(
@@ -3722,7 +3777,10 @@ class Core:
                     # portion before the break, and auto-rebase the
                     # stuck snapshots onto the new base.
                     before_break, stuck = self._split_at_break(
-                        vm_config, disk, committable, verify_result.broken_file,
+                        vm_config,
+                        disk,
+                        committable,
+                        verify_result.broken_file,
                     )
                     if not before_break:
                         msg = (
@@ -3799,7 +3857,8 @@ class Core:
             mode=effective_mode,
         )
         result = manager.blockcommit(
-            vm_config, committable,
+            vm_config,
+            committable,
             disk=disk,
             base_image=base_image,
             deep_verify=vm_config.blockcommit_deep_verify,
@@ -3854,6 +3913,7 @@ class Core:
                     vm_name=vm_config.name,
                     name=sn.name,
                     path=sn.path,
+                    disk=disk,
                 )
             )
             # Unconditional state cleanup (design D5): state must reflect
@@ -3943,9 +4003,7 @@ class Core:
         """
         # Walk the backing chain to get the ordered list of file paths.
         disk_cfg = vm_config.get_disk(disk)
-        snapshots = [
-            s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
-        ]
+        snapshots = [s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk]
         if snapshots:
             active_path = max(snapshots, key=lambda s: s.timestamp).path
         elif disk_cfg is not None:
@@ -4014,8 +4072,7 @@ class Core:
             chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
         except json.JSONDecodeError:
             logger.warning(
-                "Could not parse backing chain for split-at-break — "
-                "treating all as committable"
+                "Could not parse backing chain for split-at-break — treating all as committable"
             )
             return committable, []
 
@@ -4076,7 +4133,9 @@ class Core:
         new_base = base_image
         for snap in sorted(stuck, key=lambda s: s.timestamp, reverse=True):
             exists = self._shell.run(
-                ["test", "-f", str(snap.path)], timeout=10, check=True,
+                ["test", "-f", str(snap.path)],
+                timeout=10,
+                check=True,
             )
             if not exists.success:
                 # File already gone — clean up state.
@@ -4167,8 +4226,7 @@ class Core:
             if getattr(result, "success", True):
                 if attempt > 1:
                     logger.info(
-                        "Operation for target %s succeeded on retry "
-                        "attempt %d/%d",
+                        "Operation for target %s succeeded on retry attempt %d/%d",
                         target.path,
                         attempt,
                         max_retries,
@@ -4189,8 +4247,7 @@ class Core:
 
             backoff = compute_backoff(base_seconds, attempt)
             logger.info(
-                "Retrying operation for target %s (attempt %d/%d, "
-                "backoff %.1fs)",
+                "Retrying operation for target %s (attempt %d/%d, backoff %.1fs)",
                 target.path,
                 attempt + 1,
                 max_retries,
@@ -4224,6 +4281,7 @@ class Core:
         Returns the list of ``BackupResult`` objects from the last
         attempt.
         """
+
         def operation() -> _RetryResult:
             results = provider.transfer_missing(
                 vm_config,
@@ -4268,9 +4326,7 @@ class Core:
         When ``last`` is ``None`` (first run): the disk is treated as
         changed (proceed).
         """
-        detector = self._factory.create_change_detector(
-            vm_config.change_detection_mode
-        )
+        detector = self._factory.create_change_detector(vm_config.change_detection_mode)
         change_results: dict[str, ChangeResult] = {}
         any_changed = False
 
@@ -4278,9 +4334,7 @@ class Core:
             change_result = detector.has_changed(vm_config, disk.target)
             change_results[disk.target] = change_result
 
-            last = self._state.get_last_backup_allocation(
-                str(target.path), disk.target
-            )
+            last = self._state.get_last_backup_allocation(str(target.path), disk.target)
             if last is None:
                 # First run (or after clear) for this disk — proceed.
                 any_changed = True
@@ -4294,8 +4348,7 @@ class Core:
             else:
                 # Unrecognized mode — fail-safe: proceed with backup.
                 logger.warning(
-                    "[backup] %s: unrecognized change_detection_mode %r — "
-                    "proceeding fail-safe",
+                    "[backup] %s: unrecognized change_detection_mode %r — proceeding fail-safe",
                     vm_config.name,
                     vm_config.change_detection_mode,
                 )
@@ -4342,9 +4395,7 @@ class Core:
         skip_transfer = False
         change_results: dict[str, ChangeResult] | None = None
         if target.backup_create == "onchange":
-            should_proceed, change_results = self._should_backup_onchange(
-                vm_config, target
-            )
+            should_proceed, change_results = self._should_backup_onchange(vm_config, target)
             if not should_proceed:
                 skip_transfer = True
 
@@ -4391,9 +4442,7 @@ class Core:
                 # Clear per-disk last_backup_allocation if no FULLs remain
                 if not filtered_fulls and all_fulls:
                     for disk in vm_config.disks:
-                        self._state.clear_last_backup_allocation(
-                            str(target.path), disk.target
-                        )
+                        self._state.clear_last_backup_allocation(str(target.path), disk.target)
                     logger.info(
                         "Cleared last_backup_allocation for target %s — no FULLs remain",
                         target.path,
@@ -4431,9 +4480,7 @@ class Core:
                             str(target.path), newest_full.name
                         )
                         chain_length = target.target_chain_length
-                        needs_full = (
-                            chain_length is not None and len(deps) > chain_length
-                        )
+                        needs_full = chain_length is not None and len(deps) > chain_length
                     if not needs_full:
                         continue
 
@@ -4441,8 +4488,7 @@ class Core:
                     disk_snaps = [s for s in snapshots if s.disk == disk_target]
                     if not disk_snaps:
                         logger.info(
-                            "[backup] %s: disk %s needs a FULL but has no "
-                            "snapshots — skipping",
+                            "[backup] %s: disk %s needs a FULL but has no snapshots — skipping",
                             vm_config.name,
                             disk_target,
                         )
@@ -4452,9 +4498,7 @@ class Core:
                     if self._dry_run:
                         # Log FULL-would-be-created without executing.
                         vm_state = (
-                            "running"
-                            if is_vm_running(self._shell, vm_config.name)
-                            else "stopped"
+                            "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
                         )
                         chain_length = target.target_chain_length or 0
                         logger.info(
@@ -4498,13 +4542,9 @@ class Core:
                                 ["rm", "-f", str(full_result.target_path)],
                                 timeout=10,
                             )
-                            self._cleanup_failed_checkpoint(
-                                vm_config, target, full_result
-                            )
+                            self._cleanup_failed_checkpoint(vm_config, target, full_result)
                             full_name = full_result.target_path.stem
-                            self._state.remove_full_backup(
-                                str(target.path), f"{full_name}.qcow2"
-                            )
+                            self._state.remove_full_backup(str(target.path), f"{full_name}.qcow2")
                             logger.warning(
                                 "FULL backup verification failed for VM %s "
                                 "target %s — rolled back: %s",
@@ -4520,6 +4560,7 @@ class Core:
                                 bytes_transferred=full_result.bytes_transferred,
                                 error=verify_error,
                                 duration=full_result.duration,
+                                disk=full_result.disk,
                             )
 
                         # Verification passed — record + log.
@@ -4537,6 +4578,7 @@ class Core:
                                 name=full_name,
                                 path=full_result.target_path,
                                 size=full_result.bytes_transferred,
+                                disk=mr.disk,
                             )
                         )
                         logger.info(
@@ -4548,9 +4590,7 @@ class Core:
                         )
                         return full_result
 
-                    full_result = self._execute_with_retry(
-                        _create_full_operation, target
-                    )
+                    full_result = self._execute_with_retry(_create_full_operation, target)
                     if not full_result.success:
                         # All retries exhausted or non-retryable failure —
                         # CRITICAL, keep old generations (verify-before-
@@ -4578,9 +4618,7 @@ class Core:
             # timestamp rolls past the snapshot's microsecond timestamp
             # (a spurious "backup failed" on an otherwise healthy FULL).
             if not self._dry_run:
-                transfer_list = [
-                    s for s in snapshots if s.name not in full_source_names
-                ]
+                transfer_list = [s for s in snapshots if s.name not in full_source_names]
                 results = self._transfer_with_retry(
                     provider,
                     vm_config,
@@ -4620,6 +4658,7 @@ class Core:
                                 path=r.target_path,
                                 size=r.bytes_transferred,
                                 duration=r.duration,
+                                disk=r.disk,
                             )
                         )
                         logger.info(
@@ -4837,21 +4876,15 @@ class Core:
         chain_map: dict[str, list[SnapshotInfo]] = {}
         for chain_id, chain_backups in chains.items():
             chain_map[chain_id] = chain_backups
-            full_backup = next(
-                (b for b in chain_backups if ".FULL." in b.name), None
-            )
+            full_backup = next((b for b in chain_backups if ".FULL." in b.name), None)
             representative = full_backup if full_backup else chain_backups[0]
-            chain_items.append(
-                RetentionItem(name=chain_id, timestamp=representative.timestamp)
-            )
+            chain_items.append(RetentionItem(name=chain_id, timestamp=representative.timestamp))
 
         policy = RetentionPolicy(
             chain_length=0, keep_generations=target.target_keep_generations or 1
         )
         engine = self._factory.create_retention_engine(policy)
-        chain_result = engine.evaluate(
-            chain_items, policy, datetime.now()
-        )
+        chain_result = engine.evaluate(chain_items, policy, datetime.now())
 
         # Expand chain-level results to individual items.
         remove_chains = set(chain_result.remove)
@@ -4898,9 +4931,7 @@ class Core:
             # Nothing to delete, but still run post-cleanup verification
             # on keep-set items (spec: per-chain-retention).
             if retention_result and retention_result.keep:
-                self._verify_keep_set_chains(
-                    backups, set(retention_result.keep), target
-                )
+                self._verify_keep_set_chains(backups, set(retention_result.keep), target)
             return
 
         keep_set = set(retention_result.keep)
@@ -4967,13 +4998,12 @@ class Core:
                         vm_name=vm_config.name,
                         name=backup.name,
                         path=backup.path,
+                        disk=backup.disk,
                     )
                 )
                 # Clean up state: remove FULL + all dependency records.
                 self._state.remove_full_backup(str(target.path), backup.name)
-                self._state.remove_all_incremental_dependencies(
-                    str(target.path), backup.name
-                )
+                self._state.remove_all_incremental_dependencies(str(target.path), backup.name)
             else:
                 # Incremental — resolve FULL anchor BEFORE deletion
                 # (the file is needed to walk the backing chain).
@@ -4991,13 +5021,12 @@ class Core:
                         vm_name=vm_config.name,
                         name=backup.name,
                         path=backup.path,
+                        disk=backup.disk,
                     )
                 )
                 # Clean up state: remove the incremental→FULL dependency.
                 if anchor is not None:
-                    self._state.remove_incremental_dependency(
-                        str(target.path), backup.name, anchor
-                    )
+                    self._state.remove_incremental_dependency(str(target.path), backup.name, anchor)
                 else:
                     # Anchor resolution failed (broken chain) — search
                     # all FULLs for this target to find and remove the
@@ -5060,9 +5089,7 @@ class Core:
         # disk's snapshot directory (per-disk dir, multi-disk refactor).
         disk_cfg = vm_config.get_disk(disk)
         snapshot_dir = (
-            vm_config.snapshot_dir_for(disk_cfg)
-            if disk_cfg is not None
-            else vm_config.snapshot_dir
+            vm_config.snapshot_dir_for(disk_cfg) if disk_cfg is not None else vm_config.snapshot_dir
         )
         name = base_name
         counter = 1

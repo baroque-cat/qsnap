@@ -345,14 +345,16 @@ def test_list_snapshots_tree_dispatches_to_core_list_snapshots(capsys):
                 path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1.qcow2"),
                 timestamp=datetime(2025, 7, 14, 10, 0),
                 allocation=1024,
-                    disk="vda",
+                disk="vda",
             ),
         ]
     }
     mock_core.list_config.return_value = [
         VMConfig(
             name="testvm",
-            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
+            disks=[
+                DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))
+            ],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
         )
     ]
@@ -542,7 +544,7 @@ def _make_deferred_summary(
         reason=reason,
         age=timedelta(hours=age_hours),
         since=since,
-            disk="vda",
+        disk="vda",
     )
 
 
@@ -675,7 +677,9 @@ def test_list_config_shows_off_for_default_deep_verify(capsys):
     mock_core.list_config.return_value = [
         VMConfig(
             name="testvm",
-            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
+            disks=[
+                DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))
+            ],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
             blockcommit_deep_verify=False,
         )
@@ -708,7 +712,11 @@ def test_list_config_shows_on_for_enabled_deep_verify(capsys):
     mock_core.list_config.return_value = [
         VMConfig(
             name="critical-db",
-            disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/critical-db.qcow2"))],
+            disks=[
+                DiskConfig(
+                    target="vda", base_image=Path("/var/lib/libvirt/images/critical-db.qcow2")
+                )
+            ],
             snapshot_dir=Path("/var/lib/libvirt/snapshots/critical-db"),
             blockcommit_deep_verify=True,
         )
@@ -961,6 +969,53 @@ def test_fork_command_missing_snapshot_exit_one(cli_app):
     assert result == EXIT_GENERIC
 
 
+def test_fork_local_dry_run_flag(cli_app):
+    """Parse 'fork snap1 --output /tmp/o.qcow2 --dry-run' and verify
+    handle_fork sets core.dry_run to True (local flag)."""
+    mock_core = _make_mock_core()
+    mock_core.dry_run = False
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/o.qcow2", "--dry-run"])
+    result = handle_fork(mock_core, args)
+    assert mock_core.dry_run is True
+    assert result == EXIT_SUCCESS
+    mock_core.fork.assert_called_once_with("snap1", Path("/tmp/o.qcow2"), None)
+
+
+def test_fork_global_n_flag(cli_app):
+    """Parse '-n fork snap1 --output /tmp/o.qcow2' and verify
+    handle_fork sets core.dry_run to True (global -n flag)."""
+    mock_core = _make_mock_core()
+    mock_core.dry_run = False
+    args = cli_app.parse_args(["-n", "fork", "snap1", "--output", "/tmp/o.qcow2"])
+    result = handle_fork(mock_core, args)
+    assert mock_core.dry_run is True
+    assert result == EXIT_SUCCESS
+    mock_core.fork.assert_called_once_with("snap1", Path("/tmp/o.qcow2"), None)
+
+
+def test_fork_no_dry_run_converts(cli_app):
+    """Parse 'fork snap1 --output /tmp/o.qcow2' with no dry-run flags
+    and verify core.dry_run remains False."""
+    mock_core = _make_mock_core()
+    mock_core.dry_run = False
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/o.qcow2"])
+    result = handle_fork(mock_core, args)
+    assert mock_core.dry_run is False
+    assert result == EXIT_SUCCESS
+    mock_core.fork.assert_called_once_with("snap1", Path("/tmp/o.qcow2"), None)
+
+
+def test_fork_dry_run_previews(cli_app):
+    """Dry-run fork calls Core.fork with core.dry_run=True; no file created."""
+    mock_core = _make_mock_core()
+    mock_core.dry_run = False
+    args = cli_app.parse_args(["fork", "snap1", "--output", "/tmp/o.qcow2", "--dry-run"])
+    result = handle_fork(mock_core, args)
+    assert result == EXIT_SUCCESS
+    assert mock_core.dry_run is True
+    mock_core.fork.assert_called_once_with("snap1", Path("/tmp/o.qcow2"), None)
+
+
 def test_handle_deploy_not_importable():
     """Verify that handle_deploy is NOT importable from commands module."""
     with pytest.raises(ImportError, match="cannot import name 'handle_deploy'"):
@@ -1111,12 +1166,18 @@ def test_list_latest_multi_disk_both_present(capsys):
     mock_core.list_latest.return_value = {
         "testvm": {
             "vda": SnapshotInfo(
-                name="snap-vda", path=Path("/tmp/snap-vda.qcow2"),
-                timestamp=dt1, allocation=1000, disk="vda",
+                name="snap-vda",
+                path=Path("/tmp/snap-vda.qcow2"),
+                timestamp=dt1,
+                allocation=1000,
+                disk="vda",
             ),
             "vdb": SnapshotInfo(
-                name="snap-vdb", path=Path("/tmp/snap-vdb.qcow2"),
-                timestamp=dt2, allocation=2000, disk="vdb",
+                name="snap-vdb",
+                path=Path("/tmp/snap-vdb.qcow2"),
+                timestamp=dt2,
+                allocation=2000,
+                disk="vdb",
             ),
         }
     }

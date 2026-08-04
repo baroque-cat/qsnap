@@ -25,7 +25,7 @@ from qsnap.interfaces.config import IConfigFacade
 from qsnap.interfaces.factory import IVMModuleFactory
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.config import GlobalConfig
+from qsnap.models.config import DiskConfig, GlobalConfig
 from qsnap.models.results import (
     BackupResult,
     RetentionResult,
@@ -199,13 +199,14 @@ def test_generate_snapshot_name_appends_collision_suffix(
         shell=mock_shell,
     )
 
-    with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
-        # Mock token_hex to return the same value → forces collision.
-        with patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"):
-            name1 = core._generate_snapshot_name(vm, disk="vda")
-            assert name1 == "testvm.20250713T153123_vda_a1b2c3"
-            (tmp_path / f"{name1}.qcow2").touch()
-            name2 = core._generate_snapshot_name(vm, disk="vda")
+    with (
+        frozen_clock(datetime(2025, 7, 13, 15, 31, 23)),
+        patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"),
+    ):
+        name1 = core._generate_snapshot_name(vm, disk="vda")
+        assert name1 == "testvm.20250713T153123_vda_a1b2c3"
+        (tmp_path / f"{name1}.qcow2").touch()
+        name2 = core._generate_snapshot_name(vm, disk="vda")
 
     assert name2 == "testvm.20250713T153123_vda_a1b2c3_1"
 
@@ -236,12 +237,14 @@ def test_generate_snapshot_name_collision_increments_suffix(
         shell=mock_shell,
     )
 
-    with frozen_clock(datetime(2025, 7, 13, 15, 31, 23)):
-        with patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"):
-            name1 = core._generate_snapshot_name(vm, disk="vda")
-            (tmp_path / f"{name1}.qcow2").touch()
-            (tmp_path / f"{name1}_1.qcow2").touch()
-            name2 = core._generate_snapshot_name(vm, disk="vda")
+    with (
+        frozen_clock(datetime(2025, 7, 13, 15, 31, 23)),
+        patch("qsnap.core.secrets.token_hex", return_value="a1b2c3"),
+    ):
+        name1 = core._generate_snapshot_name(vm, disk="vda")
+        (tmp_path / f"{name1}.qcow2").touch()
+        (tmp_path / f"{name1}_1.qcow2").touch()
+        name2 = core._generate_snapshot_name(vm, disk="vda")
 
     assert name2 == "testvm.20250713T153123_vda_a1b2c3_2"
 
@@ -444,7 +447,6 @@ def test_core_passes_quiesce_true_to_snapshot_provider(
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=True,
-
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -484,7 +486,6 @@ def test_core_passes_quiesce_false_to_snapshot_provider(
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=False,
-
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -601,6 +602,7 @@ def test_action_appended_on_snapshot_create(
     snap_actions = [a for a in result.actions if a.action == "snapshot_create"]
     assert len(snap_actions) == 1, "Should contain exactly one snapshot_create action"
     assert snap_actions[0].vm_name == "testvm"
+    assert snap_actions[0].disk == "vda"
     assert snap_actions[0].size == 65536  # MockSnapshotProvider default
     assert snap_actions[0].error is None
 
@@ -622,7 +624,6 @@ def test_action_appended_on_snapshot_delete(
     )
     vm = make_vm_config(
         name="testvm",
-
         snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -639,7 +640,6 @@ def test_action_appended_on_snapshot_delete(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -668,6 +668,7 @@ def test_action_appended_on_snapshot_delete(
     assert len(delete_actions) == 1, "Should contain one snapshot_delete action"
     assert delete_actions[0].vm_name == "testvm"
     assert delete_actions[0].name == "snap_old"
+    assert delete_actions[0].disk == "vda"
 
 
 # ── test_action_appended_on_backup_transfer ────────────────────────────────
@@ -696,7 +697,6 @@ def test_action_appended_on_backup_transfer(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -714,6 +714,7 @@ def test_action_appended_on_backup_transfer(
     assert len(transfer_actions) == 1, "Should contain one backup_transfer action"
     assert transfer_actions[0].vm_name == "testvm"
     assert transfer_actions[0].name == "snap1"
+    assert transfer_actions[0].disk == "vda"
     assert transfer_actions[0].size == 1048576  # MockBitmapBackupProvider default
 
     # Verify Core passes compression_type and stall_timeout to transfer_missing.
@@ -748,7 +749,6 @@ def test_action_appended_on_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -770,6 +770,7 @@ def test_action_appended_on_full_backup(
     full_actions = [a for a in result.actions if a.action == "backup_full"]
     assert len(full_actions) == 1, "Should contain one backup_full action"
     assert full_actions[0].vm_name == "testvm"
+    assert full_actions[0].disk == "vda"
     assert full_actions[0].size == 1048576  # MockBitmapBackupProvider default
 
     # Verify Core passes compression_type and stall_timeout to create_full_backup.
@@ -806,7 +807,6 @@ def test_action_appended_on_backup_delete(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -817,7 +817,6 @@ def test_action_appended_on_backup_delete(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-
         disk="vda",
     )
 
@@ -841,6 +840,7 @@ def test_action_appended_on_backup_delete(
     assert len(delete_actions) == 1, "Should contain one backup_delete action"
     assert delete_actions[0].vm_name == "testvm"
     assert delete_actions[0].name == "testvm.FULL.backup1.qcow2"
+    assert delete_actions[0].disk == "vda"
 
 
 # ── test_error_action_appended_on_failure ──────────────────────────────────
@@ -875,9 +875,8 @@ def test_error_action_appended_on_failure(
     error_actions = [a for a in result.actions if a.action == "error"]
     assert len(error_actions) == 1, "Should contain exactly one error action"
     assert error_actions[0].vm_name == "testvm"
-    assert "Simulated failure" in error_actions[0].error or "" in (error_actions[0].error or ""), (
-        "Error message should be captured"
-    )
+    assert error_actions[0].disk is None, "VM-level error record should have disk=None"
+    assert "Simulated failure" in (error_actions[0].error or ""), "Error message should be captured"
     assert result.success is False
 
 
@@ -908,6 +907,50 @@ def test_no_actions_in_dry_run_mutations(
     assert len(result.actions) == 0, (
         f"Dry-run should produce no mutation actions, got: {result.actions}"
     )
+
+
+# ── test_multi_disk_actions_each_carry_disk ────────────────────────────────
+
+
+def test_multi_disk_actions_each_carry_disk(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    frozen_clock,
+):
+    """2-disk VM; each disk's ActionRecord carries its own disk."""
+    disks = [
+        DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm_vda.qcow2")),
+        DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm_vdb.qcow2")),
+    ]
+    vm = make_vm_config(name="testvm", disks=disks)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    with (
+        frozen_clock(datetime(2025, 7, 13, 15, 31, 23)),
+        patch("qsnap.core.secrets.token_hex", side_effect=["a1b2c3", "d4e5f6"]),
+    ):
+        result = core.snapshot()
+
+    snap_actions = [a for a in result.actions if a.action == "snapshot_create"]
+    assert len(snap_actions) == 2, (
+        f"Should have 2 snapshot_create actions (one per disk), got: {len(snap_actions)}"
+    )
+    disks_found = {a.disk for a in snap_actions}
+    assert disks_found == {"vda", "vdb"}, f"Expected disks vda and vdb, got: {disks_found}"
+    # Each action carries its own disk name.
+    for action in snap_actions:
+        assert action.vm_name == "testvm"
+        assert action.disk in {"vda", "vdb"}
+        assert action.size == 65536  # MockSnapshotProvider default
+        assert action.error is None
 
 
 # ── test_pipeline_result_includes_actions_success ──────────────────────────
@@ -1000,7 +1043,6 @@ def test_backup_failed_warning_with_transfer_failures(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1058,7 +1100,6 @@ def test_no_backup_failed_warning_when_all_succeed(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1163,7 +1204,6 @@ def test_snapshot_delete_info_log(
     )
     vm = make_vm_config(
         name="testvm",
-
         snapshot_chain_length=0,
     )
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
@@ -1179,7 +1219,6 @@ def test_snapshot_delete_info_log(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1238,7 +1277,6 @@ def test_backup_transfer_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1286,7 +1324,6 @@ def test_full_backup_create_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1336,7 +1373,6 @@ def test_backup_delete_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1346,7 +1382,6 @@ def test_backup_delete_info_log(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-
         disk="vda",
     )
 
@@ -1378,6 +1413,3 @@ def test_backup_delete_info_log(
     )
     assert "testvm" in delete_lines[0]
     assert "testvm.FULL.backup1" in delete_lines[0]
-
-
-

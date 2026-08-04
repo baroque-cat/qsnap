@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -744,3 +745,147 @@ class JsonStateManager(IStateManager):
             if target_path in data:
                 del data[target_path]
                 self._save_target_state(data)
+
+    # ── Per-disk state reset (restore support, design D4) ─────────────
+
+    @staticmethod
+    def _snapshot_entry_disk(entry: Mapping[str, object]) -> str:
+        """Resolve the disk for a stored snapshot/FULL-backup entry.
+
+        Mirrors the read-time resolution: an explicit ``disk`` field wins;
+        otherwise the disk is parsed from the record name, falling back to
+        the legacy fallback disk.
+        """
+        raw_disk = entry.get("disk")
+        if raw_disk is not None:
+            return str(raw_disk)
+        name = str(entry.get("name", ""))
+        return parse_disk_from_snapshot_name(name) or _LEGACY_FALLBACK_DISK
+
+    def reset_vm_disk_state(self, vm_name: str, disk: str) -> None:
+        """Atomically clear the per-VM state that belongs to *disk* only.
+
+        Per-disk counterpart of :meth:`reset_vm_state`.  Removes only the
+        snapshots, ``last_allocation`` entry, and deferred operations that
+        belong to *disk*; state of the VM's other disks is preserved.  If
+        the VM has no state file, no file is created (no-op).
+        """
+        path = self._state_path(vm_name)
+        if not path.exists():
+            return
+        data = self._load(vm_name)
+
+        # Snapshots: keep only those NOT belonging to *disk*.
+        raw_snaps = data.get("snapshots", [])
+        if raw_snaps:
+            snaps = cast(list[dict[str, object]], raw_snaps)
+            data["snapshots"] = [s for s in snaps if self._snapshot_entry_disk(s) != disk]
+
+        # last_allocation: remove the *disk* key from the per-disk dict.  A
+        # legacy bare-int value cannot be attributed to a disk and is left
+        # untouched (treated as absent).
+        last_alloc = data.get("last_allocation")
+        if isinstance(last_alloc, dict) and disk in last_alloc:
+            del last_alloc[disk]
+            data["last_allocation"] = last_alloc
+
+        # Deferred operations: keep only those NOT belonging to *disk*.  The
+        # disk is resolved the same way as on read (explicit field, else
+        # parsed from the first snapshot name, else the legacy fallback).
+        raw_deferred = data.get("deferred_operations", [])
+        if raw_deferred:
+            deferred = cast(list[dict[str, object]], raw_deferred)
+            kept: list[dict[str, object]] = []
+            for d in deferred:
+                raw_disk = d.get("disk")
+                if raw_disk is not None:
+                    d_disk = str(raw_disk)
+                else:
+                    snaps_list = cast(list[str], d.get("snapshots", []))
+                    d_disk = _LEGACY_FALLBACK_DISK
+                    if snaps_list:
+                        d_disk = parse_disk_from_snapshot_name(str(snaps_list[0])) or d_disk
+                if d_disk != disk:
+                    kept.append(d)
+            data["deferred_operations"] = kept
+
+        self._save(vm_name, data)
+
+    def reset_target_disk_state(self, target_path: str, vm_name: str, disk: str) -> None:
+        """Atomically clear the per-target state that belongs to one disk.
+
+        Per-disk counterpart of :meth:`reset_target_state`.  Removes only
+        the full-backup records, incremental dependencies, and
+        ``last_backup_allocation`` entry that belong to ``(vm_name, disk)``;
+        backup state of other VMs and other disks on the same target is
+        preserved.
+        """
+        vm_prefix = f"{vm_name}."
+
+        # _full_backups.json: drop entries whose name starts with
+        # "{vm_name}." AND whose disk equals *disk*.  The resolved disk of
+        # every original entry is remembered so the dependency cleanup
+        # below removes exactly the deps of the removed FULL records.
+        fb_path = self._full_backups_path()
+        full_disk_by_name: dict[str, str] = {}
+        if fb_path.exists():
+            fb_data = self._load_full_backups()
+            entries = fb_data.get(target_path, [])
+            if entries:
+                # Dependency keys are stored in normalized stem form (see
+                # _normalize_full_name), so the map uses the same form.
+                full_disk_by_name = {
+                    self._normalize_full_name(
+                        str(entry.get("name", ""))
+                    ): self._snapshot_entry_disk(entry)
+                    for entry in entries
+                }
+                kept_entries = [
+                    entry
+                    for entry in entries
+                    if not (
+                        str(entry.get("name", "")).startswith(vm_prefix)
+                        and self._snapshot_entry_disk(entry) == disk
+                    )
+                ]
+                if len(kept_entries) != len(entries):
+                    fb_data[target_path] = kept_entries
+                    self._save_full_backups(fb_data)
+
+        # _dependencies.json: drop FULL-anchor keys that belong to
+        # (vm_name, disk).  The disk is resolved from the corresponding
+        # full-backup record first (so legacy FULL names without a
+        # parseable disk segment still match via their stored disk
+        # field); keys without a record fall back to name parsing.
+        dep_path = self._dependencies_path()
+        if dep_path.exists():
+            dep_data = self._load_dependencies()
+            target_deps = dep_data.get(target_path, {})
+            if target_deps:
+                removable = []
+                for full_key in target_deps:
+                    if not full_key.startswith(vm_prefix):
+                        continue
+                    resolved = full_disk_by_name.get(full_key)
+                    if resolved is None:
+                        resolved = parse_disk_from_snapshot_name(full_key)
+                    if resolved == disk:
+                        removable.append(full_key)
+                if removable:
+                    for full_key in removable:
+                        del target_deps[full_key]
+                    dep_data[target_path] = target_deps
+                    self._save_dependencies(dep_data)
+
+        # _target_state.json: remove the last_backup_allocation[disk] entry.
+        ts_path = self._target_state_path()
+        if ts_path.exists():
+            ts_data = self._load_target_state()
+            entry = ts_data.get(target_path)
+            if entry is not None:
+                value = entry.get("last_backup_allocation")
+                if isinstance(value, dict) and disk in value:
+                    del value[disk]
+                    entry["last_backup_allocation"] = value
+                    ts_data[target_path] = entry
+                    self._save_target_state(ts_data)

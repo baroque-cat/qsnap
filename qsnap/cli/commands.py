@@ -58,9 +58,7 @@ def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
     for vm in vms:
         # Multi-disk: list each disk's target and base image instead of a
         # single VM-level base_image.
-        disks_desc = ", ".join(
-            f"{d.target}={d.base_image}" for d in vm.disks
-        )
+        disks_desc = ", ".join(f"{d.target}={d.base_image}" for d in vm.disks)
         rows.append(
             {
                 "name": vm.name,
@@ -557,6 +555,9 @@ def handle_fork(core: Core, args: Namespace) -> int:
     snapshot_name: str = args.snapshot_name
     output_path = Path(args.output)
     vm_filter = _get_vm_filter(args)
+
+    if getattr(args, "dry_run", False):
+        core.dry_run = True
 
     result = core.fork(snapshot_name, output_path, vm_filter)
 
