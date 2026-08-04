@@ -111,8 +111,25 @@ state_dir = "/var/lib/qsnap/state"
 
 [[vm]]
 name = "debiantest"
-base_image = "/var/lib/libvirt/images/debiantest.qcow2"
+
+# Default snapshot directory for all disks of this VM.  Individual disks
+# may override it via their own snapshot_dir (see [[vm.disk]] below).
 snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
+
+# ── Disk definitions ───────────────────────────────────────────────────
+# Each disk of the VM gets its own [[vm.disk]] section with a libvirt
+# target device name and its own base qcow2 image.  A VM must define at
+# least one disk; disk targets must be unique.  Multi-disk VMs add one
+# [[vm.disk]] section per disk (vda, vdb, ...).  Every disk of a VM must
+# resolve to a DISTINCT snapshot directory: give each additional disk its
+# own snapshot_dir override (sharing one directory between disks is
+# rejected at config parse time).
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/debiantest.qcow2"
+  # Optional per-disk snapshot directory override (inherits the VM-level
+  # snapshot_dir when omitted):
+  # snapshot_dir = "/fast-nvme/snaps/debiantest-vda"
 
 # Override snapshot creation mode: "always" (default) or "onchange"
 # snapshot_create = "onchange"
@@ -143,9 +160,8 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #                        less sensitive)
 # change_detection_mode = "allocation-map"
 
-# Explicit list of disk targets (e.g. ["vda", "vdb"]).  When unset,
-# qsnap auto-discovers all disks via virsh domblklist.
-# disks = ["vda"]
+# Disks are defined via [[vm.disk]] sections above (one per disk).  There
+# is no separate disk list — each [[vm.disk]] names its target device.
 
 # Override snapshot chain length for this VM
 # snapshot_chain_length = 336
@@ -225,12 +241,15 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 #
 # [[vm]]
 # name = "critical-db"
-# base_image = "/var/lib/libvirt/images/critical-db.qcow2"
 # snapshot_dir = "/var/lib/libvirt/snapshots/critical-db"
 # snapshot_create = "onchange"
 # snapshot_preserve_min = 48       # always keep newest 48 snapshots
 # snapshot_quiesce = true
 # blockcommit_deep_verify = true
+#
+#   [[vm.disk]]
+#   target = "vda"
+#   base_image = "/var/lib/libvirt/images/critical-db.qcow2"
 #
 #   [[vm.target]]
 #   path = "/mnt/backup/critical-db"
