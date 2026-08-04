@@ -43,6 +43,7 @@ def _snapshots_to_rows(data: dict[str, list[SnapshotInfo]]) -> list[dict[str, st
             rows.append(
                 {
                     "vm": vm_name,
+                    "disk": snap.disk,
                     "name": snap.name,
                     "path": str(snap.path),
                     "timestamp": snap.timestamp.isoformat(),
@@ -55,11 +56,16 @@ def _snapshots_to_rows(data: dict[str, list[SnapshotInfo]]) -> list[dict[str, st
 def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for vm in vms:
+        # Multi-disk: list each disk's target and base image instead of a
+        # single VM-level base_image.
+        disks_desc = ", ".join(
+            f"{d.target}={d.base_image}" for d in vm.disks
+        )
         rows.append(
             {
                 "name": vm.name,
-                "base_image": str(vm.base_image),
-                "snapshot_dir": str(vm.snapshot_dir),
+                "disks": disks_desc,
+                "snapshot_dir": str(vm.snapshot_dir) if vm.snapshot_dir else "-",
                 "snapshot_create": vm.snapshot_create,
                 "targets": str(len(vm.targets)),
                 "blockcommit_deep_verify": "ON" if vm.blockcommit_deep_verify else "OFF",
@@ -68,18 +74,20 @@ def _config_to_rows(vms: list[VMConfig]) -> list[dict[str, str]]:
     return rows
 
 
-def _latest_to_rows(
-    data: dict[str, SnapshotInfo | None],
+def _backups_to_rows(
+    data: dict[str, list[tuple[str, SnapshotInfo]]],
 ) -> list[dict[str, str]]:
+    """Flatten per-VM ``(target_path, backup)`` lists into table rows."""
     rows: list[dict[str, str]] = []
-    for vm_name, snap in data.items():
-        if snap is None:
-            rows.append({"vm": vm_name, "name": "-", "timestamp": "-", "allocation": "-"})
-        else:
+    for vm_name, backups in data.items():
+        for target_path, snap in backups:
             rows.append(
                 {
                     "vm": vm_name,
+                    "target": target_path,
+                    "disk": snap.disk,
                     "name": snap.name,
+                    "path": str(snap.path),
                     "timestamp": snap.timestamp.isoformat(),
                     "allocation": str(snap.allocation),
                 }
@@ -87,59 +95,108 @@ def _latest_to_rows(
     return rows
 
 
+def _latest_to_rows(
+    data: dict[str, dict[str, SnapshotInfo | None]],
+) -> list[dict[str, str]]:
+    """Flatten per-VM, per-disk latest snapshots into table rows.
+
+    Multi-disk: one row per (VM, disk).  Disks without snapshots render
+    placeholder ``-`` values.
+    """
+    rows: list[dict[str, str]] = []
+    for vm_name, per_disk in data.items():
+        if not per_disk:
+            rows.append(
+                {"vm": vm_name, "disk": "-", "name": "-", "timestamp": "-", "allocation": "-"}
+            )
+            continue
+        for disk, snap in per_disk.items():
+            if snap is None:
+                rows.append(
+                    {"vm": vm_name, "disk": disk, "name": "-", "timestamp": "-", "allocation": "-"}
+                )
+            else:
+                rows.append(
+                    {
+                        "vm": vm_name,
+                        "disk": disk,
+                        "name": snap.name,
+                        "timestamp": snap.timestamp.isoformat(),
+                        "allocation": str(snap.allocation),
+                    }
+                )
+    return rows
+
+
 def _print_tree(
     data: dict[str, list[SnapshotInfo]],
     vm_configs: list[VMConfig],
 ) -> None:
-    """Print snapshots as an indented backing-chain tree.
+    """Print snapshots as indented backing-chain trees grouped by disk.
 
-    The backing chain is: base_image ← snap1 ← snap2 ← ...
-    Each level is indented one step deeper than its parent.
+    Multi-disk: each disk has its own chain (base_image ← snap1 ← ...).
+    Snapshots are grouped by their disk target, and each group is printed
+    as an indented tree rooted at that disk's base image.
     """
-    base_map = {vm.name: vm.base_image for vm in vm_configs}
+    vm_map = {vm.name: vm for vm in vm_configs}
     for vm_name, snapshots in data.items():
         print(f"=== {vm_name} ===")
-        base = base_map.get(vm_name)
-        if base is not None:
-            print(f"{base.name}")
-        else:
-            print("(unknown base image)")
-        for i, snap in enumerate(snapshots):
-            indent = "  " * (i + 1)
-            print(f"{indent}{snap.path.name}")
+        vm = vm_map.get(vm_name)
+        # Group snapshots by disk, preserving order within each disk.
+        by_disk: dict[str, list[SnapshotInfo]] = {}
+        for snap in snapshots:
+            by_disk.setdefault(snap.disk, []).append(snap)
+        for disk, disk_snaps in by_disk.items():
+            base = vm.get_disk(disk).base_image if vm and vm.get_disk(disk) else None
+            if base is not None:
+                print(f"[{disk}] {base.name}")
+            else:
+                print(f"[{disk}] (unknown base image)")
+            for i, snap in enumerate(disk_snaps):
+                indent = "  " * (i + 1)
+                print(f"{indent}{snap.path.name}")
 
 
 def _print_backup_tree(
     data: dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]],
     vm_configs: list[VMConfig],
 ) -> None:
-    """Print backup chains as an indented tree grouped by FULL anchor.
+    """Print backup chains as an indented tree grouped by disk, then FULL anchor.
 
-    Each target is shown with a header.  FULL backups are displayed at
-    the top level with their dependent incrementals indented beneath.
-    Orphan backups (no FULL anchor) are displayed under ``(orphan)``.
+    Each target is shown with a header.  Within a target, chains are
+    grouped by disk target (multi-disk refactor) and each disk's FULL
+    backups are displayed with their dependent incrementals indented
+    beneath.  Orphan backups (no FULL anchor) are displayed under
+    ``(orphan)``.
     """
     for vm_name, target_chains in data.items():
         print(f"=== {vm_name} ===")
         for target_path, chains in target_chains:
             print(f"Target: {target_path}")
+            # Group chains by disk target (each chain belongs to one disk).
+            disk_chains: dict[str, dict[str, list[SnapshotInfo]]] = {}
             for chain_id, backups in chains.items():
-                if chain_id == "__orphan__":
-                    print("  (orphan)")
-                    for b in backups:
-                        print(f"    {b.path.name}")
-                else:
-                    # FULL first, then incrementals
-                    fulls = [b for b in backups if ".FULL." in b.name]
-                    incrementals = [b for b in backups if ".FULL." not in b.name]
-                    for full in fulls:
-                        print(f"  {full.path.name}")
-                        for inc in incrementals:
-                            print(f"    {inc.path.name}")
-                    if not fulls:
-                        # Chain with no FULL (shouldn't happen, but handle)
+                disk = backups[0].disk if backups else ""
+                disk_chains.setdefault(disk, {})[chain_id] = backups
+            for disk, per_disk_chains in sorted(disk_chains.items()):
+                print(f"  [{disk}]")
+                for chain_id, backups in per_disk_chains.items():
+                    if chain_id == "__orphan__":
+                        print("    (orphan)")
                         for b in backups:
-                            print(f"  {b.path.name}")
+                            print(f"      {b.path.name}")
+                    else:
+                        # FULL first, then incrementals
+                        fulls = [b for b in backups if ".FULL." in b.name]
+                        incrementals = [b for b in backups if ".FULL." not in b.name]
+                        for full in fulls:
+                            print(f"    {full.path.name}")
+                            for inc in incrementals:
+                                print(f"      {inc.path.name}")
+                        if not fulls:
+                            # Chain with no FULL (shouldn't happen, but handle)
+                            for b in backups:
+                                print(f"    {b.path.name}")
 
 
 def _check_to_rows(data: dict[str, CheckResult]) -> list[dict[str, str]]:
@@ -188,7 +245,7 @@ def _state_check_to_rows(
 
 def _stats_to_rows(
     snapshots: dict[str, list[SnapshotInfo]],
-    backups: dict[str, list[SnapshotInfo]],
+    backups: dict[str, list[tuple[str, SnapshotInfo]]],
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     all_vms = set(snapshots.keys()) | set(backups.keys())
@@ -201,7 +258,7 @@ def _stats_to_rows(
                 "snapshots": str(len(snaps)),
                 "snapshot_size": str(sum(s.allocation for s in snaps)),
                 "backups": str(len(bcks)),
-                "backup_size": str(sum(b.allocation for b in bcks)),
+                "backup_size": str(sum(b.allocation for _, b in bcks)),
             }
         )
     return rows
@@ -299,21 +356,21 @@ def handle_list(core: Core, args: Namespace) -> int:
             _print_tree(data, core.list_config())
             return EXIT_SUCCESS
         rows = _snapshots_to_rows(data)
-        columns = ["vm", "name", "path", "timestamp", "allocation"]
+        columns = ["vm", "disk", "name", "path", "timestamp", "allocation"]
     elif sub == "backups":
         if getattr(args, "tree", False):
             data = core.list_backups(vm_filter, tree=True)
             _print_backup_tree(data, core.list_config())
             return EXIT_SUCCESS
         data = core.list_backups(vm_filter)
-        rows = _snapshots_to_rows(data)
-        columns = ["vm", "name", "path", "timestamp", "allocation"]
+        rows = _backups_to_rows(data)
+        columns = ["vm", "target", "disk", "name", "path", "timestamp", "allocation"]
     elif sub == "config":
         vms = core.list_config()
         rows = _config_to_rows(vms)
         columns = [
             "name",
-            "base_image",
+            "disks",
             "snapshot_dir",
             "snapshot_create",
             "targets",
@@ -334,7 +391,7 @@ def handle_list(core: Core, args: Namespace) -> int:
     elif sub == "latest":
         data = core.list_latest(vm_filter)
         rows = _latest_to_rows(data)
-        columns = ["vm", "name", "timestamp", "allocation"]
+        columns = ["vm", "disk", "name", "timestamp", "allocation"]
     elif sub == "deferred":
         return handle_list_deferred(core, args)
     else:

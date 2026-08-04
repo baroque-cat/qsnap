@@ -35,25 +35,26 @@ class AllocationSizeDetector(IChangeDetector):
 
     # ── IChangeDetector implementation ────────────────────────────────
 
-    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
-        """Check whether the VM disk allocation has grown since last run.
+    def has_changed(self, vm_config: VMConfig, disk: str) -> ChangeResult:
+        """Check whether the given disk's allocation has grown since last run.
 
-        When *disk* is provided, scope detection to that specific disk.
-        When omitted, use the first discovered disk (backward-compatible).
+        Detection is per-disk (multi-disk refactor): *disk* is the libvirt
+        target device name to check.
 
         Fail-safe: any command failure returns ``changed=True``
         (rather create an unnecessary snapshot than miss changes).
         """
-        # Step 1: Get last allocation from state
-        last_alloc = self._state.get_last_allocation(vm_config.name)
+        # Step 1: Get the per-disk last allocation from state.
+        last_alloc = self._state.get_last_allocation(vm_config.name, disk)
         if last_alloc is None:
             return ChangeResult(
                 changed=True,
                 last_allocation=0,
                 current_allocation=0,
+                disk=disk,
             )
 
-        # Step 2: Get active disk paths via domblklist (design D3)
+        # Step 2: Get active disk paths via domblklist (design D3).
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
         domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
@@ -61,29 +62,20 @@ class AllocationSizeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
         disks = parse_domblklist_disks(domblklist_result.stdout)
-        if not disks:
+        active_disk = next((path for target, path in disks if target == disk), None)
+        if active_disk is None:
             return ChangeResult(
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
-        # Resolve the target disk path.
-        if disk is not None:
-            active_disk = next((path for target, path in disks if target == disk), None)
-            if active_disk is None:
-                return ChangeResult(
-                    changed=True,
-                    last_allocation=last_alloc,
-                    current_allocation=0,
-                )
-        else:
-            active_disk = disks[0][1]
-
-        # Step 3: Get current allocation via qemu-img info
+        # Step 3: Get current allocation via qemu-img info.
         info_cmd = [
             "qemu-img",
             "info",
@@ -97,6 +89,7 @@ class AllocationSizeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
         try:
@@ -107,11 +100,13 @@ class AllocationSizeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
-        # Step 5: Compare
+        # Step 5: Compare.
         return ChangeResult(
             changed=(current_alloc > last_alloc),
             last_allocation=last_alloc,
             current_allocation=current_alloc,
+            disk=disk,
         )

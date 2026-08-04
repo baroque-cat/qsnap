@@ -7,13 +7,13 @@ Dependency: ``IShell`` only.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
 from qsnap.utils.mac import detect_mac_denial
-from qsnap.utils.parsing import parse_domblklist_target
 from qsnap.utils.verification import deep_verify_base_image
 
 logger = logging.getLogger(__name__)
@@ -37,42 +37,29 @@ class BlockCommitManager(ILifecycleManager):
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
         *,
+        disk: str,
+        base_image: Path,
         deep_verify: bool = False,
     ) -> CommitResult:
-        """Merge snapshots into the base image via ``virsh blockcommit``.
+        """Merge snapshots of one disk into that disk's base image.
+
+        Multi-disk (refactor): *disk* is the libvirt target device name and
+        *base_image* is this disk's base qcow2 path.  The ``--path`` and
+        ``--base`` arguments are taken from these parameters (not derived
+        from a single VM-level base image).
 
         1. If the list is empty → no-op success.
-        2. Resolve the disk target via ``virsh domblklist``.
-        3. For each snapshot (oldest first): ``virsh blockcommit --delete
+        2. For each snapshot (oldest first): ``virsh blockcommit --delete
            --verbose --wait``.  Short-circuit on first failure (design D4).
-        4. When *deep_verify* is True, run ``qemu-img check`` on the base
-           image after a successful commit.  If corruptions are detected,
-           return ``CommitResult(success=False)``.
+        3. When *deep_verify* is True, run ``qemu-img check`` on
+           *base_image* after a successful commit.  If corruptions are
+           detected, return ``CommitResult(success=False)``.
         """
         # Step 1: Empty list → no-op
         if not snapshots_to_merge:
             return CommitResult(success=True, committed_snapshot="", error=None)
 
-        # Step 2: Get disk target via domblklist
-        domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
-        domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
-        if not domblklist_result.success:
-            return CommitResult(
-                success=False,
-                committed_snapshot="",
-                error=domblklist_result.error,
-            )
-
-        try:
-            target = parse_domblklist_target(domblklist_result.stdout)
-        except ValueError:
-            return CommitResult(
-                success=False,
-                committed_snapshot="",
-                error="Failed to parse disk target from domblklist output",
-            )
-
-        # Step 3: Merge each snapshot (oldest first)
+        # Step 2: Merge each snapshot (oldest first)
         last_merged = ""
         for snapshot in snapshots_to_merge:
             cmd = [
@@ -81,9 +68,9 @@ class BlockCommitManager(ILifecycleManager):
                 "--domain",
                 vm_config.name,
                 "--path",
-                target,
+                disk,
                 "--base",
-                str(vm_config.base_image),
+                str(base_image),
                 "--top",
                 str(snapshot.path),
                 "--delete",
@@ -108,9 +95,9 @@ class BlockCommitManager(ILifecycleManager):
                 )
             last_merged = snapshot.name
 
-        # Deep verify: run qemu-img check on base image after commit
+        # Deep verify: run qemu-img check on the disk's base image after commit
         if deep_verify:
-            fail = deep_verify_base_image(self._shell, vm_config.base_image)
+            fail = deep_verify_base_image(self._shell, base_image)
             if fail is not None:
                 return fail
 

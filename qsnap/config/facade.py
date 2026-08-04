@@ -8,13 +8,14 @@ target), and produces immutable frozen dataclasses.  Implements
 from __future__ import annotations
 
 import logging
+import os
 import re
 import tomllib
 from pathlib import Path
 from typing import cast
 
 from qsnap.interfaces.config import IConfigFacade
-from qsnap.models.config import GlobalConfig, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.utils.time import parse_stall_timeout
 
 logger = logging.getLogger(__name__)
@@ -270,14 +271,15 @@ class ConfigFacade(IConfigFacade):
         vm_raw: dict[str, object],
         global_cfg: GlobalConfig,
     ) -> VMConfig:
-        # Validate required fields.
-        for field_name in ("name", "base_image", "snapshot_dir"):
-            if field_name not in vm_raw:
-                raise ConfigError(f"Missing required VM field: {field_name!r}")
+        # Validate required fields.  ``name`` is required at the VM level;
+        # each disk's ``base_image`` moved into ``[[vm.disk]]`` sections
+        # (multi-disk refactor), and ``snapshot_dir`` is an optional
+        # VM-level default that per-disk entries may override.
+        if "name" not in vm_raw:
+            raise ConfigError("Missing required VM field: 'name'")
 
         name = str(vm_raw["name"])
-        base_image = Path(str(vm_raw["base_image"]))
-        snapshot_dir = Path(str(vm_raw["snapshot_dir"]))
+        snapshot_dir = Path(str(vm_raw["snapshot_dir"])) if "snapshot_dir" in vm_raw else None
 
         # snapshot_create: VM-level or default "always".
         snapshot_create = str(vm_raw.get("snapshot_create", "always"))
@@ -363,14 +365,46 @@ class ConfigFacade(IConfigFacade):
         else:
             vm_backup_create = global_cfg.backup_create
 
-        # disks: optional explicit list of disk targets.
-        disks_raw = vm_raw.get("disks")
-        if disks_raw is not None:
-            if not isinstance(disks_raw, list):
-                raise ConfigError("'disks' must be an array of strings")
-            disks: list[str] | None = [str(d) for d in disks_raw]  # type: ignore[unknown-argument-type, unknown-variable-type]
-        else:
-            disks = None
+        # disks: one or more [[vm.disk]] sections, each describing a disk
+        # target with its own base image (multi-disk refactor).  A VM must
+        # define at least one disk; disk targets must be unique.
+        disk_sections = cast(list[dict[str, object]], vm_raw.get("disk", []))
+        if not isinstance(disk_sections, list):  # type: ignore[reportUnnecessaryIsInstance]
+            raise ConfigError("[[vm.disk]] must be an array of tables")
+        if not disk_sections:
+            raise ConfigError(f"VM {name!r} must define at least one [[vm.disk]] section")
+
+        disks: list[DiskConfig] = []
+        seen_targets: set[str] = set()
+        for disk_raw in disk_sections:
+            disks.append(ConfigFacade._build_disk(name, disk_raw, seen_targets))
+
+        # Every disk must have a resolvable snapshot directory: either its
+        # own override or the VM-level default.  Fail fast at parse time.
+        for disk in disks:
+            if disk.snapshot_dir is None and snapshot_dir is None:
+                raise ConfigError(
+                    f"Disk {disk.target!r} in VM {name!r} has no snapshot_dir: "
+                    f"set [[vm]] snapshot_dir or a per-disk snapshot_dir."
+                )
+
+        # Multi-disk isolation: two disks of the same VM must NOT resolve to
+        # the same snapshot directory.  Child discovery (``_find_child``) and
+        # overlay cleanup rely on per-disk directory isolation; a shared
+        # directory could let one disk's overlay be matched as another disk's
+        # child.  Compare normalized absolute paths.
+        resolved_dirs: dict[str, str] = {}
+        for disk in disks:
+            effective = disk.snapshot_dir if disk.snapshot_dir is not None else snapshot_dir
+            # ``effective`` is guaranteed non-None by the check above.
+            key = os.path.normpath(str(effective))
+            if key in resolved_dirs:
+                raise ConfigError(
+                    f"Disks {resolved_dirs[key]!r} and {disk.target!r} in VM "
+                    f"{name!r} share snapshot_dir {key!r}: each disk needs a "
+                    f"distinct snapshot directory."
+                )
+            resolved_dirs[key] = disk.target
 
         # Build targets.
         target_sections = cast(list[dict[str, object]], vm_raw.get("target", []))
@@ -395,7 +429,7 @@ class ConfigFacade(IConfigFacade):
 
         return VMConfig(
             name=name,
-            base_image=base_image,
+            disks=disks,
             snapshot_dir=snapshot_dir,
             snapshot_create=snapshot_create,
             snapshot_chain_length=snapshot_chain_length,
@@ -405,10 +439,41 @@ class ConfigFacade(IConfigFacade):
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,
-            disks=disks,
             blockcommit_deep_verify=blockcommit_deep_verify,
             targets=targets,
         )
+
+    @staticmethod
+    def _build_disk(
+        vm_name: str,
+        disk_raw: dict[str, object],
+        seen_targets: set[str],
+    ) -> DiskConfig:
+        """Build a :class:`DiskConfig` from a ``[[vm.disk]]`` section.
+
+        ``target`` and ``base_image`` are required per disk; ``snapshot_dir``
+        is an optional per-disk override of the VM-level default.  Disk
+        targets must be unique within a VM.
+        """
+        for field_name in ("target", "base_image"):
+            if field_name not in disk_raw:
+                raise ConfigError(
+                    f"Missing required [[vm.disk]] field {field_name!r} in VM {vm_name!r}"
+                )
+
+        target = str(disk_raw["target"])
+        if not target:
+            raise ConfigError(f"[[vm.disk]] 'target' must be non-empty in VM {vm_name!r}")
+        if target in seen_targets:
+            raise ConfigError(f"Duplicate [[vm.disk]] target {target!r} in VM {vm_name!r}")
+        seen_targets.add(target)
+
+        base_image = Path(str(disk_raw["base_image"]))
+        snapshot_dir = (
+            Path(str(disk_raw["snapshot_dir"])) if "snapshot_dir" in disk_raw else None
+        )
+
+        return DiskConfig(target=target, base_image=base_image, snapshot_dir=snapshot_dir)
 
     @staticmethod
     def _build_target(

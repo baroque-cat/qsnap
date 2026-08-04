@@ -168,18 +168,37 @@ class TargetConfig:
 
 
 @dataclass(frozen=True)
+class DiskConfig:
+    """Configuration for a single disk within a VM.
+
+    ``target`` is the libvirt device target name (e.g. ``"vda"``,
+    ``"vdb"``).  ``base_image`` is the path to the base qcow2 image for
+    this disk — each disk owns its own base image and its own backing
+    chain.  ``snapshot_dir`` is an optional per-disk snapshot directory
+    override; when ``None``, the VM-level ``VMConfig.snapshot_dir`` is
+    used as the default.
+    """
+
+    target: str
+    base_image: Path
+    snapshot_dir: Path | None = None
+
+
+@dataclass(frozen=True)
 class VMConfig:
     """Configuration for a single VM.
 
-    Required fields: ``name``, ``base_image``, ``snapshot_dir``.
+    Required fields: ``name`` and ``disks`` (one or more
+    :class:`DiskConfig`).  Each disk carries its own ``base_image`` —
+    the former VM-level ``base_image`` no longer exists (multi-disk
+    refactor).  ``snapshot_dir`` is the VM-level default snapshot
+    directory; individual disks may override it via
+    ``DiskConfig.snapshot_dir``.
+
     ``snapshot_create`` defaults to ``"always"``.
     ``snapshot_chain_length``, ``target_chain_length``, and
     ``target_keep_generations`` are count-based retention overrides
     resolved via option inheritance (global → VM → target).
-
-    ``disks`` is an optional explicit list of disk targets (e.g.
-    ``["vda", "vdb"]``).  When ``None``, Core auto-discovers all disks
-    via ``virsh domblklist``.
 
     ``snapshot_quiesce`` enables the ``--quiesce`` flag for
     ``virsh snapshot-create-as`` (requires qemu-guest-agent).
@@ -192,13 +211,14 @@ class VMConfig:
     ``qemu-img map`` allocated regions) or ``"allocation-size"``
     (compares ``qemu-img info`` actual-size).
 
-    ``targets`` uses a defensive copy on construction so that
-    external mutation of the original list does not affect this instance.
+    ``disks`` and ``targets`` use defensive copies on construction so
+    that external mutation of the original lists does not affect this
+    instance.
     """
 
     name: str
-    base_image: Path
-    snapshot_dir: Path
+    disks: list[DiskConfig]
+    snapshot_dir: Path | None = None
     snapshot_create: str = "always"
     snapshot_chain_length: int | None = None
     target_chain_length: int | None = None
@@ -207,13 +227,31 @@ class VMConfig:
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-map"
-    disks: list[str] | None = None
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False
     targets: list[TargetConfig] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
     def __post_init__(self) -> None:
-        # Defensive copy: replace the list with a shallow copy so that
-        # external mutation of the original list does not affect this
+        # Defensive copies: replace the lists with shallow copies so that
+        # external mutation of the original lists does not affect this
         # frozen instance's internal state.
+        object.__setattr__(self, "disks", list(self.disks))
         object.__setattr__(self, "targets", list(self.targets))
+
+    def get_disk(self, target: str) -> DiskConfig | None:
+        """Return the :class:`DiskConfig` for *target*, or None if absent."""
+        for disk in self.disks:
+            if disk.target == target:
+                return disk
+        return None
+
+    def snapshot_dir_for(self, disk: DiskConfig) -> Path | None:
+        """Resolve the effective snapshot directory for *disk*.
+
+        Returns the per-disk override when set, otherwise the VM-level
+        ``snapshot_dir``.  Returns ``None`` only when neither is
+        configured (a configuration error caught during validation).
+        """
+        if disk.snapshot_dir is not None:
+            return disk.snapshot_dir
+        return self.snapshot_dir

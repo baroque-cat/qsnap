@@ -12,8 +12,13 @@ from typing import cast
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.utils.parsing import parse_disk_from_snapshot_name
 
 logger = logging.getLogger(__name__)
+
+# Fallback disk target used when migrating legacy state records that lack
+# a disk field and whose name does not contain a parseable disk segment.
+_LEGACY_FALLBACK_DISK = "vda"
 
 
 class JsonStateManager(IStateManager):
@@ -142,6 +147,7 @@ class JsonStateManager(IStateManager):
             "path": str(info.path),
             "timestamp": info.timestamp.isoformat(),
             "allocation": info.allocation,
+            "disk": info.disk,
         }
         return d
 
@@ -150,25 +156,56 @@ class JsonStateManager(IStateManager):
         # Read-tolerance: old state files may contain a legacy hash
         # key — it is silently ignored (the field was removed in the
         # unify-nbd-transfer change).
+        #
+        # Multi-disk migration: legacy records lack a ``disk`` field.  The
+        # disk target is recovered from the snapshot name (which embeds it
+        # as ``_{disk}_``); when that fails, a fallback disk is used so the
+        # record is not lost.
+        name = str(d["name"])
+        raw_disk = d.get("disk")
+        if raw_disk is not None:
+            disk = str(raw_disk)
+        else:
+            disk = parse_disk_from_snapshot_name(name) or _LEGACY_FALLBACK_DISK
+            logger.info(
+                "Migrated legacy snapshot record without disk field: %s -> disk=%s",
+                name,
+                disk,
+            )
         return SnapshotInfo(
-            name=str(d["name"]),
+            name=name,
             path=Path(str(d["path"])),
             timestamp=datetime.fromisoformat(str(d["timestamp"])),
             allocation=int(str(d["allocation"])),
+            disk=disk,
         )
 
     # ── IStateManager implementation ──────────────────────────────────
 
-    def get_last_allocation(self, vm_name: str) -> int | None:
+    def get_last_allocation(self, vm_name: str, disk: str) -> int | None:
+        """Return the per-disk allocation baseline for *vm_name*/*disk*.
+
+        Storage format is ``last_allocation: {disk: int}``.  Legacy state
+        stored a bare integer (single-disk); such a value cannot be
+        attributed to a specific disk, so it is treated as absent (returns
+        None and a fresh per-disk baseline is established on next run).
+        """
         data = self._load(vm_name)
         value = data.get("last_allocation")
-        if value is None:
+        if not isinstance(value, dict):
             return None
-        return int(value)  # type: ignore[arg-type]
+        disk_value = value.get(disk)
+        if disk_value is None:
+            return None
+        return int(disk_value)  # type: ignore[arg-type]
 
-    def set_last_allocation(self, vm_name: str, alloc: int) -> None:
+    def set_last_allocation(self, vm_name: str, disk: str, alloc: int) -> None:
         data = self._load(vm_name)
-        data["last_allocation"] = alloc
+        existing = data.get("last_allocation")
+        # Replace legacy bare-integer format with the per-disk dict.
+        per_disk: dict[str, int] = existing if isinstance(existing, dict) else {}
+        per_disk[disk] = alloc
+        data["last_allocation"] = per_disk
         self._save(vm_name, data)
 
     def record_snapshot(self, vm_name: str, info: SnapshotInfo) -> None:
@@ -213,6 +250,7 @@ class JsonStateManager(IStateManager):
             "snapshots": list(item.snapshots),
             "reason": item.reason,
             "since": item.since.isoformat(),
+            "disk": item.disk,
         }
         if item.last_warned_at is not None:
             d["last_warned_at"] = item.last_warned_at.isoformat()
@@ -224,10 +262,21 @@ class JsonStateManager(IStateManager):
         raw_lwa = d.get("last_warned_at")
         if raw_lwa is not None:
             last_warned_at = datetime.fromisoformat(str(raw_lwa))
+        # Multi-disk migration: legacy records lack a ``disk`` field.  The
+        # disk is recovered from the first snapshot name when possible.
+        raw_disk = d.get("disk")
+        if raw_disk is not None:
+            disk = str(raw_disk)
+        else:
+            snapshots = list(d.get("snapshots", []))  # type: ignore[arg-type]
+            disk = _LEGACY_FALLBACK_DISK
+            if snapshots:
+                disk = parse_disk_from_snapshot_name(str(snapshots[0])) or disk
         return DeferredBlockcommit(
             snapshots=list(d.get("snapshots", [])),  # type: ignore[arg-type]
             reason=str(d["reason"]),
             since=datetime.fromisoformat(str(d["since"])),
+            disk=disk,
             last_warned_at=last_warned_at,
         )
 
@@ -241,7 +290,9 @@ class JsonStateManager(IStateManager):
             for d in raw_list  # type: ignore[union-attr]
         ]
 
-    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
+    def add_deferred_blockcommit(
+        self, vm_name: str, disk: str, snapshots: list[str], reason: str
+    ) -> None:
         data = self._load(vm_name)
         raw_list: list[dict[str, object]] = list(data.get("deferred_operations", []))  # type: ignore[arg-type]
         raw_list.append(
@@ -250,6 +301,7 @@ class JsonStateManager(IStateManager):
                     snapshots=list(snapshots),
                     reason=reason,
                     since=datetime.now(),
+                    disk=disk,
                 )
             )
         )
@@ -359,36 +411,49 @@ class JsonStateManager(IStateManager):
         if not entries:
             return None
         entry = entries[-1]  # newest is last
+        return self._entry_to_full_backup(entry)
+
+    @staticmethod
+    def _entry_to_full_backup(entry: dict[str, str]) -> FullBackupInfo:
+        """Build a :class:`FullBackupInfo` from a stored entry.
+
+        Multi-disk migration: legacy entries lack a ``disk`` field.  The
+        disk is recovered from the backup name when possible, otherwise a
+        fallback disk is used so the record is not lost.
+        """
+        name = str(entry["name"])
+        raw_disk = entry.get("disk")
+        if raw_disk is not None:
+            disk = str(raw_disk)
+        else:
+            disk = parse_disk_from_snapshot_name(name) or _LEGACY_FALLBACK_DISK
         return FullBackupInfo(
-            name=str(entry["name"]),
+            name=name,
             path=Path(str(entry["path"])),
             timestamp=datetime.fromisoformat(str(entry["timestamp"])),
+            disk=disk,
         )
 
-    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime, disk: str
+    ) -> None:
         """Record a full backup (backward-compatible, appends to list)."""
-        self.record_full_backup(target_path, name, timestamp)
+        self.record_full_backup(target_path, name, timestamp, disk)
 
     def get_full_backups(self, target_path: str) -> list[FullBackupInfo]:
         """Return all recorded full backups for *target_path*, oldest first."""
         data = self._load_full_backups()
         entries = data.get(target_path, [])
-        return [
-            FullBackupInfo(
-                name=str(e["name"]),
-                path=Path(str(e["path"])),
-                timestamp=datetime.fromisoformat(str(e["timestamp"])),
-            )
-            for e in entries
-        ]
+        return [self._entry_to_full_backup(e) for e in entries]
 
     def record_full_backup(
         self,
         target_path: str,
         name: str,
         timestamp: datetime,
+        disk: str,
     ) -> None:
-        """Append a full backup record for *target_path*."""
+        """Append a full backup record for *target_path*/*disk*."""
         data = self._load_full_backups()
         entries = data.get(target_path, [])
         entries.append(
@@ -396,6 +461,7 @@ class JsonStateManager(IStateManager):
                 "name": name,
                 "path": str(Path(target_path) / name),
                 "timestamp": timestamp.isoformat(),
+                "disk": disk,
             }
         )
         data[target_path] = entries
@@ -517,10 +583,10 @@ class JsonStateManager(IStateManager):
     def _target_state_path(self) -> Path:
         return self._state_dir / "_target_state.json"
 
-    def _load_target_state(self) -> dict[str, dict[str, int]]:
+    def _load_target_state(self) -> dict[str, dict[str, object]]:
         """Load per-target state data.
 
-        Format: ``{target_path: {"last_backup_allocation": int}}``
+        Format: ``{target_path: {"last_backup_allocation": {disk: int}}}``
 
         On ``json.JSONDecodeError`` (corrupt file), the file is renamed
         to ``_target_state.json.broken.{timestamp}`` and an empty dict
@@ -531,7 +597,7 @@ class JsonStateManager(IStateManager):
             return {}
         try:
             with open(path, encoding="utf-8") as fh:
-                data: dict[str, dict[str, int]] = json.load(fh)
+                data: dict[str, dict[str, object]] = json.load(fh)
             return data
         except json.JSONDecodeError:
             timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -550,46 +616,61 @@ class JsonStateManager(IStateManager):
             )
             return {}
 
-    def _save_target_state(self, data: dict[str, dict[str, int]]) -> None:
+    def _save_target_state(self, data: dict[str, dict[str, object]]) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self._state_dir / "_target_state.json.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, default=str)
         os.replace(tmp, self._target_state_path())
 
-    def get_last_backup_allocation(self, target_path: str) -> int | None:
-        """Return the last backup allocation recorded for *target_path*.
+    def get_last_backup_allocation(self, target_path: str, disk: str) -> int | None:
+        """Return the last backup allocation for *target_path*/*disk*.
 
         Returns ``None`` when no baseline exists (first-run behaviour —
-        backup always proceeds).
+        backup always proceeds).  Legacy state stored a bare integer under
+        ``last_backup_allocation`` (single-disk); such a value cannot be
+        attributed to a specific disk and is treated as absent.
         """
         data = self._load_target_state()
         entry = data.get(target_path)
         if entry is None:
             return None
         value = entry.get("last_backup_allocation")
-        if value is None:
+        if not isinstance(value, dict):
             return None
-        return int(value)
+        disk_value = value.get(disk)
+        if disk_value is None:
+            return None
+        return int(disk_value)  # type: ignore[arg-type]
 
-    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
-        """Record the last backup allocation for *target_path*."""
+    def set_last_backup_allocation(self, target_path: str, disk: str, alloc: int) -> None:
+        """Record the last backup allocation for *target_path*/*disk*."""
         data = self._load_target_state()
         entry = data.get(target_path, {})
-        entry["last_backup_allocation"] = alloc
+        existing = entry.get("last_backup_allocation")
+        # Replace legacy bare-integer format with the per-disk dict.
+        per_disk: dict[str, int] = existing if isinstance(existing, dict) else {}
+        per_disk[disk] = alloc
+        entry["last_backup_allocation"] = per_disk
         data[target_path] = entry
         self._save_target_state(data)
 
-    def clear_last_backup_allocation(self, target_path: str) -> bool:
-        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+    def clear_last_backup_allocation(self, target_path: str, disk: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*/*disk*.
 
         Returns ``True`` if an entry was found and removed, ``False``
         if no matching entry existed.
         """
         data = self._load_target_state()
-        if target_path not in data:
+        entry = data.get(target_path)
+        if entry is None:
             return False
-        del data[target_path]
+        value = entry.get("last_backup_allocation")
+        if not isinstance(value, dict) or disk not in value:
+            return False
+        del value[disk]
+        entry["last_backup_allocation"] = value
+        data[target_path] = entry
         self._save_target_state(data)
         return True
 
@@ -626,7 +707,9 @@ class JsonStateManager(IStateManager):
             return
         data = self._load(vm_name)
         data["snapshots"] = []
-        data["last_allocation"] = None
+        # Clear all per-disk allocation baselines (multi-disk format is a
+        # dict keyed by disk; an empty dict clears every disk).
+        data["last_allocation"] = {}
         data["deferred_operations"] = []
         self._save(vm_name, data)
 

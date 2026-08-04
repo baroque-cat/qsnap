@@ -101,13 +101,12 @@ from qsnap.models.config import TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, NbdExtent, ShellResult, SnapshotInfo
 from qsnap.utils.extents import overlap_with_allocation, unify_extents
 from qsnap.utils.nbd import (
-    get_first_disk_path,
-    get_first_disk_target,
+    get_disk_targets,
     is_vm_running,
     write_backup_xml,
     write_checkpoint_xml,
 )
-from qsnap.utils.parsing import parse_timestamp
+from qsnap.utils.parsing import parse_disk_from_snapshot_name, parse_timestamp
 from qsnap.utils.verification import verify_bitmap_incremental, verify_full_backup
 
 logger = logging.getLogger(__name__)
@@ -262,21 +261,29 @@ class BitmapBackupProvider(IBackupProvider):
 
             target_file = target.path / f"{snapshot.name}.qcow2"
             tmp_file = Path(f"{target_file}.tmp")
-            socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
-            write_socket = f"/tmp/qsnap-write-{os.getpid()}.sock"
-            pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}.pid")
+            # Socket/pid paths are scoped per disk so concurrent exports
+            # of different disks never share a socket (multi-disk).
+            socket_path = f"/tmp/qsnap-backup-{os.getpid()}-{snapshot.disk}.sock"
+            write_socket = f"/tmp/qsnap-write-{os.getpid()}-{snapshot.disk}.sock"
+            pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}-{snapshot.disk}.pid")
 
             # Determine the prior checkpoint for an incremental export
             # (design D3: newest-wins discovery via ``virsh
             # checkpoint-list``, re-evaluated per snapshot so the
             # successor created earlier in this loop becomes the
-            # baseline for the next export).  When no prior checkpoint
-            # exists, a full NBD export is performed — with an atomic
-            # successor checkpoint, so the FULL run leaves a valid
-            # baseline by construction.  The same listing also feeds
-            # successor-name uniqueness (design D2).
-            candidates = self._list_checkpoints_for_target(vm_config.name, target_hash)
-            prior = self._select_newest(candidates, target_hash, vm_config.name)
+            # baseline for the next export).  Checkpoints are scoped per
+            # disk (multi-disk refactor) so a disk with no prior
+            # checkpoint correctly falls back to a full export.  When no
+            # prior checkpoint exists, a full NBD export is performed —
+            # with an atomic successor checkpoint, so the FULL run
+            # leaves a valid baseline by construction.  The same listing
+            # also feeds successor-name uniqueness (design D2).
+            candidates = self._list_checkpoints_for_target(
+                vm_config.name, target_hash, snapshot.disk
+            )
+            prior = self._select_newest(
+                candidates, target_hash, snapshot.disk, vm_config.name
+            )
 
             # Temporal cross-check (design D5): if the prior
             # checkpoint's timestamp is newer than the snapshot being
@@ -286,7 +293,9 @@ class BitmapBackupProvider(IBackupProvider):
             # snapshot with a clear error rather than producing an
             # incomplete backup.
             if prior is not None:
-                prior_ts = self._parse_checkpoint_timestamp(prior, target_hash)
+                prior_ts = self._parse_checkpoint_timestamp(
+                    prior, target_hash, snapshot.disk
+                )
                 if (
                     prior_ts is not None
                     and snapshot.timestamp is not None
@@ -322,7 +331,9 @@ class BitmapBackupProvider(IBackupProvider):
             # The successor checkpoint is created atomically with this
             # export's backup-begin (design D1/D2): its dirty-bitmap
             # baseline coincides with the export's freeze point.
-            successor = self._new_checkpoint_name(target_hash, taken=set(candidates))
+            successor = self._new_checkpoint_name(
+                target_hash, snapshot.disk, taken=set(candidates)
+            )
 
             # Step 1: Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
@@ -330,8 +341,11 @@ class BitmapBackupProvider(IBackupProvider):
             # Step 2: Build and write backup XML + checkpoint XML.  The
             # incremental checkpoint is passed via the <incremental> XML
             # element, NOT via a --incremental CLI flag (the flag does
-            # not exist in any version of virsh backup-begin).
-            backup_xml_path = write_backup_xml(socket_path, incremental=prior)
+            # not exist in any version of virsh backup-begin).  The export
+            # is restricted to this snapshot's disk (multi-disk refactor).
+            backup_xml_path = write_backup_xml(
+                socket_path, incremental=prior, disk=snapshot.disk
+            )
             checkpoint_xml_path = write_checkpoint_xml(successor)
 
             try:
@@ -364,17 +378,19 @@ class BitmapBackupProvider(IBackupProvider):
                             vm_config.name,
                             backup_result.error,
                         )
-                        self._force_cleanup_checkpoints(vm_config.name, target_hash)
+                        self._force_cleanup_checkpoints(
+                            vm_config.name, target_hash, snapshot.disk
+                        )
                         # Re-list candidates after cleanup and generate
                         # a fresh successor name.
                         candidates = self._list_checkpoints_for_target(
-                            vm_config.name, target_hash,
+                            vm_config.name, target_hash, snapshot.disk,
                         )
                         prior = self._select_newest(
-                            candidates, target_hash, vm_config.name,
+                            candidates, target_hash, snapshot.disk, vm_config.name,
                         )
                         successor = self._new_checkpoint_name(
-                            target_hash, taken=set(candidates),
+                            target_hash, snapshot.disk, taken=set(candidates),
                         )
                         checkpoint_xml_path = write_checkpoint_xml(successor)
                         backup_cmd = [
@@ -408,11 +424,10 @@ class BitmapBackupProvider(IBackupProvider):
                 # libvirt's NBD server exports each disk under its
                 # target device name (e.g., "vda"); the export name is
                 # needed both for the convert URI and for the dirty
-                # bitmap meta-context name.
-                disk_target = get_first_disk_target(
-                    self._shell,
-                    vm_config.name,
-                )
+                # bitmap meta-context name.  Multi-disk (refactor): the
+                # export is restricted to this snapshot's disk, so the
+                # export name is the snapshot's disk target.
+                disk_target = snapshot.disk
                 start_time = time.monotonic()
                 dirty_bytes = 0
                 previous_path: Path | None = None
@@ -603,7 +618,7 @@ class BitmapBackupProvider(IBackupProvider):
                     # qsnap- checkpoint exists for this VM+target
                     # (dirty-bitmap baseline for next incremental).
                     checkpoints = self._list_checkpoints_for_target(
-                        vm_config.name, target_hash,
+                        vm_config.name, target_hash, snapshot.disk,
                     )
                     if not checkpoints:
                         logger.critical(
@@ -633,7 +648,9 @@ class BitmapBackupProvider(IBackupProvider):
                 # successor checkpoint already exists (created atomically
                 # in step 3), so deletion never opens a zero-checkpoint
                 # window.  Delete failures are WARNING, never fatal.
-                self._delete_superseded_checkpoints(vm_config.name, target_hash, successor)
+                self._delete_superseded_checkpoints(
+                    vm_config.name, target_hash, snapshot.disk, successor
+                )
 
                 # Get file size for bytes_transferred.
                 try:
@@ -1197,13 +1214,17 @@ class BitmapBackupProvider(IBackupProvider):
 
         # (1) Resolve the previous backup — walk backwards through
         # backups (sorted ascending by timestamp) to find the newest
-        # backup with an intact backing chain.  Rationale: if the
-        # newest backup has a broken chain (its backing file was
-        # deleted by retention), qemu-img create -b will fail.  Walking
-        # backwards skips broken-chain files and chains to the last
-        # available valid backup (design D4).  FULLs are standalone
-        # (no backing) and always valid.
+        # backup of THIS disk with an intact backing chain.  Backups are
+        # scoped per disk (multi-disk refactor): an incremental for disk
+        # X must chain to disk X's newest valid backup, never to another
+        # disk's.  Rationale: if the newest backup has a broken chain
+        # (its backing file was deleted by retention), qemu-img create -b
+        # will fail.  Walking backwards skips broken-chain files and
+        # chains to the last available valid backup (design D4).  FULLs
+        # are standalone (no backing) and always valid.
         backups = self.list(target)
+        if disk_target is not None:
+            backups = [b for b in backups if b.disk == disk_target]
         previous: SnapshotInfo | None = None
         for backup in reversed(backups):
             # Check file existence (race guard — retention may have
@@ -1373,7 +1394,7 @@ class BitmapBackupProvider(IBackupProvider):
         - **Stopped VM**: direct ``qemu-img convert <source_path>
           <target>.tmp`` from the source qcow2 file (no
           ``virsh backup-begin``, no NBD socket).  The source path is
-          resolved via :func:`get_first_disk_path`.
+          resolved for the snapshot's disk via :func:`get_disk_targets`.
 
         Uses an atomic pattern: transfer to a ``.tmp`` file, then rename
         on success.  On failure, the ``.tmp`` file is removed.
@@ -1385,15 +1406,16 @@ class BitmapBackupProvider(IBackupProvider):
         — state recording is Core's responsibility after post-create
         verification passes.
         """
-        # Generate full backup name: vm.FULL.YYYYMMDDTHHMMSS_{6hex}.qcow2
+        # Generate full backup name:
+        # vm.FULL.YYYYMMDDTHHMMSS_{disk}_{6hex}.qcow2 (multi-disk).
         date_str = source_snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
         hex_suffix = secrets.token_hex(3)
-        full_name = f"{vm_name}.FULL.{date_str}_{hex_suffix}"
+        full_name = f"{vm_name}.FULL.{date_str}_{source_snapshot.disk}_{hex_suffix}"
         target_file = target.path / f"{full_name}.qcow2"
         tmp_file = target.path / f"{full_name}.qcow2.tmp"
 
         target_hash = self.target_hash(str(target.path))
-        checkpoint_name = self._new_checkpoint_name(target_hash)
+        checkpoint_name = self._new_checkpoint_name(target_hash, source_snapshot.disk)
 
         # Detect VM state to choose the transfer path (design D2).
         running = is_vm_running(self._shell, vm_name)
@@ -1404,8 +1426,11 @@ class BitmapBackupProvider(IBackupProvider):
             # Remove stale socket.
             self._shell.run(["rm", "-f", socket_path], timeout=10)
 
-            # Write backup XML (full, no <incremental>) + checkpoint XML.
-            backup_xml_path = write_backup_xml(socket_path)
+            # Write backup XML (full, no <incremental>, restricted to this
+            # snapshot's disk) + checkpoint XML.
+            backup_xml_path = write_backup_xml(
+                socket_path, disk=source_snapshot.disk
+            )
             checkpoint_xml_path = write_checkpoint_xml(checkpoint_name)
 
             # Start NBD export via virsh backup-begin (no <incremental> —
@@ -1440,7 +1465,9 @@ class BitmapBackupProvider(IBackupProvider):
 
             # Full-pull lifecycle via the shared helper (design D7).
             # qemu-img convert reads from nbd:unix:<socket>:exportname=<disk_target>.
-            disk_target = get_first_disk_target(self._shell, vm_name)
+            # Multi-disk (refactor): the export is restricted to this
+            # snapshot's disk, so the export name is the snapshot's disk.
+            disk_target = source_snapshot.disk
             transfer_error, _ = self._full_pull_lifecycle(
                 vm_name=vm_name,
                 tmp_file=tmp_file,
@@ -1473,7 +1500,15 @@ class BitmapBackupProvider(IBackupProvider):
         else:
             # Stopped VM: direct qemu-img convert from source qcow2.
             # No virsh backup-begin, no NBD socket, no checkpoint.
-            source_path_str = get_first_disk_path(self._shell, vm_name)
+            # Multi-disk (refactor): resolve this snapshot's disk path.
+            source_path_str = next(
+                (
+                    path
+                    for tgt, path in get_disk_targets(self._shell, vm_name)
+                    if tgt == source_snapshot.disk
+                ),
+                "",
+            )
             if not source_path_str:
                 return BackupResult(
                     success=False,
@@ -1520,7 +1555,9 @@ class BitmapBackupProvider(IBackupProvider):
         # (design D3).  Only for running VMs — stopped VMs don't
         # create checkpoints, so there's no successor to compare.
         if running:
-            self._delete_superseded_checkpoints(vm_name, target_hash, checkpoint_name)
+            self._delete_superseded_checkpoints(
+                vm_name, target_hash, source_snapshot.disk, checkpoint_name
+            )
 
         # Post-creation FULL backup validation (design D5).
         # (a) No backing file: FULL must be standalone (no
@@ -1557,7 +1594,7 @@ class BitmapBackupProvider(IBackupProvider):
 
         if running:
             checkpoints = self._list_checkpoints_for_target(
-                vm_name, target_hash,
+                vm_name, target_hash, source_snapshot.disk,
             )
             if not checkpoints:
                 logger.critical(
@@ -1623,6 +1660,10 @@ class BitmapBackupProvider(IBackupProvider):
             name = file.stem
             actual_size = int(info.get("actual-size", 0))
             timestamp = parse_timestamp(name, file)
+            # Disk target is encoded in the backup name (both FULL and
+            # incremental): ``{vm}[.FULL].{ts}_{disk}_{6hex}``.  Empty
+            # string when the name cannot be parsed (foreign/legacy file).
+            disk = parse_disk_from_snapshot_name(name) or ""
 
             snapshots.append(
                 SnapshotInfo(
@@ -1630,6 +1671,7 @@ class BitmapBackupProvider(IBackupProvider):
                     path=file,
                     timestamp=timestamp,
                     allocation=actual_size,
+                    disk=disk,
                 )
             )
 
@@ -1674,38 +1716,45 @@ class BitmapBackupProvider(IBackupProvider):
                 checkpoints.append(name)
         return checkpoints
 
-    def _list_checkpoints_for_target(self, vm_name: str, target_hash: str) -> list[str]:
-        """Return qsnap checkpoints matching *target_hash*."""
-        prefix = f"qsnap-{target_hash}-"
+    def _list_checkpoints_for_target(
+        self, vm_name: str, target_hash: str, disk: str
+    ) -> list[str]:
+        """Return qsnap checkpoints matching *target_hash* and *disk*.
+
+        Checkpoint names are scoped per disk (multi-disk refactor) so the
+        prefix includes the disk target: ``qsnap-{target_hash}-{disk}-``.
+        """
+        prefix = f"qsnap-{target_hash}-{disk}-"
         return [cp for cp in self.list_checkpoints(vm_name) if cp.startswith(prefix)]
 
     @staticmethod
-    def _new_checkpoint_name(target_hash: str, taken: set[str] | None = None) -> str:
+    def _new_checkpoint_name(
+        target_hash: str, disk: str, taken: set[str] | None = None
+    ) -> str:
         """Generate a unique successor checkpoint name (design D2/D6).
 
-        Format: ``qsnap-{target_hash}-{yyyymmddTHHMMSS}-{6_hex_chars}`` —
-        local time with seconds resolution plus a 6-character hex suffix
+        Format:
+        ``qsnap-{target_hash}-{disk}-{yyyymmddTHHMMSS}-{6_hex_chars}`` —
+        the disk target scopes the checkpoint so each disk owns its own
+        dirty-bitmap lineage (multi-disk refactor), followed by local
+        time with seconds resolution plus a 6-character hex suffix
         (``secrets.token_hex(3)``) for collision resistance.  The suffix
         guarantees uniqueness even when two checkpoints are created
         within the same second (e.g., a fast FULL followed immediately
         by the first incremental of the same pipeline run — libvirt
         rejects duplicate names with "Bitmap already exists").
 
-        Only this format is ever generated for new checkpoints; legacy
-        names (``qsnap-{target_hash}-{yyyymmddTHHMMSS}`` without suffix,
-        or ``qsnap-{target_hash}-{snapshot_name}``) remain parseable by
-        :meth:`_parse_checkpoint_timestamp` and discovery (design D3).
-
         The *taken* set (existing qsnap checkpoint names for this
-        VM+target) is checked as a last-resort guard; the random suffix
-        makes collisions astronomically unlikely, but if it somehow
-        collides, the timestamp is bumped forward one second at a time.
+        VM+target+disk) is checked as a last-resort guard; the random
+        suffix makes collisions astronomically unlikely, but if it
+        somehow collides, the timestamp is bumped forward one second at
+        a time.
         """
         now = datetime.now()
         existing: set[str] = taken if taken is not None else set()
         for offset in range(60):
             candidate = (
-                f"qsnap-{target_hash}-"
+                f"qsnap-{target_hash}-{disk}-"
                 f"{(now + timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%S')}"
                 f"-{secrets.token_hex(3)}"
             )
@@ -1713,27 +1762,28 @@ class BitmapBackupProvider(IBackupProvider):
                 return candidate
         # Practically unreachable (60 same-name collisions in a row);
         # fall back to microsecond resolution to guarantee uniqueness.
-        return f"qsnap-{target_hash}-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        return (
+            f"qsnap-{target_hash}-{disk}-"
+            f"{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        )
 
     @staticmethod
-    def _parse_checkpoint_timestamp(name: str, target_hash: str) -> datetime | None:
+    def _parse_checkpoint_timestamp(
+        name: str, target_hash: str, disk: str
+    ) -> datetime | None:
         """Parse the creation timestamp embedded in a checkpoint name.
 
-        New-format names (``qsnap-{target_hash}-{yyyymmddTHHMMSS}-{6_hex}``)
-        carry the timestamp as the leading portion of the trailing
-        segment, optionally followed by a ``-{hex}`` suffix (design D6).
-        Legacy names without the suffix
-        (``qsnap-{target_hash}-{yyyymmddTHHMMSS}``) and legacy names
-        (``qsnap-{target_hash}-{snapshot_name}``) carry it inside the
-        snapshot-name segment (same patterns as
-        :func:`qsnap.utils.parsing.parse_timestamp`, most specific
-        first).  Timezone-aware matches are normalized to naive local
-        time so they compare coherently with new-format timestamps.
+        Checkpoint names are scoped per disk (multi-disk refactor):
+        ``qsnap-{target_hash}-{disk}-{yyyymmddTHHMMSS}-{6_hex}``.  After
+        stripping the ``qsnap-{target_hash}-{disk}-`` prefix the
+        remainder is ``{yyyymmddTHHMMSS}`` optionally followed by a
+        ``-{hex}`` suffix.  Timezone-aware matches are normalized to
+        naive local time so they compare coherently.
 
         Returns ``None`` when no timestamp can be parsed — callers sort
         such names oldest (conservative, design D3).
         """
-        prefix = f"qsnap-{target_hash}-"
+        prefix = f"qsnap-{target_hash}-{disk}-"
         remainder = name[len(prefix) :] if name.startswith(prefix) else name
         # New format with optional hex suffix: yyyymmddTHHMMSS[-hex]
         match = re.fullmatch(r"(\d{8}T\d{6})(?:-[0-9a-f]+)?", remainder)
@@ -1742,8 +1792,8 @@ class BitmapBackupProvider(IBackupProvider):
                 return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
             except ValueError:
                 return None
-        # Legacy fallback: timestamp embedded in the snapshot-name
-        # segment (e.g. ``3.Projects_opencode.20260721T0018_vda``).
+        # Fallback: timestamp embedded anywhere in the remainder (most
+        # specific pattern first).
         patterns: list[tuple[str, str]] = [
             (r"(\d{8}T\d{6}[+-]\d{4})", "%Y%m%dT%H%M%S%z"),
             (r"(\d{8}T\d{6})", "%Y%m%dT%H%M%S"),
@@ -1765,16 +1815,19 @@ class BitmapBackupProvider(IBackupProvider):
             return parsed
         return None
 
-    def _newest_checkpoint(self, vm_name: str, target_hash: str) -> str | None:
-        """Return the newest qsnap checkpoint for this VM+target (design D3).
+    def _newest_checkpoint(
+        self, vm_name: str, target_hash: str, disk: str
+    ) -> str | None:
+        """Return the newest qsnap checkpoint for this VM+target+disk.
 
         Thin wrapper over :meth:`_select_newest` that fetches the
         candidate list via ``virsh checkpoint-list --name`` —
         ``IStateManager`` is never consulted for checkpoint selection.
         """
         return self._select_newest(
-            self._list_checkpoints_for_target(vm_name, target_hash),
+            self._list_checkpoints_for_target(vm_name, target_hash, disk),
             target_hash,
+            disk,
             vm_name,
         )
 
@@ -1782,22 +1835,23 @@ class BitmapBackupProvider(IBackupProvider):
         self,
         candidates: list[str],
         target_hash: str,
+        disk: str,
         vm_name: str,
     ) -> str | None:
         """Select the newest checkpoint from *candidates* (design D3).
 
-        Orders the given ``qsnap-{target_hash}-*`` checkpoint names by
-        the creation timestamp embedded in the name (new format first,
-        legacy format as fallback).  Names whose timestamp cannot be
-        parsed sort oldest (conservative) and are logged at WARNING.
-        Returns ``None`` when *candidates* is empty.
+        Orders the given ``qsnap-{target_hash}-{disk}-*`` checkpoint
+        names by the creation timestamp embedded in the name.  Names
+        whose timestamp cannot be parsed sort oldest (conservative) and
+        are logged at WARNING.  Returns ``None`` when *candidates* is
+        empty.
         """
         if not candidates:
             return None
         newest: str | None = None
         newest_ts: datetime | None = None
         for name in candidates:
-            ts = self._parse_checkpoint_timestamp(name, target_hash)
+            ts = self._parse_checkpoint_timestamp(name, target_hash, disk)
             if ts is None:
                 logger.warning(
                     "Cannot parse timestamp from checkpoint name %s for VM %s; "
@@ -1863,9 +1917,10 @@ class BitmapBackupProvider(IBackupProvider):
         self,
         vm_name: str,
         target_hash: str,
+        disk: str,
         successor: str,
     ) -> None:
-        """Delete all qsnap checkpoints for this VM+target older than *successor*.
+        """Delete all qsnap checkpoints for this VM+target+disk older than *successor*.
 
         Called only after a successful AND verified export (design D3):
         the successor checkpoint already exists (created atomically with
@@ -1876,11 +1931,11 @@ class BitmapBackupProvider(IBackupProvider):
         because newest-wins discovery still picks the correct baseline
         and cleanup is retried here on the next successful run.
         """
-        successor_ts = self._parse_checkpoint_timestamp(successor, target_hash)
-        for name in self._list_checkpoints_for_target(vm_name, target_hash):
+        successor_ts = self._parse_checkpoint_timestamp(successor, target_hash, disk)
+        for name in self._list_checkpoints_for_target(vm_name, target_hash, disk):
             if name == successor:
                 continue
-            ts = self._parse_checkpoint_timestamp(name, target_hash)
+            ts = self._parse_checkpoint_timestamp(name, target_hash, disk)
             if ts is not None and successor_ts is not None and ts >= successor_ts:
                 # Not older than the successor — keep.
                 continue
@@ -1899,16 +1954,18 @@ class BitmapBackupProvider(IBackupProvider):
         lower = error.lower()
         return "bitmap already exists" in lower or "already exists" in lower
 
-    def _force_cleanup_checkpoints(self, vm_name: str, target_hash: str) -> None:
-        """Force-delete ALL qsnap checkpoints for this VM+target.
+    def _force_cleanup_checkpoints(
+        self, vm_name: str, target_hash: str, disk: str
+    ) -> None:
+        """Force-delete ALL qsnap checkpoints for this VM+target+disk.
 
         Used by collision recovery (design D6) when a stale
         checkpoint+bitmap blocks a new ``backup-begin``.  Unlike
         :meth:`_delete_superseded_checkpoints`, this deletes every
-        qsnap checkpoint for the target — including the newest — using
-        full ``checkpoint-delete`` with ``--metadata`` fallback.
+        qsnap checkpoint for the target+disk — including the newest —
+        using full ``checkpoint-delete`` with ``--metadata`` fallback.
         """
-        for name in self._list_checkpoints_for_target(vm_name, target_hash):
+        for name in self._list_checkpoints_for_target(vm_name, target_hash, disk):
             self._delete_checkpoint_best_effort(vm_name, name)
 
     @staticmethod

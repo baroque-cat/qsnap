@@ -79,7 +79,7 @@ def _format_age(age_td: timedelta) -> str:
 def format_deferred_table(summaries: list[DeferredSummary]) -> str:
     """Format deferred blockcommit summaries as a table.
 
-    Columns: VM, SNAPSHOTS, REASON, AGE — sorted by age descending
+    Columns: VM, DISK, SNAPSHOTS, REASON, AGE — sorted by age descending
     (oldest deferred operation first).
     """
     if not summaries:
@@ -91,19 +91,20 @@ def format_deferred_table(summaries: list[DeferredSummary]) -> str:
         rows.append(
             {
                 "vm": s.vm_name,
+                "disk": s.disk,
                 "snapshots": str(s.snapshot_count),
                 "reason": s.reason,
                 "age": _format_age(s.age),
             }
         )
-    columns = ["vm", "snapshots", "reason", "age"]
+    columns = ["vm", "disk", "snapshots", "reason", "age"]
     return format_table(rows, columns)
 
 
 def format_deferred_raw(summaries: list[DeferredSummary]) -> str:
     """Format deferred blockcommit summaries as raw key=value pairs.
 
-    Format: ``vm_name=... snapshots=... reason=... since=...``
+    Format: ``vm_name=... disk=... snapshots=... reason=... since=...``
     """
     if not summaries:
         return "No deferred blockcommit operations"
@@ -113,6 +114,7 @@ def format_deferred_raw(summaries: list[DeferredSummary]) -> str:
     for s in sorted_summaries:
         lines.append(
             f"vm_name={s.vm_name} "
+            f"disk={s.disk} "
             f"snapshots={s.snapshot_count} "
             f"reason={s.reason} "
             f"since={s.since.isoformat()}"

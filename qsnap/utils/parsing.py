@@ -32,36 +32,53 @@ def _parse_domblklist_rows(stdout: str) -> list[tuple[str, str]]:
     return rows
 
 
-def parse_domblklist_path(stdout: str) -> str:
-    """Extract the source path (last column) of the first data row.
-
-    Raises:
-        ValueError: When the output contains no data rows.
-    """
-    rows = _parse_domblklist_rows(stdout)
-    if not rows:
-        raise ValueError("domblklist output contains no data rows")
-    return rows[0][1]
-
-
-def parse_domblklist_target(stdout: str) -> str:
-    """Extract the target device name (first column) of the first data row.
-
-    Raises:
-        ValueError: When the output contains no data rows.
-    """
-    rows = _parse_domblklist_rows(stdout)
-    if not rows:
-        raise ValueError("domblklist output contains no data rows")
-    return rows[0][0]
-
-
 def parse_domblklist_disks(stdout: str) -> list[tuple[str, str]]:
     """Return a list of ``(target, source_path)`` tuples for all disks.
 
     Returns an empty list when no data rows are present.
     """
     return _parse_domblklist_rows(stdout)
+
+
+def parse_domblklist_path_map(stdout: str) -> dict[str, str]:
+    """Return a ``{target: source_path}`` mapping for all disks.
+
+    Parses ``virsh domblklist`` output into a dictionary keyed by disk
+    target device name (e.g. ``"vda"``).  Returns an empty dict when no
+    data rows are present.
+    """
+    return {target: source for target, source in _parse_domblklist_rows(stdout)}
+
+
+def parse_domblklist_path_for_disk(stdout: str, disk: str) -> str:
+    """Extract the source path for a specific disk target.
+
+    Looks up the row whose target device name equals *disk* and returns
+    its source path.
+
+    Raises:
+        ValueError: When no data row matches *disk*.
+    """
+    for target, source in _parse_domblklist_rows(stdout):
+        if target == disk:
+            return source
+    raise ValueError(f"domblklist output contains no row for disk {disk!r}")
+
+
+def parse_disk_from_snapshot_name(name: str) -> str | None:
+    """Extract the disk target from a snapshot or backup filename.
+
+    Snapshot names follow ``{vm}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}.qcow2``
+    (e.g. ``myvm.20250713T153123_vda_a1b2c3.qcow2``).  Returns the
+    ``{disk}`` segment (e.g. ``"vda"``), or ``None`` when the name does
+    not contain a recognizable disk segment.  Anchors on the timestamp
+    pattern so VM names containing dots or underscores are handled
+    correctly.
+    """
+    match = re.search(r"\d{8}T\d{6}_([^_]+)_[0-9a-fA-F]{6}", name)
+    if match:
+        return match.group(1)
+    return None
 
 
 def parse_timestamp(name: str, filepath: Path) -> datetime:

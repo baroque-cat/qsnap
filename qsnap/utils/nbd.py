@@ -20,9 +20,8 @@ Functions:
 - :func:`write_backup_xml` — write the libvirt pull-model backup XML.
 - :func:`write_checkpoint_xml` — write the checkpoint XML for atomic
   checkpoint creation via ``virsh backup-begin``.
-- :func:`get_first_disk_target` — get the first disk target device name.
-- :func:`get_first_disk_path` — get the first disk file path (for
-  stopped-VM direct ``qemu-img convert``).
+- :func:`get_disk_targets` — get all disk ``(target, source_path)`` pairs
+  (multi-disk; replaces the removed single-disk helpers).
 """
 
 from __future__ import annotations
@@ -105,45 +104,17 @@ def is_libvirt_new_enough(
     return (major, minor) >= (min_major, min_minor)
 
 
-def get_first_disk_target(shell: IShell, vm_name: str) -> str | None:
-    """Get the first disk target device name via ``virsh domblklist``.
+def get_disk_targets(shell: IShell, vm_name: str) -> list[tuple[str, str]]:
+    """Return all disk ``(target, source_path)`` pairs for a VM.
 
-    Returns the target device name (e.g., ``"vda"``) or ``None`` if
-    the command fails or no disks are found.
-    """
-    result = shell.run(
-        ["virsh", "domblklist", "--domain", vm_name],
-        timeout=30,
-        check=True,
-    )
-    if not result.success:
-        return None
+    Parses ``virsh domblklist --domain <vm> --details`` output, which has
+    four columns: *Type*, *Device*, *Target*, *Source*.  Returns a
+    ``(target, source_path)`` tuple for every row whose Device is
+    ``"disk"`` (excluding cdrom/floppy devices).  Returns an empty list
+    when the command fails or no disks are found.
 
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        # Skip header lines and separator lines.
-        if not stripped or stripped.startswith("Target") or stripped.startswith("-"):
-            continue
-        parts = stripped.split()
-        if parts:
-            return parts[0]
-
-    return None
-
-
-def get_first_disk_path(shell: IShell, vm_name: str) -> str:
-    """Get the file path of the first disk via ``virsh domblklist --details``.
-
-    Parses the ``virsh domblklist --domain <vm> --details`` output, which
-    has four columns: *Type*, *Device*, *Target*, *Source*.  Returns the
-    *Source* (file path) of the first row with Device ``"disk"``.
-
-    This is analogous to :func:`get_first_disk_target` but returns the
-    file path instead of the target device name.  Used by
-    :meth:`BitmapBackupProvider.create_full_backup` to resolve the
-    source qcow2 path for stopped-VM direct ``qemu-img convert``.
-
-    Returns an empty string if the command fails or no disk is found.
+    Multi-disk (refactor): callers iterate all disks instead of assuming
+    a single first disk.
     """
     result = shell.run(
         ["virsh", "domblklist", "--domain", vm_name, "--details"],
@@ -151,8 +122,9 @@ def get_first_disk_path(shell: IShell, vm_name: str) -> str:
         check=True,
     )
     if not result.success:
-        return ""
+        return []
 
+    disks: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
         stripped = line.strip()
         # Skip header lines and separator lines.
@@ -162,12 +134,15 @@ def get_first_disk_path(shell: IShell, vm_name: str) -> str:
         # spaces in the Source path (fourth column).
         parts = stripped.split(None, 3)
         if len(parts) >= 4 and parts[1] == "disk":
-            return parts[3]
+            disks.append((parts[2], parts[3]))
+    return disks
 
-    return ""
 
-
-def write_backup_xml(socket_path: str, incremental: str | None = None) -> Path:
+def write_backup_xml(
+    socket_path: str,
+    incremental: str | None = None,
+    disk: str | None = None,
+) -> Path:
     """Write a libvirt pull-model backup XML to a temp file.
 
     The XML uses ``mode='pull'`` with a Unix socket transport.
@@ -180,17 +155,24 @@ def write_backup_xml(socket_path: str, incremental: str | None = None) -> Path:
     ``backup-begin`` (design D1).  When *incremental* is ``None``, the
     XML describes a full NBD export (no ``<incremental>`` element).
 
+    When *disk* is non-``None`` (multi-disk refactor), a ``<disks>``
+    element restricts the export to that single disk target (e.g.
+    ``"vda"``).  When ``None``, all disks are exported.
+
     Args:
         socket_path: Path to the Unix socket the NBD server listens on.
         incremental: Optional checkpoint name for incremental export.
             When ``None`` (default), a full export XML is produced.
+        disk: Optional disk target to restrict the export to.
 
     Returns the path to the temp file containing the XML.
     """
     incremental_element = f"  <incremental>{incremental}</incremental>\n" if incremental else ""
+    disks_element = f"  <disks>\n    <disk name='{disk}'/>\n  </disks>\n" if disk else ""
     xml_content = (
         f"<domainbackup mode='pull'>\n"
         f"{incremental_element}"
+        f"{disks_element}"
         f"  <server transport='unix' socket='{socket_path}'/>\n"
         f"</domainbackup>\n"
     )

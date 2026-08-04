@@ -111,12 +111,14 @@ class ChangeResult:
     """Outcome of a change-detection check.
 
     ``changed`` is True when the VM disk allocation has grown since the
-    last recorded value.
+    last recorded value.  ``disk`` identifies the disk target (e.g.
+    ``"vda"``) this result applies to — change detection is per-disk.
     """
 
     changed: bool
     last_allocation: int
     current_allocation: int
+    disk: str
 
 
 # ── Snapshot info (state record) ─────────────────────────────────────────
@@ -127,13 +129,16 @@ class SnapshotInfo:
     """A recorded snapshot in persistent state.
 
     Used by ``IStateManager`` to record and retrieve snapshot metadata
-    across pipeline runs.
+    across pipeline runs.  ``disk`` identifies the disk target (e.g.
+    ``"vda"``) the snapshot belongs to — snapshots of different disks
+    within the same VM are differentiated by this field.
     """
 
     name: str
     path: Path
     timestamp: datetime
     allocation: int
+    disk: str
 
 
 # ── Full backup info (state record) ───────────────────────────────────────
@@ -145,12 +150,14 @@ class FullBackupInfo:
 
     Used by ``IStateManager`` to track when the last full backup was
     created for a given target, so that incremental backups can rebase
-    to the correct anchor.
+    to the correct anchor.  ``disk`` identifies the disk target (e.g.
+    ``"vda"``) this FULL anchors — each disk owns its own FULL chain.
     """
 
     name: str
     path: Path
     timestamp: datetime
+    disk: str
 
 
 # ── Retention ────────────────────────────────────────────────────────────
@@ -189,27 +196,33 @@ class DeferredBlockcommit:
     """A deferred blockcommit operation blocked by MAC (AppArmor/SELinux).
 
     Stored in ``IStateManager`` and retried when the VM is shut off.
-    ``last_warned_at`` tracks the last time a warning was logged for this
-    deferred operation (backward-compatible: ``None`` for old state files).
+    ``disk`` identifies the disk target (e.g. ``"vda"``) whose blockcommit
+    was deferred — the deferred queue is per-disk.  ``last_warned_at``
+    tracks the last time a warning was logged for this deferred operation
+    (backward-compatible: ``None`` for old state files).
     """
 
     snapshots: list[str]
     reason: str
     since: datetime
+    disk: str
     last_warned_at: datetime | None = None
 
 
 @dataclass(frozen=True)
 class DeferredSummary:
-    """Per-VM summary of deferred blockcommit operations.
+    """Per-VM per-disk summary of deferred blockcommit operations.
 
-    ``snapshot_count`` is the total number of snapshots across all deferred
-    operations for this VM.  ``reason`` is the MAC reason (apparmor/selinux)
-    from the oldest deferred entry.  ``age`` is the age of the oldest
-    deferred operation.  ``since`` is the timestamp of the oldest entry.
+    ``disk`` identifies the disk target the deferred entries belong to
+    (multi-disk refactor).  ``snapshot_count`` is the total number of
+    snapshots across all deferred operations for this VM+disk.
+    ``reason`` is the MAC reason (apparmor/selinux) from the oldest
+    deferred entry.  ``age`` is the age of the oldest deferred
+    operation.  ``since`` is the timestamp of the oldest entry.
     """
 
     vm_name: str
+    disk: str
     snapshot_count: int
     reason: str
     age: timedelta
@@ -248,11 +261,14 @@ class ChainVerifyResult:
     non-None when ``success`` is False, describing the problem.
     ``broken_file`` is the path of the first problematic file, or None
     when the verification passes or the error is not file-specific.
+    ``disk`` identifies the disk target whose chain was verified, when
+    known (None in contexts without a specific disk).
     """
 
     success: bool
     error: str | None
     broken_file: Path | None = None
+    disk: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,7 +305,9 @@ class RestoreResult:
     """Outcome of a restore operation.
 
     ``chain_files`` lists all copied file paths (base-to-top order).
-    ``restored_path`` is the target directory.
+    ``restored_path`` is the target directory.  ``disk`` identifies the
+    disk target (e.g. ``"vda"``) that was restored, when known (None when
+    the restore source does not map to a specific disk).
     """
 
     success: bool
@@ -297,6 +315,7 @@ class RestoreResult:
     restored_path: Path
     chain_files: list[Path]
     error: str | None
+    disk: str | None = None
 
 
 # ── Schedule (print_schedule) ─────────────────────────────────────────────

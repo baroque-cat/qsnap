@@ -16,13 +16,13 @@ class IStateManager(ABC):
     """
 
     @abstractmethod
-    def get_last_allocation(self, vm_name: str) -> int | None:
-        """Return the last recorded allocation size for *vm_name*, or None."""
+    def get_last_allocation(self, vm_name: str, disk: str) -> int | None:
+        """Return the last recorded allocation size for *vm_name*/*disk*, or None."""
         ...
 
     @abstractmethod
-    def set_last_allocation(self, vm_name: str, alloc: int) -> None:
-        """Record the current allocation size for *vm_name*."""
+    def set_last_allocation(self, vm_name: str, disk: str, alloc: int) -> None:
+        """Record the current allocation size for *vm_name*/*disk*."""
         ...
 
     @abstractmethod
@@ -50,8 +50,10 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def add_deferred_blockcommit(self, vm_name: str, snapshots: list[str], reason: str) -> None:
-        """Queue a deferred blockcommit for *vm_name* with the given *reason*."""
+    def add_deferred_blockcommit(
+        self, vm_name: str, disk: str, snapshots: list[str], reason: str
+    ) -> None:
+        """Queue a deferred blockcommit for *vm_name*/*disk* with the given *reason*."""
         ...
 
     @abstractmethod
@@ -70,8 +72,10 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def set_last_full_backup(self, target_path: str, name: str, timestamp: datetime) -> None:
-        """Record a full backup for *target_path* with the given *name* and *timestamp*."""
+    def set_last_full_backup(
+        self, target_path: str, name: str, timestamp: datetime, disk: str
+    ) -> None:
+        """Record a full backup for *target_path*/*disk* with *name* and *timestamp*."""
         ...
 
     @abstractmethod
@@ -81,16 +85,24 @@ class IStateManager(ABC):
 
     @abstractmethod
     def record_full_backup(
-        self, target_path: str, name: str, timestamp: datetime
+        self, target_path: str, name: str, timestamp: datetime, disk: str
     ) -> None:
-        """Append a full backup record for *target_path*."""
+        """Append a full backup record for *target_path*/*disk*."""
         ...
 
     @abstractmethod
     def record_incremental_dependency(
         self, target_path: str, incremental_name: str, full_name: str
     ) -> None:
-        """Record that *incremental_name* depends on *full_name* on *target_path*."""
+        """Record that *incremental_name* depends on *full_name* on *target_path*.
+
+        Deliberately has NO ``disk`` parameter (see spec
+        ``state-management``): the disk target is already encoded in both
+        the FULL and incremental backup file names (``..._{disk}_{hex}``),
+        and FULL records carry their own ``disk`` field.  Keying the
+        dependency by ``(target_path, full_name)`` is therefore unambiguous
+        without a separate disk dimension.
+        """
         ...
 
     @abstractmethod
@@ -119,24 +131,24 @@ class IStateManager(ABC):
         ...
 
     @abstractmethod
-    def get_last_backup_allocation(self, target_path: str) -> int | None:
-        """Return the last recorded backup allocation for *target_path*, or None.
+    def get_last_backup_allocation(self, target_path: str, disk: str) -> int | None:
+        """Return the last recorded backup allocation for *target_path*/*disk*.
 
         Used by the ``backup_create="onchange"`` gate in
-        :meth:`Core._backup_target` to decide whether to skip the
-        backup transfer for a target whose VM disk has not changed since
-        the last successful backup to that target.
+        :meth:`Core._backup_target` to decide whether to skip the backup
+        transfer for a target whose VM disk has not changed since the last
+        successful backup of *disk* to that target.
         """
         ...
 
     @abstractmethod
-    def set_last_backup_allocation(self, target_path: str, alloc: int) -> None:
-        """Record the backup allocation baseline for *target_path*."""
+    def set_last_backup_allocation(self, target_path: str, disk: str, alloc: int) -> None:
+        """Record the backup allocation baseline for *target_path*/*disk*."""
         ...
 
     @abstractmethod
-    def clear_last_backup_allocation(self, target_path: str) -> bool:
-        """Remove the ``last_backup_allocation`` baseline for *target_path*.
+    def clear_last_backup_allocation(self, target_path: str, disk: str) -> bool:
+        """Remove the ``last_backup_allocation`` baseline for *target_path*/*disk*.
 
         Returns ``True`` if an entry was found and removed, ``False``
         if no matching entry existed.

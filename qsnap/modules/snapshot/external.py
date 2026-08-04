@@ -17,7 +17,11 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotResult
-from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path, parse_timestamp
+from qsnap.utils.parsing import (
+    parse_domblklist_disks,
+    parse_domblklist_path_map,
+    parse_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -306,25 +310,48 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         )
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
-        """List existing snapshots via the backing chain of the active disk.
+        """List existing snapshots via the backing chains of all disks.
 
-        1. ``virsh domblklist`` to find the active disk path.
-        2. ``qemu-img info --force-share --backing-chain --output=json``.
-        3. Skip the first element (base image); build ``SnapshotInfo`` for
-           each subsequent chain element.
+        Multi-disk (refactor): each configured disk has its own backing
+        chain.  For every disk in ``vm_config.disks`` the active path is
+        resolved via ``virsh domblklist`` and its chain is scanned via
+        ``qemu-img info --backing-chain``.  Each resulting
+        :class:`SnapshotInfo` carries the disk target it belongs to.
+        Returns a single flat list sorted by timestamp.
         """
-        # Step 1: Get active disk path via domblklist
+        # Step 1: Get all active disk paths via domblklist.
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
         domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
             return []
 
         try:
-            active_disk = parse_domblklist_path(domblklist_result.stdout)
+            path_map = parse_domblklist_path_map(domblklist_result.stdout)
         except ValueError:
             return []
 
-        # Step 2: qemu-img info --backing-chain
+        # Step 2: Scan each configured disk's backing chain.
+        snapshots: list[SnapshotInfo] = []
+        for disk_cfg in vm_config.disks:
+            active_disk = path_map.get(disk_cfg.target)
+            if active_disk is None:
+                logger.warning(
+                    "Disk %s of VM %s not found in domblklist — skipping its chain",
+                    disk_cfg.target,
+                    vm_config.name,
+                )
+                continue
+            snapshots.extend(self._list_chain(active_disk, disk_cfg.target))
+
+        snapshots.sort(key=lambda s: s.timestamp)
+        return snapshots
+
+    def _list_chain(self, active_disk: str, disk: str) -> list[SnapshotInfo]:
+        """Scan one disk's backing chain and return its snapshots.
+
+        Skips the first element (base image); builds a ``SnapshotInfo``
+        (tagged with *disk*) for each subsequent chain element.
+        """
         chain_cmd = [
             "qemu-img",
             "info",
@@ -345,7 +372,6 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         if not isinstance(chain, list) or len(chain) <= 1:  # type: ignore[reportUnnecessaryIsInstance]
             return []
 
-        # Step 3: Build SnapshotInfo for each element after the base
         snapshots: list[SnapshotInfo] = []
         for element in chain[1:]:
             filename = cast(str, element.get("filename", ""))
@@ -358,10 +384,9 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                     path=Path(filename),
                     timestamp=timestamp,
                     allocation=actual_size,
+                    disk=disk,
                 )
             )
-
-        snapshots.sort(key=lambda s: s.timestamp)
         return snapshots
 
     def delete(self, snapshot: SnapshotInfo) -> ShellResult:

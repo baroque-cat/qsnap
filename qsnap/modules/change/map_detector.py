@@ -41,21 +41,25 @@ class MapChangeDetector(IChangeDetector):
 
     # ── IChangeDetector implementation ────────────────────────────────
 
-    def has_changed(self, vm_config: VMConfig, disk: str | None = None) -> ChangeResult:
-        """Check whether the VM disk allocation map has changed since last run.
+    def has_changed(self, vm_config: VMConfig, disk: str) -> ChangeResult:
+        """Check whether the given disk's allocation map has changed since last run.
+
+        Detection is per-disk (multi-disk refactor): *disk* is the libvirt
+        target device name to check.
 
         Fail-safe: any command failure returns ``changed=True``.
         """
-        # Step 1: Get last allocation hash from state
-        last_alloc = self._state.get_last_allocation(vm_config.name)
+        # Step 1: Get the per-disk last allocation hash from state.
+        last_alloc = self._state.get_last_allocation(vm_config.name, disk)
         if last_alloc is None:
             return ChangeResult(
                 changed=True,
                 last_allocation=0,
                 current_allocation=0,
+                disk=disk,
             )
 
-        # Step 2: Get active disk paths via domblklist (design D3)
+        # Step 2: Get active disk paths via domblklist (design D3).
         domblklist_cmd = ["virsh", "domblklist", "--domain", vm_config.name]
         domblklist_result = self._shell.run(domblklist_cmd, timeout=30, check=True)
         if not domblklist_result.success:
@@ -63,27 +67,18 @@ class MapChangeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
         disks = parse_domblklist_disks(domblklist_result.stdout)
-        if not disks:
+        active_disk = next((path for target, path in disks if target == disk), None)
+        if active_disk is None:
             return ChangeResult(
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
-
-        # Resolve the target disk path.
-        if disk is not None:
-            active_disk = next((path for target, path in disks if target == disk), None)
-            if active_disk is None:
-                return ChangeResult(
-                    changed=True,
-                    last_allocation=last_alloc,
-                    current_allocation=0,
-                )
-        else:
-            active_disk = disks[0][1]
 
         # Step 3: Get current allocation map via qemu-img map
         # --force-share: the active disk may be the active layer of a
@@ -102,6 +97,7 @@ class MapChangeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
         # Step 4: Compute hash of allocated regions
@@ -112,6 +108,7 @@ class MapChangeDetector(IChangeDetector):
                     changed=True,
                     last_allocation=last_alloc,
                     current_allocation=0,
+                    disk=disk,
                 )
             # Build a deterministic hash from sorted (offset, length) tuples.
             offsets = sorted(
@@ -129,6 +126,7 @@ class MapChangeDetector(IChangeDetector):
                 changed=True,
                 last_allocation=last_alloc,
                 current_allocation=0,
+                disk=disk,
             )
 
         # Step 5: Compare
@@ -137,4 +135,5 @@ class MapChangeDetector(IChangeDetector):
             changed=changed,
             last_allocation=last_alloc,
             current_allocation=current_alloc,
+            disk=disk,
         )

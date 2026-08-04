@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
@@ -17,11 +18,16 @@ class ILifecycleManager(ABC):
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
         *,
+        disk: str,
+        base_image: Path,
         deep_verify: bool = False,
     ) -> CommitResult:
-        """Merge snapshots into their backing file via ``virsh blockcommit``.
+        """Merge snapshots of one disk into that disk's base image.
 
-        When *deep_verify* is True, run ``qemu-img check`` on the base
-        image after a successful commit and report corruptions.
+        Multi-disk (refactor): *disk* is the libvirt target device name
+        (e.g. ``"vda"``) and *base_image* is this disk's base qcow2 path.
+        All snapshots in *snapshots_to_merge* belong to *disk*.  When
+        *deep_verify* is True, run ``qemu-img check`` on *base_image*
+        after a successful commit and report corruptions.
         """
         ...

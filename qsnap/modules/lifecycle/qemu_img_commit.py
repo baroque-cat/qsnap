@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.shell import IShell
 from qsnap.models.config import VMConfig
 from qsnap.models.results import CommitResult, SnapshotInfo
 from qsnap.utils.mac import detect_mac_denial
+from qsnap.utils.parsing import parse_disk_from_snapshot_name
 from qsnap.utils.verification import deep_verify_base_image
 
 logger = logging.getLogger(__name__)
@@ -46,21 +48,32 @@ class QemuImgCommitManager(ILifecycleManager):
         vm_config: VMConfig,
         snapshots_to_merge: list[SnapshotInfo],
         *,
+        disk: str,
+        base_image: Path,
         deep_verify: bool = False,
     ) -> CommitResult:
-        """Merge snapshots into the base image via ``qemu-img commit``.
+        """Merge snapshots of one disk into that disk's base image.
+
+        Multi-disk (refactor): *disk* is the libvirt target device name and
+        *base_image* is this disk's base qcow2 path.  The ``-b`` commit and
+        rebase targets are taken from *base_image* (not a single VM-level
+        base image).
 
         1. If the list is empty → no-op success.
         2. For each snapshot (oldest first): ``qemu-img commit
            -b <base> <snap>``, then pivot the child overlay onto the
-           base via ``qemu-img rebase -u``, then delete the committed
-           file explicitly.  Short-circuit on first failure (design D4).
-        3. When *deep_verify* is True, run ``qemu-img check`` on the
-           base image after a successful commit.
+            base via ``qemu-img rebase -u``, then delete the committed
+            file explicitly.  Short-circuit on first failure (design D4).
+        3. When *deep_verify* is True, run ``qemu-img check`` on
+           *base_image* after a successful commit.
         """
         # Step 1: Empty list → no-op
         if not snapshots_to_merge:
             return CommitResult(success=True, committed_snapshot="", error=None)
+
+        # Resolve the scan directory for child discovery: the disk's own
+        # snapshot_dir override, or the VM-level default.
+        scan_dir = self._scan_dir_for(vm_config, disk)
 
         # Step 2: Merge each snapshot (oldest first)
         last_merged = ""
@@ -71,7 +84,7 @@ class QemuImgCommitManager(ILifecycleManager):
                 "qemu-img",
                 "commit",
                 "-b",
-                str(vm_config.base_image),
+                str(base_image),
                 str(snapshot.path),
             ]
             result = self._shell.run(cmd, timeout=3600)
@@ -87,7 +100,7 @@ class QemuImgCommitManager(ILifecycleManager):
 
             # 2b: Child discovery — find the overlay whose backing file
             # is the just-committed snapshot (linear chain ⇒ at most one).
-            child_result = self._find_child(vm_config, snapshot)
+            child_result = self._find_child(scan_dir, snapshot)
             if isinstance(child_result, CommitResult):
                 return child_result
             child = child_result
@@ -103,7 +116,7 @@ class QemuImgCommitManager(ILifecycleManager):
                     "-F",
                     "qcow2",
                     "-b",
-                    str(vm_config.base_image),
+                    str(base_image),
                     child,
                 ]
                 rebase_result = self._shell.run(rebase_cmd, timeout=300)
@@ -133,9 +146,9 @@ class QemuImgCommitManager(ILifecycleManager):
                 )
             last_merged = snapshot.name
 
-        # Deep verify: run qemu-img check on base image after commit
+        # Deep verify: run qemu-img check on the disk's base image after commit
         if deep_verify:
-            fail = deep_verify_base_image(self._shell, vm_config.base_image)
+            fail = deep_verify_base_image(self._shell, base_image)
             if fail is not None:
                 return fail
 
@@ -144,6 +157,18 @@ class QemuImgCommitManager(ILifecycleManager):
             committed_snapshot=last_merged,
             error=None,
         )
+
+    @staticmethod
+    def _scan_dir_for(vm_config: VMConfig, disk: str) -> Path | None:
+        """Resolve the snapshot directory to scan for child overlays.
+
+        Returns the per-disk override when set, otherwise the VM-level
+        ``snapshot_dir``.  May be ``None`` if neither is configured.
+        """
+        disk_cfg = vm_config.get_disk(disk)
+        if disk_cfg is not None:
+            return vm_config.snapshot_dir_for(disk_cfg)
+        return vm_config.snapshot_dir
 
     # ── helpers ───────────────────────────────────────────────────────
 
@@ -161,22 +186,30 @@ class QemuImgCommitManager(ILifecycleManager):
 
     def _find_child(
         self,
-        vm_config: VMConfig,
+        scan_dir: Path | None,
         snapshot: SnapshotInfo,
     ) -> str | None | CommitResult:
-        """Find the child overlay of *snapshot* in ``snapshot_dir``.
+        """Find the child overlay of *snapshot* in *scan_dir*.
 
-        Scans ``vm_config.snapshot_dir`` for ``*.qcow2`` files and matches
-        each file's resolved ``backing-filename`` against the snapshot
-        path.  Returns the child path, ``None`` when no child exists, or
-        a failure ``CommitResult`` when discovery itself failed (the
-        caller must short-circuit — deleting without knowing whether a
-        child exists would risk dangling backing references).
+        Scans *scan_dir* (the disk's snapshot directory) for ``*.qcow2``
+        files and matches each file's resolved ``backing-filename`` against
+        the snapshot path.  Because backing chains are per-disk, only a
+        child of the same disk can reference this snapshot as its backing
+        file.  Returns the child path, ``None`` when no child exists, or a
+        failure ``CommitResult`` when discovery itself failed (the caller
+        must short-circuit — deleting without knowing whether a child
+        exists would risk dangling backing references).
         """
+        if scan_dir is None:
+            return CommitResult(
+                success=False,
+                committed_snapshot=snapshot.name,
+                error="child discovery failed: no snapshot_dir configured for disk",
+            )
         find_result = self._shell.run(
             [
                 "find",
-                str(vm_config.snapshot_dir),
+                str(scan_dir),
                 "-maxdepth",
                 "1",
                 "-type",
@@ -197,6 +230,14 @@ class QemuImgCommitManager(ILifecycleManager):
         for candidate in find_result.stdout.splitlines():
             candidate = candidate.strip()
             if not candidate:
+                continue
+            # Multi-disk guard: when several disks share one snapshot_dir,
+            # skip candidates that clearly belong to a different disk.  The
+            # disk target is encoded in snapshot-style file names; candidates
+            # whose name does not parse (e.g. a base image) are NOT skipped,
+            # because they may still be the child we are looking for.
+            candidate_disk = parse_disk_from_snapshot_name(Path(candidate).name)
+            if candidate_disk is not None and candidate_disk != snapshot.disk:
                 continue
             info_result = self._shell.run(
                 ["qemu-img", "info", "--output=json", candidate],
