@@ -78,6 +78,71 @@ def test_first_backup_creates_full(
     assert len(fulls) == 1, "One FULL backup should be recorded after first backup"
 
 
+# ── test_full_source_snapshot_excluded_from_transfer ──────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_full_source_snapshot_excluded_from_transfer(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """The snapshot consumed as the FULL source is excluded from transfer.
+
+    The FULL anchor already contains the source snapshot's data.  Re-
+    transferring it as an incremental against the checkpoint created by
+    the FULL export itself trips the design-D5 temporal cross-check when
+    the checkpoint's second-granularity timestamp rolls past the
+    snapshot's microsecond timestamp — a spurious "backup failed" on an
+    otherwise healthy FULL.  Older snapshots still pending transfer must
+    still be transferred.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Older snapshot — still needs an incremental transfer.
+    snap_old = SnapshotInfo(
+        name="snap0",
+        path=Path("/tmp/snap0.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=500,
+        disk="vda",
+    )
+    # Newest snapshot — becomes the FULL source.
+    snap_new = _record_snap(mock_state, target, vm)
+    mock_state.record_snapshot(vm.name, snap_old)
+
+    with (
+        patch.object(
+            mock_factory._backup_provider,
+            "transfer_missing",
+            wraps=mock_factory._backup_provider.transfer_missing,
+        ) as transfer_spy,
+        patch("qsnap.core.verify_full_backup", return_value=None),
+    ):
+        core._backup_target(vm, target, [snap_old, snap_new])
+
+    assert transfer_spy.called, "transfer_missing should still be called"
+    transferred = transfer_spy.call_args[0][2]
+    transferred_names = [s.name for s in transferred]
+    assert snap_new.name not in transferred_names, (
+        "FULL source snapshot must not be re-transferred as incremental"
+    )
+    assert snap_old.name in transferred_names, (
+        "older pending snapshots must still be transferred"
+    )
+
+
 # ── test_incremental_count_exceeds_chain_length_triggers_full ──────────────
 
 

@@ -4323,6 +4323,10 @@ class Core:
         stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
         full_verification_failed = False
+        # Names of snapshots consumed as FULL sources in this run.  Their
+        # data is fully contained in the new FULL anchors, so they are
+        # excluded from the incremental transfer below (see transfer_list).
+        full_source_names: set[str] = set()
         if not skip_transfer:
             # Count-based FULL backup decision (design D2).
             # The decision is a simple count check: create a new
@@ -4526,14 +4530,28 @@ class Core:
                             target.path,
                             disk_target,
                         )
+                    else:
+                        # The FULL anchor already contains this snapshot's
+                        # data; exclude it from the incremental transfer.
+                        full_source_names.add(most_recent.name)
 
-            # Transfer missing snapshots (with retry when configured)
+            # Transfer missing snapshots (with retry when configured).
+            # Snapshots already consumed as FULL sources this run are
+            # excluded: the FULL anchor fully contains their data, and
+            # re-transferring them as incrementals against the checkpoint
+            # the FULL export itself created trips the design-D5 temporal
+            # cross-check whenever the checkpoint's second-granularity
+            # timestamp rolls past the snapshot's microsecond timestamp
+            # (a spurious "backup failed" on an otherwise healthy FULL).
             if not self._dry_run:
+                transfer_list = [
+                    s for s in snapshots if s.name not in full_source_names
+                ]
                 results = self._transfer_with_retry(
                     provider,
                     vm_config,
                     target,
-                    snapshots,
+                    transfer_list,
                     compression_type=target.compression_type,
                     stall_timeout=stall_timeout,
                     convert_parallel=target.convert_parallel,
