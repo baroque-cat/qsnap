@@ -6,15 +6,19 @@ Follows patterns from test_reconcile.py — same Core setup, MockShell,
 InMemoryStateManager, MockVMModuleFactory.
 """
 from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import FullBackupInfo, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def _anchor_json(orphan_path: Path, full_path: Path) -> str:
     """Return JSON for ``qemu-img info --output=json`` with a FULL backing anchor."""
@@ -148,7 +152,7 @@ def test_reconcile_orphan_broken_chain_critical_not_deleted(make_vm_config, make
     assert not delete_spy.called, 'provider.delete() should NOT be called for broken-chain orphan'
     assert result['testvm'].orphan_files_removed == 0
     assert inc2_name in result['testvm'].broken_chains, f'Broken chain for {inc2_name} should be in broken_chains'
-    assert any(('broken chain' in r.message.lower() for r in caplog.records)), 'Should log CRITICAL about broken chain'
+    assert any('broken chain' in r.message.lower() for r in caplog.records), 'Should log CRITICAL about broken chain'
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -168,7 +172,7 @@ def test_reconcile_orphan_checkpoint_deleted(make_vm_config, make_target, mock_f
         result = core.reconcile()
     assert list_spy.called, 'list_checkpoints should be called'
     assert result['testvm'].orphan_checkpoints_deleted >= 1, f'Orphan checkpoint {orphan_checkpoint} should be deleted'
-    assert any(('deleted orphan checkpoint' in r.message for r in caplog.records)), 'Should log INFO about deleted orphan checkpoint'
+    assert any('deleted orphan checkpoint' in r.message for r in caplog.records), 'Should log INFO about deleted orphan checkpoint'
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -295,4 +299,4 @@ def test_reconcile_dry_run_targets(make_vm_config, make_target, mock_factory, mo
     assert result['testvm'].phantom_fulls_removed >= 1, 'Should report phantom FULL would be removed'
     assert result['testvm'].stale_deps_removed >= 1, 'Should report stale dep would be removed'
     assert result['testvm'].state_supplemented >= 1, 'Should report orphan would be supplemented'
-    assert any(('dry-run reconcile' in r.message for r in caplog.records)), 'Should log dry-run reconcile messages'
+    assert any('dry-run reconcile' in r.message for r in caplog.records), 'Should log dry-run reconcile messages'

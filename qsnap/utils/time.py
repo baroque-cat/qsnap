@@ -7,7 +7,7 @@ no I/O, no side effects.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 # ---------------------------------------------------------------------------
 # Duration / timeout parsing

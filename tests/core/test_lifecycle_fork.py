@@ -39,7 +39,7 @@ def _add_two_snapshots(state, vm_name: str = "testvm") -> tuple[SnapshotInfo, Sn
         path=Path(f"{_SNAP_DIR}/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=1048576,
-    
+
         disk="vda",
     )
     snap2 = SnapshotInfo(
@@ -47,7 +47,7 @@ def _add_two_snapshots(state, vm_name: str = "testvm") -> tuple[SnapshotInfo, Sn
         path=Path(f"{_SNAP_DIR}/snap2.qcow2"),
         timestamp=datetime(2025, 7, 13, 14, 0),
         allocation=2097152,
-    
+
         disk="vda",
     )
     state.record_snapshot(vm_name, snap1)

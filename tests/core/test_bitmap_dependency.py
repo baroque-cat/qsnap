@@ -43,7 +43,7 @@ def _make_incremental_snapshot(name: str = "vm.20250101T000000") -> SnapshotInfo
         path=Path(f"/var/lib/libvirt/snapshots/testvm/{name}.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
-    
+
         disk="vda",
     )
 

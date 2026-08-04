@@ -7,16 +7,20 @@ These commands are read-only: they must not mutate state, execute
 shell commands, or call lifecycle/backup deletion methods.
 """
 from __future__ import annotations
+
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.config import DiskConfig
 from qsnap.models.results import RetentionResult, ScheduleResult, ShellResult, SnapshotInfo
 from tests.helpers import add_deferred_with_since
 from tests.mocks import MockConfigFacade
+
 
 def test_list_snapshots_returns_all_vms_sorted_ascending(make_vm_config, mock_factory, mock_state, mock_shell):
     """``list_snapshots()`` returns all VMs with snapshots sorted ascending."""
@@ -479,9 +483,9 @@ def test_list_backups_tree_groups_by_chain(make_vm_config, make_target, mock_fac
     chain_keys = list(chains.keys())
     assert chain_keys[0] == 'testvm.FULL.20250701T120000_abc123'
     assert chain_keys[1] == 'testvm.FULL.20250703T120000_ghi789'
-    chain1_names = sorted((b.name for b in chains['testvm.FULL.20250701T120000_abc123']))
+    chain1_names = sorted(b.name for b in chains['testvm.FULL.20250701T120000_abc123'])
     assert chain1_names == sorted(['testvm.FULL.20250701T120000_abc123', 'testvm.20250702T120000_def456'])
-    chain2_names = sorted((b.name for b in chains['testvm.FULL.20250703T120000_ghi789']))
+    chain2_names = sorted(b.name for b in chains['testvm.FULL.20250703T120000_ghi789'])
     assert chain2_names == sorted(['testvm.FULL.20250703T120000_ghi789', 'testvm.20250704T120000_jkl012'])
 
 @pytest.mark.unit

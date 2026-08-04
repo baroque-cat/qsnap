@@ -9,14 +9,18 @@ domain XML, reset VM and target state, and best-effort checkpoint cleanup.
 See OpenSpec change: simplify-fork-restore (restore-command/spec.md)
 """
 from __future__ import annotations
+
 import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import ChainScanResult, RestoreResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 _SIMPLE_DOMAIN_XML = "<domain type='kvm'>\n  <name>testvm</name>\n  <uuid>12345678-1234-1234-1234-123456789abc</uuid>\n  <devices>\n    <disk type='file' device='disk'>\n      <source file='/var/lib/libvirt/images/testvm.qcow2'/>\n      <target dev='vda'/>\n    </disk>\n  </devices>\n</domain>"
 
 def _make_snapshot(name: str='snap1', path: str='/snapshots/snap1.qcow2', allocation: int=1048576) -> SnapshotInfo:
@@ -267,7 +271,7 @@ def test_restore_best_effort_checkpoint_cleanup(make_vm_config, make_target, moc
     assert len(checkpoint_calls) == 2, f'Expected 2 checkpoint-delete calls, got {len(checkpoint_calls)}'
     warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     warn_messages = [r.getMessage() for r in warn_records]
-    assert any(('failed to delete checkpoint' in msg for msg in warn_messages)), f'Expected WARNING about failed checkpoint deletion, got: {warn_messages}'
+    assert any('failed to delete checkpoint' in msg for msg in warn_messages), f'Expected WARNING about failed checkpoint deletion, got: {warn_messages}'
 
 @pytest.mark.unit
 def test_core_restore_from_backup_replaces_disk(tmp_path, make_vm_config, make_target, mock_factory, mock_state, mock_shell):

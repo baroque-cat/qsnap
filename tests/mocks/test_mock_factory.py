@@ -1,7 +1,9 @@
 """Mock verification: MockVMModuleFactory returns correct interface types."""
 from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
+
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
@@ -10,7 +12,12 @@ from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import BackupResult, SnapshotInfo
 from tests.mocks.mock_factory import MockVMModuleFactory
-from tests.mocks.mock_modules import MockBitmapBackupProvider, MockChangeDetector, MockLifecycleManager
+from tests.mocks.mock_modules import (
+    MockBitmapBackupProvider,
+    MockChangeDetector,
+    MockLifecycleManager,
+)
+
 
 def test_mock_factory_returns_interface_types(make_vm_config, make_target):
     """Every create_* method on MockVMModuleFactory returns an instance of
@@ -211,4 +218,4 @@ def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_tar
         assert isinstance(r1, BackupResult)
         r2 = provider.transfer_missing(make_vm_config(), make_target(), snapshots)
         assert isinstance(r2, list)
-        assert all((isinstance(r, BackupResult) for r in r2))
+        assert all(isinstance(r, BackupResult) for r in r2)

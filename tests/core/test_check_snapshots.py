@@ -6,13 +6,17 @@ matrix between state JSON, disk qcow2 files, and libvirt domain XML.
 All tests use ``@pytest.mark.unit`` and ``@pytest.mark.mock`` markers.
 """
 from __future__ import annotations
+
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def _make_chain_json(paths: list[Path]) -> str:
     """Create qemu-img --backing-chain --output=json for a list of paths.
@@ -187,7 +191,7 @@ def test_check_phantom_snapshot_but_xml_ok(make_vm_config, mock_factory, mock_st
     with caplog.at_level(logging.WARNING):
         result = core.check()
     assert result['testvm'].status == 'ok'
-    assert any(('phantom entry in state' in r.message for r in caplog.records)), 'Should log WARNING about phantom state entry'
+    assert any('phantom entry in state' in r.message for r in caplog.records), 'Should log WARNING about phantom state entry'
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -216,7 +220,7 @@ def test_check_orphan_snapshot_file_exists_not_in_state(make_vm_config, mock_fac
     with caplog.at_level(logging.WARNING):
         result = core.check()
     assert result['testvm'].status == 'ok'
-    assert any(('orphan file' in r.message and 'not in state' in r.message for r in caplog.records)), 'Should log WARNING about orphan file'
+    assert any('orphan file' in r.message and 'not in state' in r.message for r in caplog.records), 'Should log WARNING about orphan file'
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -274,7 +278,7 @@ def test_check_xml_active_layer_mismatch(make_vm_config, mock_factory, mock_stat
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
     result = core.check()
     assert result['testvm'].status == 'broken'
-    assert any(('domblklist active layer' in s or 'active layer' for s in result['testvm'].broken_snapshots)), f"Should report active layer mismatch, got: {result['testvm'].broken_snapshots}"
+    assert any('domblklist active layer' in s or 'active layer' for s in result['testvm'].broken_snapshots), f"Should report active layer mismatch, got: {result['testvm'].broken_snapshots}"
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -494,7 +498,7 @@ def test_check_inconsistent_backing_filename(make_vm_config, mock_factory, mock_
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
     result = core.check()
     assert result['testvm'].status == 'broken'
-    assert any(('backing-filename mismatch' in s for s in result['testvm'].broken_snapshots)), f"Should report backing-filename mismatch, got: {result['testvm'].broken_snapshots}"
+    assert any('backing-filename mismatch' in s for s in result['testvm'].broken_snapshots), f"Should report backing-filename mismatch, got: {result['testvm'].broken_snapshots}"
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -522,4 +526,4 @@ def test_check_detects_cycle_in_chain(make_vm_config, mock_factory, mock_state, 
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
     result = core.check()
     assert result['testvm'].status == 'broken'
-    assert any(('cycle' in s for s in result['testvm'].broken_snapshots)), f"Should report cycle detection, got: {result['testvm'].broken_snapshots}"
+    assert any('cycle' in s for s in result['testvm'].broken_snapshots), f"Should report cycle detection, got: {result['testvm'].broken_snapshots}"

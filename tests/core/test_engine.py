@@ -11,7 +11,6 @@ object is an instance of ``IConfigFacade``.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +28,6 @@ from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import GlobalConfig
 from qsnap.models.results import (
     BackupResult,
-    RestoreResult,
     RetentionResult,
     ShellResult,
     SnapshotInfo,
@@ -641,7 +639,7 @@ def test_action_appended_on_snapshot_delete(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -698,7 +696,7 @@ def test_action_appended_on_backup_transfer(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -750,7 +748,7 @@ def test_action_appended_on_full_backup(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -808,7 +806,7 @@ def test_action_appended_on_backup_delete(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -819,7 +817,7 @@ def test_action_appended_on_backup_delete(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-    
+
         disk="vda",
     )
 
@@ -1002,7 +1000,7 @@ def test_backup_failed_warning_with_transfer_failures(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1060,7 +1058,7 @@ def test_no_backup_failed_warning_when_all_succeed(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1181,7 +1179,7 @@ def test_snapshot_delete_info_log(
         path=Path("/var/lib/libvirt/snapshots/testvm/snap_old.qcow2"),
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1240,7 +1238,7 @@ def test_backup_transfer_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1288,7 +1286,7 @@ def test_full_backup_create_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1338,7 +1336,7 @@ def test_backup_delete_info_log(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    
+
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
@@ -1348,7 +1346,7 @@ def test_backup_delete_info_log(
         path=target.path / "testvm.FULL.backup1.qcow2",
         timestamp=datetime(2025, 1, 1),
         allocation=1000,
-    
+
         disk="vda",
     )
 

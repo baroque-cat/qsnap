@@ -9,14 +9,17 @@
 No synthetic timestamps, retention windows, or size projections.
 """
 from __future__ import annotations
+
 import json
 import logging
 from argparse import Namespace
 from datetime import datetime, timedelta
 from pathlib import Path
+
 from qsnap.core import Core
 from qsnap.models.results import ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def test_empty_state_summary(make_vm_config, mock_factory, mock_state, mock_shell):
     """No VMs configured → schedule_summary returns an empty string."""

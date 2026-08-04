@@ -11,15 +11,19 @@ Covers the new reconcile features:
 - Non-fatal error handling during orphan detection
 """
 from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import FullBackupInfo, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def _anchor_json(orphan_path: Path, full_path: Path) -> str:
     """Return JSON for ``qemu-img info --output=json`` with a FULL backing anchor."""
@@ -44,7 +48,7 @@ def test_reconcile_skips_non_qsnap_files_on_target(make_vm_config, make_target, 
         result = core.reconcile()
     assert not delete_spy.called, 'Non-qsnap file should NOT be deleted'
     assert result['testvm'].orphan_files_removed == 0
-    assert any(('not qsnap pattern' in r.message for r in caplog.records)), 'Should log WARNING about non-qsnap file'
+    assert any('not qsnap pattern' in r.message for r in caplog.records), 'Should log WARNING about non-qsnap file'
     assert result['testvm'].broken_chains == []
 
 @pytest.mark.unit
@@ -96,9 +100,9 @@ def test_reconcile_orphan_file_cleanup_non_fatal(make_vm_config, make_target, mo
     with patch.object(core, '_detect_broken_chains', return_value=[]), patch.object(mock_factory._bitmap_backup_provider, 'list', side_effect=OSError('target directory not accessible')), caplog.at_level(logging.WARNING):
         result = core.reconcile()
     assert len(result['testvm'].errors) > 0
-    assert any(('orphan files' in e for e in result['testvm'].errors)), 'Should record error about orphan files'
+    assert any('orphan files' in e for e in result['testvm'].errors), 'Should record error about orphan files'
     assert result['testvm'].orphan_files_removed == 0
-    assert any(('error checking orphan files' in r.message for r in caplog.records)), 'Should log WARNING about orphan files error'
+    assert any('error checking orphan files' in r.message for r in caplog.records), 'Should log WARNING about orphan files error'
 
 @pytest.mark.unit
 @pytest.mark.mock
@@ -158,7 +162,7 @@ def test_reconcile_detects_broken_chain_before_orphan(make_vm_config, make_targe
     assert orphan_name in result['testvm'].broken_chains, f'Broken chain for {orphan_name} should be in broken_chains'
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical_logs, 'Broken chain must emit CRITICAL log'
-    assert any(('broken chain' in r.message for r in critical_logs)), 'CRITICAL log should mention broken chain'
+    assert any('broken chain' in r.message for r in critical_logs), 'CRITICAL log should mention broken chain'
     rec = result['testvm']
     assert rec.state_supplemented == 0, 'no files should be supplemented'
     assert rec.xml_refreshed is False
@@ -229,4 +233,4 @@ def test_reconcile_dry_run_reports_broken_chains_no_deletion(make_vm_config, mak
     assert orphan_name in result['testvm'].broken_chains, f'Broken chain for {orphan_name} should be in broken_chains even in dry-run mode'
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical_logs, 'Broken chain must emit CRITICAL log in dry-run mode'
-    assert any(('broken chain' in r.message for r in critical_logs)), 'CRITICAL log should mention broken chain in dry-run mode'
+    assert any('broken chain' in r.message for r in critical_logs), 'CRITICAL log should mention broken chain in dry-run mode'

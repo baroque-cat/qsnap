@@ -1091,7 +1091,11 @@ def test_external_snapshot_provider_imports_shared_parsers():
     functions (i.e. the local duplicates have been removed).
     """
     from qsnap.modules.snapshot import external
-    from qsnap.utils.parsing import parse_domblklist_disks, parse_domblklist_path_map, parse_timestamp
+    from qsnap.utils.parsing import (
+        parse_domblklist_disks,
+        parse_domblklist_path_map,
+        parse_timestamp,
+    )
 
     # Shared parsers are imported (same object reference)
     # parse_domblklist_path was renamed; check new imports

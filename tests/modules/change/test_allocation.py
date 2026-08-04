@@ -157,7 +157,7 @@ def test_has_changed_allocation_grown(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config, "vda") 
+    result = detector.has_changed(vm_config, "vda")
     assert result == ChangeResult(
         disk="vda",
         changed=True,
@@ -192,7 +192,7 @@ def test_has_changed_allocation_unchanged(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config, "vda") 
+    result = detector.has_changed(vm_config, "vda")
     assert result == ChangeResult(
         disk="vda",
         changed=False,
@@ -230,7 +230,7 @@ def test_has_changed_first_run_no_state(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config, "vda") 
+    result = detector.has_changed(vm_config, "vda")
     assert result == ChangeResult(
         disk="vda",
         changed=True,
@@ -268,7 +268,7 @@ def test_has_changed_command_fails_failsafe(
 
     vm_config = make_vm_config(name="testvm", base_image=OLD_BASE_IMAGE)
     detector = AllocationSizeDetector(shell=tracking_shell, state=mock_state)
-    result = detector.has_changed(vm_config, "vda") 
+    result = detector.has_changed(vm_config, "vda")
     assert result == ChangeResult(
         disk="vda",
         changed=True,
@@ -444,7 +444,7 @@ def test_state_recovery_triggers_first_run_changed_true(tmp_path, make_vm_config
     detector = AllocationSizeDetector(shell=shell, state=manager)
 
     vm_config = make_vm_config(name="testvm")
-    result = detector.has_changed(vm_config, "vda") 
+    result = detector.has_changed(vm_config, "vda")
     assert result == ChangeResult(
         disk="vda",
         changed=True,

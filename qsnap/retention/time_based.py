@@ -12,12 +12,15 @@ count; when both are ``0``, all items are marked for removal.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.models.config import RetentionPolicy
 from qsnap.models.results import RetentionItem, RetentionResult
-from qsnap.utils.time import parse_duration, parse_stall_timeout  # noqa: F401 — re-export for backward compatibility
+from qsnap.utils.time import (  # noqa: F401 — re-export for backward compatibility
+    parse_duration,
+    parse_stall_timeout,
+)
 
 
 def _keep_count(policy: RetentionPolicy) -> int:

@@ -570,7 +570,7 @@ def test_preflight_cleanup_orphan_snapshot_detected(
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.known_vda.qcow2"),
             timestamp=datetime(2025, 1, 1),
             allocation=1024,
-        
+
             disk="vda",
         ),
     )
@@ -661,7 +661,7 @@ def test_preflight_cleanup_all_snapshots_accounted_no_warning(
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.20250101T120000.qcow2"),
             timestamp=datetime(2025, 1, 1),
             allocation=1024,
-        
+
             disk="vda",
         ),
     )

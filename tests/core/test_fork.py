@@ -10,14 +10,18 @@ No XML manipulation, virsh define, NBD, UUID generation, or deploy.
 See OpenSpec change: simplify-fork-restore (fork-mode/spec.md)
 """
 from __future__ import annotations
+
 import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import RestoreResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def _make_snapshot(name: str='snap1', path: str='/snapshots/snap1.qcow2', allocation: int=1048576) -> SnapshotInfo:
     return SnapshotInfo(name=name, path=Path(path), timestamp=datetime(2025, 7, 13, 10, 0), allocation=allocation, disk='vda')

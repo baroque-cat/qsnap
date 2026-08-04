@@ -40,7 +40,7 @@ def _add_snapshot(state, vm_name: str, name: str, path: str | None = None) -> No
             path=Path(path or f"/tmp/{name}.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
-        
+
             disk="vda",
         ),
     )

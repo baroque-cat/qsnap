@@ -4,14 +4,18 @@ Verifies that ``check_state()`` correctly detects phantom snapshots,
 phantom FULLs, stale dependencies, and corrupt state files.
 """
 from __future__ import annotations
+
 import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from qsnap.core import Core
 from qsnap.models.results import ChainScanResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
+
 
 def test_check_state_all_snapshots_exist_clean(tmp_path: Path, make_vm_config, make_target, mock_factory, mock_state, mock_shell):
     """When all recorded snapshots, FULLs, and deps have matching files on disk, status="ok"."""
