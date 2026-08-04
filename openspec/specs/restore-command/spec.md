@@ -14,12 +14,13 @@ The `qsnap restore <name> [vm]` command SHALL replace a stopped VM's disk with a
 3. Resolve `disk_cfg = vm_config.get_disk(disk)` and `base_image = disk_cfg.base_image`
 4. Verify the VM is stopped via `is_vm_running()` — abort with error if running
 5. Pre-verify source chain integrity via `scan_backing_chain()` — abort if broken
-6. Create standalone image at temporary path `<snapshot_dir>/<vm>.<disk>.restored.qcow2.tmp` via `qemu-img convert --force-share -O qcow2`
-7. Atomically replace ONLY that disk's base image: `os.replace(<tmp>, base_image)`
-8. Delete old snapshot overlay files for THAT DISK only (skip `snap.disk != disk`)
-9. Strip `<backingStore>` elements AND update `<source file>` only in the `<disk target='{disk}'>` element of domain XML
-10. Reset all VM state via `IStateManager.reset_vm_state(vm_name)` and `IStateManager.reset_target_state(target_path)` for each target
-11. Best-effort cleanup of libvirt checkpoints: `virsh checkpoint-delete --domain <vm> --metadata <checkpoint>` for each `qsnap-*` checkpoint
+6. Create standalone image at temporary path `<snapshot_dir>/<vm>.<disk>.restored.qcow2.tmp` via the shared standalone-image-conversion helper (`convert_with_retry`, which runs `qemu-img convert --force-share -O qcow2` with retry on retryable errors and best-effort partial-file cleanup)
+7. Verify the temporary image via `verify_standalone_image()` (M1 virtual-size equality with the source chain, M2 `qemu-img check`) BEFORE replacement — on verification failure remove the temp file and abort; the base image SHALL NOT be replaced with an unverified image
+8. Atomically replace ONLY that disk's base image: `os.replace(<tmp>, base_image)`
+9. Delete old snapshot overlay files for THAT DISK only (skip `snap.disk != disk`)
+10. Strip `<backingStore>` elements AND update `<source file>` only in the `<disk target='{disk}'>` element of domain XML
+11. Reset ONLY the restored disk's state: `IStateManager.reset_vm_disk_state(vm_name, disk)` and `IStateManager.reset_target_disk_state(target_path, vm_name, disk)` for each target. State of other disks of the VM and records of other VMs sharing a target SHALL NOT be touched.
+12. Best-effort cleanup of libvirt checkpoints of the restored disk ONLY: checkpoint names follow `qsnap-{target_hash}-{disk}-{timestamp}-{hex}`; only checkpoints whose third dash-separated segment equals the restored disk SHALL be deleted via `virsh checkpoint-delete --domain <vm> --metadata <checkpoint>`. Checkpoint names without a disk segment (legacy format) SHALL NOT be deleted and SHALL be logged at WARNING level.
 
 The command SHALL accept `--dry-run` and `--yes` flags. Without `--yes`, the command SHALL prompt for confirmation.
 
@@ -70,22 +71,40 @@ The command SHALL accept `--dry-run` and `--yes` flags. Without `--yes`, the com
 - **THEN** a confirmation prompt is displayed
 - **AND** the operator must confirm before proceeding
 
-#### Scenario: Restore performs best-effort checkpoint cleanup
-- **WHEN** restore completes the disk replacement and state reset
-- **THEN** all libvirt checkpoints with `qsnap-` prefix are deleted via `virsh checkpoint-delete --domain <vm> --metadata <checkpoint>`
+#### Scenario: Restore verifies the temp image before replacing the base
+- **WHEN** conversion of the temp image completes
+- **THEN** `verify_standalone_image()` runs M1 and M2 against the temp file BEFORE `os.replace()`
+- **AND** on verification failure the temp file is removed, the base image is untouched, and a failed `RestoreResult` is returned
+
+#### Scenario: Restore cleans up only the restored disk's checkpoints
+- **WHEN** restore completes the disk replacement for disk `vda` and libvirt holds checkpoints `qsnap-abc123-vda-20260701T120000-a1b2c3` and `qsnap-abc123-vdb-20260701T120000-d4e5f6`
+- **THEN** only the `vda` checkpoint is deleted via `virsh checkpoint-delete --domain <vm> --metadata <checkpoint>`
+- **AND** the `vdb` checkpoint remains
 - **AND** checkpoint deletion failures are logged at WARNING level and do NOT block the operation
 
-#### Scenario: Restore resets all VM state
-- **WHEN** restore completes successfully
-- **THEN** `IStateManager.reset_vm_state(vm_name)` is called (clears snapshots, last_allocation, deferred_operations)
-- **AND** `IStateManager.reset_target_state(target_path)` is called for each target (clears full_backups, incremental_dependencies, last_backup_allocation)
+#### Scenario: Restore skips legacy checkpoints without a disk segment
+- **WHEN** libvirt holds a checkpoint named `qsnap-abc123-20260701T120000-a1b2c3` (no disk segment)
+- **THEN** the checkpoint is NOT deleted
+- **AND** a WARNING log message names the skipped checkpoint
+
+#### Scenario: Restore resets only the restored disk's state
+- **WHEN** restore of disk `vda` completes successfully
+- **THEN** `IStateManager.reset_vm_disk_state(vm_name, "vda")` is called (clears only `vda` snapshots, `vda` allocation baseline, `vda` deferred operations)
+- **AND** `IStateManager.reset_target_disk_state(target_path, vm_name, "vda")` is called for each target
+- **AND** `reset_vm_state()` and `reset_target_state()` are NOT called
+
+#### Scenario: Restore leaves other disks and other VMs intact
+- **WHEN** restore of `myvm` disk `vda` completes and the VM also has disk `vdb` with snapshots and FULL records, and another VM `othervm` shares a target
+- **THEN** `myvm` `vdb` snapshots, allocation baseline, and deferred operations remain in state
+- **AND** `myvm` `vdb` FULL records and dependencies on the shared target remain
+- **AND** `othervm` FULL records and dependencies on the shared target remain
 
 #### Scenario: Restore from nonexistent snapshot
 - **WHEN** `qsnap restore nonexistent-snap` is executed
 - **THEN** exit code is 1 and an error message is printed
 
 ### Requirement: Core.restore method
-`Core` SHALL provide a `restore(name: str, vm_filter: str | None = None) -> RestoreResult` method. It SHALL resolve the disk from `SnapshotInfo.disk` (or `parse_disk_from_snapshot_name` as fallback), replace only that disk's `base_image`, update only that disk's `<disk>` element in domain XML, delete only that disk's snapshot overlays, reset state, and clean up checkpoints. The `target_dir` parameter is REMOVED — the result is written to `disk_cfg.base_image`.
+`Core` SHALL provide a `restore(name: str, vm_filter: str | None = None) -> RestoreResult` method. It SHALL resolve the disk from `SnapshotInfo.disk` (or `parse_disk_from_snapshot_name` as fallback), replace only that disk's `base_image` (after verifying the converted temp image), update only that disk's `<disk>` element in domain XML, delete only that disk's snapshot overlays, reset only that disk's state via `reset_vm_disk_state()` and `reset_target_disk_state()`, and clean up only that disk's checkpoints. The `target_dir` parameter is REMOVED — the result is written to `disk_cfg.base_image`.
 
 #### Scenario: Restore from snapshot identifies disk
 - **WHEN** `core.restore("vm.20250101T1200")` is called and the snapshot exists with `disk="vda"`

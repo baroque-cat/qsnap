@@ -268,7 +268,7 @@ The CLI SHALL provide an `estimate` subcommand with an optional `VM` positional 
 - **THEN** per-disk factual summaries for all configured VMs are printed
 
 ### Requirement: qsnap fork subcommand
-The system SHALL provide a `qsnap fork` subcommand accepting positional argument `SNAPSHOT_NAME`, a required `--output <path>` flag, and an optional VM filter. It SHALL call `Core.fork(name, output_path, vm_filter)`. The `--as-vm`, `--storage`, and `--add-to-config` flags are REMOVED.
+The system SHALL provide a `qsnap fork` subcommand accepting positional argument `SNAPSHOT_NAME`, a required `--output <path>` flag, an optional VM filter, and a `--dry-run` flag. It SHALL call `Core.fork(name, output_path, vm_filter)`. When the local `--dry-run` flag or the global `--dry-run` / `-n` flag is active, the CLI handler SHALL ensure `core.dry_run = True` before calling `Core.fork()`. The `--as-vm`, `--storage`, and `--add-to-config` flags are REMOVED.
 
 #### Scenario: Fork command succeeds
 - **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3 --output /var/lib/libvirt/images/myvm-clone.qcow2` is executed
@@ -282,6 +282,12 @@ The system SHALL provide a `qsnap fork` subcommand accepting positional argument
 #### Scenario: Fork without --output fails
 - **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3` is executed without `--output`
 - **THEN** argparse reports a missing required argument error
+
+#### Scenario: Fork with --dry-run previews without converting
+- **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3 --output /tmp/clone.qcow2 --dry-run` is executed
+- **THEN** the CLI handler ensures `core.dry_run = True` before calling `Core.fork()`
+- **AND** the planned conversion is logged with the estimated chain size
+- **AND** no output file is created and exit code is 0
 
 ### Requirement: qsnap list backups --tree flag
 The `list backups` subcommand SHALL accept a `--tree` flag. When present, the CLI SHALL display backup chains grouped by VM → Target → Disk → FULL chain with indented hierarchy.

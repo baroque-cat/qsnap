@@ -23,7 +23,7 @@ The check SHALL:
 1. Read snapshots from `IStateManager.get_snapshots(vm_name)` — state source (each `SnapshotInfo` has a `.disk` field)
 2. Iterate all configured disks, detect each disk's active layer via `_detect_active_layer_path(vm, disk.target)`, then run `scan_backing_chain()` on each active layer — disk source (per-disk walking of each chain)
 3. Run `virsh dumpxml --domain <vm>` and parse `<source file="...">` from all `<disk>` and `<backingStore>` elements — XML source
-4. Run `virsh domblklist --domain <vm>` — verify active layers match newest snapshots per disk
+4. Run `virsh domblklist --domain <vm>` and verify active layers match newest snapshots **per disk**: group state snapshots by `SnapshotInfo.disk`, select the newest snapshot (max timestamp) independently within each disk group, and compare each domblklist disk's source path ONLY against the newest snapshot of the same disk target. A domblklist disk that has no snapshots in state SHALL be skipped (nothing to compare). The verification SHALL NOT select a single newest snapshot across all disks and compare every domblklist disk against it. Mismatch reports SHALL name the disk target.
 5. Cross-reference all three sources using the matrix above
 
 The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistencies in `CheckResult`.
@@ -75,7 +75,19 @@ The check SHALL NOT modify state, disk, or XML. It SHALL report all inconsistenc
 
 - **WHEN** state's newest snapshot for a disk is snap3
 - **AND** `virsh domblklist` shows source = snap2 (not snap3) for that disk
-- **THEN** `CheckResult(status="broken")` is returned with issue="domblklist active layer ≠ newest snapshot in state"
+- **THEN** `CheckResult(status="broken")` is returned with issue="domblklist active layer ≠ newest snapshot in state" naming the disk target
+
+#### Scenario: Multi-disk VM — each disk compared against its own newest snapshot
+
+- **WHEN** a VM has disks `vda` and `vdb`; state's newest `vda` snapshot is `snapA` (newer timestamp) and newest `vdb` snapshot is `snapB` (older timestamp)
+- **AND** `virsh domblklist` shows `vda` source = `snapA` and `vdb` source = `snapB`
+- **THEN** `CheckResult(status="ok")` is returned — `vdb` is NOT flagged even though `snapB` is older than `snapA`
+
+#### Scenario: Disk without snapshots is skipped
+
+- **WHEN** `virsh domblklist` lists a disk target that has no snapshots recorded in state
+- **THEN** the active-layer comparison for that disk is skipped
+- **AND** no mismatch is reported for it
 
 ### Requirement: Triple-source target verification
 

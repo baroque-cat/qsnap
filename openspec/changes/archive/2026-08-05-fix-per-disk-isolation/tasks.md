@@ -84,4 +84,4 @@ MANDATORY DELEGATION PROTOCOL for the lead implementation agent (@Mr.Programmer)
 - [x] 8.3 Run e2e: `poetry run pytest tests/e2e/ -m e2e` — all green
 - [x] 8.4 Lint & types: `poetry run ruff check qsnap tests` and `poetry run ruff format --check qsnap tests` and `poetry run pyright qsnap` — clean
 - [x] 8.5 `openspec validate fix-per-disk-isolation` passes; spot-check that implementation matches all 12 delta specs
-- [ ] 8.6 Commit with a message referencing the change name; do NOT archive (archiving is a separate step after review)
+- [x] 8.6 Commit with a message referencing the change name; do NOT archive (archiving is a separate step after review)
