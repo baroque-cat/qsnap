@@ -79,7 +79,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -163,16 +167,17 @@ def test_pipeline_continues_after_broken_chain_auto_recovery(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # ── Step 1: Create snapshot + FULL backup ───────────────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.cov-gap-snap1", base_image, snapshot_dir
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.cov-gap-snap1", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
     target = TargetConfig(
-        path=target_dir, compress=False, verify="off",
-        target_chain_length=24, target_keep_generations=2,
+        path=target_dir,
+        compress=False,
+        verify="off",
+        target_chain_length=24,
+        target_keep_generations=2,
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -214,9 +219,7 @@ def test_pipeline_continues_after_broken_chain_auto_recovery(test_vm, caplog):
     assert not inc1_path.exists(), "inc1 should be deleted"
 
     # ── Step 5: Run core.run() again — triggers auto-recovery ───────
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.cov-gap-snap2", base_image, snapshot_dir
-    )
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.cov-gap-snap2", base_image, snapshot_dir)
     state.record_snapshot(vm_name, snap2)
 
     caplog.clear()
@@ -227,12 +230,14 @@ def test_pipeline_continues_after_broken_chain_auto_recovery(test_vm, caplog):
 
     # 6a. Startup validation detected the broken chain (CRITICAL log).
     startup_logs = [
-        r.message for r in caplog.records
-        if "[startup]" in r.message and "broken" in r.message.lower() and "chain" in r.message.lower()
+        r.message
+        for r in caplog.records
+        if "[startup]" in r.message
+        and "broken" in r.message.lower()
+        and "chain" in r.message.lower()
     ]
     assert len(startup_logs) > 0, (
-        f"Expected startup broken-chain CRITICAL log. "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"Expected startup broken-chain CRITICAL log. Logs: {[r.message for r in caplog.records]}"
     )
 
     # 6b. inc2 was PRESERVED (not auto-deleted).
@@ -241,15 +246,12 @@ def test_pipeline_continues_after_broken_chain_auto_recovery(test_vm, caplog):
     )
 
     # 6c. Pipeline continued — FULL still exists (was not deleted).
-    assert full_path.exists(), (
-        "FULL backup should still exist after auto-recovery"
-    )
+    assert full_path.exists(), "FULL backup should still exist after auto-recovery"
 
     # 6d. FULL still in state.
     fulls_after = state.get_full_backups(str(target_dir))
     assert len(fulls_after) >= 1, (
-        f"Expected FULL backup still in state after pipeline. "
-        f"Got: {fulls_after}"
+        f"Expected FULL backup still in state after pipeline. Got: {fulls_after}"
     )
 
     _cleanup_checkpoints(shell, vm_name)
@@ -294,16 +296,17 @@ def test_reconcile_detects_and_removes_stale_incremental_dep(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # ── Step 1: Create snapshot + FULL backup ───────────────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.stale-snap1", base_image, snapshot_dir
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.stale-snap1", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
     target = TargetConfig(
-        path=target_dir, compress=False, verify="off",
-        target_chain_length=24, target_keep_generations=2,
+        path=target_dir,
+        compress=False,
+        verify="off",
+        target_chain_length=24,
+        target_keep_generations=2,
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -362,15 +365,12 @@ def test_reconcile_detects_and_removes_stale_incremental_dep(test_vm, caplog):
     rec = reconcile_results[vm_name]
 
     # 5a. stale_deps_removed >= 1
-    assert rec.stale_deps_removed >= 1, (
-        f"Expected stale_deps_removed >= 1, got {rec}"
-    )
+    assert rec.stale_deps_removed >= 1, f"Expected stale_deps_removed >= 1, got {rec}"
 
     # 5b. inc1 no longer in state
     deps_after = state.get_incremental_dependencies(str(target_dir), full_name)
     assert inc1_name not in deps_after, (
-        f"inc1 should be removed from state after reconcile. "
-        f"Remaining deps: {deps_after}"
+        f"inc1 should be removed from state after reconcile. Remaining deps: {deps_after}"
     )
 
     # 5c. FULL still in state (not affected)
@@ -424,16 +424,17 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
     _cleanup_checkpoints(shell, vm_name)
 
     # ── Step 1: Create snapshot + FULL backup (gen 1) ───────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vgate-snap1", base_image, snapshot_dir
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.vgate-snap1", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
     target = TargetConfig(
-        path=target_dir, compress=False, verify="off",
-        target_chain_length=24, target_keep_generations=1,
+        path=target_dir,
+        compress=False,
+        verify="off",
+        target_chain_length=24,
+        target_keep_generations=1,
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -472,9 +473,7 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
     )
 
     # ── Step 3: Create new snapshot and run core.run() ──────────────
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vgate-snap2", base_image, snapshot_dir
-    )
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.vgate-snap2", base_image, snapshot_dir)
     state.record_snapshot(vm_name, snap2)
 
     caplog.clear()
@@ -482,8 +481,6 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
         core.run(vm_name)
 
     # ── Step 4: Assertions ──────────────────────────────────────────
-
-    all_logs = " ".join(r.message for r in caplog.records)
 
     # 4a. Corrupt FULL still exists on disk (startup validation did NOT delete it).
     assert full_path.exists(), (
@@ -501,9 +498,9 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
 
     # 4c. CRITICAL log about corruption or blocking deletion.
     corruption_logs = [
-        r.message for r in caplog.records
-        if "corrupt" in r.message.lower()
-        or "blocking deletion" in r.message.lower()
+        r.message
+        for r in caplog.records
+        if "corrupt" in r.message.lower() or "blocking deletion" in r.message.lower()
     ]
     # The corrupt FULL may or may not be a deletion candidate depending
     # on whether a new FULL was created.  If it IS a candidate, the
@@ -517,8 +514,7 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
 
     # 4d. Pipeline continued — at least one FULL exists after the run.
     assert len(fulls_after) >= 1, (
-        f"Pipeline should have continued — at least one FULL expected. "
-        f"Got: {fulls_after}"
+        f"Pipeline should have continued — at least one FULL expected. Got: {fulls_after}"
     )
 
     _cleanup_checkpoints(shell, vm_name)

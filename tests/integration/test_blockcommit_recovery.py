@@ -58,7 +58,6 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-
                 compress=False,
                 verify="off",
             )
@@ -144,23 +143,18 @@ def _assert_critical_verification_failed(caplog, expected_error_fragment: str = 
     fails at the subprocess level, and ``_verify_backing_chain`` returns
     ``broken_file=None``, short-circuiting the recovery path.
     """
-    critical_logs = [
-        r.message for r in caplog.records
-        if r.levelno >= logging.CRITICAL
-    ]
+    critical_logs = [r.message for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert len(critical_logs) >= 1, (
         f"Expected at least one CRITICAL log, "
         f"got: {[(r.levelname, r.message[:120]) for r in caplog.records]}"
     )
     combined = " ".join(critical_logs).lower()
     assert "pre-commit chain verification failed" in combined, (
-        f"Expected 'pre-commit chain verification failed' in CRITICAL logs. "
-        f"Got: {combined[:300]}"
+        f"Expected 'pre-commit chain verification failed' in CRITICAL logs. Got: {combined[:300]}"
     )
     if expected_error_fragment:
         assert expected_error_fragment.lower() in combined, (
-            f"Expected '{expected_error_fragment}' in CRITICAL message. "
-            f"Got: {combined[:300]}"
+            f"Expected '{expected_error_fragment}' in CRITICAL message. Got: {combined[:300]}"
         )
 
 
@@ -205,9 +199,7 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
     if not _vm_is_shut_off(shell, vm_name):
         pytest.skip("Cannot shut off VM for offline blockcommit test")
 
-    core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir
-    )
+    core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
 
     # ── Step 1: Create snapshot chain base → snap1 → snap2 → snap3 → snap4 ──
     for i in range(4):
@@ -258,13 +250,13 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
     remaining = state.get_snapshots(vm_name)
     remaining_names = {s.name for s in remaining}
     assert snap2.name not in remaining_names, (
-        f"snap2 (stale/missing file) should be removed from state. "
-        f"Remaining: {remaining_names}"
+        f"snap2 (stale/missing file) should be removed from state. Remaining: {remaining_names}"
     )
 
     # Recovery path IS now reached — WARNING (not CRITICAL) log emitted.
     warning_logs = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if r.levelno >= logging.WARNING and r.levelno < logging.ERROR
     ]
     assert len(warning_logs) >= 1, (
@@ -278,13 +270,8 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
     )
 
     # No CRITICAL log should be emitted (recovery path was triggered).
-    critical_logs = [
-        r.message for r in caplog.records
-        if r.levelno >= logging.CRITICAL
-    ]
-    assert len(critical_logs) == 0, (
-        f"Expected no CRITICAL logs, got: {critical_logs[:5]}"
-    )
+    critical_logs = [r.message for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert len(critical_logs) == 0, f"Expected no CRITICAL logs, got: {critical_logs[:5]}"
 
     # Partial blockcommit succeeded: snap1 (before break) was committed.
     assert "merged" in all_logs.lower(), (
@@ -296,12 +283,10 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
 
     # snap1 was committed → file deleted
     assert not snap1.path.exists(), (
-        f"snap1 should have been committed (blockcommit merged into base). "
-        f"Found at: {snap1.path}"
+        f"snap1 should have been committed (blockcommit merged into base). Found at: {snap1.path}"
     )
     assert snap1.name not in remaining_names, (
-        f"snap1 should be removed from state after commit. "
-        f"Remaining: {remaining_names}"
+        f"snap1 should be removed from state after commit. Remaining: {remaining_names}"
     )
 
     # Auto-rebase was attempted for stuck snapshots (snap3 after break).
@@ -310,17 +295,13 @@ def test_blockcommit_recovery_broken_snapshot_chain(test_vm, caplog):
     )
 
     # snap3 should still exist (re-based but not committed).
-    assert snap3.path.exists(), (
-        "snap3 should still exist after auto-rebase (not committed)"
-    )
+    assert snap3.path.exists(), "snap3 should still exist after auto-rebase (not committed)"
 
     # snap4 (tip) deferred to active_layer — safe behavior
     assert "deferring blockcommit" in all_logs.lower(), (
         f"Expected deferral log for tip snapshot. Logs: {all_logs[:200]}"
     )
-    assert snap4.path.exists(), (
-        "snap4 should still exist (tip — correctly deferred)"
-    )
+    assert snap4.path.exists(), "snap4 should still exist (tip — correctly deferred)"
 
     # Pipeline did not crash — recovery path made progress (partial
     # blockcommit + auto-rebase) instead of aborting with CRITICAL.
@@ -361,9 +342,7 @@ def test_blockcommit_recovery_no_committable_before_break(test_vm, caplog):
     if not _vm_is_shut_off(shell, vm_name):
         pytest.skip("Cannot shut off VM for offline blockcommit test")
 
-    core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir
-    )
+    core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
 
     # ── Step 1: Create snapshot chain base → snap1 → snap2 ───────────────
     for i in range(2):
@@ -417,17 +396,13 @@ def test_blockcommit_recovery_no_committable_before_break(test_vm, caplog):
     # is never reached (the method returns early at the empty-committable
     # guard).  No CRITICAL log is emitted in this case — the chain
     # verification is only reached when there are committable snapshots.
-    assert snap2.path.exists(), (
-        "snap2 should still exist (deferred as active_layer)"
-    )
+    assert snap2.path.exists(), "snap2 should still exist (deferred as active_layer)"
     assert "deferring blockcommit" in all_logs.lower(), (
         f"Expected deferral log. Logs: {all_logs[:200]}"
     )
 
     # snap2 should still be in state (deferred, not committed)
-    assert snap2.name in remaining_names, (
-        "snap2 should still be in state (deferred)"
-    )
+    assert snap2.name in remaining_names, "snap2 should still be in state (deferred)"
 
     # Pipeline returned safely — no crash, no blockcommit
     assert "[blockcommit]" not in all_logs, (
@@ -475,9 +450,7 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
     if not _vm_is_shut_off(shell, vm_name):
         pytest.skip("Cannot shut off VM for offline blockcommit test")
 
-    core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir
-    )
+    core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
 
     # ── Step 1: Create snapshot chain base → snap1 → snap2 → snap3 → snap4 ──
     for i in range(4):
@@ -537,7 +510,8 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
 
     # Recovery path IS now reached — WARNING log (not CRITICAL) emitted.
     warning_logs = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if r.levelno >= logging.WARNING and r.levelno < logging.ERROR
     ]
     assert len(warning_logs) >= 1, (
@@ -551,13 +525,8 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
     )
 
     # No CRITICAL log should be emitted (recovery path triggered).
-    critical_logs = [
-        r.message for r in caplog.records
-        if r.levelno >= logging.CRITICAL
-    ]
-    assert len(critical_logs) == 0, (
-        f"Expected no CRITICAL logs, got: {critical_logs[:5]}"
-    )
+    critical_logs = [r.message for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert len(critical_logs) == 0, f"Expected no CRITICAL logs, got: {critical_logs[:5]}"
 
     # Partial blockcommit succeeded: snap1 (before break) was committed.
     assert "merged" in all_logs.lower(), (
@@ -569,14 +538,12 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
 
     # snap1 was committed → file deleted
     assert not snap1.path.exists(), (
-        f"snap1 should have been committed (blockcommit merged into base). "
-        f"Found at: {snap1.path}"
+        f"snap1 should have been committed (blockcommit merged into base). Found at: {snap1.path}"
     )
 
     # snap1 removed from state
     assert snap1.name not in remaining_names, (
-        f"snap1 should be removed from state after commit. "
-        f"Remaining: {remaining_names}"
+        f"snap1 should be removed from state after commit. Remaining: {remaining_names}"
     )
 
     # Auto-rebase attempted for stuck snapshot snap3 (non-tip, after break).
@@ -588,31 +555,24 @@ def test_rebase_stuck_to_valid_ancestor(test_vm, caplog):
     )
 
     # snap3 should still exist (re-based onto base_image, not committed).
-    assert snap3.path.exists(), (
-        "snap3 should still exist after auto-rebase (not committed)"
-    )
+    assert snap3.path.exists(), "snap3 should still exist after auto-rebase (not committed)"
 
     # snap3's backing chain should now be intact (rebased to base_image).
     assert _validate_backing_chain(shell, snap3.path), (
         "snap3 should have a valid backing chain after auto-rebase"
     )
     backing_after = _get_backing_filename(shell, snap3.path)
-    assert backing_after is not None, (
-        "snap3 should have a backing file after auto-rebase"
-    )
+    assert backing_after is not None, "snap3 should have a backing file after auto-rebase"
     # snap3 should now be rebased onto the base image.
     assert str(base_image) in (backing_after or ""), (
-        f"snap3 should be rebased onto base_image ({base_image}), "
-        f"but backing is: {backing_after}"
+        f"snap3 should be rebased onto base_image ({base_image}), but backing is: {backing_after}"
     )
 
     # snap4 (tip) deferred to active_layer
     assert "deferring blockcommit" in all_logs.lower(), (
         f"Expected deferral log for tip snapshot. Logs: {all_logs[:200]}"
     )
-    assert snap4.path.exists(), (
-        "snap4 should still exist (tip — correctly deferred)"
-    )
+    assert snap4.path.exists(), "snap4 should still exist (tip — correctly deferred)"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -650,9 +610,7 @@ def test_rebase_safe_for_snapshots(test_vm, caplog):
     if not _vm_is_shut_off(shell, vm_name):
         pytest.skip("Cannot shut off VM for offline blockcommit test")
 
-    core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir
-    )
+    core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
 
     # ── Step 1: Create snapshot chain base → snap1 → snap2 ──────────────
     for i in range(2):
@@ -704,9 +662,7 @@ def test_rebase_safe_for_snapshots(test_vm, caplog):
     # snap2 is the tip → deferred as active_layer.  Since committable is
     # empty (only the tip snapshot exists after snap1 removal),
     # `_verify_backing_chain` is never reached.  No CRITICAL log.
-    assert snap2.path.exists(), (
-        "snap2 (tip) should still exist after blockcommit — no data loss"
-    )
+    assert snap2.path.exists(), "snap2 (tip) should still exist after blockcommit — no data loss"
     assert "deferring blockcommit" in all_logs.lower(), (
         f"Expected deferral log. Logs: {all_logs[:200]}"
     )

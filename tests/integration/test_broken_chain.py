@@ -137,7 +137,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -173,7 +177,6 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-
                 compress=False,
                 verify="off",
                 # Bucket-driven FULL requires a non-zero retention bucket.
@@ -260,7 +263,6 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         source_snap,
         target,
         compress=False,
-
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
@@ -273,7 +275,7 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         str(target_dir),
         f"{full_name}.qcow2",
         source_snap.timestamp,
-    disk="vda",
+        disk="vda",
     )
 
     # ── Step 2: Create manual backing-chained incrementals ──────────
@@ -281,9 +283,20 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
     incr1_name = f"{vm_name}.20250101_vda_incr1"
     incr1_path = target_dir / f"{incr1_name}.qcow2"
     create1 = shell.run(
-        ["qemu-img", "create", "-f", "qcow2", "-b", str(full_path), "-F", "qcow2",
-         str(incr1_path), "64K"],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full_path),
+            "-F",
+            "qcow2",
+            str(incr1_path),
+            "64K",
+        ],
+        timeout=30,
+        check=True,
     )
     assert create1.success, f"Failed to create incr1: {create1.error}"
     assert _validate_backing_chain(shell, incr1_path), "incr1 should have valid chain"
@@ -292,9 +305,20 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
     incr2_name = f"{vm_name}.20250102_vda_incr2"
     incr2_path = target_dir / f"{incr2_name}.qcow2"
     create2 = shell.run(
-        ["qemu-img", "create", "-f", "qcow2", "-b", str(incr1_path), "-F", "qcow2",
-         str(incr2_path), "64K"],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(incr1_path),
+            "-F",
+            "qcow2",
+            str(incr2_path),
+            "64K",
+        ],
+        timeout=30,
+        check=True,
     )
     assert create2.success, f"Failed to create incr2: {create2.error}"
     assert _validate_backing_chain(shell, incr2_path), "incr2 should have valid chain initially"
@@ -336,7 +360,8 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
 
     # Find newly created incremental on target (not incr2, not FULL, not .tmp).
     all_qcow2 = sorted(
-        f for f in target_dir.glob("*.qcow2")
+        f
+        for f in target_dir.glob("*.qcow2")
         if ".FULL." not in f.name and ".tmp" not in f.name and f.name != f"{incr2_name}.qcow2"
     )
     if all_qcow2:
@@ -346,16 +371,14 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
             # The new incremental should chain to FULL (because incr2 was
             # skipped as broken and incr1 was deleted).
             assert (
-                ".FULL." in backing
-                or str(full_path) in backing
-                or str(full_path.name) in backing
-            ), (
-                f"New incremental should chain to FULL, but backing is: {backing!r}"
-            )
+                ".FULL." in backing or str(full_path) in backing or str(full_path.name) in backing
+            ), f"New incremental should chain to FULL, but backing is: {backing!r}"
 
     # If a broken chain skip was actually triggered, verify the log.
     if has_skip:
-        skip_logs = [r.message for r in caplog.records if "broken backing chain" in r.message.lower()]
+        skip_logs = [
+            r.message for r in caplog.records if "broken backing chain" in r.message.lower()
+        ]
         assert len(skip_logs) > 0, "Expected skip log not found"
 
     _cleanup_snapshots(shell, vm_name)
@@ -426,29 +449,56 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # ── Step 2: Create backing-chained incrementals ─────────────────
     incr1_name = f"{vm_name}.20250201_vda_incr1"
     incr1_path = target_dir / f"{incr1_name}.qcow2"
     shell.run(
-        ["qemu-img", "create", "-f", "qcow2", "-b", str(full_path), "-F", "qcow2",
-         str(incr1_path), "64K"],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full_path),
+            "-F",
+            "qcow2",
+            str(incr1_path),
+            "64K",
+        ],
+        timeout=30,
+        check=True,
     )
     assert incr1_path.exists()
 
     incr2_name = f"{vm_name}.20250202_vda_incr2"
     incr2_path = target_dir / f"{incr2_name}.qcow2"
     shell.run(
-        ["qemu-img", "create", "-f", "qcow2", "-b", str(incr1_path), "-F", "qcow2",
-         str(incr2_path), "64K"],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(incr1_path),
+            "-F",
+            "qcow2",
+            str(incr2_path),
+            "64K",
+        ],
+        timeout=30,
+        check=True,
     )
     assert incr2_path.exists()
 
@@ -463,12 +513,12 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     backups = list(provider.list(target))
     # Ensure our manually-created incrementals are in the list.
     # Use name-based deduplication because SnapshotInfo lacks __eq__.
-    incr1_snap = SnapshotInfo(name=incr1_name, path=incr1_path,
-    disk="vda",
-                              timestamp=datetime(2025, 2, 1), allocation=0)
-    incr2_snap = SnapshotInfo(name=incr2_name, path=incr2_path,
-    disk="vda",
-                              timestamp=datetime(2025, 2, 2), allocation=0)
+    incr1_snap = SnapshotInfo(
+        name=incr1_name, path=incr1_path, disk="vda", timestamp=datetime(2025, 2, 1), allocation=0
+    )
+    incr2_snap = SnapshotInfo(
+        name=incr2_name, path=incr2_path, disk="vda", timestamp=datetime(2025, 2, 2), allocation=0
+    )
     existing_names = {b.name for b in backups}
     if incr1_name not in existing_names:
         backups.append(incr1_snap)
@@ -490,17 +540,13 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     # The file is in the removal list, so it gets deleted regardless
     # of incr2's dependency.
     assert not incr1_path.exists(), (
-        "incr1 should be deleted (per-chain: no ghost-retention, "
-        "file in remove list)"
+        "incr1 should be deleted (per-chain: no ghost-retention, file in remove list)"
     )
     assert incr2_path.exists(), "incr2 should still exist (in keep-set)"
 
     # Ghost retention log should NOT appear — per-chain mode has no
     # ghost-retention.
-    ghost_logs = [
-        r.message for r in caplog.records
-        if "ghost-retained" in r.message.lower()
-    ]
+    ghost_logs = [r.message for r in caplog.records if "ghost-retained" in r.message.lower()]
     assert len(ghost_logs) == 0, (
         f"Per-chain mode should not produce 'ghost-retained' log. "
         f"Logs: {[r.message for r in caplog.records]}"
@@ -519,12 +565,8 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     # Per-chain: both files in remove list → both deleted.
     # incr2 deleted first (newest-first ordering via
     # to_delete.reverse()), then incr1.
-    assert not incr1_path.exists(), (
-        "incr1 should be deleted (in remove list)"
-    )
-    assert not incr2_path.exists(), (
-        "incr2 should be deleted (in remove list, no ghost-retention)"
-    )
+    assert not incr1_path.exists(), "incr1 should be deleted (in remove list)"
+    assert not incr2_path.exists(), "incr2 should be deleted (in remove list, no ghost-retention)"
 
     # State dependency records should be cleaned.
     # BUG-003: When an incremental's backing chain is broken (incr1 deleted
@@ -600,20 +642,36 @@ def test_check_state_detects_broken_chains(test_vm):
     )
     target = vm_config.targets[0]
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     assert full_result.success, f"create_full_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # ── Step 2: Create incremental and break its chain ───────────────
     broken_name = f"{vm_name}.20250301_vda_broken"
     broken_path = target_dir / f"{broken_name}.qcow2"
     shell.run(
-        ["qemu-img", "create", "-f", "qcow2", "-b", str(full_path), "-F", "qcow2",
-         str(broken_path), "64K"],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full_path),
+            "-F",
+            "qcow2",
+            str(broken_path),
+            "64K",
+        ],
+        timeout=30,
+        check=True,
     )
     assert broken_path.exists()
 
@@ -621,9 +679,20 @@ def test_check_state_detects_broken_chains(test_vm):
     # of the new backing file's existence.
     nonexistent = target_dir / "MISSING.qcow2"
     shell.run(
-        ["qemu-img", "rebase", "-u", "-f", "qcow2", "-F", "qcow2",
-         "-b", str(nonexistent), str(broken_path)],
-        timeout=30, check=True,
+        [
+            "qemu-img",
+            "rebase",
+            "-u",
+            "-f",
+            "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            str(nonexistent),
+            str(broken_path),
+        ],
+        timeout=30,
+        check=True,
     )
     assert not _validate_backing_chain(shell, broken_path), "Chain should be broken"
 
@@ -642,8 +711,7 @@ def test_check_state_detects_broken_chains(test_vm):
         f"Status: {state_result.status!r}, broken_chains: {state_result.broken_chains}"
     )
     assert any(broken_name in bc for bc in state_result.broken_chains), (
-        f"broken_chains should mention {broken_name!r}, "
-        f"got: {state_result.broken_chains}"
+        f"broken_chains should mention {broken_name!r}, got: {state_result.broken_chains}"
     )
     assert "broken_chains" in state_result.status, (
         f"Status should include 'broken_chains', got: {state_result.status!r}"
@@ -651,4 +719,3 @@ def test_check_state_detects_broken_chains(test_vm):
 
     _cleanup_snapshots(shell, vm_name)
     _cleanup_checkpoints(shell, vm_name)
-

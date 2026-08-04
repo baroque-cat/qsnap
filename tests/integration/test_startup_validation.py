@@ -176,14 +176,11 @@ def test_startup_validation(test_vm, caplog):
 
     # Run 2 must succeed (self-healing).
     assert result2.success, (
-        f"Second run must succeed after phantom cleanup, got: "
-        f"{[r.error for r in result2.results]}"
+        f"Second run must succeed after phantom cleanup, got: {[r.error for r in result2.results]}"
     )
 
     # ── Assertion 1: Phantom FULL detection ───────────────────────────
-    phantom_msgs = [
-        r.message for r in caplog.records if "phantom FULL" in r.message
-    ]
+    phantom_msgs = [r.message for r in caplog.records if "phantom FULL" in r.message]
     assert len(phantom_msgs) >= 1, (
         f"Expected startup validation to detect phantom FULL, "
         f"but no 'phantom FULL' message found. "
@@ -233,8 +230,7 @@ def test_startup_validation(test_vm, caplog):
         if "orphan" in r.message and "checkpoint" in r.message and "delet" in r.message
     ]
     assert len(orphan_delete_msgs) == 0, (
-        f"Startup validation must NOT delete orphan checkpoints. "
-        f"Found: {orphan_delete_msgs}"
+        f"Startup validation must NOT delete orphan checkpoints. Found: {orphan_delete_msgs}"
     )
 
     # ── Cleanup ────────────────────────────────────────────────────────

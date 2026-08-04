@@ -41,7 +41,8 @@ def _record_snap(target, vm, mock_state):
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot(vm.name, snap)
     return snap
 
@@ -79,8 +80,10 @@ def _setup_cleanup_backups_context(
 
     # Record a FULL backup entry in state
     mock_state.record_full_backup(
-        str(target_cfg.path), full_name, datetime(2025, 7, 13, 8, 0),
-    "vda",
+        str(target_cfg.path),
+        full_name,
+        datetime(2025, 7, 13, 8, 0),
+        "vda",
     )
 
     # Record incremental dependencies
@@ -127,7 +130,8 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -325,21 +329,21 @@ def test_cleanup_backups_m1_passes_full_deleted(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
     inc1_info = SI(
         name="inc1.qcow2",
         path=target.path / "inc1.qcow2",
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
     inc2_info = SI(
         name="inc2.qcow2",
         path=target.path / "inc2.qcow2",
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     # FULL, inc1, inc2 all in remove list via per-chain retention
@@ -354,10 +358,12 @@ def test_cleanup_backups_m1_passes_full_deleted(
         mock_shell.expect(rf"qemu-img info.*--output=json.*{dn}").returns(
             ShellResult(
                 success=True,
-                stdout=json.dumps({
-                    "format": "qcow2",
-                    "backing-filename": inc_full_path,
-                }),
+                stdout=json.dumps(
+                    {
+                        "format": "qcow2",
+                        "backing-filename": inc_full_path,
+                    }
+                ),
                 stderr="",
                 returncode=0,
                 error=None,
@@ -422,7 +428,7 @@ def test_cleanup_backups_m1_fails_deletion_blocked(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -484,7 +490,7 @@ def test_cleanup_backups_m1_fails_no_dependents_still_blocked(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -541,7 +547,7 @@ def test_full_verify_metadata_mode_skips_m2(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -596,7 +602,8 @@ def test_full_verify_hash_match_success(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -643,7 +650,8 @@ def test_full_verify_content_comparison_mismatch_fails(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -842,7 +850,7 @@ def test_new_weekly_creates_full_with_verification(
         str(target.path),
         "old_full.FULL.weekly.qcow2",
         datetime(2025, 6, 23),
-    "vda",
+        "vda",
     )
 
     # Snapshot in new weekly period (W28 — July 13, 2025)
@@ -851,7 +859,8 @@ def test_new_weekly_creates_full_with_verification(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: old_full has no incrementals, chain_length=0,
@@ -916,7 +925,7 @@ def test_cleanup_proceeds_on_m1_pass(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -971,7 +980,7 @@ def test_cleanup_blocked_on_m1_fail(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -1030,7 +1039,7 @@ def test_per_chain_deletion_blocked_on_corrupt_full(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     # All items in remove set — but M1 failure blocks deletion
@@ -1101,14 +1110,14 @@ def test_per_chain_orphaned_incrementals_deleted(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
     inc1_info = SI(
         name="inc1.qcow2",
         path=target.path / "inc1.qcow2",
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     # FULL + inc both in remove via per-chain evaluation
@@ -1118,10 +1127,12 @@ def test_per_chain_orphaned_incrementals_deleted(
     mock_shell.expect(r"qemu-img info.*--output=json.*inc1\.qcow2").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps({
-                "format": "qcow2",
-                "backing-filename": str(target.path / full_name),
-            }),
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "backing-filename": str(target.path / full_name),
+                }
+            ),
             stderr="",
             returncode=0,
             error=None,
@@ -1185,7 +1196,7 @@ def test_phantom_full_detected_removed_from_state(
         str(target.path),
         phantom_full_name,
         datetime(2025, 7, 1),
-    "vda",
+        "vda",
     )
 
     # Record incremental dependencies for cascade cleanup verification
@@ -1270,7 +1281,7 @@ def test_all_fulls_exist_no_phantom_cleanup(
         str(target.path),
         full_name,
         datetime(2025, 7, 13, 8, 0),
-    "vda",
+        "vda",
     )
 
     # Record incremental dependencies to verify they are NOT cascade-cleaned
@@ -1337,7 +1348,7 @@ def test_full_deleted_fullbackupinfo_removed_from_state(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     retention = RetentionResult(keep=[], remove=[full_name])
@@ -1393,14 +1404,14 @@ def test_incremental_deleted_dependency_removed_from_state(
         path=target.path / full_name,
         timestamp=datetime(2025, 7, 13, 8, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
     inc1_info = SI(
         name="inc1.qcow2",
         path=target.path / "inc1.qcow2",
         timestamp=datetime(2025, 7, 13, 9, 0),
         allocation=0,
-    disk="vda",
+        disk="vda",
     )
 
     # FULL + inc in remove set via per-chain evaluation
@@ -1410,11 +1421,13 @@ def test_incremental_deleted_dependency_removed_from_state(
     mock_shell.expect_first(r"qemu-img info.*--output=json.*inc1\.qcow2").returns(
         ShellResult(
             success=True,
-            stdout=json.dumps({
-                "format": "qcow2",
-                "virtual-size": 1000,
-                "backing-filename": str(target.path / full_name),
-            }),
+            stdout=json.dumps(
+                {
+                    "format": "qcow2",
+                    "virtual-size": 1000,
+                    "backing-filename": str(target.path / full_name),
+                }
+            ),
             stderr="",
             returncode=0,
             error=None,
@@ -1471,7 +1484,8 @@ def test_hash_mode_passes_source_path_to_verify(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -1731,7 +1745,8 @@ def test_checkpoint_cleaned_up_after_failed_full(
 
     # Verify checkpoint-delete was called via IShell.run.
     checkpoint_delete_calls = [
-        c for c in shell_spy.call_args_list
+        c
+        for c in shell_spy.call_args_list
         if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
     ]
     assert len(checkpoint_delete_calls) >= 1, (
@@ -1780,7 +1795,8 @@ def test_full_backup_creation_retried_transient(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -1875,7 +1891,8 @@ def test_full_backup_creation_not_retried_no_space(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
@@ -1912,8 +1929,7 @@ def test_full_backup_creation_not_retried_no_space(
 
     # create_full_backup called exactly once — no retry
     assert full_calls == 1, (
-        f"create_full_backup should be called exactly once (non-retryable), "
-        f"got {full_calls}"
+        f"create_full_backup should be called exactly once (non-retryable), got {full_calls}"
     )
     # FULL was NOT recorded in state
     assert not record_spy.called, "record_full_backup should NOT be called when FULL fails"

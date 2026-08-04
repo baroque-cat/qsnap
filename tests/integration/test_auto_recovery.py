@@ -122,7 +122,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -161,7 +165,6 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
@@ -311,13 +314,12 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
 
     # CRITICAL log about broken chain preservation.
     critical_logs = [
-        r.message for r in caplog.records
-        if "broken backup chain" in r.message.lower()
-        and "preserving" in r.message.lower()
+        r.message
+        for r in caplog.records
+        if "broken backup chain" in r.message.lower() and "preserving" in r.message.lower()
     ]
     assert len(critical_logs) > 0, (
-        f"Expected CRITICAL 'preserving file' log. Logs: "
-        f"{[r.message for r in caplog.records]}"
+        f"Expected CRITICAL 'preserving file' log. Logs: {[r.message for r in caplog.records]}"
     )
 
     # Broken-chain files are now preserved (not auto-deleted).
@@ -331,8 +333,7 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         if "broken" in r.message.lower() and "chain" in r.message.lower()
     ]
     assert len(critical_logs) > 0, (
-        f"Expected broken-chain CRITICAL log. Logs: "
-        f"{[r.message for r in caplog.records]}"
+        f"Expected broken-chain CRITICAL log. Logs: {[r.message for r in caplog.records]}"
     )
 
     _cleanup_snapshots(shell, vm_name)
@@ -400,7 +401,9 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        str(target_dir),
+        f"{full_name}.qcow2",
+        source_snap.timestamp,
         disk="vda",
     )
 
@@ -432,8 +435,7 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
         if "auto-recovery" in r.message.lower() and "deleted" in r.message.lower()
     ]
     assert len(recovery_warnings) == 0, (
-        f"Should not have auto-recovery deletion warnings. "
-        f"Got: {recovery_warnings}"
+        f"Should not have auto-recovery deletion warnings. Got: {recovery_warnings}"
     )
 
     _cleanup_snapshots(shell, vm_name)
@@ -502,7 +504,9 @@ def test_auto_recovery_no_full_remains(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        str(target_dir),
+        f"{full_name}.qcow2",
+        source_snap.timestamp,
         disk="vda",
     )
 
@@ -593,8 +597,13 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
 
     # Use a short retention policy — keep only the newest chain.
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
-        target_chain_length=0, target_keep_generations=1,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        target_chain_length=0,
+        target_keep_generations=1,
     )
 
     target = vm_config.targets[0]
@@ -635,9 +644,7 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
         for i in range(1, 4):
             incr_name = f"{vm_name}.{suffix}_incr{i}"
             # Create incremental chained to previous.
-            incr_path = _create_manual_incremental(
-                shell, incr_name, previous_path, target_dir
-            )
+            incr_path = _create_manual_incremental(shell, incr_name, previous_path, target_dir)
             incr_names.append(incr_name)
             state.record_incremental_dependency(str(target_dir), incr_name, full_name)
             previous_path = incr_path
@@ -666,6 +673,7 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
     remove_list = [b.name for b in all_backups if b.name in remove_names]
 
     from qsnap.models.results import RetentionResult
+
     retention_result = RetentionResult(keep=keep_list, remove=remove_list)
 
     # ── Run cleanup and verify old chain files deleted ──────────────
@@ -677,18 +685,14 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
     core._cleanup_backups(vm_config, target, all_backups, retention_result)
 
     for f in old_remove_files:
-        assert not f.exists(), (
-            f"Old chain file {f} should be deleted by per-chain retention"
-        )
+        assert not f.exists(), f"Old chain file {f} should be deleted by per-chain retention"
 
     # New chain files should still exist.
     new_keep_files = [target_dir / f"{full_new_name}.qcow2"] + [
         target_dir / f"{name}.qcow2" for name in incr_new_names
     ]
     for f in new_keep_files:
-        assert f.exists(), (
-            f"New chain file {f} should still exist (in keep set)"
-        )
+        assert f.exists(), f"New chain file {f} should still exist (in keep set)"
 
     _cleanup_snapshots(shell, vm_name)
     _cleanup_checkpoints(shell, vm_name)
@@ -759,7 +763,10 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     caplog.clear()
     caplog.set_level(logging.DEBUG)
     result1 = provider.create_full_backup(
-        vm_name, snapshot1, target, compress=False,
+        vm_name,
+        snapshot1,
+        target,
+        compress=False,
     )
     assert result1.success, f"First FULL backup failed: {result1.error}"
 
@@ -789,7 +796,10 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     caplog.clear()
     caplog.set_level(logging.DEBUG)
     result2 = provider.create_full_backup(
-        vm_name, snapshot2, target, compress=False,
+        vm_name,
+        snapshot2,
+        target,
+        compress=False,
     )
     assert result2.success, (
         f"Second FULL backup should succeed without collision. Error: {result2.error}"
@@ -799,8 +809,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     collision_logs = [
         r.message
         for r in caplog.records
-        if "bitmap already exists" in r.message.lower()
-        or "collision" in r.message.lower()
+        if "bitmap already exists" in r.message.lower() or "collision" in r.message.lower()
     ]
     assert len(collision_logs) == 0, (
         f"Should not have bitmap collision errors. Got: {collision_logs}"
@@ -891,7 +900,9 @@ def test_production_incident_reproduction(test_vm, caplog):
     full_name = full_path.stem
 
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp,
+        str(target_dir),
+        f"{full_name}.qcow2",
+        source_snap.timestamp,
         disk="vda",
     )
 
@@ -933,18 +944,14 @@ def test_production_incident_reproduction(test_vm, caplog):
     # ── Step 5: Verify new behavior — files PRESERVED ───────────────
     # All incrementals after the break are PRESERVED (not auto-deleted).
     for i in range(break_index + 1, incr_count):
-        assert incr_paths[i].exists(), (
-            f"incr {incr_names[i]} (after break) should be PRESERVED"
-        )
+        assert incr_paths[i].exists(), f"incr {incr_names[i]} (after break) should be PRESERVED"
 
     # The deleted intermediate file is obviously gone.
     assert not deleted_path.exists(), "Deleted file should remain gone"
 
     # Incrementals before the break (1-12) should still exist with intact chains.
     for i in range(break_index):
-        assert incr_paths[i].exists(), (
-            f"incr {incr_names[i]} (before break) should still exist"
-        )
+        assert incr_paths[i].exists(), f"incr {incr_names[i]} (before break) should still exist"
         assert _validate_backing_chain(shell, incr_paths[i]), (
             f"incr {incr_names[i]} chain should remain intact"
         )
@@ -954,7 +961,8 @@ def test_production_incident_reproduction(test_vm, caplog):
 
     # CRITICAL logs about broken chain preservation.
     critical_logs = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if "broken" in r.message.lower() and "preserving" in r.message.lower()
     ]
     assert len(critical_logs) > 0, (
@@ -965,9 +973,9 @@ def test_production_incident_reproduction(test_vm, caplog):
     # The number of broken backups should be reported.
     expected_broken = incr_count - break_index - 1
     broken_count_logs = [
-        r.message for r in caplog.records
-        if "broken-chain" in r.message.lower()
-        and str(expected_broken) in r.message
+        r.message
+        for r in caplog.records
+        if "broken-chain" in r.message.lower() and str(expected_broken) in r.message
     ]
     if expected_broken > 0:
         assert len(broken_count_logs) > 0, (

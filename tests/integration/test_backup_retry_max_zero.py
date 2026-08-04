@@ -133,7 +133,11 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     target_dir: Path = test_vm["target_dir"]
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         backup_retry_max=0,
     )
 
@@ -148,15 +152,13 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     )
     state.record_snapshot(vm_name, snap)
 
-    target = vm_config.targets[0]
-
     # Pre-populate a FULL backup in state so the pipeline enters
     # the transfer_missing path (not the first-backup-is-FULL path).
     state.record_full_backup(
         str(target_dir),
         f"{vm_name}.retry-zero-full.qcow2",
         datetime.now(),
-    disk="vda",
+        disk="vda",
     )
 
     # Spy on _execute_with_retry.
@@ -168,7 +170,6 @@ def test_backup_retry_max_zero_calls_once(test_vm):
         # Return a mock result indicating success so the pipeline
         # doesn't actually run real transfers.
         return _RetryResultStub(success=True, error=None, payload=[])
-
 
     class _RetryResultStub:
         def __init__(self, success, error, payload):
@@ -183,8 +184,7 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     # path is exercised).  With backup_retry_max=0, the internal guard
     # ensures operation() is called exactly once per invocation.
     assert call_count >= 1, (
-        f"Expected _execute_with_retry to be called at least once, "
-        f"got {call_count}"
+        f"Expected _execute_with_retry to be called at least once, got {call_count}"
     )
 
 
@@ -213,7 +213,11 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
     target_dir: Path = test_vm["target_dir"]
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         backup_retry_max=2,
         backup_retry_base="1s",
     )
@@ -227,12 +231,11 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
     )
     state.record_snapshot(vm_name, snap)
 
-    target = vm_config.targets[0]
     state.record_full_backup(
         str(target_dir),
         f"{vm_name}.retry-two-full.qcow2",
         datetime.now(),
-    disk="vda",
+        disk="vda",
     )
 
     # Spy on _execute_with_retry.
@@ -249,8 +252,7 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
         core.run(vm_name)
 
     assert call_count >= 1, (
-        f"Expected _execute_with_retry to be called at least once, "
-        f"got {call_count}"
+        f"Expected _execute_with_retry to be called at least once, got {call_count}"
     )
     assert received_max_retries == 2, (
         f"Expected backup_retry_max=2 to flow through to _execute_with_retry, "

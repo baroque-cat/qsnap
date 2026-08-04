@@ -201,20 +201,22 @@ class ExternalSnapshotProvider(ISnapshotProvider):
         snap_virtual_size = info.get("virtual-size")
         if snap_virtual_size is not None and previous_active is not None:
             base_info_cmd = [
-                "qemu-img", "info", "--force-share",
-                "--output=json", previous_active,
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--output=json",
+                previous_active,
             ]
             base_info_result = self._shell.run(
-                base_info_cmd, timeout=30, check=True,
+                base_info_cmd,
+                timeout=30,
+                check=True,
             )
             if base_info_result.success:
                 try:
                     base_info = json.loads(base_info_result.stdout)
                     base_virtual_size = base_info.get("virtual-size")
-                    if (
-                        base_virtual_size is not None
-                        and base_virtual_size != snap_virtual_size
-                    ):
+                    if base_virtual_size is not None and base_virtual_size != snap_virtual_size:
                         return SnapshotResult(
                             success=False,
                             name=snapshot_name,
@@ -293,10 +295,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                         name=snapshot_name,
                         path=snapshot_path,
                         new_allocation=0,
-                        error=(
-                            f"libvirt pivot not confirmed: "
-                            f"domblklist still shows {old_path}"
-                        ),
+                        error=(f"libvirt pivot not confirmed: domblklist still shows {old_path}"),
                     )
             except ValueError:
                 pass  # Non-fatal — cannot verify pivot

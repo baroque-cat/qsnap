@@ -75,7 +75,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -211,15 +215,11 @@ def test_preserve_min_keeps_newest_with_real_blockcommit(test_vm, caplog):
     # Verify oldest 2 snapshots are deleted, 8 newest remain.
     for snap in sorted_snaps[:2]:
         path = snap_paths_before[snap.name]
-        assert not path.exists(), (
-            f"Oldest snapshot file should be deleted by blockcommit: {path}"
-        )
+        assert not path.exists(), f"Oldest snapshot file should be deleted by blockcommit: {path}"
 
     for snap in sorted_snaps[2:]:
         path = snap_paths_before[snap.name]
-        assert path.exists(), (
-            f"Newest snapshot file should be preserved: {path}"
-        )
+        assert path.exists(), f"Newest snapshot file should be preserved: {path}"
 
     # VM should still be running (live blockcommit via virsh).
     assert _vm_is_running(shell, vm_name), "VM should still be running after live blockcommit"
@@ -329,9 +329,7 @@ def test_preserve_min_exceeds_total_no_blockcommit_integration(test_vm, caplog):
     "change_detection_mode",
     ["allocation-size"],
 )
-def test_source_disk_onchange_gate_opens_after_write(
-    test_vm, caplog, change_detection_mode
-):
+def test_source_disk_onchange_gate_opens_after_write(test_vm, caplog, change_detection_mode):
     """Source-disk onchange gate opens when the source disk has changed.
 
     1. Start VM, write data, create snapshot, back up (first run → gate
@@ -364,9 +362,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     )
 
     # Create first snapshot.
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.gate-open-1", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.gate-open-1", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
@@ -376,8 +372,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     # path returns current_allocation=0 and Core records baseline=0.
     state.set_last_allocation(vm_name, "vda", 0)
 
-    target = TargetConfig(path=target_dir, backup_create="onchange",
-                          compress=False, verify="off")
+    target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -398,13 +393,10 @@ def test_source_disk_onchange_gate_opens_after_write(
         result_first = core.backup(vm_name)
 
     first_skip_msgs = [
-        r.message
-        for r in caplog.records
-        if "no disk changed since last backup" in r.message
+        r.message for r in caplog.records if "no disk changed since last backup" in r.message
     ]
     assert len(first_skip_msgs) == 0, (
-        f"First run must not skip — no baseline. "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"First run must not skip — no baseline. Logs: {[r.message for r in caplog.records]}"
     )
 
     # Verify backup files on target.
@@ -443,9 +435,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     # Restore last_allocation so detector still enters normal path.
     state.set_last_allocation(vm_name, "vda", 0)
 
-    should_proceed_2, change_result_2 = core._should_backup_onchange(
-        vm_config, target
-    )
+    should_proceed_2, change_result_2 = core._should_backup_onchange(vm_config, target)
     assert should_proceed_2 is True, (
         f"Gate should open again with even staler baseline. "
         f"current_allocation={change_result_2.current_allocation}, "
@@ -466,9 +456,7 @@ def test_source_disk_onchange_gate_opens_after_write(
     "change_detection_mode",
     ["allocation-size"],
 )
-def test_source_disk_onchange_gate_skips_when_unchanged(
-    test_vm, caplog, change_detection_mode
-):
+def test_source_disk_onchange_gate_skips_when_unchanged(test_vm, caplog, change_detection_mode):
     """Source-disk onchange gate skips when no new data written.
 
     1. Start VM, write data, create snapshot, back up (baseline recorded).
@@ -492,17 +480,14 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
         check=True,
     )
 
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.skip-unchanged", snapshot_dir, base_image
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.skip-unchanged", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
     # Seed last_allocation so detector enters the normal code path.
     state.set_last_allocation(vm_name, "vda", 0)
 
-    target = TargetConfig(path=target_dir, backup_create="onchange",
-                          compress=False, verify="off")
+    target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -539,9 +524,7 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
         core.backup(vm_name)
 
     skip_msgs = [
-        r.message
-        for r in caplog.records
-        if "no disk changed since last backup" in r.message
+        r.message for r in caplog.records if "no disk changed since last backup" in r.message
     ]
     assert len(skip_msgs) >= 1, (
         f"Expected onchange skip on second run, but no skip message found. "
@@ -580,9 +563,7 @@ def test_source_disk_onchange_gate_skips_when_unchanged(
     "change_detection_mode",
     ["allocation-size"],
 )
-def test_per_target_baseline_independent(
-    test_vm, caplog, change_detection_mode
-):
+def test_per_target_baseline_independent(test_vm, caplog, change_detection_mode):
     """Per-target baselines are independent — each target has its own gate.
 
     1. Back up to target A and target B (both onchange).  Baseline A and
@@ -611,9 +592,7 @@ def test_per_target_baseline_independent(
         timeout=120,
         check=True,
     )
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.indep-1", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.indep-1", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
@@ -688,15 +667,11 @@ def test_per_target_baseline_independent(
 
     # Target A: stale baseline → gate opens
     should_proceed_a2, _ = core._should_backup_onchange(vm_config, target_a_config)
-    assert should_proceed_a2 is True, (
-        "Gate A should open when baseline is stale"
-    )
+    assert should_proceed_a2 is True, "Gate A should open when baseline is stale"
 
     # Target B: still no baseline → gate opens (first-run semantics)
     should_proceed_b2, _ = core._should_backup_onchange(vm_config, target_b_config)
-    assert should_proceed_b2 is True, (
-        "Gate B should still open (no baseline → first-run semantics)"
-    )
+    assert should_proceed_b2 is True, "Gate B should still open (no baseline → first-run semantics)"
 
     _cleanup_checkpoints(shell, vm_name)
 
@@ -712,9 +687,7 @@ def test_per_target_baseline_independent(
     "change_detection_mode",
     ["allocation-size"],
 )
-def test_onchange_first_run_no_baseline_integration(
-    test_vm, caplog, change_detection_mode
-):
+def test_onchange_first_run_no_baseline_integration(test_vm, caplog, change_detection_mode):
     """Fresh target, no prior state → baseline is None → gate opens.
 
     1. Start VM, write data, create snapshot.
@@ -739,17 +712,14 @@ def test_onchange_first_run_no_baseline_integration(
         timeout=120,
         check=True,
     )
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.first-run", snapshot_dir, base_image
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.first-run", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
     # Seed last_allocation so detector enters the normal code path.
     state.set_last_allocation(vm_name, "vda", 0)
 
-    target = TargetConfig(path=target_dir, backup_create="onchange",
-                          compress=False, verify="off")
+    target = TargetConfig(path=target_dir, backup_create="onchange", compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -772,9 +742,7 @@ def test_onchange_first_run_no_baseline_integration(
 
     # --- Gate check: no baseline → gate opens ---
     should_proceed, _ = core._should_backup_onchange(vm_config, target)
-    assert should_proceed is True, (
-        "Gate should open when baseline is None (first-run semantics)"
-    )
+    assert should_proceed is True, "Gate should open when baseline is None (first-run semantics)"
 
     # --- First run: gate opens, backup proceeds ---
     caplog.clear()
@@ -782,13 +750,10 @@ def test_onchange_first_run_no_baseline_integration(
         result_first = core.backup(vm_name)
 
     first_skip_msgs = [
-        r.message
-        for r in caplog.records
-        if "no disk changed since last backup" in r.message
+        r.message for r in caplog.records if "no disk changed since last backup" in r.message
     ]
     assert len(first_skip_msgs) == 0, (
-        f"First run must not skip — no baseline. "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"First run must not skip — no baseline. Logs: {[r.message for r in caplog.records]}"
     )
 
     # Verify backup files exist.
@@ -804,15 +769,12 @@ def test_onchange_first_run_no_baseline_integration(
 
     # Verify baseline was recorded.
     baseline_after = state.get_last_backup_allocation(str(target_dir), "vda")
-    assert baseline_after is not None, (
-        "Baseline should be recorded after successful backup"
-    )
+    assert baseline_after is not None, "Baseline should be recorded after successful backup"
 
     # --- Gate check: disk unchanged → gate skips ---
     should_proceed_2, _ = core._should_backup_onchange(vm_config, target)
     assert should_proceed_2 is False, (
-        f"Gate should close when disk unchanged. "
-        f"baseline={baseline_after}"
+        f"Gate should close when disk unchanged. baseline={baseline_after}"
     )
 
     # --- Second run: verify gate skips via backup ---
@@ -821,13 +783,10 @@ def test_onchange_first_run_no_baseline_integration(
         core.backup(vm_name)
 
     skip_msgs = [
-        r.message
-        for r in caplog.records
-        if "no disk changed since last backup" in r.message
+        r.message for r in caplog.records if "no disk changed since last backup" in r.message
     ]
     assert len(skip_msgs) >= 1, (
-        f"Second run must skip (disk unchanged). "
-        f"Logs: {[r.message for r in caplog.records]}"
+        f"Second run must skip (disk unchanged). Logs: {[r.message for r in caplog.records]}"
     )
 
     # Verify no new backup files.

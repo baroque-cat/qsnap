@@ -30,7 +30,8 @@ def _record_snap(state, target, vm):
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     state.record_snapshot(vm.name, snap)
     return snap
 
@@ -138,9 +139,7 @@ def test_full_source_snapshot_excluded_from_transfer(
     assert snap_new.name not in transferred_names, (
         "FULL source snapshot must not be re-transferred as incremental"
     )
-    assert snap_old.name in transferred_names, (
-        "older pending snapshots must still be transferred"
-    )
+    assert snap_old.name in transferred_names, "older pending snapshots must still be transferred"
 
 
 # ── test_incremental_count_exceeds_chain_length_triggers_full ──────────────
@@ -172,13 +171,13 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
     # (one more than target_chain_length=5).
     full_name = "existing.FULL.daily.qcow2"
     mock_state.record_full_backup(
-        str(target.path), full_name, datetime(2025, 7, 13, 8, 0),
-    "vda",
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 8, 0),
+        "vda",
     )
     for i in range(6):
-        mock_state.record_incremental_dependency(
-            str(target.path), f"inc{i}.qcow2", full_name
-        )
+        mock_state.record_incremental_dependency(str(target.path), f"inc{i}.qcow2", full_name)
 
     with (
         patch.object(
@@ -225,13 +224,13 @@ def test_target_chain_length_none_no_full_triggered(
     # Pre-populate a prior FULL and 10 incremental dependencies.
     full_name = "existing.FULL.daily.qcow2"
     mock_state.record_full_backup(
-        str(target.path), full_name, datetime(2025, 7, 13, 8, 0),
-    "vda",
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 8, 0),
+        "vda",
     )
     for i in range(10):
-        mock_state.record_incremental_dependency(
-            str(target.path), f"inc{i}.qcow2", full_name
-        )
+        mock_state.record_incremental_dependency(str(target.path), f"inc{i}.qcow2", full_name)
 
     with (
         patch.object(
@@ -278,13 +277,13 @@ def test_incremental_count_within_chain_length_skips_full(
     # (less than target_chain_length=5).
     full_name = "existing.FULL.daily.qcow2"
     mock_state.record_full_backup(
-        str(target.path), full_name, datetime(2025, 7, 13, 8, 0),
-    "vda",
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 8, 0),
+        "vda",
     )
     for i in range(3):
-        mock_state.record_incremental_dependency(
-            str(target.path), f"inc{i}.qcow2", full_name
-        )
+        mock_state.record_incremental_dependency(str(target.path), f"inc{i}.qcow2", full_name)
 
     with (
         patch.object(
@@ -381,13 +380,13 @@ def test_dry_run_logs_full_would_be_created(
     # (incremental_count=6 > chain_length=5 → should trigger FULL).
     full_name = "existing.FULL.daily.qcow2"
     mock_state.record_full_backup(
-        str(target.path), full_name, datetime(2025, 7, 13, 8, 0),
-    "vda",
+        str(target.path),
+        full_name,
+        datetime(2025, 7, 13, 8, 0),
+        "vda",
     )
     for i in range(6):
-        mock_state.record_incremental_dependency(
-            str(target.path), f"inc{i}.qcow2", full_name
-        )
+        mock_state.record_incremental_dependency(str(target.path), f"inc{i}.qcow2", full_name)
 
     caplog.set_level(logging.INFO)
 
@@ -403,9 +402,7 @@ def test_dry_run_logs_full_would_be_created(
         core._backup_target(vm, target, [snap])
 
     # create_full_backup should NOT be called in dry-run mode.
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called in dry-run mode"
-    )
+    assert not full_spy.called, "create_full_backup should NOT be called in dry-run mode"
     # INFO log should contain the dry-run FULL creation message.
     assert "[dry-run] Would create FULL backup" in caplog.text, (
         "Dry-run should log 'Would create FULL backup'"

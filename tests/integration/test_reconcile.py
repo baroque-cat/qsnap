@@ -80,7 +80,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -179,8 +183,7 @@ def test_reconcile_command(test_vm, caplog):
     # Identify the FULL backup file on disk by scanning for *.FULL.*.qcow2.
     full_files = sorted(target_dir.glob("*.FULL.*.qcow2"))
     assert len(full_files) > 0, (
-        f"No *.FULL.*.qcow2 files found in {target_dir}; "
-        f"contents: {list(target_dir.iterdir())}"
+        f"No *.FULL.*.qcow2 files found in {target_dir}; contents: {list(target_dir.iterdir())}"
     )
 
     # Record the full name for later verification.
@@ -190,8 +193,7 @@ def test_reconcile_command(test_vm, caplog):
     # Verify this FULL is tracked in state.
     tracked_names = {full.name for full in fulls_before if full.path.name == full_name}
     assert len(tracked_names) > 0, (
-        f"FULL {full_name} not found in state; "
-        f"tracked: {[f.path.name for f in fulls_before]}"
+        f"FULL {full_name} not found in state; tracked: {[f.path.name for f in fulls_before]}"
     )
 
     # --- Manually delete the FULL backup file (simulate disk failure / user error) ---
@@ -227,17 +229,14 @@ def test_reconcile_command(test_vm, caplog):
     # backup transfer, if deps were recorded they should now be gone.
     deps_after = state.get_incremental_dependencies(str(target_dir), full_name)
     assert len(deps_after) == 0, (
-        f"Incremental dependencies should be cascade-cleaned after FULL removal, "
-        f"got {deps_after}"
+        f"Incremental dependencies should be cascade-cleaned after FULL removal, got {deps_after}"
     )
 
     # Verify new ReconcileResult fields (D8) are present.
     assert hasattr(rec_result, "state_supplemented"), (
         "ReconcileResult must have state_supplemented field"
     )
-    assert hasattr(rec_result, "xml_refreshed"), (
-        "ReconcileResult must have xml_refreshed field"
-    )
+    assert hasattr(rec_result, "xml_refreshed"), "ReconcileResult must have xml_refreshed field"
     assert hasattr(rec_result, "allocation_fixed"), (
         "ReconcileResult must have allocation_fixed field"
     )

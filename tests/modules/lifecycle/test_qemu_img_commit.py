@@ -184,7 +184,9 @@ def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is True
@@ -230,7 +232,9 @@ def test_qemu_img_commit_fails(mock_shell: MockShell, make_vm_config):
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -302,7 +306,9 @@ def test_qemu_img_commit_pivots_child_and_deletes(mock_shell: MockShell, make_vm
     # --- Execute ---
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
-    result = manager.blockcommit(vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     # --- Assertions ---
     assert isinstance(result, CommitResult)
@@ -362,7 +368,9 @@ def test_qemu_img_commit_no_child_skips_rebase(mock_shell: MockShell, make_vm_co
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert result.success is True
     assert result.committed_snapshot == snap.name
@@ -416,7 +424,9 @@ def test_qemu_img_commit_failure_no_delete_short_circuit(mock_shell: MockShell, 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [s1, s2], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [s1, s2], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -494,7 +504,9 @@ def test_qemu_img_rebase_failure_keeps_file(mock_shell: MockShell, make_vm_confi
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [s1], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -535,7 +547,9 @@ def test_qemu_img_commit_blocked_by_apparmor(mock_shell: MockShell, make_vm_conf
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -567,7 +581,9 @@ def test_qemu_img_commit_blocked_by_selinux(mock_shell: MockShell, make_vm_confi
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
 
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -649,7 +665,9 @@ def test_qemu_img_commit_deep_verify(
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True)
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
+    )
 
     assert result.success is expected_success
     assert result.error == expected_error
@@ -723,9 +741,7 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
         }
     )
     # Use a specific regex so we can track which file gets inspected.
-    mock_shell.expect_first(
-        r"qemu-img info.*" + vda_child.replace("/", r"\/")
-    ).returns(
+    mock_shell.expect_first(r"qemu-img info.*" + vda_child.replace("/", r"\/")).returns(
         ShellResult(success=True, stdout=info_json, stderr="", returncode=0, error=None)
     )
 
@@ -742,9 +758,7 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(
-        vm_config, [snap], disk="vda", base_image=vda_disk.base_image
-    )
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vda_disk.base_image)
 
     assert result.success is True
     assert result.committed_snapshot == snap.name
@@ -762,9 +776,7 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
     )
 
 
-def test_find_child_still_inspects_unparseable_names(
-    mock_shell: MockShell, make_vm_config
-):
+def test_find_child_still_inspects_unparseable_names(mock_shell: MockShell, make_vm_config):
     """Candidates whose names do not encode a disk are still inspected.
 
     Files like ``random.qcow2`` or ``base.qcow2`` do not match the
@@ -818,9 +830,7 @@ def test_find_child_still_inspects_unparseable_names(
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
 
-    result = manager.blockcommit(
-        vm_config, [snap], disk="vda", base_image=vda_disk.base_image
-    )
+    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=vda_disk.base_image)
 
     assert result.success is True
     assert result.committed_snapshot == snap.name
@@ -833,4 +843,3 @@ def test_find_child_still_inspects_unparseable_names(
     assert "random.qcow2" in info_calls[0], (
         f"qemu-img info should include random.qcow2, got: {info_calls[0]}"
     )
-

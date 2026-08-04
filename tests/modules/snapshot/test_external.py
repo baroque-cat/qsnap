@@ -68,11 +68,7 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snapshot_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snapshot_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -101,12 +97,14 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     )
     # Step 3: qemu-img info returns JSON with actual-size AND
     # format=qcow2, backing-filename matching previous active, no corrupt bit
-    qemu_info_json = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": str(snapshot_path),
-    })
+    qemu_info_json = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": str(snapshot_path),
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -278,9 +276,7 @@ def test_create_snapshot_timeout(mock_shell, make_vm_config):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _expect_successful_create(
-    mock_shell, snapshot_path: str | None = None
-):
+def _expect_successful_create(mock_shell, snapshot_path: str | None = None):
     """Configure MockShell expectations for a successful create() pipeline.
 
     Sets up virsh snapshot-create-as, chmod, and qemu-img info to all
@@ -298,11 +294,7 @@ def _expect_successful_create(
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snap_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snap_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -643,11 +635,7 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snapshot_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snapshot_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -658,12 +646,14 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     mock_shell.expect("chmod").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    qemu_info_json = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": str(snapshot_path),
-    })
+    qemu_info_json = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": str(snapshot_path),
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -810,11 +800,7 @@ def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config)
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snapshot_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snapshot_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -825,12 +811,14 @@ def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config)
     mock_shell.expect("chmod").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
-    qemu_info_json = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": str(snapshot_path),
-    })
+    qemu_info_json = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": str(snapshot_path),
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1133,11 +1121,7 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snapshot_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snapshot_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -1165,12 +1149,14 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
         )
     )
     # Step 3: qemu-img info --force-share succeeds
-    qemu_info_json = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": str(snapshot_path),
-    })
+    qemu_info_json = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": str(snapshot_path),
+        }
+    )
     mock_shell.expect("qemu-img info.*--force-share").returns(
         ShellResult(
             success=True,
@@ -1220,11 +1206,7 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
     mock_shell.expect_first("virsh domblklist").returns(
         ShellResult(
             success=True,
-            stdout=(
-                "Target   Source\n"
-                "--------------------------------\n"
-                f"vda   {snapshot_path}\n"
-            ),
+            stdout=(f"Target   Source\n--------------------------------\nvda   {snapshot_path}\n"),
             stderr="",
             returncode=0,
             error=None,
@@ -1264,12 +1246,14 @@ def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_c
         )
     )
     # Normal expectation: --force-share IS present, so this succeeds
-    qemu_info_json = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": str(snapshot_path),
-    })
+    qemu_info_json = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": str(snapshot_path),
+        }
+    )
     mock_shell.expect("qemu-img info.*--force-share").returns(
         ShellResult(
             success=True,
@@ -1347,12 +1331,14 @@ def test_post_creation_file_missing(mock_shell, make_vm_config):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     # qemu-img info returns valid qcow2 metadata
-    qemu_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": old_path,
-    })
+    qemu_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": old_path,
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1424,12 +1410,14 @@ def test_post_creation_wrong_backing(mock_shell, make_vm_config):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     # qemu-img info returns wrong backing-filename (different from old_path)
-    qemu_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": wrong_backing,
-    })
+    qemu_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": wrong_backing,
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1493,13 +1481,15 @@ def test_post_creation_corrupt_bit(mock_shell, make_vm_config):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     # qemu-img info returns corrupt bit set
-    qemu_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": old_path,
-        "incompatible-features": ["corrupt"],
-    })
+    qemu_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": old_path,
+            "incompatible-features": ["corrupt"],
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1562,12 +1552,14 @@ def test_post_creation_pivot_not_confirmed(mock_shell, make_vm_config):
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
     # qemu-img info returns valid metadata with correct backing-filename
-    qemu_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 1073741824,
-        "backing-filename": old_path,
-    })
+    qemu_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 1073741824,
+            "backing-filename": old_path,
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1633,15 +1625,15 @@ def test_post_creation_virtual_size_mismatch(mock_shell, make_vm_config):
     # qemu-img info on the snapshot: virtual-size=2 GiB (2147483648).
     # Must use expect_first with snapshot_path so it matches ONLY the
     # snapshot call and not the base-image call.
-    qemu_snap_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1048576,
-        "virtual-size": 2147483648,
-        "backing-filename": old_path,
-    })
-    mock_shell.expect_first(
-        f"qemu-img info.*{re.escape(str(snapshot_path))}"
-    ).returns(
+    qemu_snap_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1048576,
+            "virtual-size": 2147483648,
+            "backing-filename": old_path,
+        }
+    )
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(snapshot_path))}").returns(
         ShellResult(
             success=True,
             stdout=qemu_snap_info,
@@ -1654,13 +1646,13 @@ def test_post_creation_virtual_size_mismatch(mock_shell, make_vm_config):
     # — mismatched, triggers virtual-size mismatch error.
     # Also use expect_first with old_path so it matches the base-image
     # call before any generic qemu-img info pattern.
-    qemu_base_info = json.dumps({
-        "format": "qcow2",
-        "virtual-size": 1073741824,
-    })
-    mock_shell.expect_first(
-        f"qemu-img info.*{re.escape(old_path)}"
-    ).returns(
+    qemu_base_info = json.dumps(
+        {
+            "format": "qcow2",
+            "virtual-size": 1073741824,
+        }
+    )
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(old_path)}").returns(
         ShellResult(
             success=True,
             stdout=qemu_base_info,
@@ -1723,12 +1715,14 @@ def test_post_creation_actual_size_unreasonable(mock_shell, make_vm_config):
 
     # qemu-img info on the snapshot: actual-size == virtual-size, which is
     # way above the 50% threshold (1073741824 == 1073741824 → 100%).
-    qemu_snap_info = json.dumps({
-        "format": "qcow2",
-        "actual-size": 1073741824,
-        "virtual-size": 1073741824,
-        "backing-filename": old_path,
-    })
+    qemu_snap_info = json.dumps(
+        {
+            "format": "qcow2",
+            "actual-size": 1073741824,
+            "virtual-size": 1073741824,
+            "backing-filename": old_path,
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,
@@ -1740,10 +1734,12 @@ def test_post_creation_actual_size_unreasonable(mock_shell, make_vm_config):
     )
     # qemu-img info on the base image: matching virtual-size so 5b-2
     # passes cleanly and we reach 5b-3 (actual-size check).
-    qemu_base_info = json.dumps({
-        "format": "qcow2",
-        "virtual-size": 1073741824,
-    })
+    qemu_base_info = json.dumps(
+        {
+            "format": "qcow2",
+            "virtual-size": 1073741824,
+        }
+    )
     mock_shell.expect("qemu-img info").returns(
         ShellResult(
             success=True,

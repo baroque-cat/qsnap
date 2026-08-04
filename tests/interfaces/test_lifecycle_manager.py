@@ -90,5 +90,11 @@ def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
             disk="vda",
         )
     ]
-    result = manager.blockcommit(vm_config, snapshots, disk="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"), deep_verify=True)
+    result = manager.blockcommit(
+        vm_config,
+        snapshots,
+        disk="vda",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        deep_verify=True,
+    )
     assert isinstance(result, CommitResult)

@@ -58,7 +58,8 @@ def test_snapshot_retention_with_chain_length(
             path=Path(f"/tmp/snap{i + 1:02d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000 * (i + 1),
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     with patch.object(
@@ -108,7 +109,8 @@ def test_snapshot_retention_no_chain_length_uses_zero(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     with patch.object(
@@ -157,7 +159,7 @@ def test_backup_retention_with_keep_generations(
             str(target.path),
             full_name,
             base + timedelta(hours=i * 24),
-        "vda",
+            "vda",
         )
 
     # The _evaluate_backup_retention method calls provider.list(),
@@ -172,7 +174,7 @@ def test_backup_retention_with_keep_generations(
             path=target.path / f"testvm.FULL.daily.{i}.qcow2",
             timestamp=base + timedelta(hours=i * 24),
             allocation=0,
-        disk="vda",
+            disk="vda",
         )
         for i in range(5)
     ]
@@ -231,7 +233,8 @@ def test_preserve_snapshots_retention_still_evaluated(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=datetime(2025, 7, 13, 10, 0),
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     with patch.object(
@@ -273,7 +276,8 @@ def test_preserve_backups_skips_provider_delete_calls(
         path=Path("/tmp/snap1.qcow2"),
         timestamp=base,
         allocation=1000,
-    disk="vda",    )
+        disk="vda",
+    )
     mock_state.record_snapshot("testvm", snap)
 
     backups = [
@@ -282,13 +286,15 @@ def test_preserve_backups_skips_provider_delete_calls(
             path=Path("/mnt/backup/snap1.qcow2"),
             timestamp=base,
             allocation=1000,
-        disk="vda",        ),
+            disk="vda",
+        ),
         SnapshotInfo(
             name="snap2",
             path=Path("/mnt/backup/snap2.qcow2"),
             timestamp=base + timedelta(hours=1),
             allocation=2000,
-        disk="vda",        ),
+            disk="vda",
+        ),
     ]
 
     with (
@@ -342,7 +348,8 @@ def test_preserve_min_inactive_default(
             path=Path(f"/tmp/snap{i + 1:03d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000,
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     with patch.object(
@@ -384,7 +391,8 @@ def test_preserve_min_trim_excess_from_newest(
             path=Path(f"/tmp/snap{i + 1:02d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000 * (i + 1),
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     # Engine returns: keep=6 newest, remove=24 oldest.
@@ -431,7 +439,8 @@ def test_preserve_min_no_trim_when_within_limit(
             path=Path(f"/tmp/snap{i + 1:03d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000,
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     # Engine returns: keep=72 newest, remove=28 oldest.
@@ -473,7 +482,8 @@ def test_preserve_min_equals_total_no_blockcommit(
             path=Path(f"/tmp/snap{i + 1:02d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000 * (i + 1),
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     # Engine returns: keep=6 newest, remove=24 oldest.
@@ -515,7 +525,8 @@ def test_preserve_min_exceeds_total_no_blockcommit(
             path=Path(f"/tmp/snap{i + 1:02d}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000 * (i + 1),
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     keep_names = [f"snap{i:02d}" for i in range(7, 31)]
@@ -556,7 +567,8 @@ def test_preserve_min_applied_after_oldest_prefix(
             path=Path(f"/tmp/s{i + 1}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000,
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     # Engine: keep=s7,s8,s9,s10, remove=s1..s6.
@@ -602,7 +614,8 @@ def test_preserve_min_trims_newest_end_of_remove(
             path=Path(f"/tmp/s{i + 1}.qcow2"),
             timestamp=base + timedelta(hours=i),
             allocation=1000,
-        disk="vda",        )
+            disk="vda",
+        )
         mock_state.record_snapshot("testvm", snap)
 
     # Engine: keep=s7, remove=s1..s6.
@@ -652,7 +665,7 @@ def test_preserve_min_does_not_affect_target_retention(
             str(target.path),
             full_name,
             base + timedelta(hours=i * 24),
-        "vda",
+            "vda",
         )
 
     full_infos = [
@@ -661,17 +674,19 @@ def test_preserve_min_does_not_affect_target_retention(
             path=target.path / f"testvm.FULL.daily.{i}.qcow2",
             timestamp=base + timedelta(hours=i * 24),
             allocation=0,
-        disk="vda",        )
+            disk="vda",
+        )
         for i in range(3)
     ]
 
-    with patch.object(
-        mock_factory._backup_provider, "list", return_value=full_infos
-    ), patch.object(
-        mock_factory._retention_engine,
-        "evaluate",
-        wraps=mock_factory._retention_engine.evaluate,
-    ) as eval_spy:
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=full_infos),
+        patch.object(
+            mock_factory._retention_engine,
+            "evaluate",
+            wraps=mock_factory._retention_engine.evaluate,
+        ) as eval_spy,
+    ):
         backups, retention_result = core._evaluate_backup_retention(vm, target)
 
     # Target retention uses keep_generations=2, NOT preserve_min.
@@ -724,8 +739,8 @@ def test_multidisk_preserve_min_independent(
         mock_state.record_snapshot(
             "testvm",
             SnapshotInfo(
-                name=f"vda_{i+1:02d}",
-                path=Path(f"/tmp/vda_{i+1:02d}.qcow2"),
+                name=f"vda_{i + 1:02d}",
+                path=Path(f"/tmp/vda_{i + 1:02d}.qcow2"),
                 timestamp=base + timedelta(hours=i),
                 allocation=1000,
                 disk="vda",
@@ -736,8 +751,8 @@ def test_multidisk_preserve_min_independent(
         mock_state.record_snapshot(
             "testvm",
             SnapshotInfo(
-                name=f"vdb_{i+1:02d}",
-                path=Path(f"/tmp/vdb_{i+1:02d}.qcow2"),
+                name=f"vdb_{i + 1:02d}",
+                path=Path(f"/tmp/vdb_{i + 1:02d}.qcow2"),
                 timestamp=base + timedelta(hours=i + 20),
                 allocation=1000,
                 disk="vdb",

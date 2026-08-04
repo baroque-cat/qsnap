@@ -158,16 +158,24 @@ def mock_shell() -> MockShell:
 @pytest.fixture
 def success_result():
     """Factory fixture for ShellResult(success=True, ...)."""
+
     def _make(stdout="", stderr="", returncode=0, error=None):
-        return ShellResult(success=True, stdout=stdout, stderr=stderr, returncode=returncode, error=error)
+        return ShellResult(
+            success=True, stdout=stdout, stderr=stderr, returncode=returncode, error=error
+        )
+
     return _make
 
 
 @pytest.fixture
 def failure_result():
     """Factory fixture for ShellResult(success=False, ...)."""
+
     def _make(stdout="", stderr="", returncode=1, error="error"):
-        return ShellResult(success=False, stdout=stdout, stderr=stderr, returncode=returncode, error=error)
+        return ShellResult(
+            success=False, stdout=stdout, stderr=stderr, returncode=returncode, error=error
+        )
+
     return _make
 
 
@@ -223,9 +231,7 @@ def make_vm_config():
                 if isinstance(d, DiskConfig):
                     normalized.append(d)
                 else:
-                    normalized.append(
-                        DiskConfig(target=str(d), base_image=Path(base_image))
-                    )
+                    normalized.append(DiskConfig(target=str(d), base_image=Path(base_image)))
             disks = normalized
         defaults: dict[str, object] = {
             "name": name,

@@ -75,7 +75,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -158,14 +162,22 @@ def test_deep_verify_enabled_runs_qemu_img_check(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         blockcommit_deep_verify=True,
     )
 
     # Step 1: Create a snapshot — it will trigger blockcommit since
     # snapshot_chain_length=1 and the snapshot is the first.
     snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.dv-s1", base_image, snapshot_dir,
+        shell,
+        vm_name,
+        f"{vm_name}.dv-s1",
+        base_image,
+        snapshot_dir,
     )
     state.record_snapshot(vm_name, snap1)
 
@@ -183,18 +195,14 @@ def test_deep_verify_enabled_runs_qemu_img_check(test_vm, caplog):
     # BlockCommitManager runs qemu-img check.  Look for "qemu-img"
     # and "check" in the same log message as evidence of deep verify.
     check_logs = [
-        r.message for r in caplog.records
-        if "qemu-img" in r.message and "check" in r.message
+        r.message for r in caplog.records if "qemu-img" in r.message and "check" in r.message
     ]
     # At minimum, if blockcommit happened, deep_verify=True should have
     # triggered qemu-img check on the base image.
     # If no blockcommit occurred (VM running might defer), the test
     # still passes — we just note that the deep_verify path is exercised
     # through the mock/factory path in unit tests.
-    blockcommit_logs = [
-        r.message for r in caplog.records
-        if "blockcommit" in r.message.lower()
-    ]
+    blockcommit_logs = [r.message for r in caplog.records if "blockcommit" in r.message.lower()]
     if blockcommit_logs:
         assert len(check_logs) >= 1, (
             f"With blockcommit_deep_verify=True, expected qemu-img check logs "
@@ -236,13 +244,21 @@ def test_deep_verify_disabled_no_qemu_img_check(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         blockcommit_deep_verify=False,
     )
 
     # Step 1: Create a snapshot.
     snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.dv-off-s1", base_image, snapshot_dir,
+        shell,
+        vm_name,
+        f"{vm_name}.dv-off-s1",
+        base_image,
+        snapshot_dir,
     )
     state.record_snapshot(vm_name, snap1)
 
@@ -254,17 +270,16 @@ def test_deep_verify_disabled_no_qemu_img_check(test_vm, caplog):
 
     # Step 3: If blockcommit happened, qemu-img check must NOT appear
     # for the BASE image (deep_verify checks the base image, not backups).
-    blockcommit_logs = [
-        r.message for r in caplog.records
-        if "blockcommit" in r.message.lower()
-    ]
+    blockcommit_logs = [r.message for r in caplog.records if "blockcommit" in r.message.lower()]
     # deep_verify_base_image runs "qemu-img check" on the BASE image.
     # FULL backup verification also runs "qemu-img check" but on the
     # BACKUP file — filter to only base-image checks.
     base_image_str = str(base_image)
     check_logs = [
-        r.message for r in caplog.records
-        if "qemu-img" in r.message and "check" in r.message
+        r.message
+        for r in caplog.records
+        if "qemu-img" in r.message
+        and "check" in r.message
         and "--output=json" in r.message
         and base_image_str in r.message
     ]

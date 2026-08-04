@@ -70,7 +70,6 @@ def test_validate_environment_passes_with_libnbd(test_vm) -> None:
         targets=[
             TargetConfig(
                 path=target_dir,
-
                 verify="metadata",
             ),
         ],
@@ -132,7 +131,6 @@ def test_libnbd_missing_hard_failure(test_vm) -> None:
         targets=[
             TargetConfig(
                 path=target_dir,
-
             ),
         ],
     )

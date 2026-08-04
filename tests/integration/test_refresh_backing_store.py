@@ -95,20 +95,26 @@ def _ensure_vm_stopped(shell: SubprocessShell, vm_name: str, max_retries: int = 
         if attempt > 0:
             time.sleep(3)
         destroy_result = shell.run(
-            ["virsh", "destroy", vm_name], timeout=30,
+            ["virsh", "destroy", vm_name],
+            timeout=30,
         )
         time.sleep(2)
         # Verify via dominfo.
         dominfo = shell.run(
-            ["virsh", "dominfo", "--domain", vm_name], timeout=30,
+            ["virsh", "dominfo", "--domain", vm_name],
+            timeout=30,
         )
         if dominfo.success:
             for line in dominfo.stdout.splitlines():
-                if line.strip().lower().startswith("state:") and line.split(":", 1)[1].strip().lower() == "shut off":
+                if (
+                    line.strip().lower().startswith("state:")
+                    and line.split(":", 1)[1].strip().lower() == "shut off"
+                ):
                     return True
-        elif not destroy_result.success and "domain is not running" in str(
-            destroy_result.error or ""
-        ).lower():
+        elif (
+            not destroy_result.success
+            and "domain is not running" in str(destroy_result.error or "").lower()
+        ):
             # destroy reported "domain is not running" — already stopped.
             return True
         elif "failed to get domain" in str(destroy_result.error or "").lower():
@@ -130,7 +136,11 @@ def _create_external_snapshot(
     """
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     result = provider.create(vm_config, snap_name, "vda", snap_path)
     assert result.success, f"Snapshot creation failed: {result.error}"
     info = SnapshotInfo(
@@ -294,9 +304,7 @@ def test_refresh_after_offline_commit(test_vm):
 
     # Step 4: Find snap2 as the child of snap1 and rebase it onto base.
     child = _find_child_overlay(shell, snap1_path, snapshot_dir)
-    assert child is not None, (
-        f"Could not find child overlay of {snap1_path} in {snapshot_dir}"
-    )
+    assert child is not None, f"Could not find child overlay of {snap1_path} in {snapshot_dir}"
 
     rebase_result = shell.run(
         ["qemu-img", "rebase", "-u", "-F", "qcow2", "-b", str(base_image), str(child)],
@@ -320,7 +328,11 @@ def test_refresh_after_offline_commit(test_vm):
 
     # Step 6: Call _refresh_domain_backing_store().
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     core = _build_core(shell, vm_config, state, tmpdir)
     core._refresh_domain_backing_store(vm_config)
 
@@ -329,8 +341,7 @@ def test_refresh_after_offline_commit(test_vm):
     # the chain is now: base ← snap2 ← snap3 (with snap1 gone).
     start_result = shell.run(["virsh", "start", vm_name], timeout=30)
     assert start_result.success, (
-        f"VM must start after _refresh_domain_backing_store. "
-        f"Error: {start_result.error}"
+        f"VM must start after _refresh_domain_backing_store. Error: {start_result.error}"
     )
     time.sleep(2)
     assert is_vm_running(shell, vm_name), "VM must be running after start"
@@ -403,7 +414,11 @@ def test_refresh_strips_all_backing_store(test_vm):
 
     # Call _refresh_domain_backing_store() — must not raise.
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     core = _build_core(shell, vm_config, state, tmpdir)
     core._refresh_domain_backing_store(vm_config)
 
@@ -464,7 +479,11 @@ def test_refresh_idempotent(test_vm):
     )
 
     state = InMemoryStateManager()
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     core = _build_core(shell, vm_config, state, tmpdir)
 
     # First call: strips <backingStore> and runs virsh define.
@@ -516,7 +535,11 @@ def test_refresh_failure_non_fatal(test_vm, caplog):
 
     # Use a non-existent VM name — virsh dumpxml will fail.
     nonexistent_vm = "qsnap-nonexistent-vm-xyz123"
-    vm_config = VMConfig(name=nonexistent_vm, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=nonexistent_vm,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     state = InMemoryStateManager()
     core = _build_core(shell, vm_config, state, tmpdir)
@@ -527,7 +550,8 @@ def test_refresh_failure_non_fatal(test_vm, caplog):
 
     # The method must have logged a WARNING about the dumpxml failure.
     warning_msgs = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if r.levelno >= logging.WARNING and "dumpxml" in r.message.lower()
     ]
     assert len(warning_msgs) >= 1, (

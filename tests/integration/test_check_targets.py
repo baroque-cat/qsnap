@@ -72,7 +72,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -273,9 +277,7 @@ def test_check_real_targets_broken_chain(test_vm):
         pytest.skip(f"inc2 backup failed: {result3.results[0].error}")
 
     # Identify incremental files on target (non-FULL qcow2)
-    incremental_files = sorted(
-        [f for f in target_dir.glob("*.qcow2") if ".FULL." not in f.name]
-    )
+    incremental_files = sorted([f for f in target_dir.glob("*.qcow2") if ".FULL." not in f.name])
     if len(incremental_files) < 2:
         pytest.skip(
             f"Need at least 2 incremental files on target to break chain; "
@@ -373,16 +375,15 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
     qsnap_checkpoints = []
     if cp_result.success:
         qsnap_checkpoints = [
-            c.strip() for c in cp_result.stdout.strip().splitlines()
+            c.strip()
+            for c in cp_result.stdout.strip().splitlines()
             if c.strip().startswith("qsnap-")
         ]
     assert len(qsnap_checkpoints) > 0, (
-        f"Expected at least one qsnap checkpoint after FULL backup, "
-        f"got {qsnap_checkpoints}"
+        f"Expected at least one qsnap checkpoint after FULL backup, got {qsnap_checkpoints}"
     )
     assert any(original_hash in cp for cp in qsnap_checkpoints), (
-        f"Expected checkpoint matching hash {original_hash}, "
-        f"got {qsnap_checkpoints}"
+        f"Expected checkpoint matching hash {original_hash}, got {qsnap_checkpoints}"
     )
 
     # Build a NEW Core with a different target path → different hash
@@ -424,9 +425,7 @@ def test_check_real_targets_orphan_checkpoint(test_vm):
             if line.strip().startswith("qsnap-"):
                 still_exists = True
                 break
-    assert still_exists, (
-        "check() should be read-only — orphan checkpoint must NOT be deleted"
-    )
+    assert still_exists, "check() should be read-only — orphan checkpoint must NOT be deleted"
 
     # Orphan checkpoints are WARNING-level — status may still be "ok"
     # if no other issues are found
@@ -578,9 +577,7 @@ def test_check_real_targets_after_retention(test_vm):
     # Create enough additional snapshots to trigger retention (chain_length=2)
     for i in range(2, 5):
         time.sleep(1)
-        snap = _snapshot_create(
-            shell, vm_name, f"{vm_name}.ret-s{i}", snapshot_dir, base_image
-        )
+        snap = _snapshot_create(shell, vm_name, f"{vm_name}.ret-s{i}", snapshot_dir, base_image)
         state.record_snapshot(vm_name, snap)
         time.sleep(1)
         core.run(vm_name)

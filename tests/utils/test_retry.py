@@ -188,6 +188,7 @@ def test_retry_disabled_when_backup_retry_max_zero(
         call_count += 1
         # Return a failure — but max_retries=0 means no retry should happen
         from types import SimpleNamespace
+
         return SimpleNamespace(success=False, error="Connection refused")
 
     core._execute_with_retry(operation, target)

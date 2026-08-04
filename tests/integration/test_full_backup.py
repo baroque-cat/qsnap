@@ -199,7 +199,10 @@ def test_full_backup_compression_modes(test_vm):
     result_none = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.none", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.none",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
             disk="vda",
         ),
         TargetConfig(path=target_dir, compress=False, verify="off"),
@@ -219,7 +222,10 @@ def test_full_backup_compression_modes(test_vm):
     result_zstd = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.zstd", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.zstd",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
             disk="vda",
         ),
         TargetConfig(path=target_dir, compress=True, verify="off"),
@@ -238,7 +244,10 @@ def test_full_backup_compression_modes(test_vm):
     result_zlib = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.zlib", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.zlib",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
             disk="vda",
         ),
         TargetConfig(path=target_dir, compress=True, verify="off"),
@@ -304,12 +313,14 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     result = provider.create_full_backup(
         vm_name,
         SnapshotInfo(
-            name=f"{vm_name}.stopped", path=base_image, timestamp=datetime.now(), allocation=0,
+            name=f"{vm_name}.stopped",
+            path=base_image,
+            timestamp=datetime.now(),
+            allocation=0,
             disk="vda",
         ),
         TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
-
     )
 
     assert result.success, f"Stopped-VM FULL must succeed, got: {result.error}"
@@ -386,7 +397,6 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
-
     )
 
     assert result.success, f"Running-VM NBD FULL must succeed, got: {result.error}"
@@ -490,7 +500,6 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
         snapshot,
         TargetConfig(path=target_dir, compress=False, verify="off"),
         compress=False,
-
     )
 
     assert result.success, f"qemu-img-convert FULL must succeed, got: {result.error}"

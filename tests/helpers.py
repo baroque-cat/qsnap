@@ -10,7 +10,13 @@ from qsnap.models.results import DeferredBlockcommit, SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 
 
-def add_deferred_with_since(state, vm_name: str, disk: str, snapshots: list[str], reason: str, since: datetime,
+def add_deferred_with_since(
+    state,
+    vm_name: str,
+    disk: str,
+    snapshots: list[str],
+    reason: str,
+    since: datetime,
 ) -> None:
     """Add a deferred blockcommit with a specific ``since`` timestamp.
 

@@ -17,13 +17,7 @@ def _make_snapshot(
     allocation: int = 1024,
     path: str = "/tmp/snap.qcow2",
 ) -> SnapshotInfo:
-    return SnapshotInfo(
-        name=name,
-        path=Path(path),
-        timestamp=ts,
-        allocation=allocation,
-        disk="vda"
-    )
+    return SnapshotInfo(name=name, path=Path(path), timestamp=ts, allocation=allocation, disk="vda")
 
 
 # ── reset_vm_state tests ───────────────────────────────────────────────
@@ -148,7 +142,5 @@ def test_inmemory_reset_target_state_nonexistent_target_no_error() -> None:
 
     # No error was raised — state remains empty.
     assert mgr.get_full_backups("/nonexistent/target") == []
-    assert (
-        mgr.get_incremental_dependencies("/nonexistent/target", "any") == []
-    )
+    assert mgr.get_incremental_dependencies("/nonexistent/target", "any") == []
     assert mgr.get_last_backup_allocation("/nonexistent/target", "vda") is None

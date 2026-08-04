@@ -50,7 +50,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -220,7 +224,11 @@ def test_reconcile_real_orphan_snapshot_recorded(test_vm, caplog):
     snap2_path = snapshot_dir / f"{snap2_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result2 = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap2_name,
         "vda",
         snap2_path,
@@ -247,20 +255,14 @@ def test_reconcile_real_orphan_snapshot_recorded(test_vm, caplog):
     rec = reconcile_results[vm_name]
 
     # snap2 should be supplemented into state.
-    assert rec.state_supplemented >= 1, (
-        f"Expected state_supplemented >= 1, got {rec}"
-    )
+    assert rec.state_supplemented >= 1, f"Expected state_supplemented >= 1, got {rec}"
 
     # Verify snap2 recorded in state.
     remaining = {s.name for s in state.get_snapshots(vm_name)}
-    assert snap2_name in remaining, (
-        f"snap2 should be recorded in state. Got: {remaining}"
-    )
+    assert snap2_name in remaining, f"snap2 should be recorded in state. Got: {remaining}"
 
     # snap2 file must still exist on disk (NOT deleted).
-    assert snap2_path.exists(), (
-        "snap2 file should NOT be deleted — it is a legitimate snapshot"
-    )
+    assert snap2_path.exists(), "snap2 file should NOT be deleted — it is a legitimate snapshot"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -347,9 +349,7 @@ def test_reconcile_real_stale_xml(test_vm, caplog):
     rec = reconcile_results[vm_name]
 
     # XML must be refreshed.
-    assert rec.xml_refreshed, (
-        f"Expected xml_refreshed=True, got {rec}"
-    )
+    assert rec.xml_refreshed, f"Expected xml_refreshed=True, got {rec}"
 
     # Domain XML persistent config must no longer have <backingStore>.
     # (Live XML still has it while VM runs, but persistent was cleaned.)
@@ -451,8 +451,7 @@ def test_reconcile_real_broken_chain_no_rebase(test_vm, caplog):
 
     # XML should have been refreshed (stripped backingStore).
     assert rec.xml_refreshed, (
-        f"Expected xml_refreshed=True after deleting middle snapshot. "
-        f"Result: {rec}"
+        f"Expected xml_refreshed=True after deleting middle snapshot. Result: {rec}"
     )
 
     # No qemu-img rebase should have been attempted.
@@ -552,14 +551,11 @@ def test_reconcile_real_dry_run(test_vm, caplog):
     # Phantom must still be in state (no changes).
     remaining = {s.name for s in state.get_snapshots(vm_name)}
     assert phantom_snap.name in remaining, (
-        f"Phantom snapshot must remain in state during dry-run. "
-        f"Got: {remaining}"
+        f"Phantom snapshot must remain in state during dry-run. Got: {remaining}"
     )
 
     # Orphan file must still be on disk.
-    assert orphan_path.exists(), (
-        "Orphan file must remain on disk during dry-run"
-    )
+    assert orphan_path.exists(), "Orphan file must remain on disk during dry-run"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -597,15 +593,9 @@ def test_reconcile_detects_snapshot_in_state_but_not_in_xml(test_vm, caplog):
         pytest.skip("VM did not reach running state")
 
     # ── Step 1: Create 3 snapshots ──────────────────────────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.xmlgap-snap1", snapshot_dir, base_image
-    )
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.xmlgap-snap2", snapshot_dir, base_image
-    )
-    snap3 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.xmlgap-snap3", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.xmlgap-snap1", snapshot_dir, base_image)
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.xmlgap-snap2", snapshot_dir, base_image)
+    snap3 = _snapshot_create(shell, vm_name, f"{vm_name}.xmlgap-snap3", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
@@ -691,25 +681,19 @@ def test_reconcile_detects_snapshot_in_state_but_not_in_xml(test_vm, caplog):
     snaps_after = state.get_snapshots(vm_name)
     snap_names = [s.name for s in snaps_after]
     assert snap2.name not in snap_names, (
-        f"snap2 should be removed from state after reconcile. "
-        f"Snapshots remaining: {snap_names}"
+        f"snap2 should be removed from state after reconcile. Snapshots remaining: {snap_names}"
     )
 
     # WARNING log about "not in domain XML"
     assert "not in domain xml" in caplog.text.lower(), (
-        f"Expected WARNING about snapshot not in domain XML. "
-        f"Captured: {caplog.text[:500]}"
+        f"Expected WARNING about snapshot not in domain XML. Captured: {caplog.text[:500]}"
     )
 
     # phantom_snapshots_removed should include this removal.
-    assert rec.phantom_snapshots_removed >= 1, (
-        f"Expected phantom_snapshots_removed >= 1, got {rec}"
-    )
+    assert rec.phantom_snapshots_removed >= 1, f"Expected phantom_snapshots_removed >= 1, got {rec}"
 
     # snap2 file must still exist on disk (safety — not deleted).
-    assert snap2.path.exists(), (
-        "snap2 file should be preserved on disk (safety backup)"
-    )
+    assert snap2.path.exists(), "snap2 file should be preserved on disk (safety backup)"
 
     # Cleanup: restart VM to allow proper teardown.
     shell.run(["virsh", "start", vm_name], timeout=30)
@@ -750,15 +734,9 @@ def test_reconcile_all_snapshots_deleted_from_disk(test_vm, caplog):
         pytest.skip("VM did not reach running state")
 
     # ── Step 1: Create 3 snapshots ──────────────────────────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.allgone-snap1", snapshot_dir, base_image
-    )
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.allgone-snap2", snapshot_dir, base_image
-    )
-    snap3 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.allgone-snap3", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.allgone-snap1", snapshot_dir, base_image)
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.allgone-snap2", snapshot_dir, base_image)
+    snap3 = _snapshot_create(shell, vm_name, f"{vm_name}.allgone-snap3", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
@@ -792,9 +770,7 @@ def test_reconcile_all_snapshots_deleted_from_disk(test_vm, caplog):
     # ── Step 4: Assertions ──────────────────────────────────────────
 
     # 4a. XML must be refreshed (backingStore references stripped).
-    assert rec.xml_refreshed, (
-        f"Expected xml_refreshed=True, got {rec}"
-    )
+    assert rec.xml_refreshed, f"Expected xml_refreshed=True, got {rec}"
 
     # 4b. Persistent XML must have no <backingStore>.
     inactive_result = shell.run(
@@ -815,9 +791,7 @@ def test_reconcile_all_snapshots_deleted_from_disk(test_vm, caplog):
     #     removed) because XML still references the deleted files.  Only
     #     XML is refreshed; state records persist until blockcommit.
     snaps_after = state.get_snapshots(vm_name)
-    assert len(snaps_after) >= 3, (
-        f"Expected snapshots in state. Got {len(snaps_after)}"
-    )
+    assert len(snaps_after) >= 3, f"Expected snapshots in state. Got {len(snaps_after)}"
 
     _cleanup_checkpoints_snap(shell, vm_name)
 

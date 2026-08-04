@@ -27,19 +27,28 @@ from tests.mocks import MockConfigFacade
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+
 # Module-level result factory for helper functions (not pytest fixtures).
-_ok = lambda: ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-_shell_ok = lambda stdout="": ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None)
+def _ok() -> ShellResult:
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+
+
+def _shell_ok(stdout: str = "") -> ShellResult:
+    return ShellResult(success=True, stdout=stdout, stderr="", returncode=0, error=None)
 
 
 def _single_file_chain(path: Path) -> str:
     """qemu-img info --backing-chain --output=json for a standalone file."""
-    return json.dumps([{
-        "filename": str(path),
-        "format": "qcow2",
-        "virtual-size": 10737418240,
-        "actual-size": 200704,
-    }])
+    return json.dumps(
+        [
+            {
+                "filename": str(path),
+                "format": "qcow2",
+                "virtual-size": 10737418240,
+                "actual-size": 200704,
+            }
+        ]
+    )
 
 
 def _multi_file_chain(*paths: Path) -> str:
@@ -81,7 +90,7 @@ def _setup_snapshot_check(
             path=snap_path,
             timestamp=datetime(2025, 7, 13, 14, 0),
             allocation=1000,
-                    disk="vda",
+            disk="vda",
         ),
     )
 
@@ -92,9 +101,9 @@ def _setup_snapshot_check(
 
     # qemu-img info --backing-chain on the active layer (snapshot chain).
     # Use expect_first so this specific pattern wins over any catch-all.
-    mock_shell.expect_first(
-        f"--backing-chain.*{re.escape(str(snap_path))}"
-    ).returns(_shell_ok(_single_file_chain(snap_path)))
+    mock_shell.expect_first(f"--backing-chain.*{re.escape(str(snap_path))}").returns(
+        _shell_ok(_single_file_chain(snap_path))
+    )
 
     # virsh dumpxml — return XML that references only the snapshot.
     mock_shell.expect("virsh dumpxml").returns(
@@ -133,8 +142,7 @@ def test_check_targets_all_consistent(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     # Snapshot verification passes cleanly.
@@ -153,16 +161,16 @@ def test_check_targets_all_consistent(
     inc2_path = backup_dir / f"{inc2_name}.qcow2"
     inc2_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
+    mock_state.record_incremental_dependency(
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
-    )
-    mock_state.record_incremental_dependency(
-        str(backup_dir), inc2_name, full_name,
+        str(backup_dir),
+        inc2_name,
+        full_name,
     )
 
     # Provider returns all backup files on disk.
@@ -172,46 +180,52 @@ def test_check_targets_all_consistent(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
         SnapshotInfo(
             name=inc1_name,
             path=inc1_path,
             timestamp=datetime(2025, 7, 13, 15, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
         SnapshotInfo(
             name=inc2_name,
             path=inc2_path,
             timestamp=datetime(2025, 7, 13, 16, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
     ]
 
     # Chain traversability: qemu-img --backing-chain on inc2 succeeds.
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(success_result(_multi_file_chain(inc2_path, inc1_path, full_path)))
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(inc2_path))}").returns(
+        success_result(_multi_file_chain(inc2_path, inc1_path, full_path))
+    )
 
     # Compute the target_hash for matching checkpoints.
-    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
-        str(backup_dir)
-    )
+    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(str(backup_dir))
     mock_shell.expect("virsh checkpoint-list").returns(
         success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -241,30 +255,33 @@ def test_check_phantom_full(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
 
     # FULL in state, but NO file on disk.
     full_name = "testvm.FULL.20250712.qcow2"
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
 
     # Provider returns nothing — no files on disk.
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=[],
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=[],
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -297,8 +314,7 @@ def test_check_phantom_incremental(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -308,15 +324,13 @@ def test_check_phantom_incremental(
     full_path = backup_dir / full_name
     full_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     # Incremental in state but no file on disk.
     inc1_name = "testvm.20250713T1500_vda"
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
 
     # Provider returns only the FULL.
@@ -326,26 +340,33 @@ def test_check_phantom_incremental(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
     ]
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
     assert result["testvm"].status == "broken"
     assert any(
-        "phantom backup" in b and inc1_name in b
-        for b in result["testvm"].broken_snapshots
+        "phantom backup" in b and inc1_name in b for b in result["testvm"].broken_snapshots
     ), f"Expected phantom backup for {inc1_name} in broken_snapshots"
 
 
@@ -373,8 +394,7 @@ def test_check_orphan_backup_file(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -392,38 +412,60 @@ def test_check_orphan_backup_file(
     inc2_path = backup_dir / f"{inc2_name}.qcow2"
     inc2_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
 
     # Chain traversability on last incremental (inc1) succeeds.
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(inc1_path))}").returns(
+        success_result(_multi_file_chain(inc1_path, full_path))
+    )
 
     backups = [
-        SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
-        SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
-        SnapshotInfo(name=inc2_name, path=inc2_path,
-                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=full_name.rstrip(".qcow2"),
+            path=full_path,
+            timestamp=datetime(2025, 7, 12, 10, 0),
+            allocation=0,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name=inc1_name,
+            path=inc1_path,
+            timestamp=datetime(2025, 7, 13, 15, 0),
+            allocation=0,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name=inc2_name,
+            path=inc2_path,
+            timestamp=datetime(2025, 7, 13, 16, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
-    ), caplog.at_level(logging.WARNING):
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -431,8 +473,7 @@ def test_check_orphan_backup_file(
     assert result["testvm"].status == "ok"
     assert result["testvm"].broken_snapshots == []
     assert any(
-        "orphan backup file" in r.message and inc2_path.name in r.message
-        for r in caplog.records
+        "orphan backup file" in r.message and inc2_path.name in r.message for r in caplog.records
     ), "Should log WARNING about orphan backup file"
 
 
@@ -459,8 +500,7 @@ def test_check_broken_backup_chain(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -476,55 +516,71 @@ def test_check_broken_backup_chain(
     inc2_path = backup_dir / f"{inc2_name}.qcow2"
     inc2_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
+    mock_state.record_incremental_dependency(
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
-    )
-    mock_state.record_incremental_dependency(
-        str(backup_dir), inc2_name, full_name,
+        str(backup_dir),
+        inc2_name,
+        full_name,
     )
 
     # Chain traversability check on last incremental (inc2) — FAILS.
     # Use expect_first to override conftest default --backing-chain expectation.
-    mock_shell.expect_first(
-        f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(failure_result("Could not open backing file"))
+    mock_shell.expect_first(f"--backing-chain.*{re.escape(str(inc2_path))}").returns(
+        failure_result("Could not open backing file")
+    )
 
     backups = [
-        SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
-        SnapshotInfo(name=inc2_name, path=inc2_path,
-                     timestamp=datetime(2025, 7, 13, 16, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=full_name.rstrip(".qcow2"),
+            path=full_path,
+            timestamp=datetime(2025, 7, 12, 10, 0),
+            allocation=0,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name=inc2_name,
+            path=inc2_path,
+            timestamp=datetime(2025, 7, 13, 16, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
     assert result["testvm"].status == "broken"
     broken_list = result["testvm"].broken_snapshots
     # inc1 is phantom.
-    assert any(
-        "phantom backup" in b and inc1_name in b
-        for b in broken_list
-    ), f"Expected phantom backup for {inc1_name}"
+    assert any("phantom backup" in b and inc1_name in b for b in broken_list), (
+        f"Expected phantom backup for {inc1_name}"
+    )
     # inc2 chain is broken.
-    assert any(
-        "backup chain broken" in b and inc2_name in b
-        for b in broken_list
-    ), f"Expected broken chain at {inc2_name}"
+    assert any("backup chain broken" in b and inc2_name in b for b in broken_list), (
+        f"Expected broken chain at {inc2_name}"
+    )
 
 
 # ── Scenario 6: broken chain — FULL missing ────────────────────────────────
@@ -550,8 +606,7 @@ def test_check_broken_backup_chain_full_missing(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -563,50 +618,59 @@ def test_check_broken_backup_chain_full_missing(
     inc1_path = backup_dir / f"{inc1_name}.qcow2"
     inc1_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
 
     # Chain traversability on inc1 fails (backing FULL missing).
     # Use expect_first to override conftest default --backing-chain expectation.
-    mock_shell.expect_first(
-        f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(failure_result("Could not open backing file"))
+    mock_shell.expect_first(f"--backing-chain.*{re.escape(str(inc1_path))}").returns(
+        failure_result("Could not open backing file")
+    )
 
     backups = [
-        SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=inc1_name,
+            path=inc1_path,
+            timestamp=datetime(2025, 7, 13, 15, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
     assert result["testvm"].status == "broken"
     broken_list = result["testvm"].broken_snapshots
     # FULL is phantom.
-    assert any(
-        "phantom backup" in b and full_name.rstrip(".qcow2") in b
-        for b in broken_list
-    ), f"Expected phantom backup for {full_name}"
+    assert any("phantom backup" in b and full_name.rstrip(".qcow2") in b for b in broken_list), (
+        f"Expected phantom backup for {full_name}"
+    )
     # inc1 chain is broken.
-    assert any(
-        "backup chain broken" in b and inc1_name in b
-        for b in broken_list
-    ), f"Expected broken chain at {inc1_name}"
+    assert any("backup chain broken" in b and inc1_name in b for b in broken_list), (
+        f"Expected broken chain at {inc1_name}"
+    )
 
 
 # ── Scenario 7: orphan checkpoint ──────────────────────────────────────────
@@ -632,8 +696,7 @@ def test_check_orphan_checkpoint(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -642,36 +705,44 @@ def test_check_orphan_checkpoint(
     full_name = "testvm.FULL.20250712.qcow2"
     full_path = backup_dir / full_name
     full_path.touch()
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
 
     backups = [
-        SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=full_name.rstrip(".qcow2"),
+            path=full_path,
+            timestamp=datetime(2025, 7, 12, 10, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
     # Compute the CORRECT target hash for the configured target.
-    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
-        str(backup_dir)
-    )
+    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(str(backup_dir))
     # Provide a checkpoint with a WRONG (different) hash.
     wrong_hash = "deadbeef"
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[
-            f"qsnap-{wrong_hash}-testvm.snap",    # wrong hash → orphan
-            f"qsnap-{tgt_hash}-testvm.snap",      # correct hash — ok
-        ],
-    ), caplog.at_level(logging.WARNING):
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[
+                f"qsnap-{wrong_hash}-testvm.snap",  # wrong hash → orphan
+                f"qsnap-{tgt_hash}-testvm.snap",  # correct hash — ok
+            ],
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -680,10 +751,9 @@ def test_check_orphan_checkpoint(
         "Orphan checkpoints should not break status — they are WARNING only"
     )
     assert result["testvm"].broken_snapshots == []
-    assert any(
-        "orphan checkpoint" in r.message
-        for r in caplog.records
-    ), f"Should log WARNING about orphan checkpoint, got: {[r.message for r in caplog.records]}"
+    assert any("orphan checkpoint" in r.message for r in caplog.records), (
+        f"Should log WARNING about orphan checkpoint, got: {[r.message for r in caplog.records]}"
+    )
 
 
 # ── Scenario 8: missing checkpoint ─────────────────────────────────────────
@@ -710,8 +780,7 @@ def test_check_missing_checkpoint(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -725,47 +794,63 @@ def test_check_missing_checkpoint(
     inc1_path = backup_dir / f"{inc1_name}.qcow2"
     inc1_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
 
     # Chain traversability on inc1 succeeds.
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(inc1_path))}").returns(
+        success_result(_multi_file_chain(inc1_path, full_path))
+    )
 
     backups = [
-        SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
-        SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=full_name.rstrip(".qcow2"),
+            path=full_path,
+            timestamp=datetime(2025, 7, 12, 10, 0),
+            allocation=0,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name=inc1_name,
+            path=inc1_path,
+            timestamp=datetime(2025, 7, 13, 15, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
     # checkpoint-list returns empty — no checkpoints at all.
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[],
-    ), caplog.at_level(logging.WARNING):
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[],
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
     # Missing checkpoint is a WARNING — not broken.
     assert result["testvm"].status == "ok"
     assert result["testvm"].broken_snapshots == []
-    assert any(
-        "no checkpoint" in r.message
-        for r in caplog.records
-    ), f"Should log WARNING about missing checkpoint, got: {[r.message for r in caplog.records]}"
+    assert any("no checkpoint" in r.message for r in caplog.records), (
+        f"Should log WARNING about missing checkpoint, got: {[r.message for r in caplog.records]}"
+    )
 
 
 # ── Scenario 9: multiple checkpoints for same target ───────────────────────
@@ -795,8 +880,7 @@ def test_check_multiple_checkpoints(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -810,45 +894,59 @@ def test_check_multiple_checkpoints(
     inc1_path = backup_dir / f"{inc1_name}.qcow2"
     inc1_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc1_name, full_name,
+        str(backup_dir),
+        inc1_name,
+        full_name,
     )
 
     # Chain traversability on inc1 succeeds.
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(inc1_path))}"
-    ).returns(success_result(_multi_file_chain(inc1_path, full_path)))
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(inc1_path))}").returns(
+        success_result(_multi_file_chain(inc1_path, full_path))
+    )
 
     backups = [
-        SnapshotInfo(name=full_name.rstrip(".qcow2"), path=full_path,
-                     timestamp=datetime(2025, 7, 12, 10, 0), allocation=0, disk="vda"),
-        SnapshotInfo(name=inc1_name, path=inc1_path,
-                     timestamp=datetime(2025, 7, 13, 15, 0), allocation=0, disk="vda"),
+        SnapshotInfo(
+            name=full_name.rstrip(".qcow2"),
+            path=full_path,
+            timestamp=datetime(2025, 7, 12, 10, 0),
+            allocation=0,
+            disk="vda",
+        ),
+        SnapshotInfo(
+            name=inc1_name,
+            path=inc1_path,
+            timestamp=datetime(2025, 7, 13, 15, 0),
+            allocation=0,
+            disk="vda",
+        ),
     ]
 
     # 2 checkpoints for the same target.
-    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
-        str(backup_dir)
-    )
+    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(str(backup_dir))
     checkpoints = [
         f"qsnap-{tgt_hash}-testvm.snap1",
         f"qsnap-{tgt_hash}-testvm.snap2",
     ]
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=checkpoints,
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=checkpoints,
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -886,8 +984,7 @@ def test_check_after_retention_cleanup(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -903,13 +1000,11 @@ def test_check_after_retention_cleanup(
     inc2_path = backup_dir / f"{inc2_name}.qcow2"
     inc2_path.touch()
 
-    mock_state.record_full_backup(
-        str(backup_dir), full_name,
-        datetime(2025, 7, 12, 10, 0),
-        "vda"
-    )
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 12, 10, 0), "vda")
     mock_state.record_incremental_dependency(
-        str(backup_dir), inc2_name, full_name,
+        str(backup_dir),
+        inc2_name,
+        full_name,
     )
 
     # Provider returns only FULL + inc2 (inc1 was deleted).
@@ -919,39 +1014,45 @@ def test_check_after_retention_cleanup(
             path=full_path,
             timestamp=datetime(2025, 7, 12, 10, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
         SnapshotInfo(
             name=inc2_name,
             path=inc2_path,
             timestamp=datetime(2025, 7, 13, 16, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
     ]
 
     # Chain traversability: qemu-img --backing-chain on inc2 succeeds
     # (inc2 → FULL — inc1 is no longer in the chain).
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(inc2_path))}"
-    ).returns(success_result(_multi_file_chain(inc2_path, full_path)))
-
-    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
-        str(backup_dir)
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(inc2_path))}").returns(
+        success_result(_multi_file_chain(inc2_path, full_path))
     )
+
+    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(str(backup_dir))
     mock_shell.expect("virsh checkpoint-list").returns(
         success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -987,8 +1088,7 @@ def test_check_after_force_full(
     backup_dir.mkdir()
 
     target = make_target(path=str(backup_dir))
-    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir),
-                        targets=[target])
+    vm = make_vm_config(name="testvm", snapshot_dir=str(snap_dir), targets=[target])
     config = MockConfigFacade(vms=[vm])
 
     _setup_snapshot_check(mock_state, mock_shell, snap_dir, "testvm")
@@ -999,7 +1099,8 @@ def test_check_after_force_full(
     new_full_path.touch()
 
     mock_state.record_full_backup(
-        str(backup_dir), new_full_name,
+        str(backup_dir),
+        new_full_name,
         datetime(2025, 7, 13, 14, 0),
         "vda",
     )
@@ -1011,32 +1112,38 @@ def test_check_after_force_full(
             path=new_full_path,
             timestamp=datetime(2025, 7, 13, 14, 0),
             allocation=0,
-                    disk="vda",
+            disk="vda",
         ),
     ]
 
     # Chain traversability: qemu-img --backing-chain on new_full succeeds
     # (standalone file, no backing).
-    mock_shell.expect(
-        f"--backing-chain.*{re.escape(str(new_full_path))}"
-    ).returns(success_result(_single_file_chain(new_full_path)))
-
-    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(
-        str(backup_dir)
+    mock_shell.expect(f"--backing-chain.*{re.escape(str(new_full_path))}").returns(
+        success_result(_single_file_chain(new_full_path))
     )
+
+    tgt_hash = mock_factory._bitmap_backup_provider.target_hash(str(backup_dir))
     mock_shell.expect("virsh checkpoint-list").returns(
         success_result(f"qsnap-{tgt_hash}-testvm.snap\n"),
     )
 
-    with patch.object(
-        mock_factory._bitmap_backup_provider, "list", return_value=backups,
-    ), patch.object(
-        mock_factory._bitmap_backup_provider, "list_checkpoints",
-        return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list",
+            return_value=backups,
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "list_checkpoints",
+            return_value=[f"qsnap-{tgt_hash}-testvm.snap"],
+        ),
     ):
         core = Core(
-            config=config, factory=mock_factory,
-            state=mock_state, shell=mock_shell,
+            config=config,
+            factory=mock_factory,
+            state=mock_state,
+            shell=mock_shell,
         )
         result = core.check()
 
@@ -1044,4 +1151,3 @@ def test_check_after_force_full(
         f"Expected status ok after force-full, got {result['testvm'].status}"
     )
     assert result["testvm"].broken_snapshots == []
-

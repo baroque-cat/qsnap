@@ -126,7 +126,6 @@ def test_socket_and_tmp_cleanup(test_vm):
                 source,
                 target,
                 compress=False,
-
             )
 
         # Source NBD socket must be gone.
@@ -153,7 +152,6 @@ def test_socket_and_tmp_cleanup(test_vm):
             source,
             target,
             compress=False,
-
         )
         assert result.success or result.error is not None, f"Stopped-VM path failed: {result.error}"
         # The stale .tmp was created with hex "deadbe" — the actual
@@ -342,7 +340,11 @@ def test_stale_state_self_healing(test_vm):
     # Run transfer_missing.
     provider = BitmapBackupProvider(shell, state=state)
     target = TargetConfig(path=target_dir, verify="off")
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     results = provider.transfer_missing(
         vm_config=vm_config,

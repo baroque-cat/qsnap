@@ -72,7 +72,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -135,9 +139,7 @@ def test_reconcile_real_phantom_full(test_vm, caplog):
     state.record_snapshot(vm_name, snap_info)
 
     # Build Core and run pipeline to create a FULL backup.
-    target = TargetConfig(
-        path=target_dir, compress=False, verify="off"
-    )
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -167,8 +169,7 @@ def test_reconcile_real_phantom_full(test_vm, caplog):
     # Find the FULL backup file on disk.
     full_files = sorted(target_dir.glob("*.FULL.*.qcow2"))
     assert len(full_files) > 0, (
-        f"No *.FULL.*.qcow2 files found in {target_dir}; "
-        f"contents: {list(target_dir.iterdir())}"
+        f"No *.FULL.*.qcow2 files found in {target_dir}; contents: {list(target_dir.iterdir())}"
     )
     full_path = full_files[0]
     full_name = full_path.name
@@ -185,18 +186,14 @@ def test_reconcile_real_phantom_full(test_vm, caplog):
     assert vm_name in reconcile_results, f"Missing reconcile result for {vm_name}"
     rec = reconcile_results[vm_name]
 
-    assert rec.phantom_fulls_removed >= 1, (
-        f"Expected phantom_fulls_removed >= 1, got {rec}"
-    )
+    assert rec.phantom_fulls_removed >= 1, f"Expected phantom_fulls_removed >= 1, got {rec}"
 
     # FULL must no longer be in state.
     fulls_after = state.get_full_backups(str(target_dir))
     after_names = {full.name for full in fulls_after}
     for fb in fulls_before:
         if fb.path.name == full_name:
-            assert fb.name not in after_names, (
-                f"FULL {fb.name} should have been removed from state"
-            )
+            assert fb.name not in after_names, f"FULL {fb.name} should have been removed from state"
 
     _cleanup_checkpoints(shell, vm_name)
 
@@ -247,9 +244,7 @@ def test_reconcile_real_orphan_backup_recorded(test_vm, caplog):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
 
-    target = TargetConfig(
-        path=target_dir, compress=False, verify="off"
-    )
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -310,14 +305,10 @@ def test_reconcile_real_orphan_backup_recorded(test_vm, caplog):
     rec = reconcile_results[vm_name]
 
     # Orphan backup with intact chain should be supplemented.
-    assert rec.state_supplemented >= 1, (
-        f"Expected state_supplemented >= 1, got {rec}"
-    )
+    assert rec.state_supplemented >= 1, f"Expected state_supplemented >= 1, got {rec}"
 
     # Orphan file must NOT be deleted.
-    assert orphan_path.exists(), (
-        "Orphan backup with intact chain must NOT be deleted"
-    )
+    assert orphan_path.exists(), "Orphan backup with intact chain must NOT be deleted"
 
     _cleanup_checkpoints(shell, vm_name)
 
@@ -360,16 +351,12 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Create snapshot and run pipeline → FULL backup (creates checkpoint).
-    snap_info = _snapshot_create(
-        shell, vm_name, f"{vm_name}.ckpt-snap", snapshot_dir, base_image
-    )
+    snap_info = _snapshot_create(shell, vm_name, f"{vm_name}.ckpt-snap", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
 
-    target = TargetConfig(
-        path=target_dir, compress=False, verify="off"
-    )
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -415,7 +402,6 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
 
     target2 = TargetConfig(
         path=different_target_dir,
-
         compress=False,
         verify="off",
     )
@@ -425,9 +411,7 @@ def test_reconcile_real_orphan_checkpoint(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[target2],  # different target path
     )
-    config2 = MockConfigFacade(
-        vms=[vm_config2], config_path=tmpdir / "ckpt2.toml"
-    )
+    config2 = MockConfigFacade(vms=[vm_config2], config_path=tmpdir / "ckpt2.toml")
     factory2 = DefaultFactory(shell, state)
     core2 = Core(config=config2, factory=factory2, state=state, shell=shell)
 
@@ -486,9 +470,7 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
 
     state = InMemoryStateManager()
 
-    target = TargetConfig(
-        path=target_dir, compress=False, verify="off"
-    )
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -510,12 +492,26 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
     create_cmds = [
         ["qemu-img", "create", "-f", "qcow2", str(full_path), "64M"],
         [
-            "qemu-img", "create", "-f", "qcow2",
-            "-b", str(full_path), "-F", "qcow2", str(inc_a_path),
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(full_path),
+            "-F",
+            "qcow2",
+            str(inc_a_path),
         ],
         [
-            "qemu-img", "create", "-f", "qcow2",
-            "-b", str(inc_a_path), "-F", "qcow2", str(inc_b_path),
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(inc_a_path),
+            "-F",
+            "qcow2",
+            str(inc_b_path),
         ],
     ]
     for cmd in create_cmds:
@@ -558,13 +554,13 @@ def test_reconcile_real_broken_chain_critical(test_vm, caplog):
 
     # broken_chains should list the broken file (stem form).
     assert any(inc_b_name in bc for bc in rec.broken_chains), (
-        f"Expected {inc_b_name!r} in broken_chains, got {rec.broken_chains}. "
-        f"Result: {rec}"
+        f"Expected {inc_b_name!r} in broken_chains, got {rec.broken_chains}. Result: {rec}"
     )
 
     # A CRITICAL log must be emitted for the broken chain.
     critical_records = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if r.levelno == logging.CRITICAL and "broken chain" in r.getMessage().lower()
     ]
     assert critical_records, "Expected a CRITICAL log for the broken chain"
@@ -616,9 +612,7 @@ def test_reconcile_real_dry_run_targets(test_vm, caplog):
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap_info)
 
-    target = TargetConfig(
-        path=target_dir, compress=False, verify="off"
-    )
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -686,14 +680,10 @@ def test_reconcile_real_dry_run_targets(test_vm, caplog):
     after_names = {full.name for full in fulls_after}
     for fb in fulls_before:
         if fb.path.name == full_name:
-            assert fb.name in after_names, (
-                f"FULL {fb.name} must remain in state during dry-run"
-            )
+            assert fb.name in after_names, f"FULL {fb.name} must remain in state during dry-run"
 
     # Orphan file must still be on disk.
-    assert orphan_path.exists(), (
-        "Orphan file must remain on disk during dry-run"
-    )
+    assert orphan_path.exists(), "Orphan file must remain on disk during dry-run"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -737,16 +727,17 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     _cleanup_checkpoints(shell, vm_name)
 
     # ── Step 1: Create snapshot + FULL + incremental ─────────────────
-    snap1 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.fullgone-snap1", snapshot_dir, base_image
-    )
+    snap1 = _snapshot_create(shell, vm_name, f"{vm_name}.fullgone-snap1", snapshot_dir, base_image)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap1)
 
     target = TargetConfig(
-        path=target_dir, compress=False, verify="off",
-        target_chain_length=24, target_keep_generations=2,
+        path=target_dir,
+        compress=False,
+        verify="off",
+        target_chain_length=24,
+        target_keep_generations=2,
     )
     vm_config = VMConfig(
         name=vm_name,
@@ -776,9 +767,7 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     full_stem = fulls[0].name
 
     # ── Step 2: Create a second snapshot for incremental ─────────────
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.fullgone-snap2", snapshot_dir, base_image
-    )
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.fullgone-snap2", snapshot_dir, base_image)
     state.record_snapshot(vm_name, snap2)
 
     # Run 2: create incremental backup chaining to the FULL.
@@ -798,9 +787,7 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     state.remove_all_incremental_dependencies(str(target_dir), full_stem)
 
     fulls_after_delete = state.get_full_backups(str(target_dir))
-    assert len(fulls_after_delete) == 0, (
-        "FULL should be removed from state after deletion"
-    )
+    assert len(fulls_after_delete) == 0, "FULL should be removed from state after deletion"
 
     # ── Step 4: Run reconcile ───────────────────────────────────────
     caplog.clear()
@@ -815,20 +802,6 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     # 5a. Incremental detected as broken chain (or handled as orphan
     #     with broken chain detected).
     #     The incremental chains to a non-existent FULL → broken chain.
-    has_broken = (
-        len(rec.broken_chains) > 0
-        or rec.state_supplemented > 0
-    )
-    if not has_broken:
-        # Check caplog for broken chain detection.
-        broken_logs = [
-            r.message for r in caplog.records
-            if "broken" in r.message.lower() and "chain" in r.message.lower()
-        ]
-        more_logs = [
-            r.message for r in caplog.records
-            if "orphan" in r.message.lower()
-        ]
     assert len(rec.broken_chains) > 0 or len(inc_files) > 0, (
         f"Expected broken_chains or orphan detection for incrementals "
         f"whose FULL was fully deleted. Result: {rec}"

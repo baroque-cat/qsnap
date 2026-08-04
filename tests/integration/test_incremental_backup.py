@@ -267,7 +267,6 @@ def test_incremental_after_full(test_vm):
         source,
         target,
         compress=False,
-
     )
     assert result_full.success, f"FULL backup failed: {result_full.error}"
     full_actual = _get_actual_size(shell, result_full.target_path)
@@ -340,7 +339,11 @@ def test_incremental_after_full(test_vm):
 
     # Step 5: Incremental transfer via libnbd.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,
@@ -446,7 +449,6 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         target,
         compress=True,
         compression_type="zstd",
-
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
     ct_full = _get_compression_type(shell, r_full.target_path)
@@ -487,7 +489,11 @@ def test_incremental_compression_not_applied(test_vm, caplog):
     import logging
 
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     with caplog.at_level(logging.INFO):
         results = provider_inc.transfer_missing(
@@ -591,7 +597,6 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         source,
         target,
         compress=False,
-
     )
     assert r_full.success, f"FULL failed: {r_full.error}"
     full_actual = _get_actual_size(shell, r_full.target_path)
@@ -631,7 +636,11 @@ def test_incremental_dirty_bytes_proportional(test_vm):
 
     # Step 4: transfer_missing.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,

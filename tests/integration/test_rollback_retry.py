@@ -68,7 +68,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -124,9 +128,7 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Create snapshot and build Core with verification enabled.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.rollback-snap", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.rollback-snap", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -169,9 +171,7 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
         fulls_in_state = state.get_full_backups(str(target_dir))
         for f in fulls_in_state:
             full_file = target_dir / f.name
-            assert full_file.exists(), (
-                f"FULL {f.name} in state should have a corresponding file"
-            )
+            assert full_file.exists(), f"FULL {f.name} in state should have a corresponding file"
     else:
         # The FULL was created successfully — verify it exists.
         full_files_after = sorted(target_dir.glob("*.FULL.*.qcow2"))
@@ -181,8 +181,7 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
     # Step 6: Either "rolled back" or "created FULL" appears.
     has_result_log = rolled_back or "created FULL" in all_logs
     assert has_result_log, (
-        f"Expected either 'rolled back' or 'created FULL' in logs. "
-        f"Logs: {all_logs[:500]}"
+        f"Expected either 'rolled back' or 'created FULL' in logs. Logs: {all_logs[:500]}"
     )
 
     _cleanup_checkpoints(shell, vm_name)
@@ -228,9 +227,7 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.retry-snap", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.retry-snap", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -238,7 +235,6 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     # Step 1: Build Core with retry enabled.
     target = TargetConfig(
         path=target_dir,
-
         compress=False,
         verify="off",
         backup_retry_max=3,
@@ -268,8 +264,7 @@ def test_retry_after_rollback_succeeds(test_vm, caplog):
     # Step 3: Verify FULL file exists and is valid.
     full_files = sorted(target_dir.glob("*.FULL.*.qcow2"))
     assert len(full_files) >= 1, (
-        f"Expected at least one FULL backup file on target. "
-        f"Contents: {list(target_dir.iterdir())}"
+        f"Expected at least one FULL backup file on target. Contents: {list(target_dir.iterdir())}"
     )
 
     # Step 4: Verify FULL is recorded in state.

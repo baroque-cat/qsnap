@@ -47,11 +47,13 @@ def _make_xml(vm_name: str, *source_paths: str) -> str:
             lines.append('      <backingStore type="file">')
             lines.append(f'        <source file="{bp}"/>')
             lines.append("      </backingStore>")
-    lines.extend([
-        "    </disk>",
-        "  </devices>",
-        "</domain>",
-    ])
+    lines.extend(
+        [
+            "    </disk>",
+            "  </devices>",
+            "</domain>",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -70,7 +72,7 @@ def _snap(vm_name: str, snap_dir: Path, tag: str, allocation: int = 0) -> Snapsh
         path=snap_dir / f"{name}.qcow2",
         timestamp=datetime.now(),
         allocation=allocation,
-        disk="vda"
+        disk="vda",
     )
 
 
@@ -136,9 +138,9 @@ def test_reconcile_phantom_snapshot_removed_from_state(
     assert snap2.name not in remaining, f"snap2 should be removed from state, got {remaining}"
     assert snap1.name in remaining and snap3.name in remaining
 
-    assert any(
-        "removed phantom snapshot" in rec.message.lower() for rec in caplog.records
-    ), "Should log WARNING about phantom snapshot removal"
+    assert any("removed phantom snapshot" in rec.message.lower() for rec in caplog.records), (
+        "Should log WARNING about phantom snapshot removal"
+    )
 
 
 # ── 2. Orphan snapshot recorded in state ───────────────────────────────────
@@ -175,9 +177,7 @@ def test_reconcile_orphan_snapshot_recorded_in_state(
 
     # XML references snap1, snap2, and snap3.
     mock_shell.expect_first("virsh dumpxml").returns(
-        success_result(
-            _make_xml("testvm", str(snap3.path), str(snap2.path), str(snap1.path))
-        )
+        success_result(_make_xml("testvm", str(snap3.path), str(snap2.path), str(snap1.path)))
     )
 
     # The glob will return all three files; only snap2 is not in recorded state
@@ -209,9 +209,9 @@ def test_reconcile_orphan_snapshot_recorded_in_state(
     # Verify snap2 is now in state.
     state_names = [s.name for s in mock_state.get_snapshots("testvm")]
     assert snap2.name in state_names, f"snap2 should be recorded in state, got {state_names}"
-    assert any(
-        "state supplemented" in rec.message.lower() for rec in caplog.records
-    ), "Should log INFO about state supplement"
+    assert any("state supplemented" in rec.message.lower() for rec in caplog.records), (
+        "Should log INFO about state supplement"
+    )
 
 
 # ── 3. Orphan snapshot deleted ─────────────────────────────────────────────
@@ -275,9 +275,9 @@ def test_reconcile_orphan_snapshot_deleted(
         f"Expected 1 orphan file removed, got {r.orphan_files_removed}"
     )
     assert r.state_supplemented == 0, "Should not supplement state for orphan"
-    assert any(
-        "removed orphan snapshot file" in rec.message.lower() for rec in caplog.records
-    ), "Should log WARNING about orphan removal"
+    assert any("removed orphan snapshot file" in rec.message.lower() for rec in caplog.records), (
+        "Should log WARNING about orphan removal"
+    )
 
 
 # ── 4. Stale domain XML refreshed ─────────────────────────────────────────
@@ -348,12 +348,10 @@ def test_reconcile_stale_xml_refreshed(
         result = core.reconcile()
 
     r = result["testvm"]
-    assert r.xml_refreshed is True, (
-        f"Expected xml_refreshed=True, got {r.xml_refreshed}"
+    assert r.xml_refreshed is True, f"Expected xml_refreshed=True, got {r.xml_refreshed}"
+    assert any("stripped stale" in rec.message.lower() for rec in caplog.records), (
+        "Should log WARNING about stale XML refresh"
     )
-    assert any(
-        "stripped stale" in rec.message.lower() for rec in caplog.records
-    ), "Should log WARNING about stale XML refresh"
 
 
 # ── 5. Broken chain — no auto-rebase ──────────────────────────────────────
@@ -440,9 +438,9 @@ def test_reconcile_broken_chain_no_auto_rebase(
     # Verify no qemu-img rebase was attempted (MockShell would have
     # returned its default failure for any unmatched command, but we
     # check the pattern directly).
-    assert not any(
-        "rebase" in rec.message.lower() for rec in caplog.records
-    ), "Should NOT attempt qemu-img rebase"
+    assert not any("rebase" in rec.message.lower() for rec in caplog.records), (
+        "Should NOT attempt qemu-img rebase"
+    )
 
 
 # ── 6. last_allocation mismatch ────────────────────────────────────────────
@@ -483,7 +481,9 @@ def test_reconcile_last_allocation_mismatch(
             return ShellResult(
                 success=True,
                 stdout='{"actual-size": 2000, "format": "qcow2"}',
-                stderr="", returncode=0, error=None,
+                stderr="",
+                returncode=0,
+                error=None,
             )
         return _orig_run(cmd, timeout, check)
 
@@ -505,9 +505,7 @@ def test_reconcile_last_allocation_mismatch(
     result = core.reconcile()
 
     r = result["testvm"]
-    assert r.allocation_fixed is True, (
-        f"Expected allocation_fixed=True, got {r.allocation_fixed!r}"
-    )
+    assert r.allocation_fixed is True, f"Expected allocation_fixed=True, got {r.allocation_fixed!r}"
 
 
 @pytest.mark.unit
@@ -624,20 +622,16 @@ def test_reconcile_dry_run_no_modifications(
     r = result["testvm"]
 
     # In dry-run, counts increment but state is NOT modified.
-    assert r.phantom_snapshots_removed == 1, (
-        "dry-run should count phantom snapshots"
-    )
+    assert r.phantom_snapshots_removed == 1, "dry-run should count phantom snapshots"
 
     # Verify snap2 is still in state (dry-run doesn't modify).
     remaining = [s.name for s in mock_state.get_snapshots("testvm")]
-    assert snap2.name in remaining, (
-        "dry-run should NOT remove state entries"
-    )
+    assert snap2.name in remaining, "dry-run should NOT remove state entries"
 
     # Verify [dry-run reconcile] prefix in log messages.
-    assert any(
-        "[dry-run reconcile]" in rec.message for rec in caplog.records
-    ), "Should have [dry-run reconcile] prefixed messages"
+    assert any("[dry-run reconcile]" in rec.message for rec in caplog.records), (
+        "Should have [dry-run reconcile] prefixed messages"
+    )
 
 
 # ── 9. Structured result ───────────────────────────────────────────────────
@@ -759,4 +753,3 @@ def test_reconcile_with_vm_filter(
     assert "vm1" in result, "vm1 should be in results"
     assert "vm2" not in result, "vm2 should NOT be in results when filtered"
     assert len(result) == 1, f"Only one VM should be in results, got {list(result.keys())}"
-

@@ -28,14 +28,14 @@ def _make_snapshots() -> list[SnapshotInfo]:
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1.qcow2"),
             timestamp=datetime(2025, 7, 14, 10, 0),
             allocation=1024,
-                    disk="vda",
+            disk="vda",
         ),
         SnapshotInfo(
             name="snap2",
             path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap2.qcow2"),
             timestamp=datetime(2025, 7, 14, 11, 0),
             allocation=2048,
-                    disk="vda",
+            disk="vda",
         ),
     ]
 
@@ -172,21 +172,21 @@ def _make_backup_tree_data(
             path=Path(f"{target}/testvm.FULL.20250701T120000_abc123.qcow2"),
             timestamp=datetime(2025, 7, 1, 12, 0),
             allocation=5000,
-                    disk="vda",
+            disk="vda",
         )
         inc1 = SnapshotInfo(
             name="testvm.20250702T120000_def456",
             path=Path(f"{target}/testvm.20250702T120000_def456.qcow2"),
             timestamp=datetime(2025, 7, 2, 12, 0),
             allocation=1000,
-                    disk="vda",
+            disk="vda",
         )
         inc2 = SnapshotInfo(
             name="testvm.20250703T120000_ghi789",
             path=Path(f"{target}/testvm.20250703T120000_ghi789.qcow2"),
             timestamp=datetime(2025, 7, 3, 12, 0),
             allocation=1000,
-                    disk="vda",
+            disk="vda",
         )
         chains = {"testvm.FULL.20250701T120000_abc123": [full1, inc1, inc2]}
     return {vm_name: [(target, chains)]}
@@ -217,15 +217,9 @@ def test_backup_tree_output_for_chains(capsys):
 
     # Verify ordering: FULL before incrementals
     lines = output.strip().split("\n")
-    full_idx = next(
-        i for i, line in enumerate(lines) if "FULL.20250701T120000" in line
-    )
-    inc1_idx = next(
-        i for i, line in enumerate(lines) if "20250702T120000" in line
-    )
-    inc2_idx = next(
-        i for i, line in enumerate(lines) if "20250703T120000" in line
-    )
+    full_idx = next(i for i, line in enumerate(lines) if "FULL.20250701T120000" in line)
+    inc1_idx = next(i for i, line in enumerate(lines) if "20250702T120000" in line)
+    inc2_idx = next(i for i, line in enumerate(lines) if "20250703T120000" in line)
     assert full_idx < inc1_idx < inc2_idx
 
 
@@ -236,19 +230,17 @@ def test_backup_tree_output_orphan_backups(capsys):
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
     orphan2 = SnapshotInfo(
         name="testvm.20250703T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 3, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
 
-    data = _make_backup_tree_data(
-        chains={"__orphan__": [orphan1, orphan2]}
-    )
+    data = _make_backup_tree_data(chains={"__orphan__": [orphan1, orphan2]})
 
     mock_core = Mock()
     mock_core.list_backups.return_value = data
@@ -277,7 +269,7 @@ def test_backup_tree_output_with_vm_filter(capsys):
         path=Path("/mnt/backup/vm1/vm1.FULL.20250701T120000_abc123.qcow2"),
         timestamp=datetime(2025, 7, 1, 12, 0),
         allocation=5000,
-                    disk="vda",
+        disk="vda",
     )
     chains = {"vm1.FULL.20250701T120000_abc123": [full1]}
     data = {"vm1": [("/mnt/backup/vm1", chains)]}
@@ -314,28 +306,28 @@ def test_backup_tree_output_multiple_chains(capsys):
         path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
         timestamp=datetime(2025, 7, 1, 12, 0),
         allocation=5000,
-                    disk="vda",
+        disk="vda",
     )
     inc1a = SnapshotInfo(
         name="testvm.20250702T120000_def456",
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
     full2 = SnapshotInfo(
         name="testvm.FULL.20250704T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.FULL.20250704T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 4, 12, 0),
         allocation=5000,
-                    disk="vda",
+        disk="vda",
     )
     inc2a = SnapshotInfo(
         name="testvm.20250705T120000_jkl012",
         path=Path("/mnt/backup/testvm/testvm.20250705T120000_jkl012.qcow2"),
         timestamp=datetime(2025, 7, 5, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
 
     chains = {
@@ -366,12 +358,8 @@ def test_backup_tree_output_multiple_chains(capsys):
 
     # Verify chain ordering: full1 before full2 (by timestamp)
     lines = output.strip().split("\n")
-    full1_idx = next(
-        i for i, line in enumerate(lines) if "FULL.20250701T120000" in line
-    )
-    full2_idx = next(
-        i for i, line in enumerate(lines) if "FULL.20250704T120000" in line
-    )
+    full1_idx = next(i for i, line in enumerate(lines) if "FULL.20250701T120000" in line)
+    full2_idx = next(i for i, line in enumerate(lines) if "FULL.20250704T120000" in line)
     assert full1_idx < full2_idx
 
 
@@ -383,20 +371,18 @@ def test_backup_tree_output_chain_without_full(capsys):
         path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
         timestamp=datetime(2025, 7, 2, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
     backup2 = SnapshotInfo(
         name="testvm.20250703T120000_ghi789",
         path=Path("/mnt/backup/testvm/testvm.20250703T120000_ghi789.qcow2"),
         timestamp=datetime(2025, 7, 3, 12, 0),
         allocation=1000,
-                    disk="vda",
+        disk="vda",
     )
 
     # Chain with non-orphan chain_id but no .FULL. entries
-    data = _make_backup_tree_data(
-        chains={"testvm.20250702T120000_def456": [backup1, backup2]}
-    )
+    data = _make_backup_tree_data(chains={"testvm.20250702T120000_def456": [backup1, backup2]})
 
     mock_core = Mock()
     mock_core.list_backups.return_value = data

@@ -448,7 +448,13 @@ def test_factory_create_lifecycle_manager_accepts_deep_verify(
         )
     )
 
-    result = manager.blockcommit(vm_config, [snap], disk="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"), deep_verify=True)
+    result = manager.blockcommit(
+        vm_config,
+        [snap],
+        disk="vda",
+        base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        deep_verify=True,
+    )
     assert isinstance(result, CommitResult)
     assert result.success is True
     assert result.error is None

@@ -21,8 +21,11 @@ import pytest
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 
+
 # Module-level result factory for helper functions (not pytest fixtures).
-_ok = lambda: ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+def _ok() -> ShellResult:
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -38,7 +41,9 @@ def _make_snapshot() -> SnapshotInfo:
     )
 
 
-def _setup_convert_expectations(mock_shell, target, running: bool = True, *, compress: bool = False):
+def _setup_convert_expectations(
+    mock_shell, target, running: bool = True, *, compress: bool = False
+):
     """Register core expectations for create_full_backup via qemu-img convert.
 
     MockShell already has ``virsh dominfo`` (→ State: running) from conftest,
@@ -106,9 +111,7 @@ def test_convert_cmd_running_vm_compressed(mock_shell, make_target, tmp_path, su
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=True)
 
     assert result.success is True
 
@@ -145,9 +148,7 @@ def test_convert_cmd_running_vm_uncompressed(mock_shell, make_target, tmp_path, 
         mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
     ) as stall_spy:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -185,9 +186,7 @@ def test_convert_cmd_stopped_vm_compressed(mock_shell, make_target, tmp_path):
             mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
         ) as stall_spy,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=True
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=True)
 
     assert result.success is True
 
@@ -227,9 +226,7 @@ def test_convert_cmd_stopped_vm_uncompressed(mock_shell, make_target, tmp_path):
             mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
         ) as stall_spy,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -274,9 +271,7 @@ def test_convert_failure_removes_tmp(mock_shell, make_target, tmp_path, success_
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is False
     assert convert_error in (result.error or "")
@@ -305,9 +300,7 @@ def test_convert_success_renames_tmp_to_final(mock_shell, make_target, tmp_path,
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
     assert result.target_path.suffix == ".qcow2"
@@ -335,9 +328,7 @@ def test_running_vm_uses_nbd_convert(mock_shell, make_target, tmp_path, success_
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -369,9 +360,7 @@ def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
         patch("qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", source_path)]),
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -392,7 +381,9 @@ def test_stopped_vm_uses_direct_convert(mock_shell, make_target, tmp_path):
 
 
 @pytest.mark.unit
-def test_full_backup_does_not_use_write_server_or_transfer(mock_shell, make_target, tmp_path, success_result):
+def test_full_backup_does_not_use_write_server_or_transfer(
+    mock_shell, make_target, tmp_path, success_result
+):
     """1k: Spy on _start_write_server and _transfer; assert neither called during create_full_backup()."""
     target = make_target(path=str(tmp_path / "backups"), compress=False)
     target.path.mkdir(parents=True, exist_ok=True)
@@ -407,9 +398,7 @@ def test_full_backup_does_not_use_write_server_or_transfer(mock_shell, make_targ
         patch.object(BitmapBackupProvider, "_start_write_server") as mock_wserver,
         patch.object(BitmapBackupProvider, "_transfer") as mock_transfer,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
     mock_wserver.assert_not_called()
@@ -492,7 +481,9 @@ def test_stall_detection_output_file_is_tmp(mock_shell, make_target, tmp_path, s
 
 
 @pytest.mark.unit
-def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp_path, success_result):
+def test_stall_detection_timeout_from_target_config(
+    mock_shell, make_target, tmp_path, success_result
+):
     """5e: TargetConfig.backup_stall_timeout='5m' → stall_timeout=300 passed to run_with_stall_detection."""
     target = make_target(path=str(tmp_path / "backups"), compress=False, backup_stall_timeout="5m")
     target.path.mkdir(parents=True, exist_ok=True)
@@ -530,7 +521,9 @@ def test_stall_detection_timeout_from_target_config(mock_shell, make_target, tmp
 
 
 @pytest.mark.unit
-def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, tmp_path, success_result):
+def test_first_backup_full_via_convert_with_checkpoint(
+    mock_shell, make_target, tmp_path, success_result
+):
     """3a: No prior checkpoint; virsh backup-begin called with checkpoint XML;
     qemu-img convert executed (not pread/pwrite); no _start_write_server."""
     target = make_target(path=str(tmp_path / "backups"), compress=False)
@@ -551,9 +544,7 @@ def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, 
             mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
         ) as stall_spy,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -586,7 +577,9 @@ def test_first_backup_full_via_convert_with_checkpoint(mock_shell, make_target, 
 
 
 @pytest.mark.unit
-def test_full_pull_lifecycle_uses_convert(mock_shell, make_vm_config, make_target, tmp_path, success_result):
+def test_full_pull_lifecycle_uses_convert(
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
+):
     """3d: _full_pull_lifecycle used by both create_full_backup() and transfer_missing() full-pull;
     qemu-img convert used inside the helper."""
     snapshot = _make_snapshot()
@@ -602,9 +595,7 @@ def test_full_pull_lifecycle_uses_convert(mock_shell, make_vm_config, make_targe
         BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
     ) as mock_fpl:
         provider = BitmapBackupProvider(mock_shell)
-        result = provider.create_full_backup(
-            "testvm", snapshot, target_cfb, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target_cfb, compress=False)
 
     assert result.success is True
     assert mock_fpl.call_count == 1, (
@@ -672,9 +663,7 @@ def test_full_pull_lifecycle_no_write_server(mock_shell, make_target, tmp_path, 
         patch.object(BitmapBackupProvider, "_start_write_server") as mock_wserver,
         patch.object(BitmapBackupProvider, "_transfer") as mock_transfer,
     ):
-        result = provider.create_full_backup(
-            "testvm", snapshot, target, compress=False
-        )
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
     mock_wserver.assert_not_called()
@@ -695,9 +684,7 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path, succ
     _setup_convert_expectations(mock_shell, target, running=True, compress=False)
 
     provider = BitmapBackupProvider(mock_shell)
-    result = provider.create_full_backup(
-        "testvm", snapshot, target, compress=False
-    )
+    result = provider.create_full_backup("testvm", snapshot, target, compress=False)
 
     assert result.success is True
 
@@ -717,7 +704,9 @@ def test_full_timestamp_matches_snapshot(mock_shell, make_target, tmp_path, succ
 
 
 @pytest.mark.unit
-def test_global_section_compress_false_affects_convert_cmd(mock_shell, make_target, tmp_path, success_result):
+def test_global_section_compress_false_affects_convert_cmd(
+    mock_shell, make_target, tmp_path, success_result
+):
     """2e: compress=False from [global] propagates → qemu-img convert has no -c flag."""
     # compress=False at global level, target inherits it
     target = make_target(path=str(tmp_path / "backups"), compress=False)

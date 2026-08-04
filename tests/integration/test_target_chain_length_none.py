@@ -82,7 +82,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -137,7 +141,7 @@ def _build_core(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@ pytest.mark.timeout(3600)
+@pytest.mark.timeout(3600)
 def test_target_chain_length_none_no_full(test_vm, caplog):
     """Create many incrementals with ``target_chain_length=None``, verify NO FULL.
 
@@ -169,7 +173,11 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         target_chain_length=None,  # No count-based FULL trigger
     )
 
@@ -185,14 +193,19 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
         disk="vda",
     )
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # Step 2: Record 8 incrementals — well beyond any typical chain_length.
     for i in range(8):
@@ -229,7 +242,7 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
 # ──────────────────────────────────────────────────────────────────────
 
 
-@ pytest.mark.timeout(3600)
+@pytest.mark.timeout(3600)
 def test_target_chain_length_three_triggers_full(test_vm, caplog):
     """Create 4 incrementals with ``target_chain_length=3``, verify FULL is created.
 
@@ -260,7 +273,11 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         target_chain_length=3,
     )
 
@@ -276,14 +293,19 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
         disk="vda",
     )
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # Step 2: Record 4 incrementals (exceeds chain_length=3).
     for i in range(4):
@@ -313,8 +335,7 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
 
     # Check for FULL creation log.
     created_logs = [
-        r.message for r in caplog.records
-        if "created FULL" in r.message and vm_name in r.message
+        r.message for r in caplog.records if "created FULL" in r.message and vm_name in r.message
     ]
     assert len(created_logs) >= 1, (
         f"Expected 'created FULL' in logs. "

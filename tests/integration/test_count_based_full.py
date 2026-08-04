@@ -72,7 +72,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -106,7 +110,6 @@ def _build_core(
         targets=[
             TargetConfig(
                 path=target_dir,
-
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
@@ -162,7 +165,11 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         target_chain_length=2,
     )
 
@@ -182,14 +189,19 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
         disk="vda",
     )
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # Step 2: Record 3 incrementals as deps on the FULL (exceeds chain_length=2).
     for i in range(3):
@@ -217,8 +229,7 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
 
     # Check for FULL creation log.
     created_logs = [
-        r.message for r in caplog.records
-        if "created FULL" in r.message and vm_name in r.message
+        r.message for r in caplog.records if "created FULL" in r.message and vm_name in r.message
     ]
     assert len(created_logs) >= 1, (
         f"Expected 'created FULL' in logs. "
@@ -266,7 +277,11 @@ def test_full_not_created_when_incrementals_within_chain_length(test_vm, caplog)
     _cleanup_checkpoints(shell, vm_name)
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
         target_chain_length=5,
     )
 
@@ -282,14 +297,19 @@ def test_full_not_created_when_incrementals_within_chain_length(test_vm, caplog)
         disk="vda",
     )
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
 
     # Step 2: Record 4 incrementals (within chain_length=5).
     for i in range(4):
@@ -360,9 +380,7 @@ def test_first_backup_to_target_always_creates_full(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Step 1: Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.first-full", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.first-full", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -375,9 +393,7 @@ def test_first_backup_to_target_always_creates_full(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
-    config = MockConfigFacade(
-        vms=[vm_config], config_path=tmpdir / "first_full.toml"
-    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "first_full.toml")
     factory = DefaultFactory(shell, state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
 
@@ -395,9 +411,7 @@ def test_first_backup_to_target_always_creates_full(test_vm, caplog):
 
     # Step 5: Verify FULL recorded in state.
     fulls_in_state = state.get_full_backups(str(target_dir))
-    assert len(fulls_in_state) >= 1, (
-        f"Expected FULL recorded in state, got {len(fulls_in_state)}"
-    )
+    assert len(fulls_in_state) >= 1, f"Expected FULL recorded in state, got {len(fulls_in_state)}"
 
     _cleanup_checkpoints(shell, vm_name)
 
@@ -442,9 +456,7 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Step 1: Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.dryrun-full", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.dryrun-full", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -457,9 +469,7 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         targets=[target],
     )
-    config = MockConfigFacade(
-        vms=[vm_config], config_path=tmpdir / "dryrun_full.toml"
-    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "dryrun_full.toml")
     factory = DefaultFactory(shell, state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
     core._dry_run = True
@@ -470,10 +480,7 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
         core.run(vm_name)
 
     # Verify dry-run log message.
-    dry_run_logs = [
-        r.message for r in caplog.records
-        if "Would create FULL backup" in r.message
-    ]
+    dry_run_logs = [r.message for r in caplog.records if "Would create FULL backup" in r.message]
     assert len(dry_run_logs) >= 1, (
         f"Expected 'Would create FULL backup' in dry-run logs. "
         f"Logs: {[r.message for r in caplog.records if 'FULL' in r.message]}"
@@ -481,7 +488,8 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
 
     # Verify log message includes chain_length.
     chain_length_logs = [
-        r.message for r in caplog.records
+        r.message
+        for r in caplog.records
         if "chain_length=" in r.message and "Would create FULL" in r.message
     ]
     assert len(chain_length_logs) >= 1, (

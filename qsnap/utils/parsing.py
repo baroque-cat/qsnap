@@ -47,7 +47,7 @@ def parse_domblklist_path_map(stdout: str) -> dict[str, str]:
     target device name (e.g. ``"vda"``).  Returns an empty dict when no
     data rows are present.
     """
-    return {target: source for target, source in _parse_domblklist_rows(stdout)}
+    return dict(_parse_domblklist_rows(stdout))
 
 
 def parse_domblklist_path_for_disk(stdout: str, disk: str) -> str:

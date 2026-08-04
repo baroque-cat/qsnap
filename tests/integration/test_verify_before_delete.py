@@ -69,7 +69,11 @@ def _snapshot_create(
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
     provider = ExternalSnapshotProvider(shell)
     result = provider.create(
-        VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir),
+        VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+        ),
         snap_name,
         "vda",
         snap_path,
@@ -127,9 +131,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Step 1: Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vbd-snap", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.vbd-snap", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -145,14 +147,19 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
         disk="vda",
     )
     full_result = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
     assert full_path.exists(), "FULL backup file must exist"
 
     # Step 3: Corrupt the FULL file to force M2 verification to fail
@@ -182,13 +189,14 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
         disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=999,  # prevent blockcommit from interfering
-        targets=[TargetConfig(
-            path=target_dir,
-
-            compress=False,
-            verify="off",
-            target_keep_generations=1,
-        )],
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+                target_keep_generations=1,
+            )
+        ],
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
@@ -227,14 +235,13 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     # Step 7: Verify log messages about the gate.
     all_logs = " ".join(r.message for r in caplog.records)
     corruption_logs = [
-        r.message for r in caplog.records
-        if "corrupt" in r.message.lower()
-        or "blocking deletion" in r.message.lower()
+        r.message
+        for r in caplog.records
+        if "corrupt" in r.message.lower() or "blocking deletion" in r.message.lower()
     ]
     if full_path.exists():
         assert len(corruption_logs) >= 1, (
-            f"Expected deletion-blocking log. "
-            f"Logs: {[r.message for r in caplog.records]}"
+            f"Expected deletion-blocking log. Logs: {[r.message for r in caplog.records]}"
         )
 
     _cleanup_checkpoints(shell, vm_name)
@@ -282,9 +289,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     # Step 1: Create snapshot.
-    snap = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vbd-pass-snap", base_image, snapshot_dir
-    )
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.vbd-pass-snap", base_image, snapshot_dir)
 
     state = InMemoryStateManager()
     state.record_snapshot(vm_name, snap)
@@ -300,20 +305,23 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         disk="vda",
     )
     full_result1 = provider.create_full_backup(
-        vm_name, source_snap, target, compress=False,
+        vm_name,
+        source_snap,
+        target,
+        compress=False,
     )
     if not full_result1.success:
         pytest.skip(f"FULL backup failed: {full_result1.error}")
 
     gen1_path = full_result1.target_path
     gen1_name = gen1_path.stem
-    state.record_full_backup(str(target_dir), f"{gen1_name}.qcow2", source_snap.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{gen1_name}.qcow2", source_snap.timestamp, disk="vda"
+    )
     assert gen1_path.exists(), "Generation 1 FULL must exist"
 
     # Step 3: Create second snapshot.
-    snap2 = _snapshot_create(
-        shell, vm_name, f"{vm_name}.vbd-pass-snap2", base_image, snapshot_dir
-    )
+    snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.vbd-pass-snap2", base_image, snapshot_dir)
     state.record_snapshot(vm_name, snap2)
 
     # Step 4: Build Core with keep_generations=1.
@@ -321,13 +329,14 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
-        targets=[TargetConfig(
-            path=target_dir,
-
-            compress=False,
-            verify="off",
-            target_keep_generations=1,
-        )],
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+                target_keep_generations=1,
+            )
+        ],
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(
@@ -355,18 +364,13 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
         # new FULL creation failed), that's also acceptable.
         pass
     assert len(full_files_after) >= 1, (
-        f"Expected at least 1 FULL on target after run. "
-        f"Got: {[f.name for f in full_files_after]}"
+        f"Expected at least 1 FULL on target after run. Got: {[f.name for f in full_files_after]}"
     )
 
     # Step 7: No corruption/deletion-blocking log messages.
-    blocking_logs = [
-        r.message for r in caplog.records
-        if "blocking deletion" in r.message.lower()
-    ]
+    blocking_logs = [r.message for r in caplog.records if "blocking deletion" in r.message.lower()]
     assert len(blocking_logs) == 0, (
-        f"Should not have deletion-blocking logs for valid FULLs. "
-        f"Got: {blocking_logs}"
+        f"Should not have deletion-blocking logs for valid FULLs. Got: {blocking_logs}"
     )
 
     _cleanup_checkpoints(shell, vm_name)

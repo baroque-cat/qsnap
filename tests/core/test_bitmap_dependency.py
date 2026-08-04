@@ -43,7 +43,6 @@ def _make_incremental_snapshot(name: str = "vm.20250101T000000") -> SnapshotInfo
         path=Path(f"/var/lib/libvirt/snapshots/testvm/{name}.qcow2"),
         timestamp=datetime(2025, 1, 1, 0, 0, 0),
         allocation=65536,
-
         disk="vda",
     )
 
@@ -327,9 +326,7 @@ def test_dependency_visible_in_check_state(
     inc_path.touch()
 
     # Record state: FULL first, then dependency.
-    mock_state.record_full_backup(
-        str(backup_dir), full_name, datetime(2025, 1, 1, 0, 0, 0)
-    , "vda")
+    mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "vda")
     mock_state.record_incremental_dependency(str(backup_dir), inc_name, full_name)
 
     config = MockConfigFacade(

@@ -64,9 +64,16 @@ def _create_qcow2_chain(
             backing = paths[i - 1]
             result = shell.run(
                 [
-                    "qemu-img", "create", "-f", "qcow2",
-                    "-b", str(backing), "-F", "qcow2",
-                    str(file_path), "64K",
+                    "qemu-img",
+                    "create",
+                    "-f",
+                    "qcow2",
+                    "-b",
+                    str(backing),
+                    "-F",
+                    "qcow2",
+                    str(file_path),
+                    "64K",
                 ],
                 timeout=30,
             )
@@ -103,23 +110,21 @@ def test_scan_backing_chain_intact(test_vm):
 
     # Create chain: base.qcow2 → snap1.qcow2 → snap2.qcow2
     chain_paths = _create_qcow2_chain(
-        shell, tmpdir, ["base.qcow2", "snap1.qcow2", "snap2.qcow2"],
+        shell,
+        tmpdir,
+        ["base.qcow2", "snap1.qcow2", "snap2.qcow2"],
     )
 
     # Scan from the top (snap2).
     result = scan_backing_chain(shell, chain_paths[-1])
 
     assert result.success, f"Scan must succeed, got: {result.error}"
-    assert result.broken_files == [], (
-        f"Expected no broken files, got: {result.broken_files}"
-    )
+    assert result.broken_files == [], f"Expected no broken files, got: {result.broken_files}"
     assert len(result.paths) == 3, (
         f"Expected 3 paths in chain, got {len(result.paths)}: {result.paths}"
     )
     for p in chain_paths:
-        assert str(p) in result.paths, (
-            f"Path {p} not found in scan result: {result.paths}"
-        )
+        assert str(p) in result.paths, f"Path {p} not found in scan result: {result.paths}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -139,7 +144,9 @@ def test_scan_backing_chain_broken_missing_file(test_vm):
 
     # Create chain: base.qcow2 → snap1.qcow2 → snap2.qcow2
     chain_paths = _create_qcow2_chain(
-        shell, tmpdir, ["base.qcow2", "snap1.qcow2", "snap2.qcow2"],
+        shell,
+        tmpdir,
+        ["base.qcow2", "snap1.qcow2", "snap2.qcow2"],
     )
 
     # Delete the intermediate file to break the chain.
@@ -158,11 +165,8 @@ def test_scan_backing_chain_broken_missing_file(test_vm):
     # broken chain — the error message mentions the missing file.
     if not result.success:
         # Scan command failed — the error should reference the missing file.
-        assert snap1_str in (result.error or "") or "No such file" in (
-            result.error or ""
-        ), (
-            f"Expected error to mention missing file {snap1_str}. "
-            f"error={result.error}"
+        assert snap1_str in (result.error or "") or "No such file" in (result.error or ""), (
+            f"Expected error to mention missing file {snap1_str}. error={result.error}"
         )
     else:
         # Scan succeeded but found broken files.
@@ -206,9 +210,16 @@ def test_scan_backing_chain_non_qcow2_detected(test_vm):
     top_path = tmpdir / "top.qcow2"
     r = shell.run(
         [
-            "qemu-img", "create", "-f", "qcow2",
-            "-b", str(raw_path), "-F", "raw",
-            str(top_path), "64K",
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(raw_path),
+            "-F",
+            "raw",
+            str(top_path),
+            "64K",
         ],
         timeout=30,
     )
@@ -230,8 +241,7 @@ def test_scan_backing_chain_non_qcow2_detected(test_vm):
         broken_str_set = {str(b) for b in result.broken_files}
         raw_str = str(raw_path)
         assert raw_str in broken_str_set or len(result.broken_files) >= 1, (
-            f"Expected non-qcow2 file {raw_str} in broken_files. "
-            f"Got: {result.broken_files}"
+            f"Expected non-qcow2 file {raw_str} in broken_files. Got: {result.broken_files}"
         )
     else:
         # If the scan command itself fails due to non-qcow2 in chain,
@@ -262,9 +272,7 @@ def test_scan_backing_chain_single_file(test_vm):
     assert result.broken_files == [], (
         f"Standalone qcow2 must have no broken files: {result.broken_files}"
     )
-    assert len(result.paths) == 1, (
-        f"Expected 1 path, got {len(result.paths)}: {result.paths}"
-    )
+    assert len(result.paths) == 1, f"Expected 1 path, got {len(result.paths)}: {result.paths}"
     assert str(standalone) in result.paths
 
 
@@ -283,7 +291,6 @@ def test_scan_backing_chain_nonexistent_entry(test_vm):
     result = scan_backing_chain(shell, nonexistent)
 
     assert not result.success, (
-        f"Scan of non-existent file must fail. "
-        f"success={result.success}, error={result.error}"
+        f"Scan of non-existent file must fail. success={result.success}, error={result.error}"
     )
     assert result.error is not None, "Error message must be present for failed scan"

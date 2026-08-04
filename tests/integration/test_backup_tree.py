@@ -72,11 +72,19 @@ def test_list_backups_tree_full_pipeline(
     backups = [
         # FULL chain 1: FULL name sans ".qcow2", path with ".qcow2"
         _make_backup(full1_name, f"{tmp_path}/backup/{full1_name}.qcow2", base),
-        _make_backup("testvm_inc1.qcow2", f"{tmp_path}/backup/testvm_inc1.qcow2", base + timedelta(hours=1)),
-        _make_backup("testvm_inc2.qcow2", f"{tmp_path}/backup/testvm_inc2.qcow2", base + timedelta(hours=2)),
+        _make_backup(
+            "testvm_inc1.qcow2", f"{tmp_path}/backup/testvm_inc1.qcow2", base + timedelta(hours=1)
+        ),
+        _make_backup(
+            "testvm_inc2.qcow2", f"{tmp_path}/backup/testvm_inc2.qcow2", base + timedelta(hours=2)
+        ),
         # FULL chain 2 (newer)
         _make_backup(full2_name, f"{tmp_path}/backup/{full2_name}.qcow2", base + timedelta(days=2)),
-        _make_backup("testvm_inc3.qcow2", f"{tmp_path}/backup/testvm_inc3.qcow2", base + timedelta(days=2, hours=1)),
+        _make_backup(
+            "testvm_inc3.qcow2",
+            f"{tmp_path}/backup/testvm_inc3.qcow2",
+            base + timedelta(days=2, hours=1),
+        ),
     ]
 
     # Mock qemu-img info --output=json for _resolve_chain_full_anchor().
@@ -90,10 +98,12 @@ def test_list_backups_tree_full_pipeline(
         mock_shell.expect(f"qemu-img info --output=json.*{bp}").returns(
             ShellResult(
                 success=True,
-                stdout=json.dumps({
-                    "format": "qcow2",
-                    "backing-filename": full_path,
-                }),
+                stdout=json.dumps(
+                    {
+                        "format": "qcow2",
+                        "backing-filename": full_path,
+                    }
+                ),
                 stderr="",
                 returncode=0,
                 error=None,
@@ -118,11 +128,15 @@ def test_list_backups_tree_full_pipeline(
 
     # Chain 1 should have FULL + 2 incrementals = 3 backups
     chain1 = chains[full1_name]
-    assert len(chain1) == 3, f"Expected 3 backups in chain1, got {len(chain1)}: {[b.name for b in chain1]}"
+    assert len(chain1) == 3, (
+        f"Expected 3 backups in chain1, got {len(chain1)}: {[b.name for b in chain1]}"
+    )
 
     # Chain 2 should have FULL + 1 incremental = 2 backups
     chain2 = chains[full2_name]
-    assert len(chain2) == 2, f"Expected 2 backups in chain2, got {len(chain2)}: {[b.name for b in chain2]}"
+    assert len(chain2) == 2, (
+        f"Expected 2 backups in chain2, got {len(chain2)}: {[b.name for b in chain2]}"
+    )
 
     # Chains should be sorted by timestamp (older FULL first)
     chain_names = list(chains.keys())
@@ -158,8 +172,12 @@ def test_list_backups_tree_with_orphans(
         # A FULL anchor
         _make_backup("testvm.FULL.20250710", f"{tmp_path}/backup/testvm.FULL.20250710.qcow2", base),
         # Orphan incrementals (no .FULL. in backing chain)
-        _make_backup("orphan_inc1.qcow2", f"{tmp_path}/backup/orphan_inc1.qcow2", base + timedelta(hours=1)),
-        _make_backup("orphan_inc2.qcow2", f"{tmp_path}/backup/orphan_inc2.qcow2", base + timedelta(hours=2)),
+        _make_backup(
+            "orphan_inc1.qcow2", f"{tmp_path}/backup/orphan_inc1.qcow2", base + timedelta(hours=1)
+        ),
+        _make_backup(
+            "orphan_inc2.qcow2", f"{tmp_path}/backup/orphan_inc2.qcow2", base + timedelta(hours=2)
+        ),
     ]
 
     # Mock qemu-img info for orphan incrementals — backing chain has no .FULL.
@@ -267,10 +285,16 @@ def test_list_backups_tree_multiple_targets(
 
     base = datetime(2025, 7, 13, 10, 0)
     target1_backups = [
-        _make_backup("testvm.FULL.20250710", f"{tmp_path}/backup1/testvm.FULL.20250710.qcow2", base),
+        _make_backup(
+            "testvm.FULL.20250710", f"{tmp_path}/backup1/testvm.FULL.20250710.qcow2", base
+        ),
     ]
     target2_backups = [
-        _make_backup("testvm.FULL.20250712", f"{tmp_path}/backup2/testvm.FULL.20250712.qcow2", base + timedelta(days=2)),
+        _make_backup(
+            "testvm.FULL.20250712",
+            f"{tmp_path}/backup2/testvm.FULL.20250712.qcow2",
+            base + timedelta(days=2),
+        ),
     ]
 
     # Patch list() to return different backups per target

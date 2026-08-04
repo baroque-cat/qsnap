@@ -28,8 +28,10 @@ pytestmark = pytest.mark.unit
 # the same regardless of disk size, and one window avoids multiplying extents.
 _TINY_DISK = 65536
 
+
 # Module-level result factory for helper functions (not pytest fixtures).
-_ok = lambda: ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+def _ok() -> ShellResult:
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -175,8 +177,7 @@ def _setup_verify_bitmap_incremental_expectations(
 
 
 def test_copy_loop_reads_only_dirty_extents(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """block_status has dirty + clean extents; pread covers exactly
     dirty ∩ allocated ranges.  bytes_read == dirty total."""
@@ -258,8 +259,7 @@ def test_copy_loop_reads_only_dirty_extents(
 
 
 def test_first_incremental_backing_is_full(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """qemu-img create -b names the FULL backup; final qemu-img info
     shows backing-filename == FULL path → verify pass."""
@@ -337,8 +337,7 @@ def test_first_incremental_backing_is_full(
 
 
 def test_previous_backup_vanished_retryable_failure(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """test -f fails → is_retryable(error) is True; successor checkpoint
     deleted, prior preserved."""
@@ -447,8 +446,7 @@ def test_previous_backup_vanished_retryable_failure(
 
 
 def test_previous_existence_rechecked_before_create(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Assert a test -f <prev> command appears BEFORE the qemu-img create command."""
     vm_config = make_vm_config()
@@ -522,8 +520,7 @@ def test_previous_existence_rechecked_before_create(
 
 
 def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """fail_pread after first extent → result failure, rm -f <tmp> issued,
     write socket rm issued, qemu-nbd kill issued, domjobabort issued,
@@ -623,7 +620,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
 
     # qemu-nbd kill now happens in transfer_missing finally block;
     # the pread failure path may not reach the write-side kill.
-    kill_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("kill")] # noqa: F841
+    kill_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("kill")]  # noqa: F841
 
     abort_cmds = [cmd for cmd in all_run_cmds if "domjobabort" in cmd]
     assert len(abort_cmds) >= 1, "domjobabort not issued"
@@ -634,8 +631,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
 
 
 def test_successful_transfer_no_tmp_or_socket_remain(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """On success: final rm -f sweep includes tmp file and write socket;
     mv tmp→final issued."""
@@ -714,8 +710,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
 
 
 def test_stall_watchdog_aborts_with_correct_error_string(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """sleeping pread_handler + small stall_timeout; exact string match
     'Stall detected: no progress for {N}s'; failure path ran."""
@@ -820,8 +815,7 @@ def test_stall_watchdog_aborts_with_correct_error_string(
 
 
 def test_slow_progressing_loop_not_killed(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Short sleeps per chunk, generous timeout; success."""
     vm_config = make_vm_config()
@@ -922,8 +916,7 @@ def test_slow_progressing_loop_not_killed(
 
 
 def test_zero_stall_timeout_disables_watchdog(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """stall_timeout=0 + sleeping pread → success (watchdog disabled)."""
     vm_config = make_vm_config()
@@ -1024,8 +1017,7 @@ def test_zero_stall_timeout_disables_watchdog(
 
 
 def test_incremental_uses_unified_engine_no_convert(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """No 'qemu-img convert' in shell history when prior checkpoint exists;
     unified NBD engine (pread/pwrite) used instead.  mock connect called
@@ -1100,8 +1092,7 @@ def test_incremental_uses_unified_engine_no_convert(
 
 
 def test_qemu_img_info_shows_backing_filename(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Verify path asserts backing-filename; wrong backing → verify failure."""
     vm_config = make_vm_config()
@@ -1214,8 +1205,7 @@ def test_qemu_img_info_shows_backing_filename(
 
 
 def test_restore_chain_resolved_without_bitmap_specific_logic(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """The delta's backing-filename points to previous backup so the
     EXISTING restore flow works — assert create -b chain + final backing
@@ -1297,8 +1287,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
 
 
 def test_bitmap_incremental_ignores_compress_setting(
-    mock_shell, make_vm_config, make_target, tmp_path, caplog
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, caplog, success_result
 ) -> None:
     """target.compress=True; assert INFO log line and no '-c' in any
     issued command on the incremental path."""
@@ -1405,8 +1394,7 @@ def test_missing_libnbd_fails_factory_construction(make_target, tmp_path) -> Non
 
 
 def test_full_size_verify_failure_triggers_cleanup(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """qemu-img info actual-size > dirty_bytes*2+64MiB → verification
     failed error; final file rm'd; successor checkpoint deleted;
@@ -1537,8 +1525,7 @@ def test_full_size_verify_failure_triggers_cleanup(
 
 
 def test_incremental_always_uses_pread_pwrite(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Incremental transfers always use pread/pwrite unified NBD engine."""
     vm_config = make_vm_config()
@@ -1600,16 +1587,16 @@ def test_incremental_always_uses_pread_pwrite(
 
     # No qemu-img convert — incrementals always use pread/pwrite unified engine
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
-    assert len(convert_cmds) == 0, (
-        "Incremental should NEVER use qemu-img convert"
-    )
+    assert len(convert_cmds) == 0, "Incremental should NEVER use qemu-img convert"
 
     # pread/pwrite was called (unified NBD engine)
     pread_calls = [c for c in nbd.calls if c[0] == "pread"]
     assert len(pread_calls) > 0, "pread should be called for incremental transfer"
 
 
-def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tmp_path, success_result) -> None:
+def test_incremental_zero_skip_false(
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
+) -> None:
     """Incremental _transfer is called with zero_skip=False — copies only
     dirty∩allocated extents, never performs zero-skip optimization."""
     vm_config = make_vm_config()
@@ -1682,8 +1669,7 @@ def test_incremental_zero_skip_false(mock_shell, make_vm_config, make_target, tm
 
 
 def test_temporal_mismatch_snapshot_predates_checkpoint(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Snapshot predating checkpoint is skipped with temporal mismatch error.
     The prior checkpoint timestamp (2025-02-01) is newer than the snapshot
@@ -1718,9 +1704,7 @@ def test_temporal_mismatch_snapshot_predates_checkpoint(
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
     assert len(results) == 1
-    assert results[0].success is False, (
-        f"Expected temporal mismatch failure, got: {results[0]}"
-    )
+    assert results[0].success is False, f"Expected temporal mismatch failure, got: {results[0]}"
     assert "temporal mismatch" in results[0].error.lower(), (
         f"Error should mention 'temporal mismatch', got: {results[0].error}"
     )
@@ -1729,8 +1713,7 @@ def test_temporal_mismatch_snapshot_predates_checkpoint(
     # backup-begin is NEVER called — temporal check triggers continue before it.
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
     assert len(backup_cmds) == 0, (
-        f"backup-begin should NOT be called when temporal mismatch skips, "
-        f"got: {backup_cmds}"
+        f"backup-begin should NOT be called when temporal mismatch skips, got: {backup_cmds}"
     )
     # No data transfer started
     convert_cmds = [cmd for cmd in all_run_cmds if "qemu-img convert" in cmd]
@@ -1738,8 +1721,7 @@ def test_temporal_mismatch_snapshot_predates_checkpoint(
 
 
 def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """Snapshot after checkpoint proceeds normally (no temporal mismatch).
     The prior checkpoint timestamp (2024-12-30) is before the snapshot
@@ -1798,14 +1780,11 @@ def test_temporal_mismatch_snapshot_after_checkpoint_proceeds(
         results = provider.transfer_missing(vm_config, target, [snapshot])
 
     assert len(results) == 1
-    assert results[0].success is True, (
-        f"Expected successful backup, got error: {results[0].error}"
-    )
+    assert results[0].success is True, f"Expected successful backup, got error: {results[0].error}"
 
 
 def test_size_sanity_check_warns_on_large_transfer(
-    mock_shell, make_vm_config, make_target, tmp_path, caplog
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, caplog, success_result
 ) -> None:
     """Large transfer triggers WARNING but does NOT fail the backup.
     dirty_bytes (700000) > snapshot.allocation (65536) * 10 → WARNING logged,
@@ -1889,8 +1868,7 @@ def test_size_sanity_check_warns_on_large_transfer(
 
 
 def test_temporal_mismatch_no_checkpoint_proceeds(
-    mock_shell, make_vm_config, make_target, tmp_path
-, success_result
+    mock_shell, make_vm_config, make_target, tmp_path, success_result
 ) -> None:
     """No prior checkpoint exists (checkpoint-list is empty) → backup
     proceeds normally without any temporal check (full export)."""
@@ -1916,11 +1894,10 @@ def test_temporal_mismatch_no_checkpoint_proceeds(
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
         patch(
-            "qsnap.modules.backup.bitmap.get_disk_targets", return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")]
+            "qsnap.modules.backup.bitmap.get_disk_targets",
+            return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")],
         ),
-        patch.object(
-            BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)
-        ),
+        patch.object(BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)),
     ):
         mock_wbxml.return_value = tmp_path / "backup-test.xml"
         mock_wcxml.return_value = tmp_path / "qsnap-checkpoint-test.xml"
@@ -1941,7 +1918,10 @@ def test_temporal_mismatch_no_checkpoint_proceeds(
 
 
 def test_transfer_missing_normal_prior_always_set(
-    mock_shell, make_vm_config, make_target, tmp_path,
+    mock_shell,
+    make_vm_config,
+    make_target,
+    tmp_path,
     success_result,
 ):
     """Normal path: prior checkpoint exists → incremental transfer via copy_loop.
@@ -2019,7 +1999,10 @@ def test_transfer_missing_normal_prior_always_set(
 
 
 def test_transfer_missing_safety_net_prior_none_full_export(
-    mock_shell, make_vm_config, make_target, tmp_path,
+    mock_shell,
+    make_vm_config,
+    make_target,
+    tmp_path,
     success_result,
 ):
     """Safety net: prior=None triggers full export via _full_pull_lifecycle.
@@ -2075,6 +2058,7 @@ def test_transfer_missing_safety_net_prior_none_full_export(
     )
     # Post-export checkpoint-list and backing-chain verification
     import hashlib
+
     target_hash = hashlib.md5(str(target.path).encode()).hexdigest()[:8]
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(
@@ -2097,7 +2081,9 @@ def test_transfer_missing_safety_net_prior_none_full_export(
 
     with (
         patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
-        patch.object(mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection) as stall_spy,
+        patch.object(
+            mock_shell, "run_with_stall_detection", wraps=mock_shell.run_with_stall_detection
+        ) as stall_spy,
         patch("qsnap.modules.backup.bitmap.write_backup_xml") as mock_wbxml,
         patch("qsnap.modules.backup.bitmap.write_checkpoint_xml") as mock_wcxml,
     ):
@@ -2113,7 +2099,9 @@ def test_transfer_missing_safety_net_prior_none_full_export(
 
     # qemu-img convert IS called via run_with_stall_detection for the safety-net full export
     convert_calls = [
-        " ".join(call.args[0]) for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
+        " ".join(call.args[0])
+        for call in stall_spy.call_args_list
+        if "qemu-img" in " ".join(call.args[0])
     ]
     assert len(convert_calls) >= 1, "Safety net full export should use qemu-img convert"
 

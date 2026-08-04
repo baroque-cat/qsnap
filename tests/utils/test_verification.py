@@ -132,15 +132,14 @@ def test_deep_verify_base_image_fails_errors(clean_shell, success_result) -> Non
 @pytest.mark.unit
 @pytest.mark.mock
 def test_deep_verify_base_image_qemu_img_check_fails(
-    clean_shell, failure_result,
+    clean_shell,
+    failure_result,
 ) -> None:
     """When ``shell.run()`` for ``qemu-img check`` returns ``success=False``,
     the function returns ``CommitResult(success=False)`` with an error
     containing "qemu-img check failed".
     """
-    clean_shell.expect("qemu-img check").returns(
-        failure_result(error="No space left on device")
-    )
+    clean_shell.expect("qemu-img check").returns(failure_result(error="No space left on device"))
     result = deep_verify_base_image(clean_shell, Path("/tmp/base.qcow2"))
     assert isinstance(result, CommitResult)
     assert result.success is False
@@ -153,9 +152,7 @@ def test_deep_verify_base_image_json_parse_fails(clean_shell, success_result) ->
     """When ``qemu-img check`` returns invalid JSON, the function returns
     ``CommitResult(success=False)`` with an error containing "parse".
     """
-    clean_shell.expect("qemu-img check").returns(
-        success_result(stdout="not valid json {{{")
-    )
+    clean_shell.expect("qemu-img check").returns(success_result(stdout="not valid json {{{"))
     result = deep_verify_base_image(clean_shell, Path("/tmp/base.qcow2"))
     assert isinstance(result, CommitResult)
     assert result.success is False

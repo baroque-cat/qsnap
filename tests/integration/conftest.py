@@ -260,9 +260,7 @@ def test_vm_multi_disk():
         )
         if not create_result.success:
             shutil.rmtree(str(tmpdir), ignore_errors=True)
-            pytest.skip(
-                f"qemu-img create failed for {img_path}: {create_result.error}"
-            )
+            pytest.skip(f"qemu-img create failed for {img_path}: {create_result.error}")
 
     # Build domain XML with two disks
     domain_type = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "qemu"
@@ -304,9 +302,7 @@ def test_vm_multi_disk():
     )
     if not define_result.success:
         shutil.rmtree(str(tmpdir), ignore_errors=True)
-        pytest.skip(
-            f"virsh define failed (libvirt daemon not available?): {define_result.error}"
-        )
+        pytest.skip(f"virsh define failed (libvirt daemon not available?): {define_result.error}")
 
     # Pre-built DiskConfig objects for convenience
     from qsnap.models.config import DiskConfig  # noqa: E402

@@ -522,9 +522,7 @@ def scan_backing_chain(
                 if isinstance(next_item, dict):
                     next_path = next_item.get("filename") or next_item.get("image") or ""
                     if next_path and backing != next_path:
-                        broken_files.append(
-                            f"backing-filename mismatch in {Path(file_path).name}"
-                        )
+                        broken_files.append(f"backing-filename mismatch in {Path(file_path).name}")
 
     return ChainScanResult(
         paths=paths,

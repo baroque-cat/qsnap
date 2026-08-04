@@ -40,7 +40,6 @@ def _add_snapshot(state, vm_name: str, name: str, path: str | None = None) -> No
             path=Path(path or f"/tmp/{name}.qcow2"),
             timestamp=datetime(2025, 7, 13, 10, 0),
             allocation=1000,
-
             disk="vda",
         ),
     )
@@ -345,7 +344,6 @@ def test_risk_deferred_queue_grows_across_runs(
     """
     vm = make_vm_config(
         name="testvm",
-
         snapshot_chain_length=24,
     )
     config = MockConfigFacade(vms=[vm])
@@ -1199,9 +1197,7 @@ def test_multidisk_deferred_drain_per_disk_independence(
         core.snapshot()
 
     # Both entries were drained (blockcommit called twice)
-    assert bc_spy.call_count == 2, (
-        f"Expected 2 blockcommit calls, got {bc_spy.call_count}"
-    )
+    assert bc_spy.call_count == 2, f"Expected 2 blockcommit calls, got {bc_spy.call_count}"
 
     # Collect per-disk call details
     calls_by_disk: dict[str, dict] = {}
@@ -1301,10 +1297,15 @@ def test_multidisk_deferred_drain_one_failure_independent(
     def _fail_vda(vm_config, snapshots_to_merge, *, disk, base_image, deep_verify=False):
         if disk == "vda":
             return CommitResult(
-                success=False, committed_snapshot="", error="vda commit failed",
+                success=False,
+                committed_snapshot="",
+                error="vda commit failed",
             )
         return original_bc(
-            vm_config, snapshots_to_merge, disk=disk, base_image=base_image,
+            vm_config,
+            snapshots_to_merge,
+            disk=disk,
+            base_image=base_image,
             deep_verify=deep_verify,
         )
 
@@ -1327,4 +1328,3 @@ def test_multidisk_deferred_drain_one_failure_independent(
     assert remaining[0].disk == "vda"
     assert remaining[0].snapshots == ["vda_s1"]
     assert remaining[0].reason == "apparmor"
-

@@ -150,9 +150,6 @@ def test_global_config_snapshot_preserve_min_immutable():
         cfg.snapshot_preserve_min = 48  # type: ignore[misc]
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Scenario 9: GlobalConfig chain_length defaults are 24/168/2
 # ---------------------------------------------------------------------------
@@ -574,9 +571,6 @@ def test_global_config_full_verify_before_delete_metadata():
     """GlobalConfig(full_verify_before_delete='metadata') stores 'metadata' (M1 only)."""
     cfg = GlobalConfig(full_verify_before_delete="metadata")
     assert cfg.full_verify_before_delete == "metadata"
-
-
-
 
 
 # ---------------------------------------------------------------------------

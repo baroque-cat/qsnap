@@ -204,7 +204,11 @@ def test_snapshot_post_creation_validation(test_vm):
     snap_name = f"{vm_name}.post-val"
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
 
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     result: SnapshotResult = provider.create(vm_config, snap_name, "vda", snap_path)
 
     assert result.success, (
@@ -218,9 +222,7 @@ def test_snapshot_post_creation_validation(test_vm):
     # 5. qcow2 format check: qemu-img info reports format="qcow2".
     info = _qemu_img_info(shell, snap_path)
     assert info is not None, f"qemu-img info failed for {snap_path}"
-    assert info.get("format") == "qcow2", (
-        f"Expected qcow2 format, got: {info.get('format')}"
-    )
+    assert info.get("format") == "qcow2", f"Expected qcow2 format, got: {info.get('format')}"
 
     # 6. backing-filename must point to previous active layer.
     backing = _get_backing_filename(shell, snap_path)
@@ -233,8 +235,7 @@ def test_snapshot_post_creation_validation(test_vm):
     active_after = _get_domblklist_source(shell, vm_name)
     assert active_after is not None, "Must be able to read domblklist after snapshot"
     assert active_after == str(snap_path), (
-        f"libvirt pivot not confirmed: domblklist shows {active_after}, "
-        f"expected {snap_path}"
+        f"libvirt pivot not confirmed: domblklist shows {active_after}, expected {snap_path}"
     )
 
     # 8. Corrupt bit must NOT be set.
@@ -283,12 +284,14 @@ def test_snapshot_post_creation_validation_failure(test_vm):
     snap_name = f"{vm_name}.post-val-fail"
     snap_path = snapshot_dir / f"{snap_name}.qcow2"
 
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
     result = provider.create(vm_config, snap_name, "vda", snap_path)
 
-    assert result.success, (
-        f"Snapshot creation must succeed: {result.error}"
-    )
+    assert result.success, f"Snapshot creation must succeed: {result.error}"
     assert snap_path.exists(), f"Snapshot file must exist: {snap_path}"
 
     # Now delete the snapshot file.
@@ -303,8 +306,7 @@ def test_snapshot_post_creation_validation_failure(test_vm):
         check=True,
     )
     assert not test_cmd.success, (
-        "test -f must fail for deleted snapshot file — "
-        "validation must detect missing file"
+        "test -f must fail for deleted snapshot file — validation must detect missing file"
     )
 
     # Verify that qemu-img info on the deleted file also fails.
@@ -429,7 +431,11 @@ def test_incremental_post_transfer_validation(test_vm):
 
     # Step 3: transfer_missing — must produce an incremental.
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(name=vm_name, disks=[DiskConfig(target="vda", base_image=base_image)], snapshot_dir=snapshot_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
 
     results = provider_inc.transfer_missing(
         vm_config=vm_config,
@@ -460,9 +466,7 @@ def test_incremental_post_transfer_validation(test_vm):
         timeout=60,
         check=True,
     )
-    assert chain_result.success, (
-        f"Chain-to-FULL not traversable: {chain_result.error}"
-    )
+    assert chain_result.success, f"Chain-to-FULL not traversable: {chain_result.error}"
     try:
         chain_data = json.loads(chain_result.stdout)
         assert isinstance(chain_data, list) and len(chain_data) > 0, (
@@ -478,9 +482,7 @@ def test_incremental_post_transfer_validation(test_vm):
     )
     assert cp_result.success, f"checkpoint-list failed: {cp_result.error}"
     qsnap_cps = [
-        cp.strip()
-        for cp in cp_result.stdout.splitlines()
-        if cp.strip().startswith("qsnap-")
+        cp.strip() for cp in cp_result.stdout.splitlines() if cp.strip().startswith("qsnap-")
     ]
     assert len(qsnap_cps) >= 1, (
         f"At least one qsnap- checkpoint expected after incremental transfer, got: {qsnap_cps}"
@@ -556,9 +558,7 @@ def test_full_post_creation_validation(test_vm):
     )
     assert cp_result.success, f"checkpoint-list failed: {cp_result.error}"
     qsnap_cps = [
-        cp.strip()
-        for cp in cp_result.stdout.splitlines()
-        if cp.strip().startswith("qsnap-")
+        cp.strip() for cp in cp_result.stdout.splitlines() if cp.strip().startswith("qsnap-")
     ]
     assert len(qsnap_cps) >= 1, (
         f"At least one qsnap- checkpoint expected after FULL backup, got: {qsnap_cps}"
