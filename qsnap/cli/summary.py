@@ -25,6 +25,7 @@ _SYMBOLS: dict[str, str] = {
     "backup_full": "***",
     "error": "!!!",
     "backup_delete": "---",
+    "blockcommit": "<<<",
 }
 
 _LEGEND_LINES: list[tuple[str, str]] = [
@@ -32,6 +33,7 @@ _LEGEND_LINES: list[tuple[str, str]] = [
     ("---", "deleted snapshot (blockcommitted)"),
     (">>>", "transferred incremental backup"),
     ("***", "created FULL backup"),
+    ("<<<", "blockcommit (merged snapshots into base)"),
     ("!!!", "ERROR"),
 ]
 
@@ -102,6 +104,37 @@ def _format_action(action: ActionRecord) -> str:
     return f"{indent}{lead}{action.name}"
 
 
+def _format_prediction(action: ActionRecord) -> str:
+    """Format a dry-run prediction as one table row.
+
+    Reuses the action-row convention (symbol + ``[disk]`` prefix) but
+    marks sizes with ``~`` — predictions are upper-bound estimates
+    (design D4 of fix-dry-run-predictions) — and omits duration/speed
+    because nothing actually ran.  A size of 0 renders as
+    ``size unknown`` (estimation failed or not applicable).
+    """
+    symbol = _SYMBOLS.get(action.action, "???")
+    indent = "    "  # 4 spaces for table rows
+    lead = f"{symbol} [{action.disk}] " if action.disk is not None else f"{symbol}  "
+    size = f"~{_format_size(action.size)}" if action.size > 0 else "size unknown"
+
+    if action.action == "snapshot_create":
+        return f"{indent}{lead}{action.name}  ({size})"
+    if action.action == "snapshot_delete":
+        return f"{indent}{lead}{action.name}"
+    if action.action == "backup_transfer":
+        target = str(action.path) if action.path else "-"
+        return f"{indent}{lead}{action.name}  → {target}  ({size})"
+    if action.action == "backup_full":
+        return f"{indent}{lead}{action.name}  ({size})"
+    if action.action == "backup_delete":
+        target = str(action.path.parent) if action.path else "-"
+        return f"{indent}{lead}{action.name}  from {target}"
+    if action.action == "blockcommit":
+        return f"{indent}{lead}{action.name}"
+    return f"{indent}{lead}{action.name}"
+
+
 def _group_by_vm(actions: list[ActionRecord]) -> list[tuple[str, list[ActionRecord]]]:
     """Group actions by vm_name, preserving insertion (pipeline) order.
 
@@ -152,6 +185,18 @@ def format_summary(result: PipelineResult) -> str:
         for action in actions:
             lines.append(_format_action(action))
         lines.append("")
+
+    # ── Planned actions (dry-run predictions) ──────────────────────────
+    # Rendered from result.predictions (design D10 of
+    # fix-dry-run-predictions).  Empty predictions → no section.
+    if result.dry_run and result.predictions:
+        lines.append("Planned actions (dry-run):")
+        lines.append("")
+        for vm_name, predictions in _group_by_vm(result.predictions):
+            lines.append(f"{vm_name}:")
+            for prediction in predictions:
+                lines.append(_format_prediction(prediction))
+            lines.append("")
 
     # ── Dry-run footer ─────────────────────────────────────────────────
     if result.dry_run:

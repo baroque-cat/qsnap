@@ -403,7 +403,16 @@ def test_dry_run_logs_full_would_be_created(
 
     # create_full_backup should NOT be called in dry-run mode.
     assert not full_spy.called, "create_full_backup should NOT be called in dry-run mode"
-    # INFO log should contain the dry-run FULL creation message.
-    assert "[dry-run] Would create FULL backup" in caplog.text, (
-        "Dry-run should log 'Would create FULL backup'"
+    # INFO log should contain the dry-run FULL creation message with
+    # per-disk context, chain-size estimate, and chain length (design D5/D9
+    # of fix-dry-run-predictions).  The default MockShell expectation for
+    # qemu-img info --backing-chain returns no actual-size, producing a zero
+    # estimate formatted as "~0 B".
+    expected_fragment = (
+        "[dry-run] Would create FULL backup for disk vda"
+        " (~0 B, chain_length=5, method=NBD, VM=running)"
+    )
+    assert expected_fragment in caplog.text, (
+        "Dry-run should log 'Would create FULL backup' with per-disk context, "
+        "chain-size estimate, and chain_length"
     )

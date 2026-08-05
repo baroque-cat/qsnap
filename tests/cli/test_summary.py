@@ -220,13 +220,21 @@ def test_dry_run_summary_footer():
 
 
 def test_dry_run_shows_predicted_actions():
-    """In dry-run, verify the summary still shows predicted actions (if any)."""
+    """In dry-run, verify the summary renders predicted actions from the
+    predictions field with per-disk prefix."""
     result = PipelineResult(
         results=[
             VMRunResult(vm_name="vm-predict", success=True),
         ],
-        actions=[
-            _make_action("snapshot_create", vm_name="vm-predict", name="predicted_snap", size=1024),
+        actions=[],  # empty — predictions drive the planned-actions section
+        predictions=[
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-predict",
+                name="predicted_snap",
+                size=1024,
+                disk="vda",
+            ),
         ],
         dry_run=True,
     )
@@ -234,13 +242,110 @@ def test_dry_run_shows_predicted_actions():
 
     assert "Dryrun: YES" in output
     assert "NOTE: Dryrun was active" in output
+    assert "Planned actions (dry-run):" in output
     assert "vm-predict:" in output
     assert "predicted_snap" in output
-    assert "+++" in output
+    assert "+++ [vda]" in output
+    # Predicted sizes carry approximate marker
+    assert "~1.0 KiB" in output
+
+    # Planned section uses predictions, not actions
+    planned_start = output.find("Planned actions (dry-run):")
+    assert planned_start != -1
+    planned_section = output[planned_start:]
+    assert "vm-predict:" in planned_section
+    assert "predicted_snap" in planned_section
 
 
 # ---------------------------------------------------------------------------
-# test_formatter_no_side_effects (8)
+# test_dry_run_empty_predictions (8)
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_empty_predictions():
+    """Dry-run with empty predictions. Verify header and footer are
+    present but NO planned-actions section is rendered."""
+    result = PipelineResult(
+        results=[],
+        actions=[],
+        predictions=[],
+        dry_run=True,
+    )
+    output = format_summary(result)
+
+    assert "Dryrun: YES" in output
+    assert "NOTE: Dryrun was active" in output
+    assert "none of the operations above were actually executed" in output
+    # No planned-actions section when predictions is empty
+    assert "Planned actions (dry-run):" not in output
+
+
+# ---------------------------------------------------------------------------
+# test_dry_run_sizes_marked_approximate (9)
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_sizes_marked_approximate():
+    """Dry-run predictions with various sizes. Assert ~ prefix on every
+    rendered size and size=0 renders as 'size unknown'."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=True),
+        ],
+        actions=[],
+        predictions=[
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-test",
+                name="snap_big",
+                size=1048576,
+                disk="vda",
+            ),
+            _make_action(
+                "backup_transfer",
+                vm_name="vm-test",
+                name="inc_001",
+                size=52428800,
+                path=Path("/backups/inc_001.qcow2"),
+                disk="vda",
+            ),
+            _make_action(
+                "snapshot_create",
+                vm_name="vm-test",
+                name="snap_zero",
+                size=0,
+                disk="vda",
+            ),
+        ],
+        dry_run=True,
+    )
+    output = format_summary(result)
+
+    # Size > 0 → ~ prefix
+    assert "~1.0 MiB" in output
+    assert "~50.0 MiB" in output
+    # Size == 0 → "size unknown"
+    assert "size unknown" in output
+
+    # Every parenthesized size in the planned section is approximate.
+    # Start scanning after the heading line to avoid matching "(dry-run)".
+    planned_start = output.find("Planned actions (dry-run):")
+    assert planned_start != -1
+    after_heading = output.find("\n", planned_start)
+    assert after_heading != -1
+    body = output[after_heading:]
+
+    import re
+
+    parens = re.findall(r"\(([^)]+)\)", body)
+    for content in parens:
+        assert content.startswith("~") or content == "size unknown", (
+            f"Non-approximate size in dry-run predictions: ({content})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# test_formatter_no_side_effects (10)
 # ---------------------------------------------------------------------------
 
 

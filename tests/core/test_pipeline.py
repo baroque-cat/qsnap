@@ -459,17 +459,18 @@ def test_dry_run_logs_no_mutation(
     # IStateManager.record_snapshot was NEVER called.
     record_spy.assert_not_called()
 
-    # IShell.run may be called for read-only operations (_log_size_estimate
-    # runs even in dry-run mode to provide size projections via qemu-img info
-    # and du -sb).  In dry-run mode, _validate_environment() also runs
-    # (design D6) making read-only validation calls (test, which, virsh
-    # dominfo, find).  Verify only read-only shell calls were made.
+    # IShell.run may be called for read-only operations: qemu-img info
+    # --force-share for chain-size and allocation estimation (design D5),
+    # virsh domstate for deferred drain planning (design D8), and
+    # _validate_environment() read-only calls (which, test, virsh dominfo,
+    # find).  Verify only read-only shell calls were made.
     read_only_patterns = (
         "qemu-img info",
         "du",
         "test ",
         "which ",
         "virsh dominfo",
+        "virsh domstate",
         "find",
         "qemu-nbd",
     )
@@ -490,6 +491,11 @@ def test_dry_run_logs_no_mutation(
 
     # Dry-run logs planned actions at INFO level.
     assert "[dry-run]" in caplog.text
+    assert "Would create snapshot for disk" in caplog.text
+
+    # Result carries predictions populated by dry-run, actions empty.
+    assert len(result.predictions) > 0
+    assert result.actions == []
 
     # Verify --force-share is used on qemu-img info read-only calls
     qemu_img_calls = [
@@ -1077,9 +1083,12 @@ def test_dry_run_logs_full_would_be_created(
     # No FULL actually created — dry-run skips mutations.
     assert not full_spy.called, "create_full_backup should NOT be called in dry-run"
 
-    # Log line announces the planned action with count-based info.
+    # Log line announces the planned action with count-based info and
+    # per-disk context (design D9) including chain-size estimate.
     assert "[dry-run]" in caplog.text
     assert "Would create FULL backup" in caplog.text
+    assert "for disk" in caplog.text
+    assert "chain_length=" in caplog.text
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────
@@ -2602,6 +2611,8 @@ def test_dry_run_detects_vm_running_state_for_method(
     core._backup_target(vm, target, [snap])
 
     assert "method=NBD" in caplog.text, "Running VM should produce method=NBD in dry-run log"
+    # Dry-run log carries per-disk context (design D9).
+    assert "for disk" in caplog.text, "Dry-run log should include disk context"
     # VM state is reported in dry-run log
 
     # --- Case B: VM stopped — patch is_vm_running to return False ---
@@ -2611,6 +2622,7 @@ def test_dry_run_detects_vm_running_state_for_method(
 
     assert "method=NBD" in caplog.text, "Stopped VM should also produce method=NBD (bitmap-only)"
     assert "VM=stopped" in caplog.text
+    assert "for disk" in caplog.text, "Dry-run log should include disk context"
 
 
 def test_dry_run_logs_full_would_be_created_without_executing(
@@ -2652,8 +2664,11 @@ def test_dry_run_logs_full_would_be_created_without_executing(
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
         core._backup_target(vm, target, [snap])
 
-    # Log confirms FULL would be created.
+    # Log confirms FULL would be created with per-disk context and
+    # chain-size estimate (design D9).
     assert "[dry-run] Would create FULL backup" in caplog.text
+    assert "for disk" in caplog.text
+    assert "chain_length=" in caplog.text
 
     # No virsh backup-begin or qemu-img convert was executed.
     mutating_cmds = [
@@ -4054,7 +4069,12 @@ def test_dry_run_logs_planned_actions(
 
     # Planned actions are logged
     assert "[dry-run]" in caplog.text
-    assert "Would create snapshot for VM" in caplog.text
+    assert "Would create snapshot for disk" in caplog.text
+
+    # Predictions are populated, actions remain empty.
+    assert result.predictions is not None
+    assert len(result.predictions) > 0
+    assert result.actions == []
 
     # No mutations executed
     assert not create_spy.called, "snapshot provider create() must NOT be called in dry-run"
@@ -4118,6 +4138,8 @@ def test_dry_run_activated_from_cli(
         result = core.run()
 
     assert result.dry_run is True
+    # Predictions populated in dry-run mode.
+    assert len(result.predictions) > 0
     # No snapshot creation
     assert not create_spy.called
     # No backup transfer

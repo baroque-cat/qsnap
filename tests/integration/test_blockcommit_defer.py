@@ -617,3 +617,127 @@ def test_xml_tip_excluded_offline_vm_boots_integration(test_vm):
     time.sleep(1)
     assert _vm_is_running(shell, vm_name), "VM should be running after start"
     shell.run(["virsh", "destroy", vm_name], timeout=30)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 5: Dry-run predicts deferred blockcommit drain without mutation
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_dry_run_deferred_drain_prediction(test_vm):
+    """Dry-run predicts deferred blockcommit drain read-only; no execution.
+
+    1. Start VM, create 2 snapshots with lifecycle_mode="virsh".
+    2. Manually add a deferred blockcommit entry for the oldest
+       (non-active) snapshot.
+    3. Set core.dry_run = True and run the pipeline.
+    4. Assert: at least one blockcommit prediction with a disk field exists.
+    5. Assert: deferred queue is UNCHANGED after the dry run.
+    6. Assert: no blockcommit was executed (files + chain intact).
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Step 1: Start VM.
+    start_result = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start_result.success:
+        pytest.skip(f"virsh start failed: {start_result.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    # Build Core with lifecycle_mode="virsh" so the non-active snapshot
+    # is committable live (the deferred-drain prediction path uses
+    # the same adaptive fork as the real path).
+    core, vm_config, state = _build_core(
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        lifecycle_mode="virsh",
+    )
+
+    # Create 2 snapshots (snap0 = oldest non-active, snap1 = active tip).
+    for i in range(2):
+        results = core._create_snapshot(vm_config)
+        assert len(results) >= 1, f"Snapshot {i + 1} creation returned no results"
+        assert results[0].success, f"Snapshot {i + 1} failed: {results[0].error}"
+        time.sleep(1.1)
+
+    snapshots = state.get_snapshots(vm_name)
+    assert len(snapshots) == 2, f"Expected 2 snapshots, got {len(snapshots)}"
+
+    oldest = snapshots[0]
+    newest = snapshots[1]
+    oldest_path = oldest.path
+    newest_path = newest.path
+    assert oldest_path.exists(), f"Oldest snapshot should exist: {oldest_path}"
+    assert newest_path.exists(), f"Newest snapshot should exist: {newest_path}"
+
+    # Record chain length on the tip before the dry run.
+    chain_len_before = _backing_chain_length(newest_path, shell)
+    assert chain_len_before is not None, "Should be able to get chain length"
+    assert chain_len_before >= 2, f"Chain should have at least 2 entries, got {chain_len_before}"
+
+    # Step 2: Add a deferred blockcommit entry for the oldest snapshot.
+    state.add_deferred_blockcommit(
+        vm_name,
+        "vda",
+        snapshots=[oldest.name],
+        reason="vm_running",
+    )
+
+    deferred_before = state.get_deferred_operations(vm_name)
+    assert len(deferred_before) == 1, "Deferred entry should exist before dry-run"
+
+    # Step 3: Set dry_run = True and run the pipeline.
+    core.dry_run = True
+    result = core.run(vm_name)
+
+    # --- Assertions ---
+
+    # (a) Result carries dry_run=True and no actions were executed.
+    assert result.dry_run is True, f"Expected result.dry_run=True, got {result.dry_run}"
+    assert result.actions == [], f"Expected no actions in dry-run mode, got {result.actions}"
+
+    # (b) At least one blockcommit prediction with a per-disk ``disk`` field.
+    blockcommit_preds = [p for p in result.predictions if p.action == "blockcommit"]
+    assert len(blockcommit_preds) > 0, (
+        f"Expected at least one blockcommit prediction, "
+        f"got predictions={[(p.action, p.name, p.disk) for p in result.predictions]}"
+    )
+    for pred in blockcommit_preds:
+        assert pred.disk is not None, f"blockcommit prediction missing disk field: {pred}"
+
+    # (c) Deferred queue UNCHANGED after dry run (no queue rewrite).
+    deferred_after = state.get_deferred_operations(vm_name)
+    assert len(deferred_after) == len(deferred_before), (
+        f"Deferred queue size changed after dry-run: "
+        f"before={len(deferred_before)}, after={len(deferred_after)}"
+    )
+    assert deferred_after[0].snapshots == deferred_before[0].snapshots, (
+        f"Deferred entry snapshots changed after dry-run: "
+        f"before={deferred_before[0].snapshots}, after={deferred_after[0].snapshots}"
+    )
+
+    # (d) No blockcommit was executed — overlay file still exists on disk.
+    assert oldest_path.exists(), (
+        f"Oldest snapshot should still exist after dry-run (no real blockcommit): {oldest_path}"
+    )
+
+    # (e) Backing chain unchanged.
+    chain_len_after = _backing_chain_length(newest_path, shell)
+    assert chain_len_after is not None, "Should be able to get chain length after dry-run"
+    assert chain_len_after == chain_len_before, (
+        f"Backing chain length should be unchanged after dry-run: "
+        f"was {chain_len_before}, now {chain_len_after}"
+    )
+
+    # Cleanup: VM still running (dry-run is read-only), destroy it.
+    assert _vm_is_running(shell, vm_name), "VM should still be running after dry-run"
+    shell.run(["virsh", "destroy", vm_name], timeout=30)

@@ -27,6 +27,7 @@ from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import DiskConfig, GlobalConfig
 from qsnap.models.results import (
+    ActionRecord,
     BackupResult,
     RetentionResult,
     ShellResult,
@@ -907,6 +908,13 @@ def test_no_actions_in_dry_run_mutations(
     assert len(result.actions) == 0, (
         f"Dry-run should produce no mutation actions, got: {result.actions}"
     )
+    assert len(result.predictions) > 0, (
+        f"Dry-run should produce predictions, got: {result.predictions}"
+    )
+    assert all(isinstance(p, ActionRecord) for p in result.predictions), (
+        "All predictions must be ActionRecord instances"
+    )
+    assert result.dry_run is True, "PipelineResult.dry_run must be True for a dry-run"
 
 
 # ── test_multi_disk_actions_each_carry_disk ────────────────────────────────

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from qsnap.core import VMRunResult
+from qsnap.core import PipelineResult, VMRunResult
 from qsnap.models.results import (
     ActionRecord,
     BackupResult,
@@ -45,6 +45,7 @@ def test_snapshot_result_success():
     assert result.path == Path("/snapshots/testvm.20250101")
     assert result.new_allocation == 1024
     assert result.error is None
+    assert result.disk is None  # new optional disk field defaults to None
     # Verify the dataclass is declared frozen.
     assert result.__dataclass_params__.frozen is True
 
@@ -479,6 +480,77 @@ def test_action_record_error_disk_none():
     assert record.action == "error"
     assert record.error == "pipeline failure"
     assert record.disk is None
+
+
+# ── PipelineResult ────────────────────────────────────────────────────────
+
+
+def test_pipeline_result_predictions_default_empty():
+    """PipelineResult.predictions defaults to an empty list via default_factory.
+
+    Two independently constructed instances must not share the same list
+    object (default_factory correctness — no mutable-default trap).
+    """
+    result1 = PipelineResult()
+    result2 = PipelineResult()
+
+    # Default predictions is an empty list (not None).
+    assert result1.predictions == []
+    assert isinstance(result1.predictions, list)
+    assert result2.predictions == []
+    assert isinstance(result2.predictions, list)
+
+    # Two independently constructed instances must not share the same
+    # list object (default_factory creates a new list each time).
+    assert result1.predictions is not result2.predictions
+
+    # Other defaults are consistent.
+    assert result1.actions == []
+    assert result1.results == []
+    assert result1.dry_run is False
+    assert result1.config_path is None
+
+
+def test_pipeline_result_predictions_dry_run():
+    """PipelineResult carries predictions and dry_run flag; frozen dataclass."""
+    record = ActionRecord(
+        action="snapshot_create",
+        vm_name="testvm",
+        name="testvm.20260701T120000_vda",
+        path=Path("/snapshots/testvm.20260701T120000_vda"),
+        disk="vda",
+    )
+
+    result = PipelineResult(
+        predictions=[record],
+        dry_run=True,
+    )
+
+    # Predictions channel holds the supplied ActionRecord.
+    assert len(result.predictions) == 1
+    assert result.predictions[0] is record
+    assert result.predictions[0].action == "snapshot_create"
+    assert result.predictions[0].vm_name == "testvm"
+    assert result.predictions[0].disk == "vda"
+
+    # dry_run flag is correctly set.
+    assert result.dry_run is True
+
+    # Verify the dataclass is declared frozen (consistent pattern with
+    # existing tests in this file).
+    assert result.__dataclass_params__.frozen is True
+
+    # Mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.predictions = []
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.dry_run = False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.actions = [record]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.results = []
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.config_path = "/mutated"
 
 
 # ── ReconcileResult ─────────────────────────────────────────────────────────

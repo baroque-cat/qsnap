@@ -472,12 +472,12 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "dryrun_full.toml")
     factory = DefaultFactory(shell, state)
     core = Core(config=config, factory=factory, state=state, shell=shell)
-    core._dry_run = True
+    core.dry_run = True
 
     # Step 4: Run pipeline in dry-run mode.
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        core.run(vm_name)
+        result = core.run(vm_name)
 
     # Verify dry-run log message.
     dry_run_logs = [r.message for r in caplog.records if "Would create FULL backup" in r.message]
@@ -495,6 +495,17 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
     assert len(chain_length_logs) >= 1, (
         f"Expected chain_length in dry-run log. "
         f"Logs: {[r.message for r in caplog.records if 'chain_length' in r.message]}"
+    )
+
+    # ---- dry-run PipelineResult predictions assertions ----
+    assert result.dry_run is True, f"Expected result.dry_run=True, got {result.dry_run}"
+    assert result.actions == [], f"Expected no actions in dry-run mode, got {result.actions}"
+    assert len(result.predictions) > 0, (
+        f"Expected predictions in dry-run mode, got {result.predictions}"
+    )
+    assert any("FULL" in p.name for p in result.predictions), (
+        f"Expected a FULL backup prediction in dry-run mode, "
+        f"got {[(p.action, p.name, p.disk) for p in result.predictions]}"
     )
 
     # Step 5: No FULL files created on target.

@@ -1,0 +1,132 @@
+# Dry-Run Prediction — Delta Spec
+
+## ADDED Requirements
+
+### Requirement: Simulated future snapshots in dry-run
+
+In dry-run mode, when the snapshot gate passes (always mode, or onchange mode with at least one changed disk), `Core._create_snapshot()` SHALL build one simulated `SnapshotInfo` per configured disk instead of returning an empty list. Each simulated snapshot SHALL carry: a predicted name produced by the real `_generate_snapshot_name()` function, the path `<effective snapshot_dir>/<name>.qcow2`, `timestamp` = current time, `allocation` = the disk's current allocation obtained read-only via `IChangeDetector.has_changed()`, and `disk` = the disk target. Simulated snapshots SHALL NOT be written to `IStateManager`, and no `virsh snapshot-create-as` command SHALL be executed. Each simulated snapshot SHALL be logged at INFO level with VM and disk context and its allocation estimate. Predicted names are illustrative — a later real run produces its own timestamp and hex suffix.
+
+#### Scenario: Multi-disk VM produces per-disk simulated snapshots
+- **WHEN** `qsnap -n run` is executed for a VM with disks `vda` and `vdb` in snapshot-always mode
+- **THEN** one simulated `SnapshotInfo` is produced for `vda` and one for `vdb`
+- **AND** each is logged at INFO with the VM name, disk target, predicted name, and allocation estimate
+- **AND** `IStateManager.record_snapshot()` is never called
+
+#### Scenario: Onchange gate closed produces no simulated snapshots
+- **WHEN** `qsnap -n run` is executed in onchange mode and no disk has changed
+- **THEN** no simulated snapshots are produced and no snapshot prediction is logged
+
+#### Scenario: Simulated snapshot allocation comes from read-only detection
+- **WHEN** a simulated snapshot is built for disk `vda`
+- **THEN** its `allocation` equals `ChangeResult.current_allocation` returned by the change detector
+- **AND** no mutating shell command is executed to obtain it
+
+### Requirement: Retention prediction against post-run state
+
+In dry-run mode, `Core._evaluate_snapshot_retention()` SHALL merge the simulated snapshots (Requirement: Simulated future snapshots in dry-run) with the snapshots read from `IStateManager` before per-disk grouping and retention evaluation. The predicted keep/remove split SHALL reflect the post-run world. In non-dry-run mode the merge input SHALL be absent and behavior SHALL be unchanged.
+
+#### Scenario: Retention counts the would-be-created snapshot
+- **WHEN** disk `vda` has 2 snapshots in state, `snapshot_chain_length = 2`, and dry-run simulates a third snapshot
+- **THEN** the retention prediction marks the oldest existing snapshot for removal
+- **AND** the simulated snapshot is in the keep set
+
+#### Scenario: Real run behavior unchanged
+- **WHEN** the pipeline runs with dry-run disabled
+- **THEN** retention evaluation reads only `IStateManager` snapshots, exactly as before this change
+
+### Requirement: Backup steps evaluated with simulated snapshots
+
+In dry-run mode, `Core._execute_backup_steps()` SHALL pass the simulated snapshots to `_backup_target()` merged with the snapshots read from `IStateManager`. The per-disk FULL decision and the incremental transfer list SHALL be evaluated against this merged post-run set. In non-dry-run mode behavior SHALL be unchanged.
+
+#### Scenario: First run predicts FULL sourced from simulated snapshot
+- **WHEN** `qsnap -n run` is executed for a VM with no snapshots in state and one configured target
+- **THEN** the per-disk FULL decision sees the simulated snapshot
+- **AND** a FULL prediction is emitted naming the simulated snapshot as source
+
+### Requirement: Incremental transfer prediction
+
+In dry-run mode, `Core._backup_target()` SHALL predict the incremental transfer list instead of silently skipping it. The predicted transfer list SHALL be the merged snapshots minus FULL sources created this run minus snapshots already present on the target (determined via the read-only `provider.list(target)`). For each predicted transfer, Core SHALL log an INFO line with VM, disk, snapshot name, target, and an approximate size estimate, and SHALL record a prediction entry. The size estimate SHALL be the snapshot file `actual-size` from read-only `qemu-img info --force-share` when the file exists, or the simulated allocation when it does not. Estimates are upper bounds and SHALL be presented as approximate.
+
+#### Scenario: Two untransferred snapshots produce two predictions
+- **WHEN** state holds snapshots `s1`, `s2` for disk `vda`, neither exists on the target, and no FULL is predicted
+- **THEN** dry-run logs one transfer prediction per snapshot with name, target, and approximate size
+- **AND** no NBD export, checkpoint, or file write occurs
+
+#### Scenario: Snapshot already on target is not predicted
+- **WHEN** snapshot `s1` already exists on the target as a file
+- **THEN** no transfer prediction is emitted for `s1`
+
+### Requirement: FULL backup prediction with size estimate
+
+In dry-run mode, when the per-disk FULL decision determines a FULL would be created, Core SHALL log an INFO prediction containing the disk target, the transfer method, the VM running state, and an estimated standalone size computed read-only as the sum of `actual-size` over the source snapshot's backing chain (`qemu-img info --force-share --backing-chain --output=json`). The chain-size estimation logic SHALL be shared with `Core.fork()` via a single helper. When the estimation command fails, the prediction SHALL still be emitted with size unknown.
+
+#### Scenario: FULL prediction carries chain size estimate
+- **WHEN** dry-run predicts a FULL for disk `vda` sourced from a snapshot whose backing chain sums to 1 GiB of `actual-size`
+- **THEN** the prediction log includes the disk, method, VM state, and an approximate size of 1 GiB
+
+#### Scenario: Estimation failure degrades gracefully
+- **WHEN** the `qemu-img info --backing-chain` call fails during dry-run
+- **THEN** the FULL prediction is still logged, with the size marked unknown
+- **AND** the pipeline does not abort
+
+### Requirement: Backup retention prediction includes predicted FULLs
+
+In dry-run mode, when a new FULL is predicted for a disk on a target, `Core._evaluate_backup_retention()` SHALL include the predicted FULL as an additional chain (timestamp = current time) in the generation count. Backup deletions that become eligible only because of the predicted FULL SHALL be predicted with an explicit condition that they execute only after the new FULL passes verification (verify-before-delete gate). In non-dry-run mode behavior SHALL be unchanged.
+
+#### Scenario: Generation rollover predicted
+- **WHEN** a target has 1 existing FULL generation, `target_keep_generations = 1`, and dry-run predicts a new FULL for disk `vda`
+- **THEN** the old generation's backups appear in the deletion prediction
+- **AND** each such deletion is marked conditional on new-FULL verification
+
+### Requirement: Per-disk blockcommit prediction
+
+In dry-run mode, `Core._blockcommit_snapshots()` SHALL log the predicted merges grouped by disk target, listing the snapshot names per disk, instead of a per-VM counter. One prediction entry per disk SHALL be recorded.
+
+#### Scenario: Two disks produce two per-disk predictions
+- **WHEN** the retention remove set contains 2 snapshots of `vda` and 1 snapshot of `vdb`
+- **THEN** dry-run logs one blockcommit prediction for `vda` naming both snapshots and one for `vdb` naming its snapshot
+- **AND** no `virsh blockcommit` or `qemu-img commit` command is executed
+
+### Requirement: Deferred drain prediction without mutation
+
+In dry-run mode, `Core._check_deferred_operations()` SHALL NOT execute any blockcommit, SHALL NOT remove or re-queue deferred entries, SHALL NOT remove snapshots from state, and SHALL NOT refresh domain XML. For each queued entry Core SHALL compute the read-only commit plan (`_plan_blockcommit()`, which may call `virsh domstate`) and log a per-disk prediction of what would be drained, including the deferral split when the plan produces one. If the VM state cannot be determined, the prediction SHALL state that a drain would be attempted with the VM state unknown.
+
+#### Scenario: Deferred queue survives dry-run byte-identical
+- **WHEN** `qsnap -n run` is executed with a queued deferred blockcommit for disk `vda`
+- **THEN** the deferred queue in state is unchanged after the run
+- **AND** no lifecycle manager `blockcommit()` is called
+- **AND** a per-disk prediction naming the queued snapshots is logged
+
+### Requirement: Zero-mutation invariant for the dry-run pipeline
+
+A dry-run pipeline execution (`run`, `snapshot`, `backup`, `prune`) SHALL NOT create, modify, or delete any file in snapshot directories or on backup targets, SHALL NOT write to `IStateManager`, SHALL NOT write a transaction log, and SHALL NOT modify domain XML. State-hygiene self-healing (phantom FULL removal with dependency cascade, stale `last_backup_allocation` baseline cleanup) SHALL be predicted with `[dry-run] Would ...` logs instead of being executed; the in-memory detection that drives downstream decisions (e.g. filtering phantom FULLs out of the FULL decision input) remains active because it performs no state write. Read-only shell commands are permitted: `qemu-img info`, `virsh domstate` / `virsh dominfo` / `virsh domblklist` / `virsh dumpxml` / `virsh checkpoint-list` / `virsh --version`, `test`, `which`, `find`, `du`, and read-only listing commands. Every shell call issued during a dry-run SHALL be read-only.
+
+#### Scenario: State and filesystem unchanged after dry-run
+- **WHEN** `qsnap -n run` completes for a VM
+- **THEN** the full `IStateManager` content for that VM is identical to the pre-run content
+- **AND** no new file exists in the VM's snapshot directories or on its targets
+- **AND** no transaction log line was written
+
+#### Scenario: Dry-run with phantom FULL records predicts cleanup without state writes
+- **WHEN** `qsnap -n run` executes while state holds a FULL backup record whose file no longer exists on disk (with incremental dependency records attached)
+- **THEN** dry-run logs a `[dry-run] Would remove phantom FULL ...` prediction including the dependency cascade count obtained read-only
+- **AND** the phantom FULL record and its dependency records remain in `IStateManager` after the run
+- **AND** any stale baseline cleanup that would follow is likewise logged, not executed
+
+#### Scenario: Dry-run with stale baseline and no FULLs predicts baseline cleanup
+- **WHEN** `qsnap -n run` executes while state holds a `last_backup_allocation` baseline for a target disk but no FULL backup records for that target
+- **THEN** dry-run logs a `[dry-run] Would clear stale last_backup_allocation ...` prediction for that target and disk
+- **AND** the baseline remains in `IStateManager` after the run
+
+### Requirement: Structured predictions channel
+
+In dry-run mode, Core SHALL accumulate one prediction record per predicted mutation in a predictions list carried by `PipelineResult.predictions` (field defined in capability `action-audit-trail`). Prediction records SHALL use the `ActionRecord` structure with VM and disk context. In non-dry-run mode `PipelineResult.predictions` SHALL be empty. Predictions SHALL never be written to the transaction log.
+
+#### Scenario: Dry-run populates predictions per disk
+- **WHEN** `qsnap -n run` completes for a two-disk VM that would create 2 snapshots, merge 1 snapshot, create 1 FULL, and transfer 1 incremental
+- **THEN** `result.predictions` contains records for each predicted action with correct `vm_name` and `disk`
+- **AND** `result.actions` is empty
+
+#### Scenario: Real run leaves predictions empty
+- **WHEN** `qsnap run` completes with dry-run disabled
+- **THEN** `result.predictions` is empty and `result.actions` is populated as before

@@ -80,10 +80,18 @@ class VMRunResult:
 
 @dataclass(frozen=True)
 class PipelineResult:
-    """Aggregate pipeline result for all processed VMs."""
+    """Aggregate pipeline result for all processed VMs.
+
+    ``actions`` is the audit trail of EXECUTED actions (always empty in
+    dry-run).  ``predictions`` is the dry-run counterpart: one
+    :class:`ActionRecord` per mutation the run WOULD have performed
+    (always empty in real runs).  Predictions are never written to the
+    transaction log (design D7 of fix-dry-run-predictions).
+    """
 
     results: list[VMRunResult] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     actions: list[ActionRecord] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+    predictions: list[ActionRecord] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     dry_run: bool = False
     config_path: str | None = None
 
@@ -158,6 +166,25 @@ class Core:
         # Action audit trail — accumulated during _run_pipeline(), cleared
         # at the start of each run (design D1: ephemeral, single-run scope).
         self._actions: list[ActionRecord] = []
+        # Dry-run prediction channel — parallel to _actions (design D7 of
+        # fix-dry-run-predictions).  Accumulated during _run_pipeline() in
+        # dry-run mode only; real runs accumulate _actions instead.  Never
+        # written to the transaction log.
+        self._predictions: list[ActionRecord] = []
+        # Per-VM simulated snapshots produced by the most recent
+        # _execute_snapshot_steps() dry-run; threaded by _execute_pipeline()
+        # into the backup steps so retention and transfer predictions
+        # evaluate the post-run state (design D1/D3 of
+        # fix-dry-run-predictions).  Always empty in real runs.
+        self._simulated_snapshots: list[SnapshotInfo] = []
+        # Dry-run state-hygiene dedupe: _validate_state_at_startup() runs
+        # twice per pipeline (snapshot + backup steps) and _backup_target()
+        # re-detects the same phantom FULLs.  In dry-run nothing is written
+        # to state, so every detection would re-log; keys recorded here are
+        # logged at most once per run.  Reset in _run_pipeline().  Real runs
+        # never consult this set (zero-mutation invariant, design D11 of
+        # fix-dry-run-predictions).
+        self._healing_logged: set[str] = set()
         # Targets that need a forced FULL backup (auto-recovery detected
         # broken chains at startup).  Populated by
         # _validate_state_at_startup(); consumed and cleared by
@@ -1405,30 +1432,9 @@ class Core:
 
         source_path = snapshot_info.path
 
-        # Step 2: Estimate chain size via qemu-img info --backing-chain
-        # --force-share: the source may be the active layer of a running
-        # VM with an exclusive write lock (design D1).
-        chain_size = 0
-        info_result = self._shell.run(
-            [
-                "qemu-img",
-                "info",
-                "--force-share",
-                "--backing-chain",
-                "--output=json",
-                str(source_path),
-            ],
-            timeout=30,
-            check=True,
-        )
-        if info_result.success:
-            try:
-                chain_data = cast(list[dict[str, object]], json.loads(info_result.stdout))
-                if isinstance(chain_data, list):  # type: ignore[reportUnnecessaryIsInstance]
-                    for item in chain_data:
-                        chain_size += int(cast(int, item.get("actual-size", 0)))
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
+        # Step 2: Estimate chain size (read-only shared helper; design D5
+        # of fix-dry-run-predictions).
+        chain_size = self._estimate_chain_size(source_path) or 0
 
         # Step 3: Log estimated chain size
         size_str = self._format_bytes(chain_size)
@@ -1502,6 +1508,70 @@ class Core:
             error=None,
             disk=snapshot_info.disk,
         )
+
+    def _estimate_chain_size(self, path: Path) -> int | None:
+        """Estimate the total allocated size of a qcow2 backing chain.
+
+        Read-only: runs ``qemu-img info --force-share --backing-chain
+        --output=json`` and sums ``actual-size`` across all chain
+        members.  ``--force-share`` is required because the source may
+        be the active layer of a running VM holding an exclusive write
+        lock.
+
+        Returns the summed size in bytes (``0`` when the chain was
+        queried but no member reported a size), or ``None`` when the
+        estimation failed (command failure or unparseable output).
+        Shared by :meth:`fork` and dry-run FULL-backup predictions
+        (design D5 of fix-dry-run-predictions).
+        """
+        info_result = self._shell.run(
+            [
+                "qemu-img",
+                "info",
+                "--force-share",
+                "--backing-chain",
+                "--output=json",
+                str(path),
+            ],
+            timeout=30,
+            check=True,
+        )
+        if not info_result.success:
+            return None
+        chain_size = 0
+        try:
+            chain_data = cast(list[dict[str, object]], json.loads(info_result.stdout))
+            if isinstance(chain_data, list):  # type: ignore[reportUnnecessaryIsInstance]
+                for item in chain_data:
+                    chain_size += int(cast(int, item.get("actual-size", 0)))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        return chain_size
+
+    def _estimate_file_actual_size(self, path: Path) -> int | None:
+        """Return the read-only ``actual-size`` (bytes) of one qcow2 file.
+
+        Uses ``qemu-img info --force-share --output=json``
+        (``--force-share``: the file may be the active layer of a
+        running VM).  Returns ``None`` when the file does not exist or
+        the query fails.  Used for dry-run incremental transfer
+        predictions (design D4 of fix-dry-run-predictions).
+        """
+        if not os.path.exists(str(path)):
+            return None
+        info_result = self._shell.run(
+            ["qemu-img", "info", "--force-share", "--output=json", str(path)],
+            timeout=30,
+            check=True,
+        )
+        if not info_result.success:
+            return None
+        try:
+            info = json.loads(info_result.stdout)
+        except json.JSONDecodeError:
+            return None
+        actual = info.get("actual-size") if isinstance(info, dict) else None
+        return actual if isinstance(actual, int) else None
 
     @staticmethod
     def _format_bytes(size: int) -> str:
@@ -2270,6 +2340,8 @@ class Core:
         # Clear the action audit trail at the start of each run
         # (design D1: ephemeral, single-run scope).
         self._actions = []
+        self._predictions = []
+        self._healing_logged = set()
         vms = self._filter_vms(vm_filter)
         results: list[VMRunResult] = []
         for vm in vms:
@@ -2330,6 +2402,7 @@ class Core:
         return PipelineResult(
             results=results,
             actions=list(self._actions),
+            predictions=list(self._predictions),
             dry_run=self._dry_run,
             config_path=str(self._config.config_path),
         )
@@ -2745,14 +2818,29 @@ class Core:
                             self._state.get_last_backup_allocation(str(target.path), disk.target)
                             is not None
                         ):
-                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
-                            logger.info(
-                                "[startup] %s: cleared stale last_backup_allocation "
-                                "for target %s disk %s (no FULLs in state)",
-                                vm_config.name,
-                                target.path,
-                                disk.target,
-                            )
+                            if self._dry_run:
+                                # Zero-mutation invariant: predict the
+                                # baseline cleanup, never write state.
+                                key = f"baseline:{target.path}:{disk.target}"
+                                if key not in self._healing_logged:
+                                    self._healing_logged.add(key)
+                                    logger.info(
+                                        "[dry-run] Would clear stale last_backup_allocation "
+                                        "for target %s disk %s (no FULLs in state)",
+                                        target.path,
+                                        disk.target,
+                                    )
+                            else:
+                                self._state.clear_last_backup_allocation(
+                                    str(target.path), disk.target
+                                )
+                                logger.info(
+                                    "[startup] %s: cleared stale last_backup_allocation "
+                                    "for target %s disk %s (no FULLs in state)",
+                                    vm_config.name,
+                                    target.path,
+                                    disk.target,
+                                )
                 except Exception as exc:
                     logger.warning(
                         "[startup] %s: failed to clear baseline for target %s: %s",
@@ -2766,45 +2854,91 @@ class Core:
             has_phantom = False
             for full in all_fulls:
                 if not os.path.exists(str(full.path)):
-                    try:
-                        self._state.remove_full_backup(str(target.path), full.name)
-                        removed = self._state.remove_all_incremental_dependencies(
-                            str(target.path), full.name
-                        )
-                        logger.warning(
-                            "[startup] %s: phantom FULL %s removed (cascade: %d deps cleaned)",
-                            vm_config.name,
-                            full.name,
-                            removed,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[startup] %s: failed to remove phantom FULL %s: %s",
-                            vm_config.name,
-                            full.name,
-                            exc,
-                        )
+                    if self._dry_run:
+                        # Zero-mutation invariant: predict the cleanup with
+                        # a read-only cascade count, never write state.
+                        key = f"phantom:{target.path}:{full.name}"
+                        if key not in self._healing_logged:
+                            self._healing_logged.add(key)
+                            try:
+                                cascade = len(
+                                    self._state.get_incremental_dependencies(
+                                        str(target.path), full.name
+                                    )
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[startup] %s: failed to count dependencies "
+                                    "of phantom FULL %s: %s",
+                                    vm_config.name,
+                                    full.name,
+                                    exc,
+                                )
+                                cascade = 0
+                            logger.warning(
+                                "[dry-run] Would remove phantom FULL %s from state "
+                                "(cascade: %d deps would be cleaned)",
+                                full.name,
+                                cascade,
+                            )
+                    else:
+                        try:
+                            self._state.remove_full_backup(str(target.path), full.name)
+                            removed = self._state.remove_all_incremental_dependencies(
+                                str(target.path), full.name
+                            )
+                            logger.warning(
+                                "[startup] %s: phantom FULL %s removed (cascade: %d deps cleaned)",
+                                vm_config.name,
+                                full.name,
+                                removed,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[startup] %s: failed to remove phantom FULL %s: %s",
+                                vm_config.name,
+                                full.name,
+                                exc,
+                            )
                     has_phantom = True
             if has_phantom:
-                # Re-check: if no FULLs remain, clear per-disk baselines
-                try:
-                    remaining = self._state.get_full_backups(str(target.path))
-                    if not remaining:
-                        for disk in vm_config.disks:
-                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
-                        logger.info(
-                            "[startup] %s: cleared last_backup_allocation "
-                            "for target %s (no FULLs remain after phantom cleanup)",
+                if self._dry_run:
+                    # Zero-mutation invariant: state still holds the phantom
+                    # entries (nothing was removed), so a state re-check
+                    # would still see them.  Compute the post-cleanup
+                    # remainder in memory and predict the baseline clear.
+                    remaining_real = [f for f in all_fulls if os.path.exists(str(f.path))]
+                    if not remaining_real:
+                        key = f"baseline-after-phantom:{target.path}"
+                        if key not in self._healing_logged:
+                            self._healing_logged.add(key)
+                            logger.info(
+                                "[dry-run] Would clear last_backup_allocation "
+                                "for target %s (no FULLs would remain after phantom cleanup)",
+                                target.path,
+                            )
+                else:
+                    # Re-check: if no FULLs remain, clear per-disk baselines
+                    try:
+                        remaining = self._state.get_full_backups(str(target.path))
+                        if not remaining:
+                            for disk in vm_config.disks:
+                                self._state.clear_last_backup_allocation(
+                                    str(target.path), disk.target
+                                )
+                            logger.info(
+                                "[startup] %s: cleared last_backup_allocation "
+                                "for target %s (no FULLs remain after phantom cleanup)",
+                                vm_config.name,
+                                target.path,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "[startup] %s: failed to re-check FULLs for target %s: %s",
                             vm_config.name,
                             target.path,
+                            exc,
                         )
-                except Exception as exc:
-                    logger.warning(
-                        "[startup] %s: failed to re-check FULLs for target %s: %s",
-                        vm_config.name,
-                        target.path,
-                        exc,
-                    )
 
         # Auto-recovery: detect and delete broken-chain backups (spec:
         # auto-recovery).  Runs BEFORE retention evaluation to ensure
@@ -2934,7 +3068,12 @@ class Core:
         # Step 1b: State-vs-disk validation (non-fatal, before onchange gate)
         self._validate_state_at_startup(vm_config)
         self._execute_snapshot_steps(vm_config)
-        return self._execute_backup_steps(vm_config)
+        # Dry-run: thread simulated snapshots into the backup steps so
+        # FULL/transfer/retention predictions evaluate the post-run
+        # state (design D3 of fix-dry-run-predictions).
+        return self._execute_backup_steps(
+            vm_config, extra_snapshots=self._simulated_snapshots or None
+        )
 
     # ── snapshot steps (1-4) ──────────────────────────────────────────
 
@@ -2942,7 +3081,14 @@ class Core:
         """Steps 1-4: change detection, snapshot, retention, lifecycle.
 
         Returns False (no backup steps, so no backup failure).
+
+        In dry-run mode, simulated snapshots created by step 2 are kept
+        in ``self._simulated_snapshots`` so :meth:`_execute_pipeline`
+        can thread them into the backup steps (design D3 of
+        fix-dry-run-predictions).
         """
+        self._simulated_snapshots = []
+
         # Step 0: Deferred blockcommit check
         self._check_deferred_operations(vm_config)
 
@@ -2964,11 +3110,32 @@ class Core:
                 should_snapshot = False
 
         # Step 2: Snapshot creation
+        extra_snapshots: list[SnapshotInfo] = []
         if should_snapshot:
-            self._create_snapshot(vm_config)
+            created = self._create_snapshot(vm_config)
+            if self._dry_run:
+                # Simulated snapshots (design D1): rebuild SnapshotInfo
+                # records from the tagged SnapshotResults and thread them
+                # into retention + backup evaluation so predictions
+                # reflect the post-run state.
+                now = datetime.now()
+                extra_snapshots = [
+                    SnapshotInfo(
+                        name=r.name,
+                        path=r.path,
+                        timestamp=now,
+                        allocation=r.new_allocation,
+                        disk=r.disk or "",
+                    )
+                    for r in created
+                    if r.success
+                ]
+                self._simulated_snapshots = extra_snapshots
 
         # Step 3: Snapshot retention
-        retention_result = self._evaluate_snapshot_retention(vm_config)
+        retention_result = self._evaluate_snapshot_retention(
+            vm_config, extra_snapshots=extra_snapshots or None
+        )
 
         # Step 4: Snapshot lifecycle (blockcommit removed snapshots)
         if retention_result and retention_result.remove:
@@ -2998,6 +3165,13 @@ class Core:
         """
         deferred = self._state.get_deferred_operations(vm_config.name)
         if not deferred:
+            return
+
+        if self._dry_run:
+            # Dry-run guard (design D8 of fix-dry-run-predictions):
+            # predict the drain read-only — no blockcommit execution, no
+            # state removals, no queue rewrite, no XML refresh.
+            self._predict_deferred_drain(vm_config, deferred)
             return
 
         remaining: list[DeferredBlockcommit] = []
@@ -3121,6 +3295,144 @@ class Core:
         if offline_drained:
             self._refresh_domain_backing_store(vm_config)
 
+    def _predict_deferred_drain(
+        self,
+        vm_config: VMConfig,
+        deferred: list[DeferredBlockcommit],
+    ) -> None:
+        """Dry-run only: predict the deferred blockcommit drain read-only.
+
+        Computes the same adaptive drain plan as the real path via
+        :meth:`_plan_blockcommit` (one read-only ``virsh domstate`` per
+        disk) but performs NO mutations: no blockcommit is executed, no
+        snapshot is removed from state, the deferred queue is not
+        rewritten, and the domain XML is not refreshed (design D8 of
+        fix-dry-run-predictions).
+
+        One ``blockcommit`` prediction is recorded per disk that would
+        be drained (fully or partially).  When the VM state cannot be
+        determined (``domstate`` failed), the drain would still be
+        attempted — predicted with unknown VM state.
+        """
+        for entry in deferred:
+            snapshots = [
+                s for s in self._state.get_snapshots(vm_config.name) if s.name in entry.snapshots
+            ]
+            if not snapshots:
+                logger.info(
+                    "[dry-run] Would drop stale deferred entry for VM %s disk %s "
+                    "(snapshots no longer in state)",
+                    vm_config.name,
+                    entry.disk,
+                )
+                continue
+
+            disk_cfg = vm_config.get_disk(entry.disk)
+            if disk_cfg is None:
+                logger.info(
+                    "[dry-run] Would drop deferred entry referencing unconfigured "
+                    "disk %s for VM %s",
+                    entry.disk,
+                    vm_config.name,
+                )
+                continue
+
+            plan = self._plan_blockcommit(vm_config, entry.disk, snapshots)
+            if plan is None:
+                # domstate failed — the drain would be attempted without
+                # knowing the VM state (degraded prediction, design D8).
+                logger.info(
+                    "[dry-run] Would attempt to drain %d deferred blockcommit(s) "
+                    "for disk %s of VM %s (VM state unknown): %s",
+                    len(snapshots),
+                    entry.disk,
+                    vm_config.name,
+                    ", ".join(s.name for s in snapshots),
+                )
+                self._predictions.append(
+                    ActionRecord(
+                        action="blockcommit",
+                        vm_name=vm_config.name,
+                        name=", ".join(s.name for s in snapshots),
+                        path=Path(),
+                        disk=entry.disk,
+                    )
+                )
+                continue
+
+            if not plan.committable:
+                logger.info(
+                    "[dry-run] Would skip deferred blockcommit of %d snapshot(s) "
+                    "for disk %s of VM %s — not committable in current VM "
+                    "state (reason: %s)",
+                    len(snapshots),
+                    entry.disk,
+                    vm_config.name,
+                    plan.defer_reason,
+                )
+                continue
+
+            suffix = (
+                f" ({len(plan.deferrable)} deferred: {', '.join(s.name for s in plan.deferrable)})"
+                if plan.deferrable
+                else ""
+            )
+            logger.info(
+                "[dry-run] Would drain %d deferred blockcommit(s) for disk %s of VM %s: %s%s",
+                len(plan.committable),
+                entry.disk,
+                vm_config.name,
+                ", ".join(s.name for s in plan.committable),
+                suffix,
+            )
+            self._predictions.append(
+                ActionRecord(
+                    action="blockcommit",
+                    vm_name=vm_config.name,
+                    name=", ".join(s.name for s in plan.committable),
+                    path=Path(),
+                    disk=entry.disk,
+                )
+            )
+
+    def _simulate_snapshots(self, vm_config: VMConfig) -> list[SnapshotInfo]:
+        """Dry-run only: build in-memory simulated snapshots (design D1/D2).
+
+        One simulated :class:`SnapshotInfo` per configured disk — the
+        same set a real run would create.  Names come from the real
+        :meth:`_generate_snapshot_name` (illustrative: a real run would
+        produce different hex suffixes), paths resolve into each disk's
+        snapshot directory, timestamps are "now", and allocations come
+        from a read-only :meth:`IChangeDetector.has_changed` query.
+
+        No state writes, no ``virsh snapshot-create-as`` — the simulated
+        snapshots are threaded into retention and backup evaluation so
+        dry-run predictions reflect the post-run state.
+        """
+        detector = self._factory.create_change_detector(vm_config.change_detection_mode)
+        simulated: list[SnapshotInfo] = []
+        for disk in self._resolve_disks(vm_config):
+            snapshot_name = self._generate_snapshot_name(vm_config, disk.target)
+            snapshot_dir = vm_config.snapshot_dir_for(disk)
+            if snapshot_dir is None:
+                logger.error(
+                    "No snapshot_dir resolved for disk %s of VM %s — skipping",
+                    disk.target,
+                    vm_config.name,
+                )
+                continue
+            change_result = detector.has_changed(vm_config, disk.target)
+            simulated.append(
+                SnapshotInfo(
+                    name=snapshot_name,
+                    path=snapshot_dir / f"{snapshot_name}.qcow2",
+                    timestamp=datetime.now(),
+                    allocation=change_result.current_allocation,
+                    disk=disk.target,
+                )
+            )
+        return simulated
+
     def _create_snapshot(self, vm_config: VMConfig) -> list[SnapshotResult]:
         """Step 2: Create a snapshot for each disk of *vm_config*.
 
@@ -3132,13 +3444,44 @@ class Core:
 
         If one disk fails, logs the error and continues with the next
         (design D2 — partial failure tolerance).
+
+        Dry-run: no snapshot is created.  Simulated snapshots (design D1
+        of fix-dry-run-predictions) are logged per disk, recorded as
+        ``snapshot_create`` predictions, and returned as tagged
+        :class:`SnapshotResult` objects so callers can thread them into
+        retention and backup evaluation.
         """
         if self._dry_run:
-            logger.info(
-                "[dry-run] Would create snapshot for VM %s",
-                vm_config.name,
-            )
-            return []
+            results: list[SnapshotResult] = []
+            for info in self._simulate_snapshots(vm_config):
+                logger.info(
+                    "[dry-run] Would create snapshot for disk %s of VM %s: %s (~%s allocation)",
+                    info.disk,
+                    vm_config.name,
+                    info.name,
+                    self._format_bytes(info.allocation),
+                )
+                self._predictions.append(
+                    ActionRecord(
+                        action="snapshot_create",
+                        vm_name=vm_config.name,
+                        name=info.name,
+                        path=info.path,
+                        size=info.allocation,
+                        disk=info.disk,
+                    )
+                )
+                results.append(
+                    SnapshotResult(
+                        success=True,
+                        name=info.name,
+                        path=info.path,
+                        new_allocation=info.allocation,
+                        error=None,
+                        disk=info.disk,
+                    )
+                )
+            return results
 
         disks = self._resolve_disks(vm_config)
         results: list[SnapshotResult] = []
@@ -3218,6 +3561,7 @@ class Core:
     def _evaluate_snapshot_retention(
         self,
         vm_config: VMConfig,
+        extra_snapshots: list[SnapshotInfo] | None = None,
     ) -> RetentionResult | None:
         """Step 3: Evaluate which snapshots to keep/remove (per-disk).
 
@@ -3238,8 +3582,15 @@ class Core:
         guarantees the newest N snapshots of each disk are never
         blockcommitted, even when ``chain_length`` is exceeded.  When
         ``preserve_min`` is 0 (default), the filter is inactive.
+
+        ``extra_snapshots`` (dry-run only, design D3 of
+        fix-dry-run-predictions): simulated snapshots merged with the
+        state records before evaluation so predictions reflect the
+        post-run state.  Real-run callers pass nothing.
         """
         snapshots = self._state.get_snapshots(vm_config.name)
+        if extra_snapshots:
+            snapshots = [*snapshots, *extra_snapshots]
         if not snapshots:
             return None
 
@@ -3697,11 +4048,40 @@ class Core:
             return
 
         if self._dry_run:
-            logger.info(
-                "[dry-run] Would blockcommit %d snapshots for VM %s",
-                len(to_merge),
-                vm_config.name,
-            )
+            # Per-disk predictions (design D9 of fix-dry-run-predictions):
+            # one blockcommit prediction per disk plus one snapshot_delete
+            # prediction per snapshot that retention would remove.
+            by_disk: dict[str, list[SnapshotInfo]] = {}
+            for sn in to_merge:
+                by_disk.setdefault(sn.disk, []).append(sn)
+            for disk, disk_snapshots in by_disk.items():
+                names = ", ".join(sn.name for sn in disk_snapshots)
+                logger.info(
+                    "[dry-run] Would blockcommit %d snapshot(s) for disk %s of VM %s: %s",
+                    len(disk_snapshots),
+                    disk,
+                    vm_config.name,
+                    names,
+                )
+                self._predictions.append(
+                    ActionRecord(
+                        action="blockcommit",
+                        vm_name=vm_config.name,
+                        name=names,
+                        path=Path(),
+                        disk=disk,
+                    )
+                )
+                for sn in disk_snapshots:
+                    self._predictions.append(
+                        ActionRecord(
+                            action="snapshot_delete",
+                            vm_name=vm_config.name,
+                            name=sn.name,
+                            path=sn.path,
+                            disk=disk,
+                        )
+                    )
             return
 
         # Group the remove set by disk target; each disk's chain is
@@ -4174,15 +4554,27 @@ class Core:
 
     # ── backup steps (5) ───────────────────────────────────────────────
 
-    def _execute_backup_steps(self, vm_config: VMConfig) -> bool:
+    def _execute_backup_steps(
+        self,
+        vm_config: VMConfig,
+        extra_snapshots: list[SnapshotInfo] | None = None,
+    ) -> bool:
         """Step 5: For each target — backup transfer → retention → cleanup.
 
         Returns True if any backup transfer failed.
+
+        ``extra_snapshots`` (dry-run only, design D3 of
+        fix-dry-run-predictions): simulated snapshots threaded from
+        :meth:`_execute_snapshot_steps`, merged with the state records
+        so backup predictions evaluate the post-run state.  Real-run
+        callers pass nothing.
         """
         # State-vs-disk validation (non-fatal, before onchange gate).
         # Ensures standalone ``qsnap backup`` also gets self-healing.
         self._validate_state_at_startup(vm_config)
         snapshots = self._state.get_snapshots(vm_config.name)
+        if extra_snapshots:
+            snapshots = [*snapshots, *extra_snapshots]
         backup_failed = False
         for target in vm_config.targets:
             if self._backup_target(vm_config, target, snapshots):
@@ -4412,6 +4804,10 @@ class Core:
         # data is fully contained in the new FULL anchors, so they are
         # excluded from the incremental transfer below (see transfer_list).
         full_source_names: set[str] = set()
+        # Dry-run only: disks for which a new FULL was predicted.  Threaded
+        # into backup retention/cleanup so predictions simulate the new
+        # chains (design D6 of fix-dry-run-predictions).
+        predicted_full_disks: list[str] = []
         if not skip_transfer:
             # Count-based FULL backup decision (design D2).
             # The decision is a simple count check: create a new
@@ -4426,6 +4822,25 @@ class Core:
                 for full in all_fulls:
                     if os.path.exists(str(full.path)):
                         filtered_fulls.append(full)
+                    elif self._dry_run:
+                        # Zero-mutation invariant: keep the in-memory
+                        # filtering (it drives the FULL decision below)
+                        # but predict the state cleanup instead of
+                        # writing it.
+                        key = f"phantom:{target.path}:{full.name}"
+                        if key not in self._healing_logged:
+                            self._healing_logged.add(key)
+                            cascade = len(
+                                self._state.get_incremental_dependencies(
+                                    str(target.path), full.name
+                                )
+                            )
+                            logger.warning(
+                                "[dry-run] Would remove phantom FULL %s from state "
+                                "(cascade: %d deps would be cleaned)",
+                                full.name,
+                                cascade,
+                            )
                     else:
                         # Cascade cleanup: remove FULL + all linked
                         # dependencies (phantom cascade).
@@ -4441,12 +4856,25 @@ class Core:
                         )
                 # Clear per-disk last_backup_allocation if no FULLs remain
                 if not filtered_fulls and all_fulls:
-                    for disk in vm_config.disks:
-                        self._state.clear_last_backup_allocation(str(target.path), disk.target)
-                    logger.info(
-                        "Cleared last_backup_allocation for target %s — no FULLs remain",
-                        target.path,
-                    )
+                    if self._dry_run:
+                        # Zero-mutation invariant: predict baseline cleanup.
+                        for disk in vm_config.disks:
+                            key = f"baseline:{target.path}:{disk.target}"
+                            if key not in self._healing_logged:
+                                self._healing_logged.add(key)
+                                logger.info(
+                                    "[dry-run] Would clear last_backup_allocation "
+                                    "for target %s disk %s (no FULLs would remain)",
+                                    target.path,
+                                    disk.target,
+                                )
+                    else:
+                        for disk in vm_config.disks:
+                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
+                        logger.info(
+                            "Cleared last_backup_allocation for target %s — no FULLs remain",
+                            target.path,
+                        )
                 all_fulls = filtered_fulls
 
                 # Determine per-disk whether a new FULL is needed and
@@ -4496,18 +4924,47 @@ class Core:
                     most_recent = max(disk_snaps, key=lambda s: s.timestamp)
 
                     if self._dry_run:
-                        # Log FULL-would-be-created without executing.
+                        # Log FULL-would-be-created without executing and
+                        # record a backup_full prediction (design D5 of
+                        # fix-dry-run-predictions).  The chain-size
+                        # estimate is read-only; on failure the prediction
+                        # degrades to "size unknown" but is still emitted.
                         vm_state = (
                             "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
                         )
                         chain_length = target.target_chain_length or 0
+                        chain_size = self._estimate_chain_size(most_recent.path)
+                        size_str = (
+                            f"~{self._format_bytes(chain_size)}"
+                            if chain_size is not None
+                            else "size unknown"
+                        )
                         logger.info(
                             "[dry-run] Would create FULL backup for disk %s "
-                            "(chain_length=%d, method=NBD, VM=%s)",
+                            "(%s, chain_length=%d, method=NBD, VM=%s)",
                             disk_target,
+                            size_str,
                             chain_length,
                             vm_state,
                         )
+                        # Illustrative FULL name (same naming convention as
+                        # the provider; a real run would use its own hex).
+                        full_name = (
+                            f"{vm_config.name}.FULL."
+                            f"{most_recent.timestamp.strftime('%Y%m%dT%H%M%S')}"
+                            f"_{disk_target}_{secrets.token_hex(3)}"
+                        )
+                        self._predictions.append(
+                            ActionRecord(
+                                action="backup_full",
+                                vm_name=vm_config.name,
+                                name=full_name,
+                                path=target.path / f"{full_name}.qcow2",
+                                size=chain_size or 0,
+                                disk=disk_target,
+                            )
+                        )
+                        predicted_full_disks.append(disk_target)
                         continue
 
                     def _create_full_operation(
@@ -4690,6 +5147,36 @@ class Core:
                             r.snapshot_name,
                             anchor,
                         )
+            else:
+                # Dry-run: predict incremental transfers read-only
+                # (design D4 of fix-dry-run-predictions).  Predicted
+                # list = merged snapshots minus FULL sources minus
+                # backups already present on the target.  Sizes are
+                # upper-bound estimates: the source file's actual-size
+                # when it exists, else the simulated allocation.
+                existing_names = {b.name for b in provider.list(target)}
+                for snap in snapshots:
+                    if snap.name in full_source_names or snap.name in existing_names:
+                        continue
+                    actual = self._estimate_file_actual_size(snap.path)
+                    approx = actual if actual is not None else snap.allocation
+                    logger.info(
+                        "[dry-run] Would transfer %s/%s → %s (~%s)",
+                        vm_config.name,
+                        snap.name,
+                        target.path,
+                        self._format_bytes(approx),
+                    )
+                    self._predictions.append(
+                        ActionRecord(
+                            action="backup_transfer",
+                            vm_name=vm_config.name,
+                            name=snap.name,
+                            path=target.path / f"{snap.name}.qcow2",
+                            size=approx,
+                            disk=snap.disk,
+                        )
+                    )
 
         # Update per-target per-disk baselines after successful backup
         # (onchange mode).  Each disk's baseline is its current_allocation
@@ -4714,8 +5201,16 @@ class Core:
         # is skipped, retention + cleanup still runs to clean expired
         # backups.
         if not full_verification_failed:
-            backups, retention_result = self._evaluate_backup_retention(vm_config, target)
-            self._cleanup_backups(vm_config, target, backups, retention_result)
+            backups, retention_result = self._evaluate_backup_retention(
+                vm_config, target, predicted_full_disks=predicted_full_disks or None
+            )
+            self._cleanup_backups(
+                vm_config,
+                target,
+                backups,
+                retention_result,
+                predicted_full_disks=predicted_full_disks or None,
+            )
 
         return backup_failed
 
@@ -4852,6 +5347,7 @@ class Core:
         self,
         vm_config: VMConfig,
         target: TargetConfig,
+        predicted_full_disks: list[str] | None = None,
     ) -> tuple[list[SnapshotInfo], RetentionResult | None]:
         """List backups on *target* and evaluate per-chain retention.
 
@@ -4863,6 +5359,14 @@ class Core:
 
         Returns ``(backups, retention_result)``.  When no backups
         exist, ``retention_result`` is ``None``.
+
+        ``predicted_full_disks`` (dry-run only, design D6 of
+        fix-dry-run-predictions): disks for which this run predicted a
+        new FULL.  Each predicted FULL is simulated as an additional
+        NEWEST chain (timestamp=now) before generation grouping so
+        retention predictions account for the post-run chain layout.
+        Simulated chains never appear in the returned keep/remove
+        lists.  Real-run callers pass nothing.
         """
         provider = self._factory.create_backup_provider(vm_config, target)
         backups = provider.list(target)
@@ -4870,6 +5374,25 @@ class Core:
             return [], None
 
         chains = self._group_backups_by_chain(backups)
+
+        # Dry-run: simulate predicted FULLs as additional newest chains
+        # (design D6).  Timestamp=now makes them the newest generation,
+        # so older chains may roll over into the remove set.
+        predicted_chain_ids: set[str] = set()
+        if self._dry_run and predicted_full_disks:
+            now = datetime.now()
+            for disk_target in predicted_full_disks:
+                chain_id = f"__predicted_full__{disk_target}__"
+                predicted_chain_ids.add(chain_id)
+                chains[chain_id] = [
+                    SnapshotInfo(
+                        name=f"{vm_config.name}.FULL.<predicted>_{disk_target}",
+                        path=target.path,
+                        timestamp=now,
+                        allocation=0,
+                        disk=disk_target,
+                    )
+                ]
 
         # Build chain-level retention items (one per chain, FULL's timestamp).
         chain_items: list[RetentionItem] = []
@@ -4893,6 +5416,9 @@ class Core:
         final_remove: list[str] = []
 
         for chain_id, chain_backups in chain_map.items():
+            if chain_id in predicted_chain_ids:
+                # Simulated predicted-FULL chain — never keep/remove-listed.
+                continue
             if chain_id == "__orphan__":
                 # Broken chain — preserve files for operator review.
                 # Already logged as CRITICAL by startup validation.
@@ -4913,10 +5439,17 @@ class Core:
         target: TargetConfig,
         backups: list[SnapshotInfo],
         retention_result: RetentionResult | None,
+        predicted_full_disks: list[str] | None = None,
     ) -> None:
         """Delete backups flagged for removal by per-chain retention.
 
         Honours ``_preserve_backups`` and ``_dry_run``.
+
+        ``predicted_full_disks`` (dry-run only, design D6 of
+        fix-dry-run-predictions): when a new FULL was predicted for
+        this target, dry-run deletions are logged as conditional — in a
+        real run the verify-before-delete gate skips the whole cleanup
+        pass when the new FULL fails verification.
 
         Per-chain deletion (spec: per-chain-retention):
         - FULLs: M1 verification (non-configurable), M2 if configured,
@@ -4949,8 +5482,24 @@ class Core:
             return
 
         if self._dry_run:
+            conditional = bool(predicted_full_disks)
             for backup in to_delete:
-                logger.info("[dry-run] Would delete backup: %s", backup.name)
+                if conditional:
+                    logger.info(
+                        "[dry-run] Would delete backup %s (after new FULL passes verification)",
+                        backup.name,
+                    )
+                else:
+                    logger.info("[dry-run] Would delete backup: %s", backup.name)
+                self._predictions.append(
+                    ActionRecord(
+                        action="backup_delete",
+                        vm_name=vm_config.name,
+                        name=backup.name,
+                        path=backup.path,
+                        disk=backup.disk,
+                    )
+                )
             return
 
         provider = self._factory.create_backup_provider(vm_config, target)

@@ -66,13 +66,21 @@ class NbdResult:
 
 @dataclass(frozen=True)
 class SnapshotResult:
-    """Outcome of a snapshot creation operation."""
+    """Outcome of a snapshot creation operation.
+
+    ``disk`` identifies the disk target (e.g. ``"vda"``) the snapshot
+    belongs to.  Core tags simulated dry-run snapshot results per disk
+    (design D1 of fix-dry-run-predictions) so downstream prediction
+    channels can attribute each snapshot to its disk.  ``None`` when the
+    caller has no disk context.
+    """
 
     success: bool
     name: str
     path: Path
     new_allocation: int
     error: str | None
+    disk: str | None = None
 
 
 # ── Backup ───────────────────────────────────────────────────────────────
@@ -421,9 +429,13 @@ class ActionRecord:
 
     ``action`` is one of ``"snapshot_create"``, ``"snapshot_delete"``,
     ``"backup_transfer"``, ``"backup_full"``, ``"backup_delete"``,
-    ``"error"``.  ``size`` is bytes transferred/created (0 for
-    deletions).  ``duration`` is seconds elapsed (0.0 when not measured).
-    ``error`` is non-None iff ``action == "error"``.
+    ``"blockcommit"``, ``"error"``.  ``"blockcommit"`` is
+    prediction-only: it appears in the dry-run ``predictions`` channel
+    of ``PipelineResult`` (one entry per disk whose overlays would be
+    merged) and is never recorded for real runs.  ``size`` is bytes
+    transferred/created (0 for deletions).  ``duration`` is seconds
+    elapsed (0.0 when not measured).  ``error`` is non-None iff
+    ``action == "error"``.
 
     ``disk`` identifies the disk target (e.g. ``"vda"``) the action
     applies to, so multi-disk VMs produce per-disk audit rows.  It is
