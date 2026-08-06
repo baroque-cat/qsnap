@@ -399,9 +399,7 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
         f"Expected empty remove list under default preserve_min=48 "
         f"(30 < 48), got {len(retention.remove)}: {retention.remove}"
     )
-    assert len(retention.keep) == 30, (
-        f"Expected all 30 snapshots kept, got {len(retention.keep)}"
-    )
+    assert len(retention.keep) == 30, f"Expected all 30 snapshots kept, got {len(retention.keep)}"
 
     # Prune → zero blockcommits, zero deletions.
     with caplog.at_level(logging.INFO):
@@ -447,8 +445,10 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
         config_path=tmpdir / "preserve_min_optout.toml",
     )
     core_zero = Core(
-        config=config_zero, factory=DefaultFactory(shell=shell, state=state2),
-        state=state2, shell=shell,
+        config=config_zero,
+        factory=DefaultFactory(shell=shell, state=state2),
+        state=state2,
+        shell=shell,
     )
 
     retention_zero = core_zero._evaluate_snapshot_retention(vm_config_zero)
@@ -465,9 +465,7 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
     sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
     for snap in sorted_snaps[:6]:
         path = snap_paths_before[snap.name]
-        assert not path.exists(), (
-            f"Oldest snapshot should be committed when preserve_min=0: {path}"
-        )
+        assert not path.exists(), f"Oldest snapshot should be committed when preserve_min=0: {path}"
     for snap in sorted_snaps[6:]:
         path = snap_paths_before[snap.name]
         assert path.exists(), f"Newest snapshot should be preserved: {path}"

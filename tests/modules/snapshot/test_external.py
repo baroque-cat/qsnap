@@ -156,15 +156,15 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     domblklist_calls = [cmd for cmd in all_cmds if "domblklist" in cmd]
     # One pre-creation call (previous active capture), one post-creation
     # (pivot check) — both satisfied by the same expect_first expectation.
-    assert (
-        len(domblklist_calls) >= 2
-    ), f"Expected at least 2 domblklist calls (pre + post), got {len(domblklist_calls)}"
+    assert len(domblklist_calls) >= 2, (
+        f"Expected at least 2 domblklist calls (pre + post), got {len(domblklist_calls)}"
+    )
 
     # Assert test -f was called for post-creation file existence check
     test_f_calls = [cmd for cmd in all_cmds if cmd.startswith("test -f")]
-    assert any(
-        str(snapshot_path) in cmd for cmd in test_f_calls
-    ), "Post-creation file existence check (test -f) should have been called"
+    assert any(str(snapshot_path) in cmd for cmd in test_f_calls), (
+        "Post-creation file existence check (test -f) should have been called"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -209,16 +209,16 @@ def test_create_snapshot_virsh_fails(mock_shell, make_vm_config):
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     # Pre-creation domblklist (step 0) + virsh snapshot-create-as (step 1) = 2 calls.
     # chmod and qemu-img info must NOT have been called.
-    assert (
-        len(all_cmds) == 2
-    ), f"Only domblklist + virsh should have been called, but got {len(all_cmds)} calls"
+    assert len(all_cmds) == 2, (
+        f"Only domblklist + virsh should have been called, but got {len(all_cmds)} calls"
+    )
     assert "snapshot-create-as" in all_cmds[1]
-    assert not any(
-        "chmod" in cmd for cmd in all_cmds
-    ), "chmod should NOT be called when virsh fails"
-    assert not any(
-        "qemu-img" in cmd for cmd in all_cmds
-    ), "qemu-img info should NOT be called when virsh fails"
+    assert not any("chmod" in cmd for cmd in all_cmds), (
+        "chmod should NOT be called when virsh fails"
+    )
+    assert not any("qemu-img" in cmd for cmd in all_cmds), (
+        "qemu-img info should NOT be called when virsh fails"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -475,9 +475,9 @@ def test_create_snapshot_quiesce_guest_agent_not_installed(mock_shell, make_vm_c
 
     # No silent fallback: exactly ONE virsh call (with --quiesce), no retry
     virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
-    assert (
-        len(virsh_cmds) == 1
-    ), f"Should not retry/fallback — exactly one virsh call expected, but got {len(virsh_cmds)}"
+    assert len(virsh_cmds) == 1, (
+        f"Should not retry/fallback — exactly one virsh call expected, but got {len(virsh_cmds)}"
+    )
     assert "--quiesce" in virsh_cmds[0]
 
 
@@ -616,9 +616,9 @@ def test_risk_quiesce_no_silent_fallback(mock_shell, make_vm_config):
         "Must NOT retry without --quiesce — exactly one virsh call expected, "
         f"but got {len(virsh_cmds)}"
     )
-    assert (
-        "--quiesce" in virsh_cmds[0]
-    ), "The single virsh call must include --quiesce (no silent fallback)"
+    assert "--quiesce" in virsh_cmds[0], (
+        "The single virsh call must include --quiesce (no silent fallback)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -702,9 +702,9 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     assert result.success is True
     assert result.new_allocation == 1048576
     assert result.error is None
-    assert (
-        len(virsh_attempts) == 2
-    ), f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), got {len(virsh_attempts)}"
+    assert len(virsh_attempts) == 2, (
+        f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), got {len(virsh_attempts)}"
+    )
 
 
 def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config):
@@ -746,9 +746,9 @@ def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config
 
     assert result.success is False
     assert result.error == lock_error
-    assert (
-        len(virsh_attempts) == 3
-    ), f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
+    assert len(virsh_attempts) == 3, (
+        f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
+    )
 
 
 def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
@@ -788,9 +788,9 @@ def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
         for c in shell_spy.call_args_list
         if "snapshot-create-as" in " ".join(c.args[0])
     ]
-    assert (
-        len(virsh_cmds) == 1
-    ), f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_cmds)}"
+    assert len(virsh_cmds) == 1, (
+        f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_cmds)}"
+    )
 
 
 def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config):
@@ -1188,9 +1188,9 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
     # Verify --force-share is in the qemu-img info command
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
-    assert (
-        "--force-share" in qemu_cmd
-    ), f"qemu-img info command must include --force-share, got: {qemu_cmd}"
+    assert "--force-share" in qemu_cmd, (
+        f"qemu-img info command must include --force-share, got: {qemu_cmd}"
+    )
 
 
 def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_config):
@@ -1932,9 +1932,9 @@ def test_create_multi_two_disks_one_virsh_call(mock_shell, make_vm_config):
     # Exactly 2 domblklist calls: 1 pre-creation + 1 pivot check.
     all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
     domblklist_calls = [c for c in all_cmds if "domblklist" in c]
-    assert (
-        len(domblklist_calls) == 2
-    ), f"Expected 1 pre + 1 pivot domblklist, got {len(domblklist_calls)}"
+    assert len(domblklist_calls) == 2, (
+        f"Expected 1 pre + 1 pivot domblklist, got {len(domblklist_calls)}"
+    )
 
 
 @pytest.mark.unit
@@ -2055,12 +2055,12 @@ def test_create_multi_virsh_failure_all_failed(mock_shell, make_vm_config):
 
     all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
     assert len([c for c in all_cmds if "snapshot-create-as" in c]) == 1
-    assert not any(
-        "chmod" in c for c in all_cmds
-    ), "chmod must NOT be called when the batch virsh call fails"
-    assert not any(
-        "qemu-img" in c for c in all_cmds
-    ), "qemu-img info must NOT be called when the batch virsh call fails"
+    assert not any("chmod" in c for c in all_cmds), (
+        "chmod must NOT be called when the batch virsh call fails"
+    )
+    assert not any("qemu-img" in c for c in all_cmds), (
+        "qemu-img info must NOT be called when the batch virsh call fails"
+    )
     rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
 
 
@@ -2195,9 +2195,9 @@ def test_create_multi_lock_conflict_resolved_on_retry(mock_shell, make_vm_config
             quiesce=False,
         )
 
-    assert (
-        len(virsh_attempts) == 2
-    ), f"Expected 2 virsh attempts (1 lock conflict + 1 success), got {len(virsh_attempts)}"
+    assert len(virsh_attempts) == 2, (
+        f"Expected 2 virsh attempts (1 lock conflict + 1 success), got {len(virsh_attempts)}"
+    )
     sleep_mock.assert_called_once_with(2.0)
     assert len(results) == 2
     assert all(r.success for r in results)
@@ -2245,9 +2245,9 @@ def test_create_multi_lock_conflict_exhausted(mock_shell, make_vm_config):
             quiesce=False,
         )
 
-    assert (
-        len(virsh_attempts) == 3
-    ), f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
+    assert len(virsh_attempts) == 3, (
+        f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
+    )
     assert sleep_mock.call_args_list == [call(2.0), call(4.0)]
     assert len(results) == 2
     for r in results:
@@ -2286,9 +2286,9 @@ def test_create_multi_no_retry_non_lock_error(mock_shell, make_vm_config):
         )
 
     virsh_calls = _virsh_create_calls(shell_spy)
-    assert (
-        len(virsh_calls) == 1
-    ), f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_calls)}"
+    assert len(virsh_calls) == 1, (
+        f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_calls)}"
+    )
     assert len(results) == 2
     for r in results:
         assert r.success is False
@@ -2341,9 +2341,9 @@ def test_create_multi_lock_retry_wraps_batch(mock_shell, make_vm_config):
     for attempt_cmd in virsh_attempts:
         assert "--diskspec vda,file=" in attempt_cmd
         assert "--diskspec vdb,file=" in attempt_cmd
-        assert (
-            attempt_cmd.count("--diskspec") == 2
-        ), "The retry must re-issue the full batch command, never per-disk virsh calls"
+        assert attempt_cmd.count("--diskspec") == 2, (
+            "The retry must re-issue the full batch command, never per-disk virsh calls"
+        )
     assert all(r.success for r in results)
 
 
@@ -2426,7 +2426,7 @@ def test_create_multi_quiesce_guest_agent_missing_all_failed(mock_shell, make_vm
     spec_vda = _make_spec("vda", "a1b2c3")
     spec_vdb = _make_spec("vdb", "d4e5f6")
     stderr_msg = (
-        "error: internal error: unable to execute guest agent: " "qemu-guest-agent is not running"
+        "error: internal error: unable to execute guest agent: qemu-guest-agent is not running"
     )
 
     mock_shell.expect("virsh snapshot-create-as").returns(
@@ -2457,9 +2457,9 @@ def test_create_multi_quiesce_guest_agent_missing_all_failed(mock_shell, make_vm
 
     # Exactly ONE virsh call, still with --quiesce (no silent fallback).
     virsh_calls = _virsh_create_calls(shell_spy)
-    assert (
-        len(virsh_calls) == 1
-    ), f"Must not retry/fall back — exactly one virsh call expected, got {len(virsh_calls)}"
+    assert len(virsh_calls) == 1, (
+        f"Must not retry/fall back — exactly one virsh call expected, got {len(virsh_calls)}"
+    )
     assert "--quiesce" in " ".join(virsh_calls[0].args[0])
     rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
 
@@ -2499,9 +2499,9 @@ def test_create_multi_all_validation_checks_pass(mock_shell, make_vm_config):
     all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
     # Per file: snapshot metadata read + base virtual-size read = 2 qemu-img calls.
     qemu_info_calls = [c for c in all_cmds if "qemu-img info" in c]
-    assert (
-        len(qemu_info_calls) == 4
-    ), f"Expected 2 qemu-img info calls per disk (snapshot + base), got {len(qemu_info_calls)}"
+    assert len(qemu_info_calls) == 4, (
+        f"Expected 2 qemu-img info calls per disk (snapshot + base), got {len(qemu_info_calls)}"
+    )
     # Per-file existence check.
     test_f_calls = [c for c in all_cmds if c.startswith("test -f")]
     assert len(test_f_calls) == 2

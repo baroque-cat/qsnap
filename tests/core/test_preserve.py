@@ -426,9 +426,7 @@ def test_default_preserve_min_48_keeps_newest_48(
     assert len(result.remove) == 52, (
         f"default preserve_min=48 should trim remove to 52, got {len(result.remove)}"
     )
-    assert len(result.keep) == 48, (
-        f"the newest 48 snapshots must be kept, got {len(result.keep)}"
-    )
+    assert len(result.keep) == 48, f"the newest 48 snapshots must be kept, got {len(result.keep)}"
 
 
 # ── test_default_floor_dominates_chain_length ─────────────────────────────
@@ -479,8 +477,7 @@ def test_default_floor_dominates_chain_length(
     assert result is not None
     # max_removable = max(0, 30 - 48) = 0 → the floor dominates chain_length.
     assert len(result.remove) == 0, (
-        f"default preserve_min=48 must dominate chain_length=24, "
-        f"got {len(result.remove)} removals"
+        f"default preserve_min=48 must dominate chain_length=24, got {len(result.remove)} removals"
     )
     assert len(result.keep) == 30
 

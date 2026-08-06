@@ -177,6 +177,39 @@ def test_backup_result_disk_defaults_none():
     assert result.disk is None
 
 
+def test_backup_result_carries_checkpoint_name():
+    """BackupResult carries the libvirt checkpoint name for the transfer."""
+    checkpoint_name = "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    result = BackupResult(
+        success=True,
+        snapshot_name="myvm.20260807T020000_vda_9f8e7d",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=4096,
+        error=None,
+        checkpoint=checkpoint_name,
+    )
+    assert result.checkpoint == checkpoint_name
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.checkpoint = "other"
+
+
+def test_backup_result_checkpoint_defaults_none():
+    """BackupResult.checkpoint defaults to None when the argument is omitted."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+    )
+    assert result.checkpoint is None
+
+
 def test_commit_result_success():
     """A successful CommitResult carries all fields."""
     result = CommitResult(

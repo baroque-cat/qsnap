@@ -405,13 +405,11 @@ class ConfigFacade(IConfigFacade):
             )
         if free_space_reserve < 0:
             raise ConfigError(
-                f"VM {name!r}: free_space_reserve must be >= 0, "
-                f"got {free_space_reserve}"
+                f"VM {name!r}: free_space_reserve must be >= 0, got {free_space_reserve}"
             )
         if free_space_factor < 1.0:
             raise ConfigError(
-                f"VM {name!r}: free_space_factor must be >= 1.0, "
-                f"got {free_space_factor}"
+                f"VM {name!r}: free_space_factor must be >= 1.0, got {free_space_factor}"
             )
 
         # Validate count-based retention fields (when set).

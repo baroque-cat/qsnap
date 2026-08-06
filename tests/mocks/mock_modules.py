@@ -138,7 +138,16 @@ class MockBitmapBackupProvider(IBackupProvider):
         stall_timeout: int = 1800,
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
+        checkpoint: str | None = None,
     ) -> BackupResult:
+        """Return a successful FULL result.
+
+        ``checkpoint`` mirrors the production provider (design D1 of
+        fix-checkpoint-rollback): the exact libvirt checkpoint name
+        created during a running-VM FULL, ``None`` on the stopped-VM
+        path where no checkpoint is created.  Default ``None`` keeps all
+        existing Core tests green.
+        """
         return BackupResult(
             success=True,
             snapshot_name=source_snapshot.name,
@@ -147,6 +156,7 @@ class MockBitmapBackupProvider(IBackupProvider):
             bytes_transferred=1048576,
             error=None,
             disk=source_snapshot.disk,
+            checkpoint=checkpoint,
         )
 
     def list_checkpoints(self, vm_name: str) -> list[str]:

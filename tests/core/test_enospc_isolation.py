@@ -149,14 +149,16 @@ def test_enospc_suspends_only_affected_target(
 
     # Target A's transfers failed → nothing audited for A.
     a_transfers = [
-        a for a in result.actions
+        a
+        for a in result.actions
         if a.action == "backup_transfer" and a.path.parent == target_a.path
     ]
     assert a_transfers == []
 
     # Target B completed its transfers → audited.
     b_transfers = [
-        a for a in result.actions
+        a
+        for a in result.actions
         if a.action == "backup_transfer" and a.path.parent == target_b.path
     ]
     assert len(b_transfers) >= 1
@@ -202,12 +204,8 @@ def test_enospc_retention_cleanup_still_run_for_suspended_target(
         result = core.run()
 
     assert result.space_limited is True
-    assert retention_spy.called, (
-        "retention should still run for the suspended target (self-heal)"
-    )
-    assert cleanup_spy.called, (
-        "cleanup should still run for the suspended target (self-heal)"
-    )
+    assert retention_spy.called, "retention should still run for the suspended target (self-heal)"
+    assert cleanup_spy.called, "cleanup should still run for the suspended target (self-heal)"
 
 
 def test_non_space_failure_raises_backup_abort(
@@ -287,9 +285,7 @@ def test_verification_failure_not_treated_as_space_error(
     )
 
     with (
-        patch.object(
-            mock_factory._backup_provider, "create_full_backup", return_value=ok_full
-        ),
+        patch.object(mock_factory._backup_provider, "create_full_backup", return_value=ok_full),
         patch(
             "qsnap.core.verify_full_backup",
             return_value="verification failed: qemu-img info returned No mock configured",
@@ -461,9 +457,7 @@ def test_next_run_resumes_interrupted_incremental(
 
     assert result2.space_limited is False
     assert result2.results[0].success is True
-    transferred = {
-        a.name for a in result2.actions if a.action == "backup_transfer"
-    }
+    transferred = {a.name for a in result2.actions if a.action == "backup_transfer"}
     assert snap.name in transferred, (
         "the interrupted incremental must be re-transferred by the next run"
     )
@@ -488,12 +482,8 @@ def test_next_run_retries_gate_skipped_full(
     vm = make_vm_config(name="testvm", targets=[target])
     snap = _add_snapshot(mock_state)
 
-    insufficient = SpaceCheckResult(
-        sufficient=False, free_bytes=0, estimate=5000, required=10000
-    )
-    sufficient = SpaceCheckResult(
-        sufficient=True, free_bytes=10**12, estimate=5000, required=10000
-    )
+    insufficient = SpaceCheckResult(sufficient=False, free_bytes=0, estimate=5000, required=10000)
+    sufficient = SpaceCheckResult(sufficient=True, free_bytes=10**12, estimate=5000, required=10000)
 
     # Run 1: gate blocks the FULL.
     core1 = Core(

@@ -192,18 +192,14 @@ def test_enospc_mid_transfer_isolation_and_auto_resume(stress_env):
         assert snap.path.exists(), "Source snapshot must survive ENOSPC"
         assert len(state.get_snapshots(vm_name)) == 1, "State records must survive ENOSPC"
         # (c) space_limited → CLI exit code 4.
-        assert result.space_limited is True, (
-            "ENOSPC mid-transfer must mark the run space_limited"
-        )
+        assert result.space_limited is True, "ENOSPC mid-transfer must mark the run space_limited"
         assert _format_pipeline_result(result) == EXIT_DISKFULL, (
             f"CLI must map the space-limited run to exit {EXIT_DISKFULL}"
         )
         # (d) No VM abort: the per-VM result is a success (target
         #     suspension, not failure) and backup_failed is False.
         vm_result = result.results[0]
-        assert vm_result.success is True, (
-            f"ENOSPC must not abort the VM: {vm_result.error}"
-        )
+        assert vm_result.success is True, f"ENOSPC must not abort the VM: {vm_result.error}"
         assert vm_result.backup_failed is False, (
             "ENOSPC must not set backup_failed (no BackupAbortError)"
         )
@@ -246,9 +242,7 @@ def test_enospc_mid_transfer_isolation_and_auto_resume(stress_env):
         )
 
         result2 = core_resume.backup(vm_name)
-        assert result2.results[0].success, (
-            f"Auto-resume run failed: {result2.results[0].error}"
-        )
+        assert result2.results[0].success, f"Auto-resume run failed: {result2.results[0].error}"
         fulls_a_after = list(target_a.glob("*.FULL.*.qcow2"))
         assert len(fulls_a_after) >= 1, (
             f"Auto-resume must complete target A's FULL. "
@@ -257,9 +251,7 @@ def test_enospc_mid_transfer_isolation_and_auto_resume(stress_env):
         assert _qemu_img_check_ok(shell, fulls_a_after[0]), (
             f"Auto-resumed FULL must pass qemu-img check: {fulls_a_after[0]}"
         )
-        assert result2.space_limited is False, (
-            "A clean auto-resume run must not be space_limited"
-        )
+        assert result2.space_limited is False, "A clean auto-resume run must not be space_limited"
     finally:
         if filler is not None:
             filler.unlink(missing_ok=True)

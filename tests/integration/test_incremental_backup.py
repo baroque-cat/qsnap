@@ -737,7 +737,9 @@ def test_free_space_gate_strict_blocks_incremental_before_transfer(test_vm, capl
     full_name = full_result.target_path.stem
 
     state = InMemoryStateManager()
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", full_source.timestamp, disk="vda")
+    state.record_full_backup(
+        str(target_dir), f"{full_name}.qcow2", full_source.timestamp, disk="vda"
+    )
 
     # Step 3: external snapshot (the pending incremental).
     snap_name = f"{vm_name}.gate-incr"

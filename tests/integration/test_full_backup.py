@@ -325,6 +325,13 @@ def test_full_backup_stopped_vm(test_vm, caplog):
 
     assert result.success, f"Stopped-VM FULL must succeed, got: {result.error}"
 
+    # Stopped-VM FULL creates NO checkpoint (design D1): the direct
+    # qemu-img convert path never runs virsh backup-begin, so the
+    # BackupResult must report checkpoint=None.
+    assert result.checkpoint is None, (
+        f"Stopped-VM FULL must not report a checkpoint, got {result.checkpoint!r}"
+    )
+
     # qemu-img convert must appear in logs.
     convert_calls = [
         r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
@@ -433,6 +440,15 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     ]
     assert len(qsnap_cps) >= 1, (
         f"At least one qsnap checkpoint expected after NBD FULL, got: {qsnap_cps}"
+    )
+
+    # The result must carry the exact checkpoint name created atomically
+    # by backup-begin (design D1), and that name must be the one libvirt
+    # lists — not a bulk-filtered guess.
+    assert result.checkpoint is not None, "Running-VM NBD FULL must report its checkpoint name"
+    assert result.checkpoint in qsnap_cps, (
+        f"Reported checkpoint {result.checkpoint!r} must appear in "
+        f"virsh checkpoint-list output: {qsnap_cps}"
     )
 
     # Atomic rename: no .tmp.
@@ -608,8 +624,14 @@ def test_free_space_gate_strict_blocks_full_before_transfer(test_vm, caplog):
     time.sleep(1)
 
     core, _, _ = _build_gate_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir,
-        free_space_check="strict", reserve=10**18,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        tmpdir,
+        free_space_check="strict",
+        reserve=10**18,
     )
 
     caplog.set_level(logging.DEBUG)
@@ -635,9 +657,7 @@ def test_free_space_gate_strict_blocks_full_before_transfer(test_vm, caplog):
     )
 
     # CRITICAL log names the target suspension.
-    suspend_logs = [
-        r.message for r in caplog.records if "suspending target (strict)" in r.message
-    ]
+    suspend_logs = [r.message for r in caplog.records if "suspending target (strict)" in r.message]
     assert len(suspend_logs) >= 1, (
         f"Expected a 'suspending target (strict)' CRITICAL log. "
         f"Logs: {[r.message for r in caplog.records]}"
@@ -675,8 +695,14 @@ def test_free_space_gate_warn_proceeds_with_warning(test_vm, caplog):
     _cleanup_checkpoints(shell, vm_name)
 
     core, _, _ = _build_gate_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir,
-        free_space_check="warn", reserve=10**18,
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        tmpdir,
+        free_space_check="warn",
+        reserve=10**18,
     )
 
     caplog.set_level(logging.DEBUG)

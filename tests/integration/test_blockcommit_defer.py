@@ -873,9 +873,7 @@ def test_offline_commit_enospc_defers_then_drains_integration(test_vm, caplog):
     # Deferred entry with reason "enospc" holds the oldest snapshot.
     deferred = state.get_deferred_operations(vm_name)
     assert len(deferred) == 1, f"Expected 1 deferred entry, got {len(deferred)}"
-    assert deferred[0].reason == "enospc", (
-        f"Expected reason 'enospc', got {deferred[0].reason!r}"
-    )
+    assert deferred[0].reason == "enospc", f"Expected reason 'enospc', got {deferred[0].reason!r}"
     assert oldest.name in deferred[0].snapshots, (
         f"Deferred entry must contain the oldest snapshot, got {deferred[0].snapshots}"
     )
@@ -895,9 +893,7 @@ def test_offline_commit_enospc_defers_then_drains_integration(test_vm, caplog):
     core._check_deferred_operations(vm_config)
 
     # Oldest file committed (deleted), chain shortened, queue empty.
-    assert not oldest_path.exists(), (
-        f"Oldest snapshot must be committed after drain: {oldest_path}"
-    )
+    assert not oldest_path.exists(), f"Oldest snapshot must be committed after drain: {oldest_path}"
     chain_len_after = _backing_chain_length(newest_path, shell)
     assert chain_len_after is not None and chain_len_after < chain_len_before, (
         f"Chain must be shorter after drain: was {chain_len_before}, now {chain_len_after}"

@@ -11,6 +11,7 @@ Run only when explicitly requested::
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -506,6 +507,79 @@ def test_dry_run_full_prediction_has_size_estimate(test_vm):
         )
 
     _cleanup_checkpoints(shell, vm_name)
+
+
+# ── Test 5b: First-run FULL prediction falls back to base_image ──────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+def test_dry_run_first_run_full_prediction_base_image_fallback(test_vm, caplog):
+    """Fresh VM dry-run: FULL size estimate falls back to the base_image chain.
+
+    1. Fresh ``test_vm`` with zero state snapshots — the FULL source is
+       the *simulated* snapshot whose file does not exist on disk.
+    2. Run ``core.run(vm_name)`` in dry-run mode.
+    3. Assert at least one ``backup_full`` prediction with ``pred.size > 0``
+       (derived from the ``base_image`` backing chain — design D3 fallback).
+    4. Assert no ERROR/WARNING record mentions the simulated snapshot path
+       or "Cannot estimate FULL size" — the missing-file probe is a
+       ``check=True`` DEBUG probe (design D4), never an ERROR.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Zero state snapshots — the FULL source will be the simulated snapshot.
+    core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
+    assert state.get_snapshots(vm_name) == [], "Test requires zero state snapshots"
+    core.dry_run = True
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        result = core.run(vm_name)
+
+    # The simulated snapshot (FULL source) must not exist on disk.
+    simulated_paths = [p.path for p in result.predictions if p.action == "snapshot_create"]
+    assert simulated_paths, (
+        f"Expected snapshot_create predictions (simulated FULL source), got none. "
+        f"All predictions: {[(p.action, p.name) for p in result.predictions]}"
+    )
+    for sp in simulated_paths:
+        assert not sp.exists(), f"Simulated snapshot path must not exist on disk: {sp}"
+
+    # At least one backup_full prediction with a positive size estimate,
+    # derived from the base_image chain via the fallback (design D3).
+    full_preds = [p for p in result.predictions if p.action == "backup_full"]
+    assert len(full_preds) >= 1, (
+        f"Expected at least one backup_full prediction, got {len(full_preds)}. "
+        f"All predictions: {[(p.action, p.name) for p in result.predictions]}"
+    )
+    for pred in full_preds:
+        assert pred.size > 0, (
+            f"Expected size > 0 for backup_full prediction '{pred.name}' "
+            f"(base_image chain fallback), got size={pred.size}"
+        )
+
+    # No ERROR/WARNING from the size-estimation probe: the missing
+    # simulated snapshot path must never surface as an ERROR/WARNING and
+    # the "Cannot estimate FULL size" message must not be emitted.
+    offending = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and (
+            "Cannot estimate FULL size" in r.message
+            or any(str(sp) in r.message for sp in simulated_paths)
+        )
+    ]
+    assert offending == [], (
+        "Size-estimation probe must not log ERROR/WARNING mentioning the "
+        "simulated snapshot path or 'Cannot estimate FULL size'. Offending "
+        f"records: {[(r.levelname, r.message) for r in offending]}"
+    )
 
 
 # ── Test 6: Incremental predictions approximate ────────────────────

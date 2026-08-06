@@ -405,7 +405,9 @@ def test_state_save_oserror_surfaces_runtime_error(tmp_path: Path, caplog):
 
     # CRITICAL log names the VM and the state path.
     critical_msgs = [
-        r.message for r in caplog.records if r.levelname == "CRITICAL" and "Failed to save state" in r.message
+        r.message
+        for r in caplog.records
+        if r.levelname == "CRITICAL" and "Failed to save state" in r.message
     ]
     assert len(critical_msgs) >= 1, (
         f"Expected a CRITICAL 'Failed to save state' log. "
@@ -416,15 +418,11 @@ def test_state_save_oserror_surfaces_runtime_error(tmp_path: Path, caplog):
     )
 
     # The original state file survives (atomic write guarantee).
-    assert (state_dir / "vm1.json").exists(), (
-        "Existing state file must survive a failed save"
-    )
+    assert (state_dir / "vm1.json").exists(), "Existing state file must survive a failed save"
 
 
 @pytest.mark.integration
-def test_stale_state_self_healing_save_failure_surfaces_runtime_error(
-    tmp_path: Path, caplog
-):
+def test_stale_state_self_healing_save_failure_surfaces_runtime_error(tmp_path: Path, caplog):
     """Stale-state self-healing surfaces RuntimeError when the save fails.
 
     The self-healing path (``transfer_missing`` → ``state.remove_snapshot``
@@ -474,7 +472,9 @@ def test_stale_state_self_healing_save_failure_surfaces_runtime_error(
             )
 
     critical_msgs = [
-        r.message for r in caplog.records if r.levelname == "CRITICAL" and "Failed to save state" in r.message
+        r.message
+        for r in caplog.records
+        if r.levelname == "CRITICAL" and "Failed to save state" in r.message
     ]
     assert len(critical_msgs) >= 1, "Expected a CRITICAL 'Failed to save state' log"
 

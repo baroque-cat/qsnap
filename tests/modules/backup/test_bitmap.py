@@ -947,6 +947,17 @@ def test_create_full_backup_atomic_rename_tmp_to_final(
     assert result.target_path.suffix == ".qcow2"
     assert ".tmp" not in result.target_path.name
 
+    # Running-VM FULL reports its checkpoint name (design D1): the
+    # successor was created atomically by backup-begin.
+    import re
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    assert result.checkpoint is not None
+    assert re.fullmatch(
+        rf"qsnap-{target_hash}-vda-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}",
+        result.checkpoint,
+    ), f"checkpoint {result.checkpoint!r} must match qsnap-{target_hash}-vda-<ts>-<hex>"
+
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
     mv_cmds = [cmd for cmd in all_run_cmds if cmd.startswith("mv ")]
     assert len(mv_cmds) == 1, (
@@ -2962,6 +2973,10 @@ def test_create_full_backup_stopped_vm_direct_convert(
 
     assert result.success is True
 
+    # Stopped-VM FULL creates no checkpoint — BackupResult.checkpoint
+    # must be None (design D1).
+    assert result.checkpoint is None
+
     all_stall_cmds = [" ".join(call_obj.args[0]) for call_obj in stall_spy.call_args_list]
     convert_cmds = [cmd for cmd in all_stall_cmds if "qemu-img convert" in cmd]
     assert len(convert_cmds) >= 1
@@ -2971,6 +2986,127 @@ def test_create_full_backup_stopped_vm_direct_convert(
     assert "/var/lib/libvirt/images/testvm.qcow2" in convert_cmds[0], (
         f"Expected source path in command, got: {convert_cmds[0]}"
     )
+
+
+@pytest.mark.unit
+def test_create_full_backup_running_vm_reports_checkpoint_name(
+    mock_shell, make_target, tmp_path, success_result
+):
+    """Running-VM FULL reports its checkpoint name (design D1).
+
+    The ``mock_shell`` fixture's ``virsh dominfo`` returns ``State:
+    running``, so ``create_full_backup`` takes the running-VM path:
+    ``backup-begin`` succeeds (with checkpoint XML), and
+    ``BackupResult.checkpoint`` carries the exact successor name
+    ``qsnap-{target_hash}-{disk}-{ts}-{hex}``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    _setup_convert_expectations(mock_shell, target)
+
+    mock_shell.expect("rm -f").returns(success_result())  # stale socket
+    mock_shell.expect("backup-begin").returns(success_result())
+
+    original_run = mock_shell.run
+
+    def spied_run(cmd, timeout, **kwargs):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("mv "):
+            Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+        return original_run(cmd, timeout)
+
+    with patch.object(mock_shell, "run", side_effect=spied_run):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.create_full_backup("testvm", snapshot, target, compress=False)
+
+    assert result.success is True
+    assert result.checkpoint is not None
+
+    import re
+
+    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    assert re.fullmatch(
+        rf"qsnap-{target_hash}-vda-\d{{8}}T\d{{6}}-[0-9a-f]{{6}}",
+        result.checkpoint,
+    ), f"checkpoint {result.checkpoint!r} must match qsnap-{target_hash}-vda-<ts>-<hex>"
+
+
+@pytest.mark.unit
+def test_create_full_backup_stopped_vm_reports_no_checkpoint(
+    mock_shell, make_target, tmp_path, success_result
+):
+    """Stopped-VM FULL reports no checkpoint (design D1).
+
+    No ``virsh backup-begin`` runs on the stopped-VM path, so no
+    checkpoint is created and ``BackupResult.checkpoint`` must be
+    ``None``.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    with (
+        patch("qsnap.modules.backup.bitmap.is_vm_running", return_value=False),
+        patch(
+            "qsnap.modules.backup.bitmap.get_disk_targets",
+            return_value=[("vda", "/var/lib/libvirt/images/testvm.qcow2")],
+        ),
+    ):
+        mock_shell.expect("qemu-img convert").returns(success_result())
+        mock_shell.expect("^mv ").returns(success_result())
+        mock_shell.expect("rm -f").returns(success_result())
+        mock_shell.expect("domjobabort").returns(success_result())
+        mock_shell.expect("rm -f").returns(success_result())
+
+        original_run = mock_shell.run
+        original_stall = mock_shell.run_with_stall_detection
+
+        def spied_run(cmd, timeout, **kwargs):
+            cmd_str = " ".join(cmd)
+            if cmd_str.startswith("mv "):
+                Path(cmd[-1]).write_bytes(b"\x00" * 65536)
+            return original_run(cmd, timeout)
+
+        with (
+            patch.object(mock_shell, "run", side_effect=spied_run),
+            patch.object(mock_shell, "run_with_stall_detection", wraps=original_stall),
+        ):
+            provider = BitmapBackupProvider(mock_shell, nbd=None)
+            result = provider.create_full_backup("testvm", snapshot, target, compress=False)
+
+    assert result.success is True
+    assert result.checkpoint is None
+
+
+@pytest.mark.unit
+def test_create_full_backup_backup_begin_failure_reports_no_checkpoint(
+    mock_shell, make_target, tmp_path, success_result
+):
+    """backup-begin failure reports no checkpoint (design D1).
+
+    ``virsh backup-begin`` is atomic — when it fails, the successor
+    checkpoint was never created, so ``BackupResult.checkpoint`` must
+    be ``None`` (Core's exact-name rollback must delete nothing).
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    snapshot = _make_snapshot()
+
+    # The mock_shell fixture's dominfo returns running → running-VM path.
+    mock_shell.expect("rm -f").returns(success_result())  # stale socket
+    backup_error = "backup-begin failed: domain is shut off"
+    mock_shell.expect("backup-begin").returns(
+        ShellResult(success=False, stdout="", stderr=backup_error, returncode=1, error=backup_error)
+    )
+
+    provider = BitmapBackupProvider(mock_shell, nbd=None)
+    result = provider.create_full_backup("testvm", snapshot, target, compress=False)
+
+    assert result.success is False
+    assert result.error == backup_error
+    assert result.checkpoint is None
 
 
 # ── Libnbd zero_skip ──────────────────────────────────────────────────

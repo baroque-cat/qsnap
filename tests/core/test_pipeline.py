@@ -82,9 +82,7 @@ def test_pipeline_always_mode_creates_snapshot(
         result = core.run()
 
     # Snapshot creation was invoked (one batch call per VM).
-    assert create_spy.called, (
-        "Snapshot provider.create_multi() should be called in always mode"
-    )
+    assert create_spy.called, "Snapshot provider.create_multi() should be called in always mode"
 
     # Change detection was NOT invoked (always mode skips it).
     assert not cd_spy.called, "create_change_detector() should NOT be called in always mode"
@@ -323,9 +321,7 @@ def test_backup_command_skips_snapshot(
     assert transfer_spy.called, "backup() should call backup_provider.transfer_missing()"
 
     # Snapshot creation was NOT executed.
-    assert not create_spy.called, (
-        "backup() should NOT call snapshot_provider.create_multi()"
-    )
+    assert not create_spy.called, "backup() should NOT call snapshot_provider.create_multi()"
 
     # Pipeline succeeded.
     assert result.success is True
@@ -4469,9 +4465,7 @@ def test_dry_run_logs_planned_actions(
     assert result.actions == []
 
     # No mutations executed
-    assert not create_spy.called, (
-        "snapshot provider create_multi() must NOT be called in dry-run"
-    )
+    assert not create_spy.called, "snapshot provider create_multi() must NOT be called in dry-run"
     assert not transfer_spy.called, (
         "backup provider transfer_missing() must NOT be called in dry-run"
     )

@@ -350,10 +350,12 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             batch_name,
         ]
         for spec in specs:
-            create_cmd.extend([
-                "--diskspec",
-                f"{spec.disk},file={spec.path},snapshot=external",
-            ])
+            create_cmd.extend(
+                [
+                    "--diskspec",
+                    f"{spec.disk},file={spec.path},snapshot=external",
+                ]
+            )
         create_cmd.extend(["--disk-only", "--atomic", "--no-metadata"])
         if quiesce:
             create_cmd.append("--quiesce")
@@ -373,8 +375,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
             ):
                 backoff = _LOCK_RETRY_BASE * (2**attempt)
                 logger.warning(
-                    "Snapshot batch lock conflict for VM %s "
-                    "(attempt %d/%d, retrying in %.1fs): %s",
+                    "Snapshot batch lock conflict for VM %s (attempt %d/%d, retrying in %.1fs): %s",
                     vm_config.name,
                     attempt + 1,
                     _LOCK_RETRY_MAX,
@@ -394,11 +395,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                     name=spec.name,
                     path=spec.path,
                     new_allocation=0,
-                    error=(
-                        create_result.error
-                        if create_result is not None
-                        else "unknown error"
-                    ),
+                    error=(create_result.error if create_result is not None else "unknown error"),
                     disk=spec.disk,
                 )
                 for spec in specs
@@ -612,10 +609,7 @@ class ExternalSnapshotProvider(ISnapshotProvider):
                         current = pivot_disks.get(spec.disk)
                         if current != str(spec.path):
                             all_valid = False
-                            idx = next(
-                                i for i, r in enumerate(results)
-                                if r.name == spec.name
-                            )
+                            idx = next(i for i, r in enumerate(results) if r.name == spec.name)
                             results[idx] = SnapshotResult(
                                 success=False,
                                 name=spec.name,

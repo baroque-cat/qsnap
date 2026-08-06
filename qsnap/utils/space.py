@@ -56,9 +56,10 @@ def estimate_full_size(shell: IShell, source_path: Path) -> int | None:
             str(source_path),
         ],
         timeout=30,
+        check=True,
     )
     if not result.success:
-        logger.warning(
+        logger.debug(
             "Cannot estimate FULL size for %s: qemu-img info failed: %s",
             source_path,
             result.error or result.stderr,
@@ -107,9 +108,10 @@ def estimate_incremental_size(shell: IShell, source_path: Path) -> int | None:
             str(source_path),
         ],
         timeout=30,
+        check=True,
     )
     if not result.success:
-        logger.warning(
+        logger.debug(
             "Cannot estimate incremental size for %s: qemu-img info failed: %s",
             source_path,
             result.error or result.stderr,

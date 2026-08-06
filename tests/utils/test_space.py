@@ -77,7 +77,14 @@ def test_estimate_full_size_skips_elements_without_actual_size(clean_shell) -> N
 
 
 def test_estimate_full_size_shell_failure_returns_none(clean_shell, caplog) -> None:
-    """``qemu-img info`` failure yields None and a WARNING (never blocks)."""
+    """``qemu-img info`` failure yields None; the probe failure logs at DEBUG only.
+
+    The size-estimation probe is a ``check=True`` call (shell-abstraction
+    probe rule): a failed command is an expected, non-error condition, so
+    the failure must be logged at DEBUG level — never WARNING/ERROR
+    (spec scenario "Size-estimation probes use check=True").  The
+    undecidable estimate still returns ``None`` (design D5, never blocks).
+    """
     shell = clean_shell
     shell.expect("qemu-img info").returns(
         ShellResult(
@@ -89,12 +96,16 @@ def test_estimate_full_size_shell_failure_returns_none(clean_shell, caplog) -> N
         )
     )
 
-    with caplog.at_level(logging.WARNING, logger="qsnap.utils.space"):
+    with caplog.at_level(logging.DEBUG, logger="qsnap.utils.space"):
         assert estimate_full_size(shell, Path("/snaps/overlay.qcow2")) is None
 
+    space_records = [r for r in caplog.records if r.name == "qsnap.utils.space"]
     assert any(
-        r.levelno == logging.WARNING and "Cannot estimate FULL size" in r.message
-        for r in caplog.records
+        r.levelno == logging.DEBUG and "Cannot estimate FULL size" in r.message
+        for r in space_records
+    ), "probe failure must log at DEBUG level"
+    assert not any(r.levelno in (logging.WARNING, logging.ERROR) for r in space_records), (
+        "probe failure must NOT log at WARNING/ERROR level"
     )
 
 
@@ -127,6 +138,41 @@ def test_estimate_full_size_zero_total_returns_none(clean_shell) -> None:
     )
 
     assert estimate_full_size(shell, Path("/snaps/overlay.qcow2")) is None
+
+
+def test_estimate_full_size_probe_uses_check_true(clean_shell) -> None:
+    """The FULL size-estimation probe passes ``check=True`` to ``shell.run()``.
+
+    ``estimate_full_size`` is a probe: command failure is expected and
+    handled by returning ``None``, so the ``shell.run()`` call for
+    ``qemu-img info --backing-chain`` must carry ``check=True``
+    (shell-abstraction spec scenario "Size-estimation probes use
+    check=True") — otherwise ``SubprocessShell`` would log the expected
+    failure at ERROR instead of DEBUG.
+    """
+    shell = clean_shell
+    shell.expect("qemu-img info --force-share --backing-chain --output=json").returns(
+        _json_result([{"filename": "/snaps/overlay.qcow2", "actual-size": 512}])
+    )
+
+    # Spy/wrapper on the mock shell to capture the run() call arguments.
+    calls: list[tuple[list[str], int, bool]] = []
+    original_run = shell.run
+
+    def spy_run(cmd: list[str], timeout: int = 0, check: bool = False) -> ShellResult:
+        calls.append((list(cmd), timeout, check))
+        return original_run(cmd, timeout=timeout, check=check)
+
+    shell.run = spy_run  # type: ignore[method-assign]
+
+    assert estimate_full_size(shell, Path("/snaps/overlay.qcow2")) == 512
+
+    assert len(calls) == 1, f"expected exactly one probe call, got {len(calls)}"
+    cmd, timeout, check = calls[0]
+    assert cmd[:2] == ["qemu-img", "info"]
+    assert "--backing-chain" in cmd
+    assert timeout == 30
+    assert check is True
 
 
 # ── estimate_incremental_size ─────────────────────────────────────────────
@@ -172,6 +218,41 @@ def test_estimate_incremental_size_undecidable_returns_none(clean_shell) -> None
     shell = clean_shell
     shell.expect("qemu-img info").returns(_json_result({"filename": "/snaps/overlay.qcow2"}))
     assert estimate_incremental_size(shell, Path("/snaps/overlay.qcow2")) is None
+
+
+def test_estimate_incremental_size_probe_uses_check_true(clean_shell) -> None:
+    """The incremental size-estimation probe passes ``check=True`` to ``shell.run()``.
+
+    ``estimate_incremental_size`` is a probe: command failure is expected
+    and handled by returning ``None``, so the ``shell.run()`` call for
+    ``qemu-img info`` must carry ``check=True`` (shell-abstraction spec
+    scenario "Size-estimation probes use check=True") — otherwise
+    ``SubprocessShell`` would log the expected failure at ERROR instead
+    of DEBUG.
+    """
+    shell = clean_shell
+    shell.expect("qemu-img info --force-share --output=json").returns(
+        _json_result({"filename": "/snaps/overlay.qcow2", "actual-size": 5242880})
+    )
+
+    # Spy/wrapper on the mock shell to capture the run() call arguments.
+    calls: list[tuple[list[str], int, bool]] = []
+    original_run = shell.run
+
+    def spy_run(cmd: list[str], timeout: int = 0, check: bool = False) -> ShellResult:
+        calls.append((list(cmd), timeout, check))
+        return original_run(cmd, timeout=timeout, check=check)
+
+    shell.run = spy_run  # type: ignore[method-assign]
+
+    assert estimate_incremental_size(shell, Path("/snaps/overlay.qcow2")) == 5242880
+
+    assert len(calls) == 1, f"expected exactly one probe call, got {len(calls)}"
+    cmd, timeout, check = calls[0]
+    assert cmd[:2] == ["qemu-img", "info"]
+    assert "--backing-chain" not in cmd
+    assert timeout == 30
+    assert check is True
 
 
 # ── check_free_space ─────────────────────────────────────────────────────

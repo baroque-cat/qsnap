@@ -136,9 +136,7 @@ class JsonStateManager(IStateManager):
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-            raise RuntimeError(
-                f"State write failed for VM {vm_name}: {exc}"
-            ) from exc
+            raise RuntimeError(f"State write failed for VM {vm_name}: {exc}") from exc
 
     def _rotate_backups(self, vm_name: str) -> None:
         """Rotate ``vm.json`` → ``vm.json.1`` → … up to backup count.

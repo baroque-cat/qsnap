@@ -1578,7 +1578,7 @@ def test_failed_full_verification_triggers_rollback(
 
     When verify_full_backup returns an error, Core must:
     1. Remove the FULL file via rm -f
-    2. Call _cleanup_failed_checkpoint
+    2. Call _cleanup_failed_checkpoint (exact-name checkpoint deletion)
     3. Remove the FULL from state
     4. Log a WARNING and retry
     """
@@ -1599,6 +1599,10 @@ def test_failed_full_verification_triggers_rollback(
     mock_shell.expect("rm -f").returns(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
+    # Pre-configure checkpoint deletion to succeed (rollback checkpoint cleanup).
+    mock_shell.expect("virsh checkpoint-delete").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
 
     caplog.set_level(logging.WARNING)
 
@@ -1606,6 +1610,20 @@ def test_failed_full_verification_triggers_rollback(
         patch(
             "qsnap.core.verify_full_backup",
             return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            return_value=BackupResult(
+                success=True,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+                disk="vda",
+                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+            ),
         ),
         patch.object(
             mock_state,
@@ -1617,6 +1635,7 @@ def test_failed_full_verification_triggers_rollback(
             "_cleanup_failed_checkpoint",
             wraps=core._cleanup_failed_checkpoint,
         ) as checkpoint_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
         pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
@@ -1625,8 +1644,457 @@ def test_failed_full_verification_triggers_rollback(
     assert remove_spy.called, "remove_full_backup should be called on verification failure"
     # Checkpoint cleanup was called.
     assert checkpoint_spy.called, "_cleanup_failed_checkpoint should be called on rollback"
+    # Exactly one exact-name checkpoint-delete call (design D1 — no bulk filter).
+    expected_cmd = (
+        "virsh checkpoint-delete --metadata --domain testvm "
+        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    )
+    checkpoint_delete_calls = [
+        c
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and " ".join(c.args[0]) == expected_cmd
+    ]
+    assert len(checkpoint_delete_calls) == 1, (
+        "exactly one exact-name virsh checkpoint-delete call expected, got "
+        f"{len(checkpoint_delete_calls)}: "
+        f"{[c for c in shell_spy.call_args_list if c.args and isinstance(c.args[0], list) and 'checkpoint-delete' in ' '.join(c.args[0])]}"
+    )
     # WARNING logged.
     assert "rolled back" in caplog.text or "FULL backup verification failed" in caplog.text
+
+
+# ── test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name ──────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Rollback deletes exactly the failed FULL's checkpoint by exact name.
+
+    Core-orchestrator scenario "Checkpoint cleaned up after failed FULL":
+    when FULL verification fails, ``_cleanup_failed_checkpoint`` issues
+    exactly one ``virsh checkpoint-delete --metadata --domain testvm``
+    call for ``BackupResult.checkpoint`` — never a
+    ``qsnap-{target_hash}-*`` bulk filter.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # Pre-configure rollback shell commands to succeed.
+    mock_shell.expect("rm -f").returns(_OK)
+    mock_shell.expect("virsh checkpoint-delete").returns(_OK)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            return_value=BackupResult(
+                success=True,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+                disk="vda",
+                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+            ),
+        ),
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # Exactly ONE exact-name checkpoint-delete call — no bulk filter.
+    expected_cmd = (
+        "virsh checkpoint-delete --metadata --domain testvm "
+        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    )
+    checkpoint_delete_calls = [
+        c
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and " ".join(c.args[0]) == expected_cmd
+    ]
+    assert len(checkpoint_delete_calls) == 1, (
+        "exactly one exact-name checkpoint-delete call expected, got "
+        f"{len(checkpoint_delete_calls)}: "
+        f"{[c for c in shell_spy.call_args_list if c.args and isinstance(c.args[0], list) and 'checkpoint-delete' in ' '.join(c.args[0])]}"
+    )
+    # FULL file cleanup from state is separate and still happens.
+    assert remove_spy.called, "remove_full_backup should be called during rollback"
+
+
+# ── test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks ───────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Multi-disk rollback deletes only the failed disk's checkpoint.
+
+    Core-orchestrator scenario "Multi-disk rollback leaves other disks
+    untouched": a vda FULL verification failure must delete only the vda
+    checkpoint — never the vdb/vdc checkpoints (regression against the
+    old ``qsnap-{target_hash}-*`` bulk filter that wiped every disk's
+    checkpoints for the target).
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target], disks=["vda", "vdb", "vdc"])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Every disk has a snapshot so each would need a FULL of its own.
+    for disk in ["vda", "vdb", "vdc"]:
+        snap = SnapshotInfo(
+            name=f"snap-{disk}",
+            path=Path(f"/tmp/snap-{disk}.qcow2"),
+            timestamp=datetime(2025, 7, 13, 10, 0),
+            allocation=1000,
+            disk=disk,
+        )
+        mock_state.record_snapshot("testvm", snap)
+
+    def full_side_effect(vm_name, source_snapshot, target_cfg, **kwargs):
+        """Per-disk checkpoint naming so vdb/vdc names are distinguishable."""
+        return BackupResult(
+            success=True,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target_cfg.path / f"{vm_name}.FULL.{source_snapshot.disk}.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+            disk=source_snapshot.disk,
+            checkpoint=f"qsnap-ab12cd34-{source_snapshot.disk}-20260807T020000-9f8e7d",
+        )
+
+    def verify_side_effect(shell, target_path, verify_mode, **kwargs):
+        """FULL verification fails for vda only — the other disks pass."""
+        source = kwargs.get("source_path")
+        if source is not None and source.name == "snap-vda.qcow2":
+            return "verification failed: FULL backup has corrupt bit set — file is damaged"
+        return None
+
+    mock_shell.expect("rm -f").returns(_OK)
+    mock_shell.expect("virsh checkpoint-delete").returns(_OK)
+
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            side_effect=full_side_effect,
+        ),
+        patch("qsnap.core.verify_full_backup", side_effect=verify_side_effect),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, mock_state.get_snapshots("testvm"))
+
+    checkpoint_delete_calls = [
+        " ".join(c.args[0])
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
+    ]
+    # Only the failed vda checkpoint is targeted — exactly one call.
+    assert checkpoint_delete_calls == [
+        "virsh checkpoint-delete --metadata --domain testvm "
+        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    ], f"only the vda checkpoint should be deleted, got: {checkpoint_delete_calls}"
+    # No vdb/vdc checkpoint-delete call may exist.
+    assert not any("vdb" in call or "vdc" in call for call in checkpoint_delete_calls), (
+        f"vdb/vdc checkpoints must be left untouched, got: {checkpoint_delete_calls}"
+    )
+
+
+# ── test_cleanup_failed_checkpoint_preserves_previous_baseline ────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_cleanup_failed_checkpoint_preserves_previous_baseline(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Rollback preserves the previous baseline checkpoint of the failed disk.
+
+    Core-orchestrator scenario "Previous baseline of the failed disk is
+    preserved": a new FULL attempt for vda fails verification, and only
+    the successor checkpoint (from ``BackupResult.checkpoint``) is
+    deleted — the pre-existing baseline checkpoint is never targeted.
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # Previous baseline of the failed disk, recorded from a prior
+    # successful transfer.  Its checkpoint must survive the rollback.
+    baseline_checkpoint = "qsnap-ab12cd34-vda-20260701T010000-a1b2c3"
+    mock_state.record_full_backup(
+        str(target.path),
+        f"{baseline_checkpoint}.qcow2",
+        datetime(2026, 7, 1),
+        "vda",
+    )
+    # Force a new FULL attempt despite the existing baseline.
+    core._force_full_targets.add(str(target.path))
+
+    mock_shell.expect("rm -f").returns(_OK)
+    mock_shell.expect("virsh checkpoint-delete").returns(_OK)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            return_value=BackupResult(
+                success=True,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+                disk="vda",
+                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+            ),
+        ),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    checkpoint_delete_calls = [
+        " ".join(c.args[0])
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
+    ]
+    # Only the successor checkpoint is targeted.
+    assert checkpoint_delete_calls == [
+        "virsh checkpoint-delete --metadata --domain testvm "
+        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    ], f"only the successor checkpoint should be deleted, got: {checkpoint_delete_calls}"
+    # The previous baseline is never mentioned in any checkpoint-delete call.
+    assert not any(baseline_checkpoint in call for call in checkpoint_delete_calls), (
+        f"previous baseline {baseline_checkpoint} must be preserved, got: {checkpoint_delete_calls}"
+    )
+
+
+# ── test_cleanup_failed_checkpoint_none_deletes_nothing ───────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_cleanup_failed_checkpoint_none_deletes_nothing(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Stopped-VM FULL failure (checkpoint=None) deletes no checkpoint.
+
+    Core-orchestrator scenario "Stopped-VM FULL failure deletes nothing":
+    when the failed FULL created no checkpoint, the rollback issues no
+    ``virsh checkpoint-delete`` call — but FULL state cleanup via
+    ``remove_full_backup`` still happens (file cleanup is separate from
+    checkpoint cleanup).
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    # No "virsh checkpoint-delete" expectation on purpose: the mock shell
+    # would still record the call (as a failure) if Core wrongly issued one.
+    mock_shell.expect("rm -f").returns(_OK)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            return_value=BackupResult(
+                success=True,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+                disk="vda",
+                checkpoint=None,
+            ),
+        ),
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    checkpoint_delete_calls = [
+        " ".join(c.args[0])
+        for c in shell_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
+    ]
+    assert checkpoint_delete_calls == [], (
+        f"no checkpoint-delete call expected when checkpoint is None, got: "
+        f"{checkpoint_delete_calls}"
+    )
+    assert remove_spy.called, (
+        "remove_full_backup should still be called (FULL file cleanup is separate)"
+    )
+
+
+# ── test_cleanup_failed_checkpoint_delete_failure_non_fatal ───────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_cleanup_failed_checkpoint_delete_failure_non_fatal(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Checkpoint deletion failure during rollback is non-fatal.
+
+    Core-orchestrator scenario "Checkpoint deletion failure is
+    non-fatal": a failing ``virsh checkpoint-delete`` logs a WARNING and
+    the rollback continues — FULL file removal and state cleanup still
+    complete (no exception raised from ``_cleanup_failed_checkpoint``).
+    """
+    global_cfg = make_global_config(full_verify_after_create="check")
+    target = make_target(backup_retry_max=1)
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _record_snap(target, vm, mock_state)
+
+    mock_shell.expect("rm -f").returns(_OK)
+    mock_shell.expect("virsh checkpoint-delete").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            error="checkpoint not found",
+        )
+    )
+
+    caplog.set_level(logging.WARNING)
+
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        ),
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "create_full_backup",
+            return_value=BackupResult(
+                success=True,
+                snapshot_name="snap1",
+                source_path=Path("/tmp/snap1.qcow2"),
+                target_path=target.path / "testvm.FULL.qcow2",
+                bytes_transferred=1048576,
+                error=None,
+                disk="vda",
+                checkpoint="qsnap-deadc0de-vda-20260807T020000-111111",
+            ),
+        ),
+        patch.object(
+            mock_state,
+            "remove_full_backup",
+            wraps=mock_state.remove_full_backup,
+        ) as remove_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [snap])
+
+    # WARNING logged for the failed checkpoint deletion.
+    assert "failed to delete checkpoint" in caplog.text, (
+        "WARNING should be logged when checkpoint deletion fails"
+    )
+    # Rollback continued past the checkpoint-deletion failure.
+    assert remove_spy.called, (
+        "remove_full_backup should still be called after checkpoint-delete failure"
+    )
 
 
 # ── test_retries_exhausted_keeps_old_generations ──────────────────────────
@@ -1696,70 +2164,6 @@ def test_retries_exhausted_keeps_old_generations(
     )
     # CRITICAL log emitted about preserving old generations.
     assert "old generations preserved" in caplog.text.lower()
-
-
-# ── test_checkpoint_cleaned_up_after_failed_full ──────────────────────────
-
-
-def test_checkpoint_cleaned_up_after_failed_full(
-    make_vm_config,
-    make_target,
-    make_global_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """_cleanup_failed_checkpoint deletes libvirt checkpoints after a failed FULL.
-
-    When a FULL verification fails, Core calls _cleanup_failed_checkpoint
-    which lists checkpoints, filters for qsnap-{hash}-*, and deletes each
-    via virsh checkpoint-delete --metadata.
-    """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    snap = _record_snap(target, vm, mock_state)
-
-    # Pre-configure checkpoint listing: one checkpoint matching the target hash.
-    target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
-    checkpoint_name = f"qsnap-{target_hash}-snap1"
-
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-
-    with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: corrupt bit set",
-        ),
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "list_checkpoints",
-            return_value=[checkpoint_name],
-        ),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, [snap])
-
-    # Verify checkpoint-delete was called via IShell.run.
-    checkpoint_delete_calls = [
-        c
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
-    ]
-    assert len(checkpoint_delete_calls) >= 1, (
-        "checkpoint-delete should be called to clean up failed FULL checkpoint"
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

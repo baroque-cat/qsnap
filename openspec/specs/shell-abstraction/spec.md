@@ -109,6 +109,7 @@ The following call sites SHALL be audited and updated to `check=True` where appl
 - `core/__init__.py`: `qemu-img info`, `qemu-img check`, `virsh domstate` (outside `_validate_environment`)
 - `utils/verification.py`: `qemu-img info`, `qemu-img check`, `qemu-img compare`
 - `modules/lifecycle/blockcommit_manager.py`: `virsh domblklist`, `qemu-img check`
+- `utils/space.py`: `estimate_full_size()`, `estimate_incremental_size()` (size-estimation probes — failure is expected and handled by returning `None`)
 
 #### Scenario: Probing call with check=True logs at DEBUG on failure
 
@@ -121,3 +122,10 @@ The following call sites SHALL be audited and updated to `check=True` where appl
 - **WHEN** `_validate_environment()` runs `qemu-nbd --image-opts driver=compress` probe
 - **THEN** `shell.run()` is called with `check=True`
 - **AND** the expected non-zero exit is logged at DEBUG level, not ERROR
+
+#### Scenario: Size-estimation probes use check=True
+
+- **WHEN** `estimate_full_size()` or `estimate_incremental_size()` runs `qemu-img info` and the command fails
+- **THEN** `shell.run()` was called with `check=True`
+- **AND** the failure is logged at DEBUG level, not ERROR
+- **AND** the function returns `None`

@@ -59,7 +59,12 @@ from qsnap.utils.parsing import (
     parse_timestamp,
 )
 from qsnap.utils.retry import compute_backoff, is_retryable, is_space_error, parse_retry_duration
-from qsnap.utils.space import SpaceCheckResult, check_free_space, estimate_full_size, estimate_incremental_size
+from qsnap.utils.space import (
+    SpaceCheckResult,
+    check_free_space,
+    estimate_full_size,
+    estimate_incremental_size,
+)
 from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import scan_backing_chain, verify_full_backup
@@ -1603,6 +1608,35 @@ class Core:
             return None
         actual = info.get("actual-size") if isinstance(info, dict) else None
         return actual if isinstance(actual, int) else None
+
+    def _estimate_full_size_for_disk(
+        self,
+        vm_config: VMConfig,
+        disk_cfg: object,
+        source_snapshot: SnapshotInfo,
+    ) -> int | None:
+        """Estimate FULL backup size for a disk, falling back to base_image.
+
+        Tries the source snapshot path first; when the file does not
+        exist (a simulated snapshot in dry-run), falls back to the
+        disk's *base_image* backing chain, which exists by pre-flight
+        validation and which a real FULL would export plus a near-zero
+        fresh overlay (design D3).  Returns ``None`` when both paths
+        fail — the caller degrades to "size unknown" without aborting
+        the pipeline.
+
+        Used by BOTH the dry-run free-space gate estimate and the
+        prediction channel so they never disagree.
+        """
+        chain_size = self._estimate_chain_size(source_snapshot.path)
+        if chain_size is not None:
+            return chain_size
+        # Source file does not exist or chain query failed ->
+        # fall back to the disk's base_image (design D3).
+        base_image = getattr(disk_cfg, "base_image", None)
+        if base_image is not None:
+            return self._estimate_chain_size(base_image)
+        return None
 
     @staticmethod
     def _format_bytes(size: int) -> str:
@@ -3557,9 +3591,7 @@ class Core:
                 logger.error(msg)
                 raise RuntimeError(msg)
             snapshot_path = snapshot_dir / f"{snapshot_name}.qcow2"
-            specs.append(
-                SnapshotSpec(disk=disk.target, name=snapshot_name, path=snapshot_path)
-            )
+            specs.append(SnapshotSpec(disk=disk.target, name=snapshot_name, path=snapshot_path))
 
         # One batch call via create_multi — single guest-agent freeze
         # for all disks when quiesce=True (design D9/D10).
@@ -3606,13 +3638,8 @@ class Core:
             # leftover files are removed best-effort and caught by
             # pre-flight orphan detection otherwise (design D10).
             failed = [r for r in results if not r.success]
-            failure_details = "; ".join(
-                f"{r.name}: {r.error}" for r in failed
-            )
-            msg = (
-                f"Snapshot batch creation failed for VM {vm_config.name}: "
-                f"{failure_details}"
-            )
+            failure_details = "; ".join(f"{r.name}: {r.error}" for r in failed)
+            msg = f"Snapshot batch creation failed for VM {vm_config.name}: {failure_details}"
             logger.error(msg)
             raise RuntimeError(msg)
 
@@ -4327,11 +4354,7 @@ class Core:
         # disk-full.  Snapshot state records remain (they are only
         # removed after successful commit), so the merge is retried
         # intact by the next run (design D4).
-        if (
-            not result.success
-            and result.error
-            and is_space_error(result.error)
-        ):
+        if not result.success and result.error and is_space_error(result.error):
             self._state.add_deferred_blockcommit(
                 vm_config.name,
                 disk,
@@ -4339,8 +4362,7 @@ class Core:
                 "enospc",
             )
             logger.warning(
-                "Blockcommit deferred due to disk-full for VM %s disk %s — "
-                "will retry on next run",
+                "Blockcommit deferred due to disk-full for VM %s disk %s — will retry on next run",
                 vm_config.name,
                 disk,
             )
@@ -4884,7 +4906,9 @@ class Core:
                     # chain (worst-case standalone copy size, design D5).
                     # In dry-run, gating is a prediction entry only.
                     if self._dry_run:
-                        full_estimate = estimate_full_size(self._shell, most_recent.path)
+                        full_estimate = self._estimate_full_size_for_disk(
+                            vm_config, disk_cfg, most_recent
+                        )
                         if free_space_check == "strict":
                             result = check_free_space(
                                 Path(target.path),
@@ -4900,7 +4924,8 @@ class Core:
                                     path=target.path,
                                     size=full_estimate or 0,
                                     error=(
-                                        None if result.sufficient
+                                        None
+                                        if result.sufficient
                                         else "insufficient space (would suspend target)"
                                     ),
                                 )
@@ -4922,7 +4947,9 @@ class Core:
                             "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
                         )
                         chain_length = target.target_chain_length or 0
-                        chain_size = self._estimate_chain_size(most_recent.path)
+                        chain_size = self._estimate_full_size_for_disk(
+                            vm_config, disk_cfg, most_recent
+                        )
                         size_str = (
                             f"~{self._format_bytes(chain_size)}"
                             if chain_size is not None
@@ -5007,6 +5034,7 @@ class Core:
                                 error="[verify-failure] " + verify_error,
                                 duration=full_result.duration,
                                 disk=full_result.disk,
+                                checkpoint=full_result.checkpoint,
                             )
 
                         # Verification passed — record + log.
@@ -5086,23 +5114,14 @@ class Core:
                 # pending transfer (upper bound for a dirty-block delta,
                 # design D5).
                 if not target_suspended:
-                    candidate_list = [
-                        s for s in snapshots if s.name not in full_source_names
-                    ]
+                    candidate_list = [s for s in snapshots if s.name not in full_source_names]
                     for disk_cfg in vm_config.disks:
-                        disk_transfers = [
-                            s for s in candidate_list
-                            if s.disk == disk_cfg.target
-                        ]
+                        disk_transfers = [s for s in candidate_list if s.disk == disk_cfg.target]
                         if not disk_transfers:
                             continue
-                        most_recent_pending = max(
-                            disk_transfers, key=lambda s: s.timestamp
-                        )
+                        most_recent_pending = max(disk_transfers, key=lambda s: s.timestamp)
                         if _apply_free_space_gate(
-                            estimate_incremental_size(
-                                self._shell, most_recent_pending.path
-                            ),
+                            estimate_incremental_size(self._shell, most_recent_pending.path),
                             f"incremental transfer for disk {disk_cfg.target}",
                         ):
                             target_suspended = True
@@ -5196,9 +5215,7 @@ class Core:
                     # instead of aborting the VM.
                     all_space = all(is_space_error(r.error) for r in failed)
                     if all_space:
-                        failure_details = "; ".join(
-                            f"{r.snapshot_name}: {r.error}" for r in failed
-                        )
+                        failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
                         logger.critical(
                             "[backup] %s target %s: incremental transfers failed "
                             "due to disk-full — suspending target: %s",
@@ -5291,43 +5308,44 @@ class Core:
         target: TargetConfig,
         full_result: BackupResult,
     ) -> None:
-        """Delete libvirt checkpoints created during a failed FULL attempt.
+        """Delete exactly the libvirt checkpoint created during a failed FULL attempt.
 
-        Lists checkpoints via ``virsh checkpoint-list --name``, filters
-        for ``qsnap-{target_hash}-*`` prefix, and deletes each via
-        ``virsh checkpoint-delete --metadata``.  Non-fatal — logs
-        warnings on failure (spec: core-orchestrator).
+        Deletes the checkpoint named in ``full_result.checkpoint`` via
+        ``virsh checkpoint-delete --metadata``.  When
+        ``full_result.checkpoint`` is ``None`` (no checkpoint was
+        created, e.g. a stopped-VM FULL), the method deletes nothing.
+        Deletion failure is non-fatal — a WARNING is logged and the
+        rollback continues (design D1/D2).
         """
-        provider = self._factory.create_backup_provider(vm_config, target)
-        target_hash = provider.target_hash(str(target.path))
-        prefix = f"qsnap-{target_hash}-"
-        checkpoints = provider.list_checkpoints(vm_config.name)
-        failed_checkpoints = [cp for cp in checkpoints if cp.startswith(prefix)]
-        if not failed_checkpoints:
-            return
-        for cp in failed_checkpoints:
-            cmd = [
-                "virsh",
-                "checkpoint-delete",
-                "--metadata",
-                "--domain",
+        if full_result.checkpoint is None:
+            logger.debug(
+                "[backup] %s: no checkpoint to delete (none created for failed FULL)",
                 vm_config.name,
-                cp,
-            ]
-            result = self._shell.run(cmd, timeout=30, check=True)
-            if result.success:
-                logger.info(
-                    "[backup] %s: deleted checkpoint %s after failed FULL",
-                    vm_config.name,
-                    cp,
-                )
-            else:
-                logger.warning(
-                    "[backup] %s: failed to delete checkpoint %s after failed FULL: %s",
-                    vm_config.name,
-                    cp,
-                    result.error,
-                )
+            )
+            return
+
+        cmd = [
+            "virsh",
+            "checkpoint-delete",
+            "--metadata",
+            "--domain",
+            vm_config.name,
+            full_result.checkpoint,
+        ]
+        result = self._shell.run(cmd, timeout=30, check=True)
+        if result.success:
+            logger.info(
+                "[backup] %s: deleted checkpoint %s after failed FULL",
+                vm_config.name,
+                full_result.checkpoint,
+            )
+        else:
+            logger.warning(
+                "[backup] %s: failed to delete checkpoint %s after failed FULL: %s",
+                vm_config.name,
+                full_result.checkpoint,
+                result.error,
+            )
 
     def _resolve_chain_full_anchor(self, backup_path: Path) -> str | None:
         """Walk a backup's backing chain to its FULL anchor (bitmap mode).

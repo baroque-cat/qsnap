@@ -1424,6 +1424,9 @@ class BitmapBackupProvider(IBackupProvider):
 
         target_hash = self.target_hash(str(target.path))
         checkpoint_name = self._new_checkpoint_name(target_hash, source_snapshot.disk)
+        # Reported checkpoint name propagated through BackupResult;
+        # None for stopped VMs where no checkpoint is created (design D1).
+        reported_checkpoint: str | None = None
 
         # Detect VM state to choose the transfer path (design D2).
         running = is_vm_running(self._shell, vm_name)
@@ -1470,6 +1473,11 @@ class BitmapBackupProvider(IBackupProvider):
                     disk=source_snapshot.disk,
                 )
 
+            # backup-begin succeeded — the checkpoint now exists.
+            # Populate reported_checkpoint so Core's rollback can
+            # delete exactly this checkpoint on failure (design D1).
+            reported_checkpoint = checkpoint_name
+
             # Full-pull lifecycle via the shared helper (design D7).
             # qemu-img convert reads from nbd:unix:<socket>:exportname=<disk_target>.
             # Multi-disk (refactor): the export is restricted to this
@@ -1504,6 +1512,7 @@ class BitmapBackupProvider(IBackupProvider):
                     bytes_transferred=0,
                     error=transfer_error,
                     disk=source_snapshot.disk,
+                    checkpoint=reported_checkpoint,
                 )
         else:
             # Stopped VM: direct qemu-img convert from source qcow2.
@@ -1599,6 +1608,7 @@ class BitmapBackupProvider(IBackupProvider):
                         bytes_transferred=0,
                         error="FULL backup has unexpected backing file",
                         disk=source_snapshot.disk,
+                        checkpoint=reported_checkpoint,
                     )
             except json.JSONDecodeError:
                 pass  # Non-fatal — cannot parse metadata
@@ -1622,6 +1632,7 @@ class BitmapBackupProvider(IBackupProvider):
                     bytes_transferred=0,
                     error="checkpoint missing — next incremental impossible",
                     disk=source_snapshot.disk,
+                    checkpoint=reported_checkpoint,
                 )
 
         # Get file size
@@ -1642,6 +1653,7 @@ class BitmapBackupProvider(IBackupProvider):
             bytes_transferred=bytes_transferred,
             error=None,
             disk=source_snapshot.disk,
+            checkpoint=reported_checkpoint,
         )
 
     def list(self, target: TargetConfig) -> list[SnapshotInfo]:

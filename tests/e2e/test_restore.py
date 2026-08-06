@@ -76,9 +76,7 @@ def test_restore_backup_to_new_vm(e2e_vm):
 
     # The VM boots off the restored image.
     start_after = shell.run(["virsh", "start", vm_name], timeout=30)
-    assert start_after.success, (
-        f"VM must boot after restore, got: {start_after.error}"
-    )
+    assert start_after.success, f"VM must boot after restore, got: {start_after.error}"
     time.sleep(1)
     assert is_vm_running(shell, vm_name), "VM should be running after restore"
 

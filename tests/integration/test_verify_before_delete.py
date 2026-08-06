@@ -415,9 +415,7 @@ def _seed_old_generation(shell, target_dir, state, vm_name, gen_name: str) -> Pa
     old_path = target_dir / f"{vm_name}.FULL.{gen_name}.20300101T000001_a1b2c3.qcow2"
     shell.run(["qemu-img", "create", "-f", "qcow2", str(old_path), "128K"], timeout=30)
     assert old_path.exists(), f"Old FULL file must exist: {old_path}"
-    state.record_full_backup(
-        str(target_dir), old_path.name, datetime(2030, 1, 1), disk="vda"
-    )
+    state.record_full_backup(str(target_dir), old_path.name, datetime(2030, 1, 1), disk="vda")
     return old_path
 
 
@@ -565,9 +563,7 @@ def test_space_error_suspends_target_no_abort_old_generation_preserved(test_vm, 
 
     # No abort: VM result success, not backup_failed.
     vm_result = result.results[0]
-    assert vm_result.success is True, (
-        f"Space failure must not abort the VM: {vm_result.error}"
-    )
+    assert vm_result.success is True, f"Space failure must not abort the VM: {vm_result.error}"
     assert vm_result.backup_failed is False, (
         "Space failure must NOT set backup_failed (no BackupAbortError)"
     )
@@ -578,8 +574,6 @@ def test_space_error_suspends_target_no_abort_old_generation_preserved(test_vm, 
     )
 
     # Never-delete-on-ENOSPC: old generation preserved.
-    assert old_gen.exists(), (
-        f"Old generation must NOT be deleted on ENOSPC: {old_gen}"
-    )
+    assert old_gen.exists(), f"Old generation must NOT be deleted on ENOSPC: {old_gen}"
 
     _cleanup_checkpoints(shell, vm_name)

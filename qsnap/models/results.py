@@ -110,6 +110,11 @@ class BackupResult:
     snapshot so audit trails and summaries can attribute the transfer to
     a specific disk.  ``None`` only when the source snapshot carries no
     disk information.
+
+    ``checkpoint`` carries the exact libvirt checkpoint name created
+    during the operation — populated by ``create_full_backup`` on the
+    running-VM path and ``None`` when no checkpoint was created
+    (stopped-VM path or plain transfers).
     """
 
     success: bool
@@ -120,6 +125,7 @@ class BackupResult:
     error: str | None
     duration: float = 0.0
     disk: str | None = None
+    checkpoint: str | None = None
 
 
 # ── Commit (blockcommit) ─────────────────────────────────────────────────

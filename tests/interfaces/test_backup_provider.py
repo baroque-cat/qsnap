@@ -487,3 +487,71 @@ def test_create_full_backup_result_carries_disk(
     assert result.disk == source_snapshot.disk, (
         f"Expected disk={source_snapshot.disk!r}, got disk={result.disk!r}"
     )
+
+
+def _make_create_full_backup_shell() -> MockShell:
+    """Configure a MockShell so that ``create_full_backup`` fails at ``backup-begin``.
+
+    ``virsh dominfo`` reports a running VM (running-VM path) and
+    ``virsh backup-begin`` fails — the simplest path for
+    ``BitmapBackupProvider`` to return a ``BackupResult`` with
+    ``checkpoint=None`` (backup-begin is atomic: no checkpoint was
+    created, so there is nothing to report or roll back).
+    """
+    shell = MockShell()
+    shell.expect(r"virsh dominfo").returns(
+        ShellResult(success=True, stdout="State: running\n", stderr="", returncode=0, error=None),
+    )
+    shell.expect(r"rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None),
+    )
+    shell.expect(r"virsh backup-begin").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="backup-begin failed",
+            returncode=1,
+            error="backup-begin failed",
+        ),
+    )
+    return shell
+
+
+@pytest.mark.parametrize(
+    "cls,init_kwargs",
+    [
+        (BitmapBackupProvider, {"shell": _make_create_full_backup_shell()}),
+        (MockBitmapBackupProvider, {}),
+    ],
+    ids=["bitmap", "mock_bitmap"],
+)
+def test_create_full_backup_result_carries_checkpoint(cls, init_kwargs):
+    """``create_full_backup`` returns a ``BackupResult`` whose ``checkpoint``
+    field is ``str | None`` (risk [A] mitigation, design.md).
+
+    - ``MockBitmapBackupProvider`` leaves ``checkpoint`` at its default
+      ``None``.
+    - ``BitmapBackupProvider`` with a ``backup-begin``-failing shell
+      takes the running-VM failure path and MUST report
+      ``checkpoint=None`` — backup-begin is atomic, so no checkpoint
+      was created.
+    """
+    provider = cls(**init_kwargs)
+    source_snapshot = SnapshotInfo(
+        name="test-snap",
+        path=Path("/tmp/snap.qcow2"),
+        timestamp=datetime.now(),
+        allocation=65536,
+        disk="vda",
+    )
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    result = provider.create_full_backup("testvm", source_snapshot, target, compress=False)
+    assert isinstance(result, BackupResult)
+    assert result.checkpoint is None or isinstance(result.checkpoint, str), (
+        f"checkpoint must be str | None, got {result.checkpoint!r}"
+    )
+    if cls is BitmapBackupProvider:
+        assert result.checkpoint is None, (
+            "BitmapBackupProvider must report checkpoint=None when backup-begin fails"
+        )
+        assert result.success is False

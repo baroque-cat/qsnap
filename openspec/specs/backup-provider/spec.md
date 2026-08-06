@@ -168,6 +168,8 @@ FULL backup naming format (multi-disk refactor): `{vm_name}.FULL.{YYYYMMDDTHHMMS
 
 For running VMs, a checkpoint named `qsnap-{target_hash}-{disk}-{yyyymmddTHHMMSS}-{6hex}` SHALL be created atomically with the FULL's `backup-begin`, so a bitmap-mode FULL always leaves a checkpoint baseline anchored at the FULL's freeze point. For stopped VMs, no checkpoint is created.
 
+The returned `BackupResult.checkpoint` SHALL carry the exact successor checkpoint name when a checkpoint was created (running-VM path, after `backup-begin` succeeds), and SHALL be `None` when no checkpoint was created (stopped-VM path, or `backup-begin` failure). This lets Core's rollback delete precisely the checkpoint the failed attempt created.
+
 The method SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after post-create verification passes.
 
 #### Scenario: Bitmap FULL with zstd compression via qemu-img convert
@@ -204,6 +206,19 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 
 - **WHEN** `BitmapBackupProvider.create_full_backup("3.Projects_opencode", snapshot, target, compress=False)` is called
 - **THEN** the FULL backup file is named `3.Projects_opencode.FULL.YYYYMMDDTHHMMSS_{disk}_{6hex}.qcow2`
+
+#### Scenario: Running-VM FULL reports its checkpoint name
+- **WHEN** `create_full_backup()` completes successfully for a running VM
+- **THEN** the returned `BackupResult.checkpoint` equals the successor checkpoint name created by `backup-begin`
+
+#### Scenario: Stopped-VM FULL reports no checkpoint
+- **WHEN** `create_full_backup()` completes successfully for a stopped VM
+- **THEN** the returned `BackupResult.checkpoint` is `None`
+
+#### Scenario: backup-begin failure reports no checkpoint
+- **WHEN** `create_full_backup()` fails because `virsh backup-begin` returned non-zero (atomic — no checkpoint created)
+- **THEN** the returned `BackupResult.checkpoint` is `None`
+- **AND** `BackupResult.success` is `False`
 
 ### Requirement: transfer_missing SHALL NOT create FULL backups
 

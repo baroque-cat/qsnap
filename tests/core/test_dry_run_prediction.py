@@ -388,15 +388,37 @@ def test_already_on_target_not_predicted(
 # ── Test 8: FULL prediction carries chain size estimate ────────────────────
 
 
+@pytest.mark.unit
+@pytest.mark.mock
 def test_full_prediction_carries_chain_size(
     mock_factory: MockVMModuleFactory,
     mock_state: InMemoryStateManager,
     mock_shell: MockShell,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """FULL prediction carries chain size estimate in log and prediction size field."""
-    # Override the chain-size shell command to return a known size.
-    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
+    """FULL prediction carries chain size estimate in log and prediction size field.
+
+    The simulated snapshot file does not exist, so under design D3 the
+    chain probe must fall back to ``disk_cfg.base_image``'s backing
+    chain — the source-path probe fails first, then the base_image probe
+    returns the known 10 MiB chain sum.
+    """
+    # The simulated snapshot path probe fails (file not found)...
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open ... No such file or directory",
+            returncode=1,
+            error="command failed",
+        )
+    )
+    # ...so the estimate falls back to the base_image chain (design D3).
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
+    ).returns(
         ShellResult(
             success=True,
             stdout=json.dumps([{"actual-size": 10485760}]),  # 10 MiB
@@ -420,6 +442,16 @@ def test_full_prediction_carries_chain_size(
     full_pred = full_predictions[0]
     assert full_pred.size == 10485760, f"Size should be 10485760 (10 MiB), got {full_pred.size}"
 
+    # The probe must have targeted disk.base_image (design D3): the
+    # base_image chain command appears in the shell call history.
+    base_image_cmd = (
+        "qemu-img info --force-share --backing-chain --output=json "
+        "/var/lib/libvirt/images/testvm.qcow2"
+    )
+    assert base_image_cmd in mock_shell.call_history, (
+        f"Expected base_image chain probe in call history, got: {mock_shell.call_history}"
+    )
+
     # Log should contain ~10.0 MiB size indicator.
     log_text = caplog.text
     assert "~10.0 MiB" in log_text or "10.0 MiB" in log_text, (
@@ -430,23 +462,32 @@ def test_full_prediction_carries_chain_size(
 # ── Test 9: FULL prediction estimation failure graceful ────────────────────
 
 
+@pytest.mark.unit
+@pytest.mark.mock
 def test_full_prediction_estimation_failure_graceful(
     mock_factory: MockVMModuleFactory,
     mock_state: InMemoryStateManager,
     mock_shell: MockShell,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When chain-size estimation fails, prediction is still recorded with size 0 and log says 'size unknown'."""
-    # Make the chain-size command fail.
-    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open",
-            returncode=1,
-            error="command failed",
-        )
+    """When chain-size estimation fails for BOTH the source probe and the
+    base_image fallback, prediction is still recorded with size 0 and log
+    says 'size unknown' (pipeline not aborted)."""
+    failure = ShellResult(
+        success=False,
+        stdout="",
+        stderr="qemu-img: Could not open",
+        returncode=1,
+        error="command failed",
     )
+    # Simulated snapshot probe fails (file not found)...
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
+    ).returns(failure)
+    # ...AND the base_image fallback probe also fails (design D3).
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
+    ).returns(failure)
 
     vm = _make_vm(name="testvm")
     core = _build_core(
@@ -466,6 +507,16 @@ def test_full_prediction_estimation_failure_graceful(
         f"Size should be 0 when estimation fails (chain_size or 0 = 0), got {full_pred.size}"
     )
 
+    # Both probes were attempted before degrading (design D3): the source
+    # snapshot path AND the base_image fallback path.
+    assert any(
+        "/snapshots/testvm/" in cmd and "--backing-chain" in cmd for cmd in mock_shell.call_history
+    ), f"Source snapshot probe should have been attempted, got: {mock_shell.call_history}"
+    assert any(
+        "/var/lib/libvirt/images/testvm.qcow2" in cmd and "--backing-chain" in cmd
+        for cmd in mock_shell.call_history
+    ), f"base_image fallback probe should have been attempted, got: {mock_shell.call_history}"
+
     # Log should say "size unknown".
     log_text = caplog.text
     assert "size unknown" in log_text, (
@@ -473,6 +524,139 @@ def test_full_prediction_estimation_failure_graceful(
     )
 
     # Pipeline did not abort (check is informational).
+
+
+# ── Test 9a (dry-run-prediction-unit): base_image fallback for FULL estimate ─
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_first_run_dry_run_full_estimate_falls_back_to_base_image(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+) -> None:
+    """First-run dry-run FULL size falls back to the base_image backing chain.
+
+    The simulated snapshot file does not exist, so the source-path probe
+    fails; the estimate is then computed from ``disk_cfg.base_image``'s
+    chain (design D3).  BOTH the FULL prediction and the free-space gate
+    prediction carry the same estimate so they never disagree.
+    """
+    # Simulated snapshot path probe fails (file not found)...
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open ... No such file or directory",
+            returncode=1,
+            error="command failed",
+        )
+    )
+    # ...and the base_image fallback probe returns a 10 MiB chain sum.
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps([{"actual-size": 10485760}]),  # 10 MiB
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    vm = _make_vm(name="testvm")
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+    result = core.run()
+
+    # FULL prediction carries the base_image chain sum.
+    full_predictions = [p for p in result.predictions if p.action == "backup_full"]
+    assert len(full_predictions) >= 1, "First run should predict a backup_full"
+    assert full_predictions[0].size == 10485760, (
+        f"FULL prediction should carry the base_image chain sum, got {full_predictions[0].size}"
+    )
+
+    # The free-space gate prediction carries the SAME estimate (design D3:
+    # gate estimate and prediction channel share _estimate_full_size_for_disk).
+    gate_predictions = [p for p in result.predictions if p.action == "free_space_gate"]
+    assert len(gate_predictions) == 1, (
+        f"Expected exactly one free_space_gate prediction, got {len(gate_predictions)}"
+    )
+    assert gate_predictions[0].size == 10485760, (
+        f"Gate prediction should carry the same estimate, got {gate_predictions[0].size}"
+    )
+
+
+# ── Test 9b (dry-run-prediction-unit): simulated-path probe logs nothing ────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_dry_run_simulated_path_probe_no_error_log(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The simulated-path probe failure does not log ERROR or a
+    'Cannot estimate FULL size' WARNING — the base_image fallback
+    succeeds silently (design D3)."""
+    # Simulated snapshot path probe fails (file not found)...
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open ... No such file or directory",
+            returncode=1,
+            error="command failed",
+        )
+    )
+    # ...and the base_image fallback probe succeeds silently.
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps([{"actual-size": 10485760}]),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    vm = _make_vm(name="testvm")
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+
+    with caplog.at_level(logging.WARNING, logger="qsnap"):
+        result = core.run()
+
+    # No ERROR-level records at all.
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], f"Expected no ERROR logs, got: {errors}"
+
+    # No 'Cannot estimate FULL size' WARNING (the fallback is silent).
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Cannot estimate FULL size" in r.getMessage()
+    ]
+    assert warnings == [], f"Expected no 'Cannot estimate FULL size' WARNING, got: {warnings}"
+
+    # The fallback estimate was still used — prediction is populated.
+    full_predictions = [p for p in result.predictions if p.action == "backup_full"]
+    assert len(full_predictions) >= 1
+    assert full_predictions[0].size == 10485760, (
+        f"Fallback estimate should be used, got {full_predictions[0].size}"
+    )
 
 
 # ── Test 10: backup retention generation rollover predicted ────────────────
@@ -1402,18 +1586,39 @@ def test_dry_run_predicts_gate_entry(
     """
     from qsnap.utils.space import SpaceCheckResult
 
+    # The gate estimate now comes from _estimate_full_size_for_disk()
+    # (design D3): the simulated snapshot probe fails (file does not
+    # exist) and the base_image fallback yields the 5000-byte chain sum.
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
+    ).returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open ... No such file or directory",
+            returncode=1,
+            error="command failed",
+        )
+    )
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps([{"actual-size": 5000}]),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
     vm = _make_vm(name="testvm")
     core = _build_core(
         vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
     )
 
-    insufficient = SpaceCheckResult(
-        sufficient=False, free_bytes=100, estimate=5000, required=10000
-    )
-    with (
-        patch("qsnap.core.estimate_full_size", return_value=5000),
-        patch("qsnap.core.check_free_space", return_value=insufficient),
-    ):
+    insufficient = SpaceCheckResult(sufficient=False, free_bytes=100, estimate=5000, required=10000)
+    with patch("qsnap.core.check_free_space", return_value=insufficient):
         result = core.run()
 
     assert result.dry_run is True
@@ -1462,9 +1667,7 @@ def test_dry_run_space_limited_false(
     assert result.space_limited is False
 
     # Dry-run with the strict gate blocked — still not flagged.
-    insufficient = SpaceCheckResult(
-        sufficient=False, free_bytes=100, estimate=5000, required=10000
-    )
+    insufficient = SpaceCheckResult(sufficient=False, free_bytes=100, estimate=5000, required=10000)
     with (
         patch("qsnap.core.estimate_full_size", return_value=5000),
         patch("qsnap.core.check_free_space", return_value=insufficient),
