@@ -3,9 +3,7 @@
 ## Purpose
 
 One-command creation of a standalone qcow2 file from any qsnap-managed snapshot or backup. Uses `qemu-img convert --force-share -O qcow2` to flatten the backing chain into a single standalone file. The disk is resolved from the snapshot/backup name. No XML manipulation, VM definition, or libvirt management is performed.
-
 ## Requirements
-
 ### Requirement: qsnap fork command creates independent qcow2 from snapshot or backup
 `qsnap fork <name> --output <path> [vm]` SHALL locate the named snapshot or backup via `Core._resolve_snapshot()` and create a standalone qcow2 file at the specified output path. The command SHALL NOT perform XML manipulation, VM definition, or any libvirt management operations.
 
@@ -58,6 +56,8 @@ The chain-size estimation step (`qemu-img info --backing-chain --force-share`) S
 ### Requirement: Core.fork method
 `Core` SHALL provide a `fork(name: str, output_path: Path, vm_filter: str | None = None) -> RestoreResult` method. It SHALL reuse `Core._resolve_snapshot()` for snapshot/backup resolution, estimate chain size, then create the standalone qcow2 via the shared standalone-image-conversion helpers (`convert_with_retry` followed by `verify_standalone_image`), consulting `self._dry_run` after the read-only chain-size estimate. It SHALL NOT perform XML manipulation or VM definition. The returned `RestoreResult` SHALL include `disk` from `snapshot_info.disk`.
 
+The optional `vm_filter` (CLI: `qsnap fork <name> [vm]`) SHALL be passed to `_resolve_snapshot()` to restrict the search to matching VMs: when the filter matches no VM that owns the named snapshot, resolution fails and fork returns `RestoreResult(success=False, error="Snapshot not found: <name>")`. When several VMs own snapshots with identical names, the filter disambiguates which one is used. Resolution failure SHALL return a failed `RestoreResult` even in dry-run mode (the failure is determined before any conversion work).
+
 #### Scenario: fork returns RestoreResult on success
 - **WHEN** `core.fork("myvm.20260701T120000_a1b2c3", Path("/var/lib/libvirt/images/clone.qcow2"))` completes
 - **THEN** returns `RestoreResult(success=True, snapshot_name="myvm.20260701T120000_a1b2c3", restored_path=Path("/var/lib/libvirt/images/clone.qcow2"), chain_files=[restored_path], error=None, disk="vda")`
@@ -77,6 +77,18 @@ The chain-size estimation step (`qemu-img info --backing-chain --force-share`) S
 - **AND** no `qemu-img convert` is executed and no output file is created
 - **AND** returns `RestoreResult(success=True)`
 
+#### Scenario: fork with non-matching vm filter reports snapshot not found
+- **WHEN** `core.fork("myvm.20260701T120000_a1b2c3", Path("/tmp/test.qcow2"), vm_filter="othervm")` is called and only "myvm" owns that snapshot
+- **THEN** returns `RestoreResult(success=False, error="Snapshot not found: myvm.20260701T120000_a1b2c3")`
+
+#### Scenario: fork vm filter disambiguates identical snapshot names
+- **WHEN** VMs "vm1" and "vm2" both have a snapshot named "shared-name" and `core.fork("shared-name", out, vm_filter="vm2")` is called
+- **THEN** "vm2"'s snapshot is resolved and forked
+
+#### Scenario: fork dry-run with unresolvable snapshot still fails
+- **WHEN** `core.fork("nonexistent-snap", Path("/tmp/test.qcow2"))` is called with `core.dry_run = True`
+- **THEN** returns `RestoreResult(success=False, error="Snapshot not found: nonexistent-snap")`
+
 ### Requirement: Fork accepts a local dry-run flag
 The `fork` subcommand SHALL accept a local `--dry-run` flag in addition to the global `--dry-run` / `-n` flag. When either is active, the CLI handler SHALL ensure `core.dry_run = True` before calling `Core.fork()`. The local flag SHALL be declared with `default=argparse.SUPPRESS` so that the global flag's value is not silently overridden when the local flag is absent (same pattern as the `reconcile` subcommand).
 
@@ -93,3 +105,4 @@ The `fork` subcommand SHALL accept a local `--dry-run` flag in addition to the g
 #### Scenario: Fork without any dry-run flag converts normally
 - **WHEN** `qsnap fork myvm.20260701T120000_a1b2c3 --output /tmp/clone.qcow2` is executed without dry-run flags
 - **THEN** `core.dry_run` is `False` and the conversion executes
+

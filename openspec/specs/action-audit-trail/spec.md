@@ -3,9 +3,7 @@
 ## Purpose
 
 Provides an immutable audit trail of pipeline actions (snapshot creation, deletion, backup transfer, FULL creation, backup deletion, errors) via the `ActionRecord` frozen dataclass. Accumulated by Core during `_run_pipeline()` in `self._actions` and carried in `PipelineResult.actions`. Consumed by the CLI summary formatter (`qsnap.cli.summary.format_summary`) and the optional transaction log writer (`qsnap.utils.transaction.TransactionWriter`).
-
 ## Requirements
-
 ### Requirement: ActionRecord dataclass
 
 The system SHALL provide an `ActionRecord` frozen dataclass in `qsnap/models/results.py` with fields: `action: str` (one of `"snapshot_create"`, `"snapshot_delete"`, `"backup_transfer"`, `"backup_full"`, `"backup_delete"`, `"error"`), `vm_name: str`, `name: str`, `path: Path`, `size: int = 0`, `duration: float = 0.0`, `error: str | None = None`, and `disk: str | None = None`. The `disk` field identifies the disk target (e.g. `"vda"`) the action applies to. Every disk-scoped action record SHALL carry its disk; VM-level records (e.g. `action="error"` for a whole-VM failure) SHALL carry `disk=None`.
@@ -68,7 +66,7 @@ Core SHALL maintain `self._actions: list[ActionRecord]` as an in-memory list cle
 
 `PipelineResult` SHALL have a field `actions: list[ActionRecord]`, populated from `self._actions` at the end of `_run_pipeline()`. The field SHALL be present in both `run()` and `snapshot()` pipeline paths.
 
-`PipelineResult` SHALL additionally have a field `predictions: list[ActionRecord]`, populated from the dry-run prediction accumulator at the end of `_run_pipeline()`. In non-dry-run mode `predictions` SHALL be empty. In dry-run mode `actions` SHALL remain empty and `predictions` SHALL carry one record per predicted mutation. Prediction records SHALL use the same `ActionRecord` structure; the action vocabulary is extended with `blockcommit` for predicted overlay merges. Predictions SHALL never be passed to `TransactionWriter`.
+`PipelineResult` SHALL additionally have a field `predictions: list[ActionRecord]`, populated from the dry-run prediction accumulator at the end of `_run_pipeline()`. In non-dry-run mode `predictions` SHALL be empty. In dry-run mode `actions` SHALL contain ONLY `error` records (a failed VM is reported regardless of mode — the per-VM except handler appends `ActionRecord(action="error", ...)` in both modes); mutation records SHALL never be appended in dry-run. `predictions` SHALL carry one record per predicted mutation. Prediction records SHALL use the same `ActionRecord` structure; the action vocabulary is extended with `blockcommit` for predicted overlay merges. Predictions SHALL never be passed to `TransactionWriter`.
 
 #### Scenario: PipelineResult includes actions after successful run
 - **WHEN** `core.run()` completes with 2 snapshots created, 1 blockcommitted, 3 backups transferred
@@ -82,5 +80,6 @@ Core SHALL maintain `self._actions: list[ActionRecord]` as an in-memory list cle
 #### Scenario: PipelineResult carries predictions in dry-run
 - **WHEN** `core.run()` completes in dry-run mode with predicted mutations
 - **THEN** `result.predictions` contains one `ActionRecord` per predicted mutation, each with `vm_name` and `disk` populated where the action is disk-scoped
-- **AND** `result.actions` is empty
+- **AND** `result.actions` contains only `error` records (empty when no VM failed)
 - **AND** no prediction is written to the transaction log
+

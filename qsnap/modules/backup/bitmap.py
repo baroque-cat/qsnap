@@ -323,7 +323,7 @@ class BitmapBackupProvider(IBackupProvider):
                             disk=snapshot.disk,
                         )
                     )
-                    continue
+                    break
 
             # The successor checkpoint is created atomically with this
             # export's backup-begin (design D1/D2): its dirty-bitmap
@@ -419,7 +419,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 disk=snapshot.disk,
                             )
                         )
-                        continue
+                        break
 
                 # Step 4: Pull the export.
                 # libvirt's NBD server exports each disk under its
@@ -519,7 +519,7 @@ class BitmapBackupProvider(IBackupProvider):
                             disk=snapshot.disk,
                         )
                     )
-                    continue
+                    break
 
                 # Step 5: Verification (if enabled).  Incrementals use
                 # the bitmap-specific verifier (backing-filename check +
@@ -561,7 +561,7 @@ class BitmapBackupProvider(IBackupProvider):
                             disk=snapshot.disk,
                         )
                     )
-                    continue
+                    break
 
                 # Step 5b: Post-transfer validation for incrementals
                 # (design D5).  Verify chain-to-FULL traversability and
@@ -616,7 +616,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 disk=snapshot.disk,
                             )
                         )
-                        continue
+                        break
 
                     # Checkpoint existence: verify at least one
                     # qsnap- checkpoint exists for this VM+target
@@ -647,7 +647,7 @@ class BitmapBackupProvider(IBackupProvider):
                                 disk=snapshot.disk,
                             )
                         )
-                        continue
+                        break
 
                 # Step 6: Checkpoint rotation (design D3): only after a
                 # successful AND verified export, delete all superseded

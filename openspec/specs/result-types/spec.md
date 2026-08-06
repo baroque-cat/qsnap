@@ -2,11 +2,9 @@
 
 ## Purpose
 Immutable frozen dataclasses returned by all fallible operations. Every result carries a `success` boolean and an `error` string that is non-None iff `success` is False.
-
 ## Requirements
-
 ### Requirement: SnapshotResult dataclass
-The system SHALL provide an immutable `SnapshotResult` dataclass with `success: bool`, `name: str`, `path: Path`, `new_allocation: int`, and `error: str | None`.
+The system SHALL provide an immutable `SnapshotResult` dataclass with `success: bool`, `name: str`, `path: Path`, `new_allocation: int`, `error: str | None`, and `disk: str | None = None`. The `disk` field identifies the disk target (e.g. `"vda"`) the snapshot belongs to; Core tags per-disk snapshot results with it (including simulated dry-run snapshots) so downstream consumers can attribute each snapshot to its disk. `disk` is `None` when the caller has no disk context.
 
 #### Scenario: Successful snapshot result
 - **WHEN** a `SnapshotResult` is created with `success=True`, `name="myvm.20250101T1200"`, `path=Path("/snaps/myvm.20250101T1200.qcow2")`, `new_allocation=65536`, `error=None`
@@ -15,6 +13,10 @@ The system SHALL provide an immutable `SnapshotResult` dataclass with `success: 
 #### Scenario: Failed snapshot result
 - **WHEN** a `SnapshotResult` is created with `success=False`, `name=""`, `path=Path()`, `new_allocation=0`, `error="virsh timed out"`
 - **THEN** `result.success is False` and `result.error` contains the error message
+
+#### Scenario: SnapshotResult carries disk
+- **WHEN** a `SnapshotResult` is created for disk `vda` with `disk="vda"`
+- **THEN** `result.disk` is `"vda"`; the default when omitted is `None`
 
 ### Requirement: BackupResult dataclass
 The system SHALL provide an immutable `BackupResult` dataclass with `success: bool`, `snapshot_name: str`, `source_path: Path`, `target_path: Path`, `bytes_transferred: int`, `error: str | None`, `duration: float = 0.0`, and `disk: str | None = None`. The `disk` field identifies the disk target (e.g. `"vda"`) the transferred backup belongs to — backups of different disks within the same VM are differentiated by this field. Producers (`BitmapBackupProvider.transfer_missing`, `BitmapBackupProvider.create_full_backup`, and the Core FULL-creation path) SHALL populate `disk` from the source snapshot's disk; the default `None` exists only for construction compatibility.
@@ -109,3 +111,4 @@ The system SHALL provide an immutable `RestoreResult` dataclass with `success: b
 #### Scenario: RestoreResult without disk
 - **WHEN** a `RestoreResult` is created with `success=True`, `snapshot_name="..."`, `restored_path=Path("...")`, `chain_files=[...]`, `error=None`, no `disk`
 - **THEN** `result.disk` is `None`
+

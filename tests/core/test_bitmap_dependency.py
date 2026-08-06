@@ -15,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from qsnap.core import Core
+import pytest
+
+from qsnap.core import BackupAbortError, Core
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import BackupResult, CheckResult, ShellResult, SnapshotInfo
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR
@@ -134,6 +136,13 @@ def test_bitmap_incremental_registers_dependency(
     vm = _make_bitmap_vm(target)
     snap = _make_incremental_snapshot("vm.20250101T000000")
 
+    # Pre-record a FULL (with a real file) so this run performs an
+    # incremental transfer instead of creating a new FULL (FULL creation
+    # would fail verification on this minimal shell and abort the VM).
+    full_name = "vm.FULL.20250101.qcow2"
+    (target_dir / full_name).touch()
+    mock_state.record_full_backup(str(target_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "vda")
+
     # Create a fresh shell with only our expectations (no conftest noise).
     shell = MockShell()
     _setup_chain_walk_shell(
@@ -186,6 +195,12 @@ def test_failed_transfer_records_no_dependency(
     vm = _make_bitmap_vm(target)
     snap = _make_incremental_snapshot("vm.failed.20250101T000000")
 
+    # Pre-record a FULL (with a real file) so this run reaches the
+    # incremental transfer step instead of creating a new FULL.
+    full_name = "vm.FULL.20250101.qcow2"
+    (target_dir / full_name).touch()
+    mock_state.record_full_backup(str(target_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "vda")
+
     # Replace the bitmap provider with one that always fails.
     failing_provider = MockBitmapBackupProvider()
 
@@ -222,9 +237,15 @@ def test_failed_transfer_records_no_dependency(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with patch.object(
-        mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
-    ) as spy:
+    with (
+        patch.object(
+            mock_state,
+            "record_incremental_dependency",
+            wraps=mock_state.record_incremental_dependency,
+        ) as spy,
+        # VM-level isolation: the definitive transfer failure aborts the VM.
+        pytest.raises(BackupAbortError),
+    ):
         core._backup_target(vm, target, [snap])
 
     # ── assert nothing was recorded ─────────────────────────────────
@@ -265,6 +286,12 @@ def test_standalone_no_backing_records_no_dependency(
     target = _make_bitmap_target(str(target_dir))
     vm = _make_bitmap_vm(target)
     snap = _make_incremental_snapshot("vm.standalone.20250101T000000")
+
+    # Pre-record a FULL (with a real file) so this run performs an
+    # incremental transfer instead of creating a new FULL.
+    full_name = "vm.FULL.20250101.qcow2"
+    (target_dir / full_name).touch()
+    mock_state.record_full_backup(str(target_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "vda")
 
     shell = MockShell()
     inc_path = target_dir / f"{snap.name}.qcow2"

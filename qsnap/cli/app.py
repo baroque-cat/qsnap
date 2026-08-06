@@ -117,6 +117,16 @@ def build_argparser() -> argparse.ArgumentParser:
     for cmd in ("run", "snapshot", "backup", "prune"):
         sub = subparsers.add_parser(cmd)
         sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
+        # Local ``--dry-run`` with ``default=argparse.SUPPRESS`` so the flag
+        # is accepted both before and after the subcommand.  When absent the
+        # subparser does not overwrite the global ``--dry-run`` value.
+        sub.add_argument(
+            "--dry-run",
+            "-n",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="Predict actions without executing them",
+        )
         sub.add_argument(
             "--print-schedule",
             "-S",
@@ -196,9 +206,16 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     restore_parser.add_argument("snapshot_name", help="Snapshot or backup name to restore from")
     restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
+    # ``default=argparse.SUPPRESS`` (same pattern as fork/reconcile): when
+    # the flag is absent the subparser does NOT overwrite the global
+    # ``--dry-run`` value, so ``qsnap --dry-run restore SNAP`` stays a
+    # dry run.  A plain ``store_true`` default of ``False`` would silently
+    # disable the global flag here.
     restore_parser.add_argument(
         "--dry-run",
+        "-n",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Show planned actions without executing them",
     )
     restore_parser.add_argument(

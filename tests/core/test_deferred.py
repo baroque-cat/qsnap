@@ -1328,3 +1328,58 @@ def test_multidisk_deferred_drain_one_failure_independent(
     assert remaining[0].disk == "vda"
     assert remaining[0].snapshots == ["vda_s1"]
     assert remaining[0].reason == "apparmor"
+
+
+# ── test_deferred_threshold_warning_dry_run_no_state_write ────────────────
+
+
+def test_deferred_threshold_warning_dry_run_no_state_write(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """L2: dry-run logs the threshold WARNING but never writes state."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "apparmor")
+    deferred_before = mock_state.get_deferred_operations("testvm")
+
+    caplog.set_level(logging.WARNING)
+    with patch.object(
+        mock_state, "update_deferred_warning", wraps=mock_state.update_deferred_warning
+    ) as warn_spy:
+        core._check_deferred_thresholds()
+
+    # WARNING still emitted in dry-run...
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    # ...but no state write happens.
+    warn_spy.assert_not_called()
+    deferred_after = mock_state.get_deferred_operations("testvm")
+    assert [e.last_warned_at for e in deferred_before] == [e.last_warned_at for e in deferred_after]
+
+    # Control: the same setup WITHOUT dry-run updates last_warned_at.
+    core.dry_run = False
+    with patch.object(
+        mock_state, "update_deferred_warning", wraps=mock_state.update_deferred_warning
+    ) as warn_spy_real:
+        core._check_deferred_thresholds()
+    assert warn_spy_real.call_count == 1

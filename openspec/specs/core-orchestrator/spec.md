@@ -3,9 +3,7 @@
 ## Purpose
 
 Core is the pipeline runner and dependency-injection host: it coordinates environment validation, deferred-operation draining, change detection, per-disk snapshot creation, per-disk retention evaluation, per-disk adaptive blockcommit lifecycle, and per-target backup steps. Modules are stateless workers invoked through ABC interfaces; Core owns the execution order and all VM-state-aware decisions.
-
 ## Requirements
-
 ### Requirement: Core initialization with dependency injection
 Core SHALL accept `IConfigFacade`, `IVMModuleFactory`, `IStateManager`, and `IShell` via its constructor. No global state, no hidden imports.
 
@@ -167,7 +165,7 @@ An error processing one VM SHALL NOT prevent other VMs from being processed.
 - **THEN** no snapshots or backups are created, only retention evaluation and cleanup run
 
 ### Requirement: Dry-run mode
-Core SHALL support dry-run mode where all pipeline steps are evaluated but no mutation occurs (no snapshot creation, no blockcommit, no file copy, no file deletion, no state writes, no XML changes, no transaction log). Dry-run mode SHALL be activated via the `dry_run` boolean property on the Core instance, settable by the CLI `--dry-run` / `-n` flag. The dry-run SHALL NOT accumulate `ActionRecord` entries in `PipelineResult.actions` — since no mutations occur, no actions are recorded. Instead, dry-run SHALL accumulate prediction records in `PipelineResult.predictions` (see capability `dry-run-prediction`). The `PipelineResult.dry_run` flag SHALL be set to `True` to indicate the run was a dry-run.
+Core SHALL support dry-run mode where all pipeline steps are evaluated but no mutation occurs (no snapshot creation, no blockcommit, no file copy, no file deletion, no state writes, no XML changes, no transaction log). Dry-run mode SHALL be activated via the `dry_run` boolean property on the Core instance, settable by the CLI `--dry-run` / `-n` flag. The dry-run SHALL NOT accumulate mutation `ActionRecord` entries in `PipelineResult.actions` — since no mutations occur, no mutation actions are recorded. `error` records ARE accumulated in dry-run (a failed VM is reported regardless of mode), so in dry-run `PipelineResult.actions` contains only error records. Dry-run SHALL accumulate prediction records in `PipelineResult.predictions` (see capability `dry-run-prediction`). The `PipelineResult.dry_run` flag SHALL be set to `True` to indicate the run was a dry-run.
 
 In dry-run mode, Core SHALL simulate the snapshots that would be created and thread them through snapshot retention, backup steps, the per-disk FULL decision, and the incremental transfer prediction, so that all predictions reflect the post-run world (capability `dry-run-prediction`). `Core._check_deferred_operations()` SHALL be guarded: no blockcommit execution and no state writes occur in dry-run.
 
@@ -175,7 +173,7 @@ In dry-run mode, Core SHALL simulate the snapshots that would be created and thr
 - **WHEN** `core.run()` is called in dry-run mode
 - **THEN** each planned action is logged at INFO level with VM and disk context, but no IShell mutating commands are executed
 - **AND** `PipelineResult.dry_run` is `True`
-- **AND** `PipelineResult.actions` is empty (no mutations occurred, so no `ActionRecord` entries are accumulated)
+- **AND** `PipelineResult.actions` contains only `error` records (empty when no VM failed)
 - **AND** `PipelineResult.predictions` contains one record per predicted mutation
 
 #### Scenario: Dry-run activated from CLI
@@ -223,7 +221,7 @@ When `--preserve` flags are active, snapshot and backup creation steps that fail
 - **THEN** the error is reported in the result, but no backup deletion is attempted
 
 ### Requirement: Per-disk snapshot creation with configured disk list
-`Core._create_snapshot()` SHALL iterate over `vm_config.disks` (the explicitly configured disk list, via `_resolve_disks()`). It SHALL NOT auto-discover disks via `virsh domblklist`. For each disk, it SHALL create one snapshot with naming convention `{vm_name}.{timestamp}_{disk_target}.qcow2`, using that disk's effective snapshot directory (`vm_config.snapshot_dir_for(disk)`). Quiesce (guest-agent freeze) is VM-wide — it SHALL be applied only to the first disk's snapshot (index==0). Each successful snapshot SHALL be recorded in state as `SnapshotInfo` with `disk=disk.target`. Partial failure SHALL be tolerated — if one disk fails, the next disk is still attempted.
+`Core._create_snapshot()` SHALL iterate over `vm_config.disks` (the explicitly configured disk list, via `_resolve_disks()`). It SHALL NOT auto-discover disks via `virsh domblklist`. For each disk, it SHALL create one snapshot with naming convention `{vm_name}.{timestamp}_{disk_target}_{6hex}.qcow2` (the `_{6hex}` suffix is `secrets.token_hex(3)`), using that disk's effective snapshot directory (`vm_config.snapshot_dir_for(disk)`). Quiesce (guest-agent freeze) is VM-wide — it SHALL be applied only to the first disk's snapshot (index==0). Each successful snapshot SHALL be recorded in state as `SnapshotInfo` with `disk=disk.target`. Partial failure SHALL NOT be tolerated: if the snapshot directory is missing or any disk's snapshot creation fails, Core SHALL raise `RuntimeError`, aborting the remaining steps of this VM (spec: VM-level failure isolation).
 
 #### Scenario: VM with multiple disks (vda, vdb)
 - **WHEN** VM config has disks `vda` and `vdb`
@@ -232,21 +230,31 @@ When `--preserve` flags are active, snapshot and backup creation steps that fail
 - **AND** `SnapshotInfo` records have `disk="vda"` and `disk="vdb"` respectively
 - **AND** quiesce is applied only to the first disk's snapshot
 
-#### Scenario: vda succeeds, vdb fails — partial failure tolerance
+#### Scenario: vda succeeds, vdb fails — VM aborts
 - **WHEN** snapshot of `vda` succeeds but `vdb` fails
-- **THEN** `vda` snapshot is recorded in state; `vdb` error is logged
-- **AND** the pipeline continues to retention evaluation
+- **THEN** `vda` snapshot is recorded in state (no rollback)
+- **AND** `RuntimeError` is raised, aborting the remaining steps of this VM
+- **AND** other VMs are processed normally
+
+#### Scenario: onchange gate is VM-wide, snapshots cover all disks
+- **WHEN** `snapshot_create = "onchange"` and disk `vda` changed but `vdb` did not
+- **THEN** the gate `any(detector.has_changed(vm, disk).changed for disk in disks)` is `True`
+- **AND** snapshots are created for ALL disks (`vda` and `vdb`)
 
 ### Requirement: EXIT_BACKUP_ABORT wired into PipelineResult
-`VMRunResult` SHALL gain a `backup_failed: bool` field. When at least one backup task failed, `Core` SHALL return exit code 10 (`EXIT_BACKUP_ABORT`).
+`VMRunResult` SHALL have a `backup_failed: bool` field, set to `True` when the VM pipeline was aborted by `BackupAbortError` (backup-stage failure after retries). The CLI SHALL check `any(r.backup_failed)` BEFORE the generic failure check, so a run with any backup-stage abort returns exit code 10 (`EXIT_BACKUP_ABORT`) even though the overall result is a failure.
 
 #### Scenario: Backup abort exit code
-- **WHEN** `qsnap run` completes with one snapshot success and one backup failure
+- **WHEN** `qsnap run` completes with one VM aborted by `BackupAbortError`
 - **THEN** exit code is 10 (EXIT_BACKUP_ABORT)
 
 #### Scenario: All backups succeed
 - **WHEN** all backup tasks succeed
 - **THEN** exit code is determined by overall pipeline success (0 or 1), not backup-specific
+
+#### Scenario: Backup abort takes precedence over generic failure
+- **WHEN** the result has `success=False` and at least one `VMRunResult.backup_failed=True`
+- **THEN** exit code is 10, not 1
 
 ### Requirement: snapshot_create ondemand support
 When `VMConfig.snapshot_create == "ondemand"`, `Core` SHALL check whether at least one backup target is reachable before creating a snapshot. If no targets are reachable, the snapshot step SHALL be skipped.
@@ -390,12 +398,12 @@ Core SHALL expose a `list_deferred(vm_filter=None)` method returning per-VM defe
 - **AND** the output includes remediation guidance: "Merge blocked by AppArmor. Consider: aa-disable /etc/apparmor.d/libvirt/libvirt-<uuid>"
 
 ### Requirement: Pre-commit chain verification before blockcommit
-When `chain_verify_before_commit = true` and there are snapshots to merge, Core SHALL call `_verify_backing_chain(vm_config, disk)` per disk before `lifecycle.blockcommit()`. If verification fails for a disk, blockcommit for that disk SHALL be skipped (or partial blockcommit attempted). See `specs/chain-integrity-verification/spec.md`.
+When `chain_verify_before_commit = true` and there are snapshots to merge, Core SHALL call `_verify_backing_chain(vm_config, disk)` per disk before `lifecycle.blockcommit()`. If verification fails for a disk, Core SHALL emit a CRITICAL log — including the broken file path when known and the hint to run `qsnap check --deep` — and raise `RuntimeError`, aborting the remaining steps of this VM. No partial blockcommit or automatic recovery is attempted. See `specs/chain-integrity-verification/spec.md`.
 
-#### Scenario: Chain verification blocks broken chain
+#### Scenario: Broken chain aborts the VM
 - **WHEN** `_verify_backing_chain(vm_config, disk)` detects a missing file in the backing chain for a specific disk
-- **THEN** blockcommit is skipped for this disk
-- **AND** a CRITICAL log is emitted
+- **THEN** a CRITICAL log is emitted with `Break at: {broken_file}` and the `qsnap check --deep` hint
+- **AND** `RuntimeError` is raised, aborting the remaining steps of this VM
 - **AND** remaining VMs are processed normally
 
 ### Requirement: Post-commit chain verification after blockcommit
@@ -548,17 +556,24 @@ When `GlobalConfig.full_verify_after_create` is set, Core SHALL call `verify_ful
 - **THEN** the new FULL file is deleted and no `record_full_backup()` call occurs
 
 ### Requirement: backup_failed WARNING in Core._backup_target
-`Core._backup_target()` SHALL emit a `logger.warning` when `backup_failed` is set to `True` due to any incremental transfer returning `BackupResult(success=False)`. The warning SHALL include the VM name, target path, count of failed snapshots, and the specific snapshot names with their error messages.
+`Core._backup_target()` SHALL emit a `logger.warning` when any incremental transfer returns `BackupResult(success=False)` after retries. The warning SHALL include the VM name, target path, count of failed snapshots, and the specific snapshot names with their error messages. Core SHALL then audit the successful transfers of the batch (ActionRecord + INFO log) and record their incremental dependencies, and raise `BackupAbortError` to abort the remaining steps of this VM. A FULL creation failure after retries SHALL log CRITICAL ("old generations preserved") and raise `BackupAbortError` without deleting old generations.
 
-#### Scenario: backup_failed warning with transfer failures
-- **WHEN** `_backup_target()` receives 2 successful and 1 failed `BackupResult` from `transfer_missing()`
-- **THEN** `backup_failed` is set to `True`
-- **AND** a WARNING is logged: `"Backup transfer failed for VM <vm> target <target>: <N> snapshot(s) failed — <name>: <error>"`
+#### Scenario: Transfer failure warns, audits successes, then aborts
+- **WHEN** `_backup_target()` receives 2 successful and 1 failed `BackupResult` from `transfer_missing()` after retries
+- **THEN** a WARNING is logged: `"Backup transfer failed for VM <vm> target <target>: <N> snapshot(s) failed — <name>: <error>"`
+- **AND** the 2 successful transfers are audited and their dependencies recorded
+- **AND** `BackupAbortError` is raised, aborting the remaining steps of this VM
+
+#### Scenario: FULL failure after retries aborts with old generations preserved
+- **WHEN** `create_full_backup()` fails after all retries
+- **THEN** a CRITICAL log is emitted ("old generations preserved")
+- **AND** `BackupAbortError` is raised
+- **AND** no old-generation backup is deleted
 
 #### Scenario: No warning when all transfers succeed
 - **WHEN** `_backup_target()` receives all `BackupResult(success=True)` from `transfer_missing()`
-- **THEN** no WARNING is logged for backup_failed
-- **AND** `backup_failed` is `False`
+- **THEN** no WARNING is logged for backup failures
+- **AND** no `BackupAbortError` is raised
 
 ### Requirement: ActionRecord accumulation in Core pipeline
 Core SHALL accumulate `ActionRecord` instances during pipeline execution (see `specs/action-audit-trail/spec.md` for the full spec). Core SHALL attach the accumulated list to `PipelineResult.actions` at the end of `_run_pipeline()`.
@@ -627,3 +642,29 @@ Core SHALL import `is_vm_running` from `qsnap.utils.nbd`, `verify_full_backup` a
 #### Scenario: Deferred entry dropped when disk removed from config
 - **WHEN** a deferred entry references a disk not in `vm_config.disks`
 - **THEN** the entry is dropped with a WARNING log
+
+### Requirement: VM-level failure isolation
+The VM pipeline is the atomic unit of execution. A definitive per-disk failure — snapshot creation failure, missing snapshot directory, broken backing chain before commit, non-MAC blockcommit failure, post-commit chain length unchanged, or FULL/incremental backup failure after retries — SHALL abort the remaining steps of that VM by raising from the failing step. The per-VM `try/except` in `Core._run_pipeline()` SHALL catch the exception, record `VMRunResult(success=False, error=...)`, and continue with the next VM. Already-completed steps of the aborted VM SHALL NOT be rolled back. MAC denials (AppArmor/SELinux) are deferred operations, not failures, and SHALL NOT abort the VM.
+
+#### Scenario: Disk failure aborts remaining steps of the VM
+- **WHEN** snapshot creation for disk `vdb` fails after `vda` succeeded
+- **THEN** the `vda` snapshot remains recorded in state (no rollback)
+- **AND** retention, blockcommit, and backup steps for this VM are skipped
+- **AND** `VMRunResult(success=False)` is recorded with the error
+
+#### Scenario: Other VMs continue after a VM aborts
+- **WHEN** the pipeline for "vm1" aborts on a broken chain
+- **THEN** "vm2" is still processed normally
+
+#### Scenario: MAC denial does not abort the VM
+- **WHEN** `lifecycle.blockcommit()` returns `CommitResult(success=False)` with an AppArmor or SELinux error
+- **THEN** the snapshots are added to the deferred queue with reason `"apparmor"` / `"selinux"`
+- **AND** no exception is raised and the pipeline continues
+
+### Requirement: BackupAbortError marks backup-stage failures
+`qsnap.core` SHALL define `BackupAbortError(RuntimeError)`. It SHALL be raised only by the backup stage (FULL creation failure after retries, incremental transfer failure after retries). `Core._run_pipeline()` SHALL set `VMRunResult.backup_failed = isinstance(exc, BackupAbortError)` so the CLI can map backup-stage aborts to exit code 10.
+
+#### Scenario: Backup abort sets backup_failed
+- **WHEN** `_backup_target()` raises `BackupAbortError`
+- **THEN** the per-VM except handler records `VMRunResult(success=False, backup_failed=True)`
+

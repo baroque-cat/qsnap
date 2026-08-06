@@ -266,8 +266,9 @@ def _stats_to_rows(
 def _format_pipeline_result(result: PipelineResult) -> int:
     """Print pipeline results and return exit code.
 
-    Returns ``EXIT_BACKUP_ABORT`` (10) if any VM had a backup failure,
-    even if the pipeline itself succeeded.
+    Returns ``EXIT_BACKUP_ABORT`` (10) if any VM had a backup-stage
+    failure (checked before generic failure), ``EXIT_GENERIC`` (1) if
+    any VM failed otherwise, ``EXIT_SUCCESS`` (0) when all succeeded.
 
     After computing the exit code, prints a btrbk-style summary table
     to stdout via :func:`qsnap.cli.summary.format_summary`.
@@ -281,10 +282,13 @@ def _format_pipeline_result(result: PipelineResult) -> int:
     # Print btrbk-style summary table (spec: cli-interface/backup-summary).
     print(format_summary(result))
 
-    if not result.success:
-        return EXIT_GENERIC
+    # Backup-stage failures map to EXIT_BACKUP_ABORT even though the
+    # affected VM is marked unsuccessful (VM-level isolation): the
+    # backup_failed flag is the more specific signal.
     if any(r.backup_failed for r in result.results):
         return EXIT_BACKUP_ABORT
+    if not result.success:
+        return EXIT_GENERIC
     return EXIT_SUCCESS
 
 

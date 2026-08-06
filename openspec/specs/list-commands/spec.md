@@ -3,9 +3,7 @@
 ## Purpose
 
 Read-only `Core.list_*` methods that surface snapshots, backups, configuration, latest snapshots, schedule, and integrity status to the CLI. All listing is disk-aware: every snapshot/backup record carries its disk target, and output is grouped or columned by disk.
-
 ## Requirements
-
 ### Requirement: Core.list_snapshots()
 `Core.list_snapshots(vm_filter=None)` SHALL return a dictionary mapping VM names to their recorded snapshots (from `IStateManager`). Each `SnapshotInfo` SHALL carry a `disk` field identifying the disk target (e.g. `"vda"`). Snapshots SHALL be sorted by timestamp ascending.
 
@@ -18,7 +16,7 @@ Read-only `Core.list_*` methods that surface snapshots, backups, configuration, 
 - **THEN** only "vm1" snapshots are returned
 
 ### Requirement: Core.list_backups()
-`Core.list_backups(vm_filter=None, tree=False)` SHALL return a dictionary mapping VM names to their backups (from `IBackupProvider.list()` for each target). Each `SnapshotInfo` SHALL carry a `disk` field. Results SHALL be sorted by timestamp ascending.
+`Core.list_backups(vm_filter=None, tree=False)` SHALL return a dictionary mapping VM names to their backups (from `IBackupProvider.list()` for each target). The listing is config-driven: keys come from the configured VMs (via `_filter_vms`), so every selected VM appears in the result — with an empty list `{vm_name: []}` when it has no backups — and VMs not present in TOML never appear. Each `SnapshotInfo` SHALL carry a `disk` field. Results SHALL be sorted by timestamp ascending.
 
 When `tree=False` (default), returns a flat list of `(target_path, backup)` tuples per VM sorted by timestamp, so callers can tell which target each backup belongs to: `{vm_name: [(target_path, SnapshotInfo), ...]}`.
 
@@ -30,7 +28,7 @@ When `tree=True`, returns per-VM, per-target, per-disk chain grouping: `{vm_name
 
 #### Scenario: List backups when no backups exist
 - **WHEN** `core.list_backups()` is called and no backups have been created
-- **THEN** the result is an empty list per VM
+- **THEN** the result is `{vm_name: []}` — every configured VM maps to an empty list
 
 #### Scenario: Flat list when tree=False
 - **WHEN** `core.list_backups(tree=False)` is called for a VM with two targets
@@ -124,3 +122,16 @@ The CLI SHALL provide a `_print_backup_tree(data, vm_configs)` function in `qsna
     [vdb]
       myvm.FULL.20260701T120000_vdb_xyz789.qcow2
   ```
+
+### Requirement: stats command summarizes snapshots and backups per VM
+
+The `qsnap stats [vm...]` command SHALL print one row per VM with the columns `vm`, `snapshots`, `snapshot_size`, `backups`, `backup_size`. Data sources SHALL be `Core.list_snapshots(vm_filter)` and `Core.list_backups(vm_filter)`; `snapshots`/`backups` are the record counts and `snapshot_size`/`backup_size` are the sums of `SnapshotInfo.allocation`. The VM scope SHALL be the union of the two config-driven listings — only VMs configured in TOML appear (VMs with no records appear with zero counts). Output SHALL respect the global `--format` flag.
+
+#### Scenario: Stats row per configured VM
+- **WHEN** `qsnap stats` is executed and "vm1" has 2 snapshots (allocations 1000, 2000) and 1 backup (allocation 5000)
+- **THEN** the row for "vm1" shows `snapshots=2`, `snapshot_size=3000`, `backups=1`, `backup_size=5000`
+
+#### Scenario: Stats scope limited to configured VMs
+- **WHEN** `qsnap stats` is executed
+- **THEN** only VMs present in the TOML configuration appear in the output
+

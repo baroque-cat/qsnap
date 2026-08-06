@@ -82,11 +82,13 @@ class VMRunResult:
 class PipelineResult:
     """Aggregate pipeline result for all processed VMs.
 
-    ``actions`` is the audit trail of EXECUTED actions (always empty in
-    dry-run).  ``predictions`` is the dry-run counterpart: one
-    :class:`ActionRecord` per mutation the run WOULD have performed
-    (always empty in real runs).  Predictions are never written to the
-    transaction log (design D7 of fix-dry-run-predictions).
+    ``actions`` is the audit trail of EXECUTED actions.  In dry-run it
+    contains only ``error`` records (a failed VM is reported regardless of
+    mode); mutation records are never appended in dry-run.  ``predictions``
+    is the dry-run counterpart: one :class:`ActionRecord` per mutation the
+    run WOULD have performed (always empty in real runs).  Predictions are
+    never written to the transaction log (design D7 of
+    fix-dry-run-predictions).
     """
 
     results: list[VMRunResult] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
@@ -130,6 +132,16 @@ class _RetryResult:
     success: bool
     error: str | None
     payload: Any = None
+
+
+class BackupAbortError(RuntimeError):
+    """Definitive failure during the backup stage of a VM pipeline.
+
+    Raised after retries are exhausted (FULL creation or incremental
+    transfer).  ``_run_pipeline`` distinguishes it from other pipeline
+    errors so the failed VM is reported with ``backup_failed=True``,
+    which maps to exit code ``EXIT_BACKUP_ABORT`` (10).
+    """
 
 
 def _same_file(path: Path, other: str | None) -> bool:
@@ -692,8 +704,9 @@ class Core:
                 remediation=remediation,
             )
 
-        # Record last deep check time
-        if deep:
+        # Record last deep check time.  Zero-mutation invariant: skipped
+        # in dry-run (no state file write).
+        if deep and not self._dry_run:
             self._set_last_deep_check_time()
 
         return results
@@ -2366,11 +2379,15 @@ class Core:
                         disk=None,
                     )
                 )
+                # VM-level isolation: the failed VM is marked unsuccessful;
+                # backup-stage failures (BackupAbortError) additionally set
+                # backup_failed so the CLI maps the run to EXIT_BACKUP_ABORT.
                 results.append(
                     VMRunResult(
                         vm_name=vm.name,
                         success=False,
                         error=str(exc),
+                        backup_failed=isinstance(exc, BackupAbortError),
                     )
                 )
 
@@ -2468,8 +2485,11 @@ class Core:
                     oldest_entry.reason,
                 )
 
-                # Update last_warned_at on the oldest deferred entry
-                self._state.update_deferred_warning(vm.name, oldest_idx, now)
+                # Update last_warned_at on the oldest deferred entry.
+                # Zero-mutation invariant: skipped in dry-run (the WARNING
+                # above is still emitted).
+                if not self._dry_run:
+                    self._state.update_deferred_warning(vm.name, oldest_idx, now)
 
     def _filter_vms(self, vm_filter: str | None) -> list[VMConfig]:
         vms = self._config.get_vms()
@@ -2528,12 +2548,19 @@ class Core:
                         for line in result.stdout.strip().splitlines():
                             filepath = line.strip()
                             if filepath:
-                                self._shell.run(
-                                    ["rm", "-f", filepath],
-                                    timeout=10,
-                                    check=True,
-                                )
-                                removed_count += 1
+                                if self._dry_run:
+                                    # Zero-mutation invariant: log only.
+                                    logger.info(
+                                        "[dry-run] Would remove stale file: %s",
+                                        filepath,
+                                    )
+                                else:
+                                    self._shell.run(
+                                        ["rm", "-f", filepath],
+                                        timeout=10,
+                                        check=True,
+                                    )
+                                    removed_count += 1
 
             # (b) Remove stale NBD sockets
             sock_result = self._shell.run(
@@ -2553,12 +2580,19 @@ class Core:
                 for line in sock_result.stdout.strip().splitlines():
                     sockpath = line.strip()
                     if sockpath:
-                        self._shell.run(
-                            ["rm", "-f", sockpath],
-                            timeout=10,
-                            check=True,
-                        )
-                        removed_count += 1
+                        if self._dry_run:
+                            # Zero-mutation invariant: log only.
+                            logger.info(
+                                "[dry-run] Would remove stale socket: %s",
+                                sockpath,
+                            )
+                        else:
+                            self._shell.run(
+                                ["rm", "-f", sockpath],
+                                timeout=10,
+                                check=True,
+                            )
+                            removed_count += 1
 
             if removed_count > 0:
                 logger.info(
@@ -2581,16 +2615,23 @@ class Core:
                         check=True,
                     )
                     if not info_result.success:
-                        self._shell.run(
-                            ["rm", "-f", str(qcow2_file)],
-                            timeout=10,
-                            check=True,
-                        )
-                        logger.warning(
-                            "Stale partial transfer detected and deleted: %s",
-                            qcow2_file,
-                        )
-                        removed_count += 1
+                        if self._dry_run:
+                            # Zero-mutation invariant: log only.
+                            logger.warning(
+                                "[dry-run] Would remove stale partial transfer: %s",
+                                qcow2_file,
+                            )
+                        else:
+                            self._shell.run(
+                                ["rm", "-f", str(qcow2_file)],
+                                timeout=10,
+                                check=True,
+                            )
+                            logger.warning(
+                                "Stale partial transfer detected and deleted: %s",
+                                qcow2_file,
+                            )
+                            removed_count += 1
 
             # (c) Detect orphan .qcow2 files (warning only, do NOT delete)
             # Only consider files matching the qsnap naming pattern:
@@ -3415,12 +3456,11 @@ class Core:
             snapshot_name = self._generate_snapshot_name(vm_config, disk.target)
             snapshot_dir = vm_config.snapshot_dir_for(disk)
             if snapshot_dir is None:
-                logger.error(
-                    "No snapshot_dir resolved for disk %s of VM %s — skipping",
-                    disk.target,
-                    vm_config.name,
-                )
-                continue
+                # Mirror the real-run abort so dry-run predicts the
+                # same VM-level interruption (VM-level isolation).
+                msg = f"No snapshot_dir resolved for disk {disk.target} of VM {vm_config.name}"
+                logger.error(msg)
+                raise RuntimeError(msg)
             change_result = detector.has_changed(vm_config, disk.target)
             simulated.append(
                 SnapshotInfo(
@@ -3442,8 +3482,9 @@ class Core:
         effective snapshot directory.  The ``--quiesce`` guest-agent freeze
         is VM-wide, so it is applied only to the FIRST disk's snapshot.
 
-        If one disk fails, logs the error and continues with the next
-        (design D2 — partial failure tolerance).
+        If one disk fails, raises ``RuntimeError`` to abort the remaining
+        pipeline steps of this VM (VM-level isolation).  Snapshots already
+        created for earlier disks are kept; other VMs are unaffected.
 
         Dry-run: no snapshot is created.  Simulated snapshots (design D1
         of fix-dry-run-predictions) are logged per disk, recorded as
@@ -3490,12 +3531,13 @@ class Core:
             snapshot_name = self._generate_snapshot_name(vm_config, disk.target)
             snapshot_dir = vm_config.snapshot_dir_for(disk)
             if snapshot_dir is None:
-                logger.error(
-                    "No snapshot_dir resolved for disk %s of VM %s — skipping",
-                    disk.target,
-                    vm_config.name,
-                )
-                continue
+                # Defensive: config parsing guarantees a resolvable
+                # snapshot_dir per disk.  If we ever get here the VM is
+                # misconfigured — abort the VM pipeline (VM-level
+                # isolation) instead of silently skipping the disk.
+                msg = f"No snapshot_dir resolved for disk {disk.target} of VM {vm_config.name}"
+                logger.error(msg)
+                raise RuntimeError(msg)
             snapshot_path = snapshot_dir / f"{snapshot_name}.qcow2"
 
             # Quiesce is a VM-wide guest-agent freeze — apply it only to
@@ -3539,12 +3581,16 @@ class Core:
                     result.new_allocation,
                 )
             else:
-                logger.error(
-                    "Snapshot creation failed for %s disk %s: %s",
-                    vm_config.name,
-                    disk.target,
-                    result.error,
+                # VM-level isolation: a definitive snapshot failure aborts
+                # the remaining steps of this VM.  Snapshots already
+                # created for earlier disks are kept (no rollback); other
+                # VMs continue processing.
+                msg = (
+                    f"Snapshot creation failed for {vm_config.name} "
+                    f"disk {disk.target}: {result.error}"
                 )
+                logger.error(msg)
+                raise RuntimeError(msg)
             results.append(result)
 
         return results
@@ -4029,11 +4075,20 @@ class Core:
             if os.path.exists(str(sn.path)):
                 filtered.append(sn)
             else:
-                self._state.remove_snapshot(vm_config.name, sn.name)
-                logger.warning(
-                    "Stale state entry: snapshot %s file not found on disk — removed from state",
-                    sn.name,
-                )
+                if self._dry_run:
+                    # Zero-mutation invariant: predict the state cleanup,
+                    # do not write it.
+                    logger.warning(
+                        "[dry-run] Would remove stale state entry: snapshot %s "
+                        "file not found on disk",
+                        sn.name,
+                    )
+                else:
+                    self._state.remove_snapshot(vm_config.name, sn.name)
+                    logger.warning(
+                        "Stale state entry: snapshot %s file not found on disk — removed from state",
+                        sn.name,
+                    )
         to_merge = filtered
         if not to_merge:
             logger.info("All snapshots in to_merge were stale — skipping blockcommit")
@@ -4102,8 +4157,13 @@ class Core:
         """Blockcommit one disk's removed snapshots into its base image.
 
         Contains the adaptive lifecycle fork, pre/post-commit chain
-        verification, partial-blockcommit recovery, MAC-deferral, and
-        race-guard logic scoped to a single disk.
+        verification, MAC-deferral, and race-guard logic scoped to a
+        single disk.
+
+        VM-level isolation: a broken backing chain or a definitive
+        blockcommit failure raises ``RuntimeError`` to abort the
+        remaining pipeline steps of this VM — no automatic recovery is
+        attempted.  MAC denials are deferred (not failures).
         """
         disk_cfg = vm_config.get_disk(disk)
         if disk_cfg is None:
@@ -4146,54 +4206,29 @@ class Core:
 
         global_cfg = self._config.get_global()
 
-        # Pre-commit chain verification
-        stuck: list[SnapshotInfo] = []
+        # Pre-commit chain verification.  ANY verification failure aborts
+        # the VM pipeline immediately (VM-level isolation): a broken or
+        # unverifiable backing chain needs operator intervention — no
+        # automatic recovery is attempted.
         if global_cfg.chain_verify_before_commit:
             verify_result = self._verify_backing_chain(vm_config, disk)
             if not verify_result.success:
-                if verify_result.broken_file is not None:
-                    # Partial blockcommit (design D7): split the
-                    # committable list at the broken file, commit the
-                    # portion before the break, and auto-rebase the
-                    # stuck snapshots onto the new base.
-                    before_break, stuck = self._split_at_break(
-                        vm_config,
-                        disk,
-                        committable,
-                        verify_result.broken_file,
-                    )
-                    if not before_break:
-                        msg = (
-                            f"Snapshot chain broken for VM {vm_config.name} "
-                            f"disk {disk}: {verify_result.error}. "
-                            f"No snapshots can be committed before the break "
-                            f"at {verify_result.broken_file}. "
-                            f"Blockcommit cannot proceed. "
-                            f"Run 'qsnap check --deep' and restore "
-                            f"the chain before continuing."
-                        )
-                        logger.critical(msg)
-                        raise RuntimeError(msg)
-                    logger.warning(
-                        "Pre-commit chain verification found break at %s — "
-                        "partial blockcommit: %d snapshot(s) committable, "
-                        "%d stuck (will be auto-rebased)",
-                        verify_result.broken_file,
-                        len(before_break),
-                        len(stuck),
-                    )
-                    committable = before_break
-                else:
-                    msg = (
-                        f"Snapshot chain verification failed for VM "
-                        f"{vm_config.name} disk {disk}: {verify_result.error}. "
-                        f"Blockcommit cannot proceed. "
-                        f"Run 'qsnap check --deep' and restore "
-                        f"the chain before continuing."
-                    )
-                    logger.critical(msg)
-                    # Do NOT defer — broken chain needs operator intervention
-                    raise RuntimeError(msg)
+                broken_hint = (
+                    f" Break at: {verify_result.broken_file}."
+                    if verify_result.broken_file is not None
+                    else ""
+                )
+                msg = (
+                    f"Snapshot chain verification failed for VM "
+                    f"{vm_config.name} disk {disk}: "
+                    f"{verify_result.error}.{broken_hint} "
+                    f"Blockcommit cannot proceed. "
+                    f"Run 'qsnap check --deep' and restore "
+                    f"the chain before continuing."
+                )
+                logger.critical(msg)
+                # Do NOT defer — broken chain needs operator intervention
+                raise RuntimeError(msg)
         else:
             logger.info(
                 "chain_verify_before_commit is disabled — "
@@ -4266,13 +4301,12 @@ class Core:
             return
 
         if not result.success:
-            logger.error(
-                "Blockcommit failed for VM %s disk %s: %s",
-                vm_config.name,
-                disk,
-                result.error,
-            )
-            return
+            # VM-level isolation: a definitive blockcommit failure (MAC
+            # denials are deferred above and never reach this branch)
+            # aborts the remaining steps of this VM.
+            msg = f"Blockcommit failed for VM {vm_config.name} disk {disk}: {result.error}"
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         # Blockcommit succeeded — record audit trail + btrbk-style INFO log
         # (design D4, D5).  Emitted before post-commit verification; if
@@ -4302,14 +4336,6 @@ class Core:
             # post-commit measurement so it finds the current active layer.
             self._state.remove_snapshot(vm_config.name, sn.name)
 
-        # Auto-rebase stuck snapshots (design D7): after a partial
-        # blockcommit, snapshots at or after the chain break need to be
-        # rebased onto the new base (the base image, now containing the
-        # committed data).  Uses ``qemu-img rebase -u`` (unsafe mode)
-        # because the original backing chain is broken.
-        if stuck:
-            self._auto_rebase_stuck(vm_config, disk, base_image, stuck)
-
         # Offline commits deleted overlay files that the (inactive) domain
         # XML may still reference in <backingStore> chains — refresh the
         # XML so the domain stays bootable (design D8).
@@ -4329,18 +4355,20 @@ class Core:
                 chain_length_after = self._get_chain_length(vm_config, disk)
                 if chain_length_after is not None:
                     if chain_length_after >= chain_length_before:
-                        logger.critical(
-                            "Blockcommit may have failed for VM %s disk %s: "
-                            "chain length unchanged "
-                            "(before=%d, after=%d). "
-                            "Snapshot paths for manual recovery: %s",
-                            vm_config.name,
-                            disk,
-                            chain_length_before,
-                            chain_length_after,
-                            ", ".join(str(s.path) for s in committable),
+                        # VM-level isolation: an unchanged chain length
+                        # after commit means the merge likely did not
+                        # happen — the chain may be inconsistent.  Abort
+                        # the VM pipeline so the operator investigates.
+                        msg = (
+                            f"Blockcommit may have failed for VM {vm_config.name} "
+                            f"disk {disk}: chain length unchanged "
+                            f"(before={chain_length_before}, "
+                            f"after={chain_length_after}). "
+                            f"Snapshot paths for manual recovery: "
+                            f"{', '.join(str(s.path) for s in committable)}"
                         )
-                        return
+                        logger.critical(msg)
+                        raise RuntimeError(msg)
                     else:
                         logger.info(
                             "Post-commit chain verification passed for VM %s disk %s",
@@ -4362,196 +4390,6 @@ class Core:
                 disk,
             )
 
-    def _split_at_break(
-        self,
-        vm_config: VMConfig,
-        disk: str,
-        committable: list[SnapshotInfo],
-        broken_file: Path,
-    ) -> tuple[list[SnapshotInfo], list[SnapshotInfo]]:
-        """Split committable snapshots of one disk at the broken file.
-
-        Multi-disk (refactor): walks *disk*'s backing chain to determine
-        which snapshots are before the broken file (safe to commit) and
-        which are at or after the break (stuck — need auto-rebase).
-
-        Returns ``(before_break, stuck)``.  When the chain cannot be
-        walked (e.g., qemu-img fails), returns ``(committable, [])``
-        as a conservative fallback — all snapshots are treated as
-        committable, letting the blockcommit manager handle any
-        failures.
-        """
-        # Walk the backing chain to get the ordered list of file paths.
-        disk_cfg = vm_config.get_disk(disk)
-        snapshots = [s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk]
-        if snapshots:
-            active_path = max(snapshots, key=lambda s: s.timestamp).path
-        elif disk_cfg is not None:
-            active_path = disk_cfg.base_image
-        else:
-            return committable, []
-
-        result = self._shell.run(
-            [
-                "qemu-img",
-                "info",
-                "--force-share",
-                "--backing-chain",
-                "--output=json",
-                str(active_path),
-            ],
-            timeout=30,
-            check=True,
-        )
-        if not result.success:
-            # qemu-img info --backing-chain failed — use per-file
-            # queries to find the break point (spec: blockcommit-recovery).
-            # For each committable snapshot (oldest first), query its
-            # backing-filename.  Once we find a snapshot whose backing
-            # file is the broken one (or that IS the broken file), all
-            # subsequent snapshots are stuck.
-            before_break: list[SnapshotInfo] = []
-            stuck: list[SnapshotInfo] = []
-            found_break = False
-            for snap in sorted(committable, key=lambda s: s.timestamp):
-                if found_break:
-                    stuck.append(snap)
-                    continue
-                if str(snap.path) == str(broken_file):
-                    # This snapshot IS the broken file — stuck.
-                    stuck.append(snap)
-                    found_break = True
-                    continue
-                # Query this snapshot's backing-filename.
-                info_result = self._shell.run(
-                    ["qemu-img", "info", "--output=json", str(snap.path)],
-                    timeout=30,
-                    check=True,
-                )
-                if not info_result.success:
-                    # Can't query — treat as stuck (conservative).
-                    stuck.append(snap)
-                    found_break = True
-                    continue
-                try:
-                    info = json.loads(info_result.stdout)
-                except json.JSONDecodeError:
-                    stuck.append(snap)
-                    found_break = True
-                    continue
-                backing = info.get("backing-filename", "")
-                if backing and str(Path(backing)) == str(broken_file):
-                    # This snapshot's backing file is the broken one — stuck.
-                    stuck.append(snap)
-                    found_break = True
-                else:
-                    before_break.append(snap)
-            return before_break, stuck
-
-        try:
-            chain_data = cast(list[dict[str, object]], json.loads(result.stdout))
-        except json.JSONDecodeError:
-            logger.warning(
-                "Could not parse backing chain for split-at-break — treating all as committable"
-            )
-            return committable, []
-
-        # chain_data is [active, snap_n, ..., snap_1, base] (newest to oldest).
-        # Build an ordered list of paths (oldest to newest) and find the
-        # broken file's position.
-        chain_paths: list[str] = []
-        for item in reversed(chain_data):
-            image = cast(str, item.get("image") or item.get("filename", ""))
-            if image:
-                chain_paths.append(image)
-
-        broken_str = str(broken_file)
-        broken_idx: int | None = None
-        for i, path in enumerate(chain_paths):
-            if path == broken_str:
-                broken_idx = i
-                break
-
-        if broken_idx is None:
-            # Broken file not found in the chain — it might be a
-            # backing-filename reference that doesn't correspond to an
-            # actual chain entry.  Treat all as stuck (conservative).
-            logger.warning(
-                "Broken file %s not found in backing chain — "
-                "treating all committable snapshots as stuck",
-                broken_file,
-            )
-            return [], committable
-
-        # Snapshots before broken_idx in the chain are committable.
-        before_paths = set(chain_paths[:broken_idx])
-        before_break = [s for s in committable if str(s.path) in before_paths]
-        stuck = [s for s in committable if str(s.path) not in before_paths]
-
-        return before_break, stuck
-
-    def _auto_rebase_stuck(
-        self,
-        vm_config: VMConfig,
-        disk: str,
-        base_image: Path,
-        stuck: list[SnapshotInfo],
-    ) -> None:
-        """Rebase stuck snapshots of one disk onto that disk's base image.
-
-        Multi-disk (refactor): *base_image* is the disk's own base qcow2
-        path.  After a partial blockcommit, snapshots at or after the chain
-        break need to be rebased onto the base image (which now contains
-        the committed data).  Uses ``qemu-img rebase -u`` (unsafe mode)
-        because the original backing chain is broken — data consistency is
-        not guaranteed, but the chain is made traversable for future
-        blockcommit attempts.
-
-        Snapshots whose files no longer exist on disk are removed from
-        state (self-healing).
-        """
-        new_base = base_image
-        for snap in sorted(stuck, key=lambda s: s.timestamp, reverse=True):
-            exists = self._shell.run(
-                ["test", "-f", str(snap.path)],
-                timeout=10,
-                check=True,
-            )
-            if not exists.success:
-                # File already gone — clean up state.
-                self._state.remove_snapshot(vm_config.name, snap.name)
-                logger.info(
-                    "Stuck snapshot %s file not found — removed from state",
-                    snap.name,
-                )
-                continue
-            rebase_cmd = [
-                "qemu-img",
-                "rebase",
-                "-u",
-                "-b",
-                str(new_base),
-                "-F",
-                "qcow2",
-                str(snap.path),
-            ]
-            result = self._shell.run(rebase_cmd, timeout=60, check=True)
-            if not result.success:
-                logger.warning(
-                    "Failed to auto-rebase stuck snapshot %s onto %s: %s",
-                    snap.path,
-                    new_base,
-                    result.error,
-                )
-            else:
-                logger.info(
-                    "[blockcommit] %s/%s: auto-rebased stuck snapshot %s onto %s",
-                    vm_config.name,
-                    disk,
-                    snap.name,
-                    new_base,
-                )
-
     # ── backup steps (5) ───────────────────────────────────────────────
 
     def _execute_backup_steps(
@@ -4561,7 +4399,10 @@ class Core:
     ) -> bool:
         """Step 5: For each target — backup transfer → retention → cleanup.
 
-        Returns True if any backup transfer failed.
+        VM-level isolation: a definitive backup failure raises
+        ``BackupAbortError`` from :meth:`_backup_target`, aborting the
+        remaining targets of this VM.  Returns ``False`` on completion
+        (kept for the step-function signature).
 
         ``extra_snapshots`` (dry-run only, design D3 of
         fix-dry-run-predictions): simulated snapshots threaded from
@@ -4575,11 +4416,9 @@ class Core:
         snapshots = self._state.get_snapshots(vm_config.name)
         if extra_snapshots:
             snapshots = [*snapshots, *extra_snapshots]
-        backup_failed = False
         for target in vm_config.targets:
-            if self._backup_target(vm_config, target, snapshots):
-                backup_failed = True
-        return backup_failed
+            self._backup_target(vm_config, target, snapshots)
+        return False
 
     def _execute_with_retry(
         self,
@@ -4778,7 +4617,10 @@ class Core:
     ) -> bool:
         """Transfer missing snapshots to *target*, run retention, cleanup.
 
-        Returns True if any backup transfer failed.
+        VM-level isolation: a definitive backup failure (FULL creation or
+        incremental transfer, after retries) raises ``BackupAbortError``
+        to abort the remaining pipeline steps of this VM.  Returns
+        ``False`` on completion (kept for the step-function signature).
         """
         # Per-target onchange gate: skip transfer when the source disk
         # has not changed since the last backup to this target (spec:
@@ -4792,14 +4634,12 @@ class Core:
                 skip_transfer = True
 
         provider = self._factory.create_backup_provider(vm_config, target)
-        backup_failed = False
 
         # Parse stall_timeout from target config (duration string → seconds).
         # "0s" disables stall detection → stall_timeout=0 → providers fall
         # back to fixed-timeout shell.run().
         stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
-        full_verification_failed = False
         # Names of snapshots consumed as FULL sources in this run.  Their
         # data is fully contained in the new FULL anchors, so they are
         # excluded from the incremental transfer below (see transfer_list).
@@ -5049,18 +4889,18 @@ class Core:
 
                     full_result = self._execute_with_retry(_create_full_operation, target)
                     if not full_result.success:
-                        # All retries exhausted or non-retryable failure —
-                        # CRITICAL, keep old generations (verify-before-
-                        # delete gate).
-                        full_verification_failed = True
-                        backup_failed = True
-                        logger.critical(
-                            "FULL backup creation failed for VM %s target %s "
-                            "disk %s — old generations preserved",
-                            vm_config.name,
-                            target.path,
-                            disk_target,
+                        # All retries exhausted or non-retryable failure.
+                        # VM-level isolation: abort the remaining steps of
+                        # this VM.  Old generations stay untouched — the
+                        # abort itself is the verify-before-delete gate:
+                        # nothing is deleted after this point.
+                        msg = (
+                            f"FULL backup creation failed for VM {vm_config.name} "
+                            f"target {target.path} disk {disk_target} — "
+                            f"old generations preserved"
                         )
+                        logger.critical(msg)
+                        raise BackupAbortError(msg)
                     else:
                         # The FULL anchor already contains this snapshot's
                         # data; exclude it from the incremental transfer.
@@ -5088,7 +4928,6 @@ class Core:
                 )
                 failed = [r for r in results if not r.success]
                 if failed:
-                    backup_failed = True
                     failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
                     logger.warning(
                         "Backup transfer failed for VM %s target %s: %d snapshot(s) failed — %s",
@@ -5147,6 +4986,17 @@ class Core:
                             r.snapshot_name,
                             anchor,
                         )
+
+                # VM-level isolation: successful transfers of this batch
+                # were audited above; now abort the remaining steps of
+                # this VM if any transfer definitively failed (retries
+                # already exhausted in _transfer_with_retry).
+                if failed:
+                    msg = (
+                        f"Backup transfer failed for VM {vm_config.name} "
+                        f"target {target.path}: {len(failed)} snapshot(s) failed"
+                    )
+                    raise BackupAbortError(msg)
             else:
                 # Dry-run: predict incremental transfers read-only
                 # (design D4 of fix-dry-run-predictions).  Predicted
@@ -5180,39 +5030,34 @@ class Core:
 
         # Update per-target per-disk baselines after successful backup
         # (onchange mode).  Each disk's baseline is its current_allocation
-        # at the time of the last successful backup.  Not updated on
-        # failure (fail-safe — next run retries) or when the gate
-        # skipped transfer (baseline already current).  Not updated in
-        # dry-run (no actual transfer occurred).
-        if (
-            change_results is not None
-            and not skip_transfer
-            and not backup_failed
-            and not self._dry_run
-        ):
+        # at the time of the last successful backup.  Failures never reach
+        # this point (BackupAbortError aborts earlier — fail-safe: next
+        # run retries).  Not updated when the gate skipped transfer
+        # (baseline already current) or in dry-run (no actual transfer
+        # occurred).
+        if change_results is not None and not skip_transfer and not self._dry_run:
             for disk_target, cr in change_results.items():
                 self._state.set_last_backup_allocation(
                     str(target.path), disk_target, cr.current_allocation
                 )
 
-        # Backup retention + cleanup — runs unless FULL verification
-        # failed (verify-before-delete gate: old generations must not
-        # be deleted when the new FULL is unverified).  When transfer
-        # is skipped, retention + cleanup still runs to clean expired
-        # backups.
-        if not full_verification_failed:
-            backups, retention_result = self._evaluate_backup_retention(
-                vm_config, target, predicted_full_disks=predicted_full_disks or None
-            )
-            self._cleanup_backups(
-                vm_config,
-                target,
-                backups,
-                retention_result,
-                predicted_full_disks=predicted_full_disks or None,
-            )
+        # Backup retention + cleanup.  A failed FULL creation never
+        # reaches this point (BackupAbortError above is the
+        # verify-before-delete gate: old generations are never deleted
+        # after a failure).  When transfer is skipped, retention +
+        # cleanup still runs to clean expired backups.
+        backups, retention_result = self._evaluate_backup_retention(
+            vm_config, target, predicted_full_disks=predicted_full_disks or None
+        )
+        self._cleanup_backups(
+            vm_config,
+            target,
+            backups,
+            retention_result,
+            predicted_full_disks=predicted_full_disks or None,
+        )
 
-        return backup_failed
+        return False
 
     def _cleanup_failed_checkpoint(
         self,

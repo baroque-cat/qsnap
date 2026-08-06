@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.core import Core
+from qsnap.core import BackupAbortError, Core
 from qsnap.models.results import (
     BackupResult,
     RetentionResult,
@@ -201,7 +201,8 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
     mock_state,
     mock_shell,
 ):
-    """M1 fails with corrupt bit, FULL file deleted, record_full_backup NOT called."""
+    """M1 fails with corrupt bit, FULL file deleted, record_full_backup NOT called,
+    and the VM pipeline is aborted (VM-level isolation)."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -232,6 +233,7 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
             "record_full_backup",
             wraps=mock_state.record_full_backup,
         ) as record_spy,
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -281,6 +283,7 @@ def test_full_created_m1_fails_not_qcow2_deleted(
             "record_full_backup",
             wraps=mock_state.record_full_backup,
         ) as record_spy,
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -660,9 +663,12 @@ def test_full_verify_content_comparison_mismatch_fails(
         ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
     )
 
-    with patch(
-        "qsnap.core.verify_full_backup",
-        return_value="verification failed: content comparison mismatch",
+    with (
+        patch(
+            "qsnap.core.verify_full_backup",
+            return_value="verification failed: content comparison mismatch",
+        ),
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -765,13 +771,13 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
             "record_full_backup",
             wraps=mock_state.record_full_backup,
         ) as record_spy,
+        pytest.raises(BackupAbortError),
     ):
-        result = core._backup_target(vm, target, [snap])
+        core._backup_target(vm, target, [snap])
 
     assert not record_spy.called, "record_full_backup should NOT be called"
     fulls = mock_state.get_full_backups(str(target.path))
     assert len(fulls) == 0
-    assert result is True, "backup_failed should be True"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1611,8 +1617,9 @@ def test_failed_full_verification_triggers_rollback(
             "_cleanup_failed_checkpoint",
             wraps=core._cleanup_failed_checkpoint,
         ) as checkpoint_spy,
+        pytest.raises(BackupAbortError),
     ):
-        result = core._backup_target(vm, target, [snap])
+        core._backup_target(vm, target, [snap])
 
     # Rollback: FULL removed from state.
     assert remove_spy.called, "remove_full_backup should be called on verification failure"
@@ -1620,8 +1627,6 @@ def test_failed_full_verification_triggers_rollback(
     assert checkpoint_spy.called, "_cleanup_failed_checkpoint should be called on rollback"
     # WARNING logged.
     assert "rolled back" in caplog.text or "FULL backup verification failed" in caplog.text
-    # backup_failed is True.
-    assert result is True, "backup_failed should be True when verification fails"
 
 
 # ── test_retries_exhausted_keeps_old_generations ──────────────────────────
@@ -1636,13 +1641,14 @@ def test_retries_exhausted_keeps_old_generations(
     mock_shell,
     caplog,
 ):
-    """All FULL backup retries exhausted — old generations preserved, CRITICAL log.
+    """All FULL backup retries exhausted — old generations preserved, CRITICAL log,
+    and the VM pipeline aborts (VM-level isolation).
 
-    When every retry attempt fails to create+verify a FULL, the
-    verify-before-delete gate prevents old generations from being deleted.
-    A CRITICAL log is emitted stating old generations are preserved.
-    Core sets ``full_verification_failed = True``, which skips retention
-    evaluation and cleanup.
+    When every retry attempt fails to create+verify a FULL, Core emits a
+    CRITICAL log stating old generations are preserved and raises
+    ``BackupAbortError``.  The abort itself is the verify-before-delete
+    gate: retention evaluation and cleanup are never reached, so old
+    generations are never deleted.
     """
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(
@@ -1680,10 +1686,11 @@ def test_retries_exhausted_keeps_old_generations(
             "_evaluate_backup_retention",
             wraps=core._evaluate_backup_retention,
         ) as retention_spy,
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
-    # Retention was NOT evaluated (gate: full_verification_failed blocks it).
+    # Retention was NOT evaluated (the abort precedes retention/cleanup).
     assert not retention_spy.called, (
         "Retention should NOT be evaluated when all FULL retries are exhausted"
     )
@@ -1740,6 +1747,7 @@ def test_checkpoint_cleaned_up_after_failed_full(
             return_value=[checkpoint_name],
         ),
         patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -1869,9 +1877,9 @@ def test_full_backup_creation_not_retried_no_space(
 
     ``is_retryable("No space left on device")`` returns ``False``, so
     ``_execute_with_retry`` returns the failure immediately without entering
-    the retry loop.  Core sets ``full_verification_failed = True`` and
-    ``backup_failed = True``, and logs a CRITICAL message preserving old
-    generations.
+    the retry loop.  Core logs a CRITICAL message preserving old generations
+    and raises ``BackupAbortError`` to abort the VM pipeline (VM-level
+    isolation).
     """
     import logging
 
@@ -1924,8 +1932,9 @@ def test_full_backup_creation_not_retried_no_space(
             "record_full_backup",
             wraps=mock_state.record_full_backup,
         ) as record_spy,
+        pytest.raises(BackupAbortError),
     ):
-        result = core._backup_target(vm, target, [snap])
+        core._backup_target(vm, target, [snap])
 
     # create_full_backup called exactly once — no retry
     assert full_calls == 1, (
@@ -1933,8 +1942,6 @@ def test_full_backup_creation_not_retried_no_space(
     )
     # FULL was NOT recorded in state
     assert not record_spy.called, "record_full_backup should NOT be called when FULL fails"
-    # backup_failed is True
-    assert result is True, "backup_failed should be True"
     # CRITICAL log about preserving old generations
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical_logs, "CRITICAL log should be emitted"

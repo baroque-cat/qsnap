@@ -309,8 +309,9 @@ class ConfigFacade(IConfigFacade):
         # lifecycle_mode: "virsh" (default) or "qemu-img".
         lifecycle_mode = str(vm_raw.get("lifecycle_mode", "virsh"))
 
-        # change_detection_mode: "allocation-size" (default) or "allocation-map".
-        change_detection_mode = str(vm_raw.get("change_detection_mode", "allocation-size"))
+        # change_detection_mode: "allocation-map" (default) or "allocation-size".
+        # Must match the VMConfig dataclass default and the change-detection spec.
+        change_detection_mode = str(vm_raw.get("change_detection_mode", "allocation-map"))
 
         # Deep verification fields (T2 — per-VM, default OFF).
         blockcommit_deep_verify = bool(vm_raw.get("blockcommit_deep_verify", False))

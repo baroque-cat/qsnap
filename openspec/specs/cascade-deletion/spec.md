@@ -3,20 +3,18 @@
 ## Purpose
 
 State cleanup when FULL and incremental backups are deleted by per-chain retention. Per-chain retention groups backups by chain and evaluates keep/remove at the chain level — the entire chain is either kept or removed atomically. Ghost-retention and cascade-deletion are no longer used (see the `per-chain-retention` capability spec).
-
 ## Requirements
-
 ### Requirement: IStateManager tracks multiple FULLs per target
 
-`IStateManager` SHALL provide `get_full_backups(target_path: str) -> list[FullBackupInfo]` returning ALL FULL backups for a target (not just the most recent). Each `FullBackupInfo` SHALL include `name`, `path`, `timestamp`, and `bucket_level`. `record_full_backup(target_path, name, timestamp, bucket_level)` SHALL append to the list (not overwrite).
+`IStateManager` SHALL provide `get_full_backups(target_path: str) -> list[FullBackupInfo]` returning ALL FULL backups for a target (not just the most recent). Each `FullBackupInfo` SHALL include `name`, `path`, `timestamp`, and `disk`. `record_full_backup(target_path, name, timestamp, disk)` SHALL append to the list (not overwrite). The `disk` field identifies the disk target (e.g. `"vda"`) this FULL anchors — each disk owns its own FULL chain.
 
 #### Scenario: Multiple FULLs tracked per target
 - **WHEN** two FULL backups are created for the same target at different times
 - **THEN** `get_full_backups(target_path)` returns a list of 2 `FullBackupInfo` entries
 
-#### Scenario: FULL recorded with bucket level
-- **WHEN** a FULL is created at the monthly bucket level
-- **THEN** the recorded `FullBackupInfo` has `bucket_level="monthly"`
+#### Scenario: FULL recorded for a disk
+- **WHEN** a FULL is created for disk `vda`
+- **THEN** the recorded `FullBackupInfo` has `disk="vda"`
 
 ### Requirement: IStateManager tracks incremental-to-FULL dependencies
 
@@ -74,3 +72,4 @@ When `Core._cleanup_backups()` deletes an incremental (as part of a removed chai
 - **WHEN** an incremental is deleted as part of a removed chain
 - **THEN** `remove_incremental_dependency` is called with the target path, incremental name, and resolved FULL anchor
 - **AND** the dependency record is removed from `_dependencies.json`
+

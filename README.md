@@ -304,6 +304,21 @@ FULL backups get a separate three-tier check at lifecycle points:
 
 A FULL that fails post-create verification is deleted and not recorded; a FULL that fails pre-deletion verification blocks deletion of its generation with a CRITICAL log.
 
+## Failure Handling
+
+The VM pipeline is the atomic unit of execution. A definitive per-disk failure aborts the remaining steps of that VM; qsnap reports the failure and continues with the next VM. Already-completed steps are not rolled back.
+
+| Stage | Failure | Behavior |
+|---|---|---|
+| Snapshot creation | any disk fails (or its snapshot directory is missing) | VM aborts (exit 1) |
+| Pre-commit verification | broken backing chain | CRITICAL + VM aborts — run `qsnap check --deep` and repair manually; no automatic recovery |
+| Blockcommit | commit rejected (non-MAC) | VM aborts (exit 1) |
+| Post-commit verification | chain length did not decrease | VM aborts (chain potentially damaged) |
+| Blockcommit | AppArmor/SELinux denial | NOT a failure — the operation is deferred and drains on a later run |
+| FULL / incremental backup | failure after retries | VM aborts with exit 10 (`EXIT_BACKUP_ABORT`); successful transfers of the batch are kept and recorded |
+
+Other VMs are always processed normally. Automatic repair of broken chains (partial blockcommit, auto-rebase) was removed — a broken chain requires operator intervention before qsnap resumes blockcommits for that VM.
+
 ## State Management
 
 qsnap keeps per-VM JSON state under `state_dir` and offers three levels of consistency management:
@@ -442,4 +457,4 @@ The qsnap user needs libvirt access. Either add it to the `libvirt` group (`sudo
 
 - **Orphaned checkpoints** — `qsnap check --state` lists checkpoints whose target hash matches no configured target; `qsnap reconcile` deletes them (`virsh checkpoint-delete --metadata`).
 - **`No space left on device` / `Permission denied`** — backup failures that are not retried; fix the target storage.
-- **Broken backing chain** — `qsnap check` reports the broken file; qsnap halts destructive operations on a broken chain and commits only the intact prefix.
+- **Broken backing chain** — `qsnap check` reports the broken file; blockcommit aborts the affected VM's pipeline with a CRITICAL log (no automatic recovery). Repair the chain, then re-run. See [Failure Handling](#failure-handling).

@@ -250,18 +250,22 @@ def test_preserve_snapshots_retention_still_evaluated(
 def test_preserve_backups_skips_provider_delete_calls(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """When ``preserve_backups`` is True, backup delete is not called."""
+    # FULL verification is not the subject of this test — disable it so the
+    # backup step completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(target_keep_generations=0)
     vm = make_vm_config(
         name="testvm",
         targets=[target],
         snapshot_chain_length=0,
     )
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,

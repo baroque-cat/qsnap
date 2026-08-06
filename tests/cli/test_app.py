@@ -179,6 +179,34 @@ def test_restore_parses_dry_run_flag():
     assert ns.dry_run is True
 
 
+def test_restore_global_dry_run_not_clobbered():
+    """``qsnap --dry-run restore SNAP`` must stay a dry run.
+
+    Regression: the restore subparser used a plain ``store_true`` local
+    ``--dry-run`` (default ``False``) which overwrote the global flag in
+    the shared namespace, silently disabling dry-run.  With
+    ``default=argparse.SUPPRESS`` the absent local flag no longer clobbers
+    the global value.
+    """
+    parser = build_argparser()
+    ns = parser.parse_args(["--dry-run", "restore", "mysnap"])
+    assert ns.dry_run is True
+
+
+def test_restore_dry_run_short_alias():
+    parser = build_argparser()
+    ns = parser.parse_args(["restore", "mysnap", "-n"])
+    assert ns.dry_run is True
+
+
+@pytest.mark.parametrize("cmd", ["run", "snapshot", "backup", "prune"])
+def test_action_subcommand_dry_run_both_positions(cmd):
+    """``--dry-run`` is accepted before and after action subcommands."""
+    parser = build_argparser()
+    assert parser.parse_args(["--dry-run", cmd]).dry_run is True
+    assert parser.parse_args([cmd, "--dry-run"]).dry_run is True
+
+
 def test_restore_parses_yes_flag():
     parser = build_argparser()
     ns = parser.parse_args(["restore", "mysnap", "--yes"])

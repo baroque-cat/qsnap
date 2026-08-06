@@ -3,9 +3,7 @@
 ## Purpose
 
 The `qsnap` command-line surface: subcommands, global flags, output formatting, and exit codes. The CLI is a thin translation layer — it converts arguments into Core calls and formats results, with no business logic. All listing output is disk-aware.
-
 ## Requirements
-
 ### Requirement: CLI entry point
 The system SHALL provide a `qsnap` command-line entry point with subcommands `run`, `snapshot`, `backup`, `prune`, `list`, `stats`, `check`, `estimate`, `restore`, and `fork`. The `deploy` subcommand is REMOVED. The `list` subcommand SHALL support sub-subcommands: `snapshots`, `backups`, `config`, `latest`, and `deferred`. Each (sub-)subcommand SHALL map to a corresponding Core method. The CLI layer SHALL contain no business logic.
 
@@ -34,7 +32,7 @@ The system SHALL accept a `--config` / `-c` flag specifying the path to the TOML
 - **THEN** ConfigFacade is constructed with `/etc/qsnap/qsnap.toml`
 
 ### Requirement: Global flag --dry-run / -n
-The system SHALL accept a `--dry-run` / `-n` flag that sets `Core.dry_run = True`. In dry-run mode, snapshot creation, blockcommit, file copy, file deletion, deferred-drain execution, and state writes SHALL NOT be executed. Planned actions SHALL be logged at INFO level, per VM and per disk, with an approximate size estimate wherever one can be computed read-only (capability `dry-run-prediction`). Read-only shell commands (`qemu-img info`, `virsh domstate` / `virsh dominfo`, `test`, `which`, `find`, `du`) remain permitted in dry-run; every shell command issued SHALL be read-only.
+The system SHALL accept a `--dry-run` / `-n` flag that sets `Core.dry_run = True`. The flag SHALL be accepted both BEFORE the subcommand (global position, all commands) and AFTER the subcommand for `run`, `snapshot`, `backup`, `prune`, `reconcile`, `restore`, and `fork`. Subcommand-local declarations SHALL use `default=argparse.SUPPRESS` so an absent local flag never overwrites the globally parsed value (a plain `store_true` default of `False` would silently disable `qsnap --dry-run <subcommand>`). In dry-run mode, snapshot creation, blockcommit, file copy, file deletion, deferred-drain execution, and state writes SHALL NOT be executed. Planned actions SHALL be logged at INFO level, per VM and per disk, with an approximate size estimate wherever one can be computed read-only (capability `dry-run-prediction`). Read-only shell commands (`qemu-img info`, `virsh domstate` / `virsh dominfo`, `test`, `which`, `find`, `du`) remain permitted in dry-run; every shell command issued SHALL be read-only.
 
 In dry-run mode, environment validation (`_validate_environment()`) SHALL still be executed. Validation failures SHALL be logged as WARNING (non-fatal).
 
@@ -60,6 +58,15 @@ In dry-run mode, the per-disk FULL backup creation decision SHALL still be evalu
 - **WHEN** `qsnap -n run` is executed with snapshots that are missing on a target
 - **THEN** each missing snapshot is logged with its name, target, disk, and an approximate size
 - **AND** no NBD export or file write occurs
+
+#### Scenario: Global dry-run before restore is not clobbered
+- **WHEN** `qsnap --dry-run restore SNAP` is executed
+- **THEN** `args.dry_run` is `True` (the restore subparser's SUPPRESS default does not overwrite it)
+- **AND** the restore runs in dry-run mode (no disk replacement)
+
+#### Scenario: Dry-run flag accepted after action subcommands
+- **WHEN** any of `qsnap run --dry-run`, `qsnap snapshot -n`, `qsnap backup --dry-run`, `qsnap prune -n` is executed
+- **THEN** the flag parses and `args.dry_run` is `True`
 
 ### Requirement: Global flags --preserve / --preserve-snapshots / --preserve-backups
 The system SHALL accept `--preserve` (sets both), `--preserve-snapshots`, and `--preserve-backups` flags. When active, retention deletion steps SHALL be skipped.
@@ -353,3 +360,4 @@ The `qsnap list backups` flat table output SHALL include a `TARGET` column (the 
 - **WHEN** `qsnap list backups` is executed for a VM with two targets
 - **THEN** the table columns are `VM`, `TARGET`, `DISK`, `NAME`, `PATH`, `TIMESTAMP`, `ALLOCATION`
 - **AND** each row shows the target path the backup belongs to
+

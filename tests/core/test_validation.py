@@ -1151,3 +1151,69 @@ def test_compress_probe_uses_check_true(
             f"Compress probe call must use check=True, got check={call.kwargs.get('check')}. "
             f"Call args: {call.args}"
         )
+
+
+# ── Dry-run zero-mutation regressions (fix-dry-run-mutations L1, L4) ─────
+
+
+def test_preflight_cleanup_dry_run_logs_instead_of_rm(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    caplog,
+):
+    """L1: in dry-run, stale .tmp files are predicted, never removed."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(auto_cleanup=True)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    shell = _fresh_shell_with_cleanup_defaults()
+    _insert_specific_find(
+        shell,
+        r"snapshots/testvm.*\.tmp",
+        "/var/lib/libvirt/snapshots/testvm/stale.tmp\n",
+    )
+
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
+    core.dry_run = True
+
+    caplog.set_level(logging.INFO)
+    with patch.object(shell, "run", wraps=shell.run) as run_spy:
+        core._preflight_cleanup(vm)
+
+    rm_calls = [
+        c
+        for c in run_spy.call_args_list
+        if c.args and isinstance(c.args[0], list) and c.args[0][0] == "rm"
+    ]
+    assert rm_calls == [], f"dry-run must not issue rm, got: {rm_calls}"
+    assert "[dry-run] Would remove stale file" in caplog.text
+    assert "stale.tmp" in caplog.text
+
+
+def test_check_deep_dry_run_does_not_write_timestamp(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """L4: ``check --deep`` in dry-run does not create _last_deep_check.json."""
+    vm = make_vm_config(name="testvm")
+    global_cfg = make_global_config(state_dir=str(tmp_path / "state"))
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+    core.dry_run = True
+    core.check(deep=True)
+
+    assert not (tmp_path / "state" / "_last_deep_check.json").exists(), (
+        "dry-run check --deep must not write the last-deep-check timestamp"
+    )
+
+    # Control: the same call WITHOUT dry-run writes the timestamp.
+    core.dry_run = False
+    core.check(deep=True)
+    assert (tmp_path / "state" / "_last_deep_check.json").exists()

@@ -3,13 +3,11 @@
 ## Purpose
 
 Detects whether a VM disk has changed by comparing the current state against the last recorded per-disk baseline. Supports two detection modes: `allocation-size` (compares `qemu-img info actual-size`) and `allocation-map` (compares `qemu-img map` region hashes). Detection is always per-disk — `disk` is a required parameter.
-
 ## Requirements
-
 ### Requirement: Change detection via allocation-size comparison
 The system SHALL determine whether a VM disk has changed by comparing the current allocation-size of the active image with the per-disk last recorded value from `IStateManager.get_last_allocation(vm_name, disk)`. The current allocation-size SHALL be determined via `qemu-img info --output=json --force-share` on the active image, whose path is obtained via `virsh domblklist`.
 
-The default `change_detection_mode` in `VMConfig` SHALL be `"allocation-map"`. The `"allocation-size"` mode SHALL remain available as an explicit configuration option.
+The default `change_detection_mode` in `VMConfig` SHALL be `"allocation-map"`. The `"allocation-size"` mode SHALL remain available as an explicit configuration option. The config parser SHALL apply the same default when the `change_detection_mode` key is absent from TOML.
 
 #### Scenario: Allocation has grown — changes detected
 - **WHEN** `IStateManager.get_last_allocation("myvm", "vda")` returns 65536
@@ -33,6 +31,11 @@ The default `change_detection_mode` in `VMConfig` SHALL be `"allocation-map"`. T
 #### Scenario: Default change detection mode is allocation-map
 - **WHEN** a `VMConfig` is constructed without an explicit `change_detection_mode`
 - **THEN** `vm_config.change_detection_mode` equals `"allocation-map"`
+
+#### Scenario: Config parsing applies the allocation-map default
+- **WHEN** `ConfigFacade` parses a TOML `[[vm]]` section without a `change_detection_mode` key
+- **THEN** the parsed `VMConfig.change_detection_mode` equals `"allocation-map"`
+- **AND** `DefaultFactory.create_change_detector(vm_config.change_detection_mode)` returns `MapChangeDetector`
 
 #### Scenario: Explicit allocation-size still works
 - **WHEN** a `VMConfig` is constructed with `change_detection_mode = "allocation-size"`
@@ -86,3 +89,4 @@ When the onchange gate skips transfer, the system SHALL still execute backup ret
 #### Scenario: Transfer skipped but retention cleans expired backups
 - **WHEN** the gate skips transfer and retention evaluation marks backups for removal
 - **THEN** the system SHALL delete the expired backups via `_cleanup_backups()`
+

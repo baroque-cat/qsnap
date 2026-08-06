@@ -91,6 +91,7 @@ def test_core_init_stores_dependencies(
 def test_core_run_all_vms(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -101,9 +102,12 @@ def test_core_run_all_vms(
     with 2 ``VMRunResult`` entries, all successful, and the factory's
     ``create_snapshot_provider`` should have been called once per VM.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # backup step completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     vm1 = make_vm_config(name="vm1", targets=[make_target()])
     vm2 = make_vm_config(name="vm2", targets=[make_target()])
-    config = MockConfigFacade(vms=[vm1, vm2])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm1, vm2])
 
     core = Core(
         config=config,
@@ -146,6 +150,7 @@ def test_core_run_all_vms(
 def test_core_run_with_filter(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -155,9 +160,12 @@ def test_core_run_with_filter(
     The filter uses exact name match.  With 2 VMs ("vm1" and "vm2"), only
     "vm1" should appear in the results.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # backup step completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     vm1 = make_vm_config(name="vm1", targets=[make_target()])
     vm2 = make_vm_config(name="vm2", targets=[make_target()])
-    config = MockConfigFacade(vms=[vm1, vm2])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm1, vm2])
 
     core = Core(
         config=config,
@@ -681,9 +689,12 @@ def test_action_appended_on_backup_transfer(
     mock_factory,
     mock_state,
     mock_shell,
+    tmp_path,
 ):
     """Run core.backup(); verify actions contains backup_transfer ActionRecord."""
-    target = make_target()
+    target_dir = tmp_path / "backup"
+    target_dir.mkdir()
+    target = make_target(path=str(target_dir))
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -701,6 +712,14 @@ def test_action_appended_on_backup_transfer(
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
+
+    # Pre-record a FULL whose file actually exists so it survives the
+    # phantom filter and this run performs an incremental transfer of snap1
+    # (a new FULL would consume the snapshot instead of transferring it).
+    (target_dir / "testvm.FULL.daily.qcow2").touch()
+    mock_state.record_full_backup(
+        str(target.path), "testvm.FULL.daily.qcow2", datetime(2025, 7, 13, 9, 0), "vda"
+    )
 
     # Spy on transfer_missing to verify new kwargs are passed by Core.
     bitmap_provider = mock_factory._bitmap_backup_provider
@@ -1066,10 +1085,15 @@ def test_backup_failed_warning_with_transfer_failures(
 
     caplog.set_level(logging.WARNING)
 
-    with patch.object(
-        mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[failed_backup],
+    # FULL verification is not the subject of this test — let the FULL
+    # succeed so the (patched) transfer failure is what gets exercised.
+    with (
+        patch("qsnap.core.verify_full_backup", return_value=None),
+        patch.object(
+            mock_factory._backup_provider,
+            "transfer_missing",
+            return_value=[failed_backup],
+        ),
     ):
         result = core.run()
 
@@ -1268,9 +1292,12 @@ def test_backup_transfer_info_log(
     mock_state,
     mock_shell,
     caplog,
+    tmp_path,
 ):
     """Verify [backup] transfer info log is emitted for each successful transfer."""
-    target = make_target()
+    target_dir = tmp_path / "backup"
+    target_dir.mkdir()
+    target = make_target(path=str(target_dir))
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1288,6 +1315,14 @@ def test_backup_transfer_info_log(
         disk="vda",
     )
     mock_state.record_snapshot("testvm", snap)
+
+    # Pre-record a FULL whose file actually exists so it survives the
+    # phantom filter and this run performs an incremental transfer of snap1
+    # (a new FULL would consume the snapshot instead of transferring it).
+    (target_dir / "testvm.FULL.daily.qcow2").touch()
+    mock_state.record_full_backup(
+        str(target.path), "testvm.FULL.daily.qcow2", datetime(2025, 7, 13, 9, 0), "vda"
+    )
 
     caplog.set_level(logging.INFO)
     core.run()

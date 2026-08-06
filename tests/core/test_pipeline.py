@@ -21,11 +21,12 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.core import Core, PipelineResult
+from qsnap.core import BackupAbortError, Core, PipelineResult
 from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
     ChangeResult,
+    CommitResult,
     FullBackupInfo,
     RetentionResult,
     ShellResult,
@@ -634,14 +635,18 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
 # ── test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline ─────────────
 
 
-def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
+def test_multi_disk_vdb_snapshot_failure_aborts_vm_pipeline(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
     caplog,
 ):
-    """vda snapshot succeeds, vdb fails. Verify vda result recorded, vdb error logged, pipeline continues."""
+    """vda snapshot succeeds, vdb fails → the VM pipeline aborts (VM-level isolation).
+
+    The vda snapshot created before the failure is kept (no rollback), the
+    VM is marked unsuccessful, and an error ActionRecord is appended.
+    """
     vm = make_vm_config(
         name="testvm",
         disks=[
@@ -682,17 +687,129 @@ def test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline(
     ):
         result = core.snapshot()
 
-    # Pipeline succeeded (partial failure is not a pipeline failure)
-    assert result.success is True
+    # VM-level isolation: the vdb failure aborts this VM's pipeline.
+    assert result.success is False
+    assert len(result.results) == 1
+    assert result.results[0].success is False
+    assert "virsh timeout for vdb" in (result.results[0].error or "")
 
-    # vda snapshot was recorded in state (vdb was not)
+    # vda snapshot created before the failure is kept (no rollback).
     snapshots = mock_state.get_snapshots("testvm")
     assert len(snapshots) == 1
     assert "_vda_" in snapshots[0].name
 
+    # An error ActionRecord was appended to the audit trail.
+    error_records = [a for a in result.actions if a.action == "error"]
+    assert len(error_records) == 1
+
     # vdb error was logged
     assert "vdb" in caplog.text
     assert "virsh timeout" in caplog.text
+
+
+def test_snapshot_failure_on_one_vm_does_not_affect_others(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """VM-level isolation: a snapshot failure aborts only the affected VM.
+
+    vm1's snapshot creation fails; vm2 is processed normally and succeeds.
+    """
+    vm1 = make_vm_config(name="vm1")
+    vm2 = make_vm_config(name="vm2")
+    config = MockConfigFacade(vms=[vm1, vm2])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+
+    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
+        if vm_config.name == "vm1":
+            return SnapshotResult(
+                success=False,
+                name=snapshot_name,
+                path=snapshot_path,
+                new_allocation=0,
+                error="virsh failed for vm1",
+            )
+        return SnapshotResult(
+            success=True,
+            name=snapshot_name,
+            path=snapshot_path,
+            new_allocation=65536,
+            error=None,
+        )
+
+    with patch.object(snapshot_provider, "create", side_effect=create_side_effect):
+        result = core.snapshot()
+
+    by_name = {r.vm_name: r for r in result.results}
+    assert by_name["vm1"].success is False
+    assert by_name["vm2"].success is True
+
+    # vm2's snapshot was recorded; vm1 has none.
+    assert len(mock_state.get_snapshots("vm1")) == 0
+    assert len(mock_state.get_snapshots("vm2")) == 1
+
+
+def test_mac_denial_defers_without_aborting(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """MAC denial (AppArmor/SELinux) during blockcommit → deferred, NOT aborted.
+
+    VM-level isolation treats a MAC denial as a deferral (the commit is
+    queued for the next VM shutdown), not a failure: no exception is raised
+    and the operation is recorded in the deferred queue.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        disks=[DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0),
+        allocation=1000,
+        disk="vda",
+    )
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        patch.object(
+            manager,
+            "blockcommit",
+            return_value=CommitResult(
+                success=False, committed_snapshot="", error="blocked by apparmor profile"
+            ),
+        ),
+        patch.object(
+            mock_state, "add_deferred_blockcommit", wraps=mock_state.add_deferred_blockcommit
+        ) as defer_spy,
+    ):
+        # Must NOT raise — a MAC denial is deferred, not a failure.
+        core._blockcommit_one_disk(vm, "vda", [snap])
+
+    defer_spy.assert_called_once()
+    # (vm_name, disk, [snapshot_names], reason)
+    assert defer_spy.call_args.args[3] == "apparmor"
 
 
 # ── test_metadata_verification_failure_marks_backup_failed ────────────────
@@ -877,6 +994,7 @@ def test_pipeline_onchange_no_changes_validation_first(
 def test_first_backup_creates_full_regardless_of_chain_length(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -887,9 +1005,12 @@ def test_first_backup_creates_full_regardless_of_chain_length(
     (``not all_fulls``), ``should_full = True`` unconditionally.
     No bucket strategy involved.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(target_chain_length=5)
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -922,6 +1043,7 @@ def test_first_backup_creates_full_regardless_of_chain_length(
 def test_incremental_count_exceeds_chain_length_triggers_full(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -930,9 +1052,12 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
 
     Core's count-based decision: ``should_full = incremental_count > chain_length``.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(target_chain_length=2)
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -1678,12 +1803,13 @@ def test_post_commit_chain_length_unchanged_critical(
     mock_shell,
     caplog,
 ):
-    """Post-commit chain length unchanged → CRITICAL log (silent blockcommit failure).
+    """Post-commit chain length unchanged → CRITICAL log + RuntimeError abort.
 
     Both pre-commit and post-commit queries return 7 entries.  After
     snap6 is removed from state, the post-commit query hits snap5 but
     still returns 7 entries — simulating that the blockcommit did not
-    actually reduce the chain.
+    actually reduce the chain.  VM-level isolation: the suspected
+    inconsistent chain aborts the VM pipeline (RuntimeError).
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=True,
@@ -1722,6 +1848,7 @@ def test_post_commit_chain_length_unchanged_critical(
     with (
         patch("os.path.exists", return_value=True),
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+        pytest.raises(RuntimeError, match="chain length unchanged"),
     ):
         core._blockcommit_snapshots(vm, retention)
 
@@ -2689,6 +2816,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
 def test_full_creation_works_for_bitmap(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -2698,9 +2826,12 @@ def test_full_creation_works_for_bitmap(
     Verifies that the factory always returns the bitmap backup provider
     and that create_full_backup succeeds without raising NotImplementedError.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -2954,6 +3085,7 @@ def test_deep_check_timeout_7200_seconds(
 def test_core_passes_vm_name_to_create_full_backup(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -2965,9 +3097,12 @@ def test_core_passes_vm_name_to_create_full_backup(
     not extracted from the snapshot filename.  This is critical for VMs with
     dotted names where filename-based extraction would truncate to ``"3"``.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target()
     vm = make_vm_config(name="3.Projects_opencode", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -3166,6 +3301,85 @@ def test_blockcommit_stale_guard_one_stale_removed(
     merge_names = [s.name for s in bc_spy.call_args[0][1]]
     assert merge_names == ["snap_ok"], f"Only snap_ok should be blockcommitted, got: {merge_names}"
     assert "snap_stale" not in merge_names, "stale snapshot must not be blockcommitted"
+
+
+def test_blockcommit_stale_guard_dry_run_no_state_write(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """L3: dry-run predicts stale-entry removal without writing state.
+
+    Same setup as ``test_blockcommit_stale_guard_one_stale_removed`` but in
+    dry-run mode: the stale entry is filtered out of ``to_merge`` and a
+    ``[dry-run] Would remove stale state entry`` WARNING is logged, but
+    ``remove_snapshot()`` is never called and no blockcommit executes.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    core.dry_run = True
+
+    snap_ok = SnapshotInfo(
+        name="snap_ok",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_ok.qcow2"),
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    snap_stale = SnapshotInfo(
+        name="snap_stale",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap_stale.qcow2"),
+        timestamp=datetime(2025, 7, 13, 9, 0),
+        allocation=2000,
+        disk="vda",
+    )
+    mock_state.record_snapshot("testvm", snap_ok)
+    mock_state.record_snapshot("testvm", snap_stale)
+
+    retention = RetentionResult(keep=[], remove=["snap_ok", "snap_stale"])
+    manager = mock_factory._lifecycle_manager
+
+    caplog.set_level(logging.WARNING)
+
+    def path_exists(path_str):
+        return "snap_stale" not in path_str
+
+    with (
+        patch("os.path.exists", side_effect=path_exists),
+        patch.object(core, "_get_chain_length", return_value=3),
+        patch.object(mock_state, "remove_snapshot", wraps=mock_state.remove_snapshot) as remove_spy,
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # No state write in dry-run — the stale entry survives.
+    remove_spy.assert_not_called()
+    remaining = {s.name for s in mock_state.get_snapshots("testvm")}
+    assert "snap_stale" in remaining, "stale entry must remain in state during dry-run"
+
+    # Prediction is logged instead.
+    assert "[dry-run] Would remove stale state entry" in caplog.text
+    assert "snap_stale" in caplog.text
+
+    # No blockcommit executes in dry-run.
+    bc_spy.assert_not_called()
 
 
 def test_blockcommit_stale_guard_all_stale_skipped(
@@ -4270,6 +4484,7 @@ def test_resolve_disks_returns_empty_on_failure(
 def test_always_mode_backup_gate_bypassed(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -4280,9 +4495,12 @@ def test_always_mode_backup_gate_bypassed(
     ``if target.backup_create == "onchange"`` check is ``False``, so the
     gate code is skipped.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(backup_create="always")
     vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -4311,16 +4529,20 @@ def test_always_mode_backup_gate_bypassed(
 def test_core_passes_convert_parallel_to_create_full_backup(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """Core reads target.convert_parallel and passes it to provider.create_full_backup()."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(
         convert_parallel=8,
     )
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -4357,16 +4579,20 @@ def test_core_passes_convert_parallel_to_create_full_backup(
 def test_core_passes_convert_out_of_order_to_create_full_backup(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """Core reads target.convert_out_of_order and passes it to provider.create_full_backup()."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(
         convert_out_of_order=False,
     )
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -4404,16 +4630,20 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
 def test_core_passes_convert_parallel_to_transfer_missing(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """Core reads target.convert_parallel and passes it to provider.transfer_missing()."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(
         convert_parallel=8,
     )
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -4452,16 +4682,20 @@ def test_core_passes_convert_parallel_to_transfer_missing(
 def test_core_passes_convert_out_of_order_to_transfer_missing(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """Core reads target.convert_out_of_order and passes it to provider.transfer_missing()."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(
         convert_out_of_order=False,
     )
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -4921,7 +5155,11 @@ def test_onchange_baseline_not_updated_on_failure(
     mock_state,
     mock_shell,
 ):
-    """After failed backup, set_last_backup_allocation is NOT called."""
+    """After failed backup, set_last_backup_allocation is NOT called.
+
+    VM-level isolation: the definitive transfer failure raises
+    BackupAbortError before the baseline update is reached.
+    """
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
     config = MockConfigFacade(vms=[vm])
@@ -4963,6 +5201,7 @@ def test_onchange_baseline_not_updated_on_failure(
             "transfer_missing",
             return_value=[fail_result],
         ),
+        pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
@@ -5056,6 +5295,7 @@ def test_onchange_skip_runs_retention_and_cleanup(
 def test_onchange_detector_failure_gate_opens_fail_safe(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -5068,9 +5308,12 @@ def test_onchange_detector_failure_gate_opens_fail_safe(
     this ``changed=True`` flag as a fail-safe signal and proceed with the
     backup, overriding the per-target baseline comparison.
     """
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm")
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -5476,14 +5719,18 @@ def test_startup_validation_no_checkpoint_deletion(
 def test_phantom_full_cascade_dep_cleanup(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
     """In _backup_target, phantom FULL removal triggers cascade dep cleanup."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -5526,15 +5773,19 @@ def test_phantom_full_cascade_dep_cleanup(
 def test_phantom_last_full_clears_baseline(
     make_vm_config,
     make_target,
+    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
     tmp_path,
 ):
     """When the last phantom FULL is removed, baseline is cleared."""
+    # FULL verification is not the subject of this test — disable it so the
+    # happy path completes (a failure now aborts the VM pipeline).
+    global_cfg = make_global_config(full_verify_after_create="off")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -7172,7 +7423,8 @@ def test_full_creation_not_retried_non_transient(
 
     ``is_retryable("No space left on device")`` returns ``False``, so
     ``_execute_with_retry`` returns the failure immediately.
-    ``create_full_backup()`` is called exactly once.
+    ``create_full_backup()`` is called exactly once, and the definitive
+    failure raises ``BackupAbortError`` (VM-level isolation).
     """
 
     target = make_target(backup_retry_max=3, backup_retry_base="0s")
@@ -7215,14 +7467,13 @@ def test_full_creation_not_retried_non_transient(
             side_effect=full_side_effect,
         ),
         patch("time.sleep"),
+        pytest.raises(BackupAbortError),
     ):
-        result = core._backup_target(vm, target, [snap])
+        core._backup_target(vm, target, [snap])
 
     assert full_calls == 1, (
         f"create_full_backup should be called exactly once (non-retryable), got {full_calls}"
     )
-    # backup_failed should be True
-    assert result is True
 
 
 # ── test_incremental_transfer_uses_execute_with_retry ────────────────────
@@ -7360,7 +7611,7 @@ def test_chain_verify_intact_chain_proceeds(
     assert bc_spy.called, "blockcommit should proceed when chain is intact"
 
 
-def test_chain_verify_missing_file_partial(
+def test_chain_verify_missing_file_aborts_vm_pipeline(
     make_vm_config,
     make_global_config,
     mock_factory,
@@ -7368,10 +7619,11 @@ def test_chain_verify_missing_file_partial(
     mock_shell,
     caplog,
 ):
-    """Missing file in chain → scan_backing_chain reports broken file → partial blockcommit attempted.
+    """Missing file in chain → pre-commit verification fails → RuntimeError abort.
 
-    When the pre-commit verification finds a broken file, the code attempts
-    partial blockcommit for snapshots before the break point.
+    VM-level isolation: a broken backing chain aborts the VM pipeline
+    immediately.  No partial blockcommit or auto-rebase is attempted;
+    the operator must repair the chain (``qsnap check --deep``).
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=True,
@@ -7410,19 +7662,20 @@ def test_chain_verify_missing_file_partial(
     retention = RetentionResult(keep=["snap4"], remove=["snap1"])
     manager = mock_factory._lifecycle_manager
 
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.CRITICAL)
     with (
         patch("os.path.exists", return_value=True),
-        patch.object(manager, "blockcommit", wraps=manager.blockcommit),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+        pytest.raises(RuntimeError, match="chain verification failed"),
     ):
         core._blockcommit_snapshots(vm, retention)
 
-    # The chain is broken → blockcommit should be skipped or attempted partially.
-    # The verification reports the break and the partial blockcommit path is
-    # activated (see _split_at_break logic).  At minimum we should see a WARNING
-    # about the broken chain.
-    warning_logs = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warning_logs, "Expected WARNING log for broken chain"
+    # No blockcommit is attempted on a broken chain.
+    assert not bc_spy.called, "blockcommit must not run on a broken chain"
+    # CRITICAL log carries the remediation hint.
+    critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical_logs, "Expected CRITICAL log for broken chain"
+    assert "qsnap check --deep" in critical_logs[0].message
 
 
 # ── GAP-1: Snapshot creation failure → no state record ────────────────────
@@ -7435,10 +7688,12 @@ def test_snapshot_creation_failure_does_not_record_state(
     mock_shell,
     caplog,
 ):
-    """SnapshotResult(success=False) → Core does NOT record in state, logs error.
+    """SnapshotResult(success=False) → Core does NOT record in state, logs error,
+    and aborts the VM pipeline (VM-level isolation).
 
     Verifies that when ExternalSnapshotProvider.create() returns failure,
-    Core does not call record_snapshot() for the failed disk.
+    Core does not call record_snapshot() for the failed disk and the VM
+    is marked unsuccessful.
     """
     vm = make_vm_config(
         name="testvm",
@@ -7478,8 +7733,8 @@ def test_snapshot_creation_failure_does_not_record_state(
     with patch.object(snapshot_provider, "create", side_effect=create_side_effect):
         result = core.snapshot()
 
-    # Pipeline overall result is success (partial failure tolerated).
-    assert result.success is True
+    # VM-level isolation: the vdb failure aborts this VM's pipeline.
+    assert result.success is False
 
     # vda recorded in state — vdb NOT.
     snapshots = mock_state.get_snapshots("testvm")
@@ -7564,10 +7819,11 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
     mock_shell,
     caplog,
 ):
-    """BackupResult(success=False) → retention/cleanup skipped, old gen preserved.
+    """BackupResult(success=False) → BackupAbortError, retention/cleanup never reached.
 
-    When backup transfer fails, full_verification_failed should prevent
-    retention evaluation and cleanup, preserving old generations.
+    VM-level isolation: when FULL backup creation fails definitively,
+    Core raises BackupAbortError.  The abort itself preserves old
+    generations — retention evaluation and cleanup are never reached.
     """
     target = make_target(target_keep_generations=1)
     vm = make_vm_config(
@@ -7612,7 +7868,8 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
         patch.object(core, "_cleanup_backups") as cleanup_spy,
     ):
         caplog.set_level(logging.CRITICAL)
-        core._backup_target(vm, target, [snap])
+        with pytest.raises(BackupAbortError):
+            core._backup_target(vm, target, [snap])
 
-    # _cleanup_backups must NOT be called — retention skipped.
+    # _cleanup_backups must NOT be called — the abort precedes retention.
     assert not cleanup_spy.called, "_cleanup_backups should be skipped when backup transfer fails"

@@ -3,12 +3,10 @@
 ## Purpose
 
 Ensures backing chain integrity per disk before and after blockcommit operations by verifying chain consistency via `scan_backing_chain()` in `qsnap/utils/verification.py`. Prevents data loss by skipping or flagging commits when the chain is broken, cyclic, or contains unexpected formats.
-
 ## Requirements
-
 ### Requirement: Per-disk pre-commit backing chain integrity verification
 
-Before executing blockcommit for a disk, Core SHALL verify the backing chain integrity of that disk's active image by calling `scan_backing_chain(self._shell, active_path)` from `qsnap/utils/verification.py`. The entry path SHALL be the most recent snapshot of that disk (or the disk's base image if no snapshots exist). The `--force-share` flag is REQUIRED internally by `scan_backing_chain()` because the active disk image is locked by the running VM. The function SHALL confirm: (a) every file referenced in the chain exists on the filesystem, (b) every file has format `"qcow2"`, (c) the backing-filename reference in each image matches the actual next file in the chain, (d) no file appears twice (no cycles). If the chain is broken, Core SHALL attempt partial blockcommit per disk (see `blockcommit-recovery` capability) instead of skipping entirely. `Core._verify_backing_chain(vm_config, disk)` SHALL call `scan_backing_chain()` and convert `ChainScanResult` → `ChainVerifyResult`, mapping `broken_files[0]` to `broken_file` when non-empty, and setting `ChainVerifyResult.disk` to the disk name.
+Before executing blockcommit for a disk, Core SHALL verify the backing chain integrity of that disk's active image by calling `scan_backing_chain(self._shell, active_path)` from `qsnap/utils/verification.py`. The entry path SHALL be the most recent snapshot of that disk (or the disk's base image if no snapshots exist). The `--force-share` flag is REQUIRED internally by `scan_backing_chain()` because the active disk image is locked by the running VM. The function SHALL confirm: (a) every file referenced in the chain exists on the filesystem, (b) every file has format `"qcow2"`, (c) the backing-filename reference in each image matches the actual next file in the chain, (d) no file appears twice (no cycles). If the chain is broken, Core SHALL abort the VM pipeline (CRITICAL log + `RuntimeError`; see `blockcommit-recovery` capability) — no blockcommit is executed and no automatic recovery is attempted. `Core._verify_backing_chain(vm_config, disk)` SHALL call `scan_backing_chain()` and convert `ChainScanResult` → `ChainVerifyResult`, mapping `broken_files[0]` to `broken_file` when non-empty, and setting `ChainVerifyResult.disk` to the disk name.
 
 #### Scenario: Intact chain — blockcommit proceeds
 
@@ -17,26 +15,26 @@ Before executing blockcommit for a disk, Core SHALL verify the backing chain int
 - **AND** `_verify_backing_chain()` returns `ChainVerifyResult(success=True, broken_file=None, disk="vda")`
 - **AND** blockcommit executes normally for that disk
 
-#### Scenario: Missing file in chain — partial blockcommit attempted
+#### Scenario: Missing file in chain — VM pipeline aborts
 
 - **WHEN** one file in the backing chain for disk `vda` does not exist on disk
 - **THEN** `scan_backing_chain()` sets `broken_files` containing the missing path
 - **AND** `_verify_backing_chain()` returns `ChainVerifyResult(success=False, broken_file=<missing path>, disk="vda")`
-- **AND** Core attempts partial blockcommit for snapshots before the break point for that disk
+- **AND** Core emits a CRITICAL log with the broken file path and raises `RuntimeError`, aborting the VM pipeline
 
-#### Scenario: Non-qcow2 file in chain — blockcommit skipped
+#### Scenario: Non-qcow2 file in chain — VM pipeline aborts
 
 - **WHEN** `qemu-img info` reports a file with `format: "raw"` in the chain for disk `vda`
 - **THEN** `scan_backing_chain()` adds the file to `broken_files`
 - **AND** a CRITICAL log is emitted with the file path and its unexpected format
-- **AND** blockcommit is NOT executed for that disk
+- **AND** `RuntimeError` is raised, aborting the VM pipeline (no blockcommit is executed)
 
-#### Scenario: Cyclic reference detected — blockcommit skipped
+#### Scenario: Cyclic reference detected — VM pipeline aborts
 
 - **WHEN** the chain refers to a file path already seen earlier in the chain for a disk
 - **THEN** `scan_backing_chain()` adds "cycle detected at {path}" to `broken_files`
 - **AND** a CRITICAL log is emitted
-- **AND** blockcommit is NOT executed for that disk
+- **AND** `RuntimeError` is raised, aborting the VM pipeline (no blockcommit is executed)
 
 #### Scenario: Entry path falls back to base image when no snapshots exist
 
@@ -65,7 +63,7 @@ After `Core._cleanup_backups()` completes, Core SHALL verify that all keep-set i
 
 After a blockcommit for a disk, Core SHALL re-run `qemu-img info --force-share --backing-chain --output=json` on the current active layer of that disk (the most recent snapshot that survived the blockcommit for that disk, obtained from `IStateManager` after removing merged snapshots). The `--force-share` flag is used because the active layer may still be locked by QEMU.
 
-The chain length after commit SHALL be directionally compared to the chain length before commit for that disk: if `chain_length_after >= chain_length_before` (the chain was not reduced), a CRITICAL log SHALL be emitted. Any actual reduction is accepted — this correctly handles both normal merging and intermediate file removal by `virsh blockcommit --delete`.
+The chain length after commit SHALL be directionally compared to the chain length before commit for that disk: if `chain_length_after >= chain_length_before` (the chain was not reduced), a CRITICAL log SHALL be emitted and `RuntimeError` SHALL be raised, aborting the VM pipeline — an unchanged chain length means the commit did not take effect and the chain is potentially damaged. Any actual reduction is accepted — this correctly handles both normal merging and intermediate file removal by `virsh blockcommit --delete`.
 
 The post-commit query SHALL use `_get_chain_length(vm_config, disk)` — the same per-disk method as the pre-commit query.
 
@@ -82,12 +80,13 @@ The post-commit query SHALL use `_get_chain_length(vm_config, disk)` — the sam
 - **AND** `qemu-img info --backing-chain` on the current active layer after commit shows 3 files
 - **THEN** verification passes (the actual reduction is accepted — `virsh --delete` semantics are respected)
 
-#### Scenario: Chain length unchanged — CRITICAL
+#### Scenario: Chain length unchanged — CRITICAL and VM aborts
 
 - **WHEN** chain for disk `vda` had 7 files before commit and 1 snapshot should have been merged
 - **AND** `qemu-img info --backing-chain` on the current active layer after commit still shows 7 files
 - **THEN** a CRITICAL log is emitted: "Blockcommit may have failed: chain length unchanged"
 - **AND** the snapshot file paths are included in the log for manual recovery
+- **AND** `RuntimeError` is raised, aborting the remaining steps of this VM
 
 #### Scenario: Post-commit measurement fails — snapshots preserved
 
@@ -227,3 +226,4 @@ Before passing `to_merge` to the lifecycle manager, `Core._blockcommit_snapshots
 
 - **WHEN** `ChainVerifyResult` is constructed without a `disk` argument
 - **THEN** `disk` is `None`
+

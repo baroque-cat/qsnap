@@ -505,6 +505,51 @@ def test_summary_printed_after_run_with_failures(capsys):
     assert "permission denied" in captured.out
 
 
+def test_backup_abort_exit_wins_over_generic_failure(capsys):
+    """VM-level isolation: a backup-stage failure marks the VM unsuccessful
+    (success=False) AND sets backup_failed=True.  The exit code must be
+    EXIT_BACKUP_ABORT (10) — the more specific signal — not EXIT_GENERIC."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(
+                vm_name="vm1",
+                success=False,
+                error="FULL backup creation failed",
+                backup_failed=True,
+            ),
+        ],
+        actions=[],
+        dry_run=False,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    # backup_failed takes precedence over the generic failure → exit 10.
+    assert result == EXIT_BACKUP_ABORT
+    captured = capsys.readouterr()
+    assert "vm1: FAILED" in captured.out
+
+
+def test_generic_failure_exit_when_no_backup_failure(capsys):
+    """A non-backup failure (success=False, backup_failed=False) maps to
+    EXIT_GENERIC (1)."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm1", success=False, error="snapshot failed"),
+        ],
+        actions=[],
+        dry_run=False,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_GENERIC
+    captured = capsys.readouterr()
+    assert "vm1: FAILED" in captured.out
+
+
 def test_summary_printed_after_dry_run(capsys):
     """After a dry run, the summary includes the 'Dryrun: YES' header
     and the dry-run disclaimer footer."""

@@ -394,16 +394,21 @@ def test_transfer_missing_result_carries_disk(
     cls,
     init_kwargs,
 ):
-    """``transfer_missing`` returns every ``BackupResult`` with ``.disk``
-    populated from the source snapshot — multi-disk input produces
-    per-disk results.
+    """``transfer_missing`` returns ``BackupResult`` objects with ``.disk``
+    populated from the source snapshot.
 
     - For ``MockBitmapBackupProvider`` the mock already sets
-      ``disk=s.disk`` on every result.
+      ``disk=s.disk`` on every result (all snapshots processed).
     - For ``BitmapBackupProvider`` the mock shell is configured to let
       the ``virsh backup-begin`` failure path produce a result; the
       implementation sets ``disk=snapshot.disk`` on every result (all
       paths).
+
+    VM-level isolation: ``BitmapBackupProvider`` stops at the first
+    definitive transfer failure and returns the partial results collected
+    so far (Core aborts the VM), so a failing first snapshot yields a
+    single failed result.  The contract asserted here is that every
+    RETURNED result carries the disk of its source snapshot.
     """
     provider = cls(**init_kwargs)
     vm_config = VMConfig(
@@ -433,10 +438,15 @@ def test_transfer_missing_result_carries_disk(
     ]
     results = provider.transfer_missing(vm_config, target, snapshots)
 
-    # Every snapshot must produce a result.
-    assert len(results) == len(snapshots), f"Expected {len(snapshots)} results, got {len(results)}"
-    for result, snapshot in zip(results, snapshots, strict=True):
+    # At least one result is returned; every RETURNED result carries the
+    # disk of its source snapshot.  (Bitmap stops at the first definitive
+    # failure — VM-level isolation — so a failing first snapshot yields a
+    # single failed result; the mock processes all snapshots.)
+    assert len(results) >= 1, "Expected at least one result"
+    by_name = {s.name: s for s in snapshots}
+    for result in results:
         assert isinstance(result, BackupResult)
+        snapshot = by_name[result.snapshot_name]
         assert result.disk == snapshot.disk, (
             f"Expected disk={snapshot.disk!r}, got disk={result.disk!r}"
             f" for snapshot {snapshot.name}"

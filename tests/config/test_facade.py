@@ -729,3 +729,48 @@ def test_multi_disk_trailing_slash_equivalent_path_detected(tmp_path: Path):
     )
     with pytest.raises(ConfigError, match="share snapshot_dir"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# change_detection_mode parse-time default
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_single_disk_config(tmp_path: Path, extra_vm_keys: str = "") -> Path:
+    """Write a minimal single-disk TOML config, optionally with extra [[vm]] keys."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        f"{extra_vm_keys}"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/vda.qcow2"\n'
+    )
+    return config_file
+
+
+@pytest.mark.unit
+def test_change_detection_mode_default_parses_as_allocation_map(tmp_path: Path):
+    """A [[vm]] without change_detection_mode parses to the spec default.
+
+    The parser fallback must match the VMConfig dataclass default and the
+    change-detection spec: "allocation-map".
+    """
+    config_file = _write_single_disk_config(tmp_path)
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.change_detection_mode == "allocation-map"
+
+
+@pytest.mark.unit
+def test_change_detection_mode_explicit_allocation_size_preserved(tmp_path: Path):
+    """An explicit change_detection_mode = "allocation-size" passes through."""
+    config_file = _write_single_disk_config(tmp_path, 'change_detection_mode = "allocation-size"\n')
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.change_detection_mode == "allocation-size"
