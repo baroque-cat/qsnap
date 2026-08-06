@@ -1,0 +1,10 @@
+# Invalid free_space_check value — must be one of strict/warn/off
+free_space_check = "hard"
+
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"

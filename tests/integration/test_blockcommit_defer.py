@@ -17,6 +17,7 @@ All tests require a running libvirt daemon and are marked
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -740,4 +741,173 @@ def test_dry_run_deferred_drain_prediction(test_vm):
 
     # Cleanup: VM still running (dry-run is read-only), destroy it.
     assert _vm_is_running(shell, vm_name), "VM should still be running after dry-run"
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 6: Offline-commit ENOSPC defers (reason "enospc"), then drains
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_offline_commit_enospc_defers_then_drains_integration(test_vm, caplog):
+    """Offline ``qemu-img commit`` ENOSPC defers with reason "enospc".
+
+    Design D4: a space-classified blockcommit failure is deferred (not a
+    VM abort).  The snapshots stay in state so the next run can retry.
+
+    1. Start VM, create 2 snapshots (snap0 = oldest, snap1 = active).
+       Record them in state with ``disk="vda"`` (the ENOSPC deferral path
+       is scoped per disk).
+    2. Destroy the VM → offline commit path (qemu-img).
+    3. Patch ``shell.run`` so the ``qemu-img commit`` invocation returns
+       "No space left on device" (simulating a full snapshot filesystem —
+       no root/loopback mount is available in the test environment).
+    4. Run ``core.prune()`` → the commit is deferred with reason
+       "enospc"; NO RuntimeError / VM abort; snapshot files and state
+       records intact; the run is ``space_limited``.
+    5. Unpatch and drain the deferred queue → a REAL offline commit
+       executes: the oldest snapshot file is deleted, the chain is
+       shortened, and the queue is empty.
+    """
+    from unittest.mock import patch
+
+    from tests.helpers import snapshot_create
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Step 1: Start VM and create 2 snapshots (recorded with disk="vda").
+    start_result = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start_result.success:
+        pytest.skip(f"virsh start failed: {start_result.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    core, vm_config, state = _build_core(
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        lifecycle_mode="virsh",
+    )
+
+    # chain_length=1 → with 2 snapshots the oldest is a removal candidate
+    # (chain_length=24, the helper default, would remove nothing).  Core
+    # reads the VM from the config facade, so rebuild the facade with the
+    # replaced config.
+    from dataclasses import replace
+
+    vm_config = replace(vm_config, snapshot_chain_length=1)
+    config = MockConfigFacade(
+        global_config=GlobalConfig(),
+        vms=[vm_config],
+    )
+    core._config = config
+
+    import secrets
+
+    for i in range(2):
+        hex_sfx = secrets.token_hex(3)
+        snap = snapshot_create(
+            shell,
+            vm_name,
+            f"{vm_name}.enospc-{i}-{hex_sfx}",
+            "vda",
+            snapshot_dir,
+            base_image,
+        )
+        state.record_snapshot(vm_name, snap)
+        time.sleep(0.6)
+
+    snapshots = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
+    assert len(snapshots) == 2, f"Expected 2 snapshots, got {len(snapshots)}"
+    oldest, newest = snapshots[0], snapshots[1]
+    oldest_path = oldest.path
+    newest_path = newest.path
+    assert oldest_path.exists(), f"Oldest file should exist: {oldest_path}"
+    assert newest_path.exists(), f"Newest file should exist: {newest_path}"
+
+    chain_len_before = _backing_chain_length(newest_path, shell)
+    assert chain_len_before is not None and chain_len_before >= 2
+
+    # Step 2: Destroy the VM → offline commit path.
+    destroy_result = shell.run(["virsh", "destroy", vm_name], timeout=30)
+    assert destroy_result.success, f"virsh destroy failed: {destroy_result.error}"
+    time.sleep(0.5)
+    assert _vm_is_shut_off(shell, vm_name), "VM should be shut off"
+
+    # Step 3: Simulate ENOSPC on the offline qemu-img commit.
+    from qsnap.models.results import ShellResult
+
+    orig_run = shell.run
+
+    def _enospc_run(cmd, timeout=30, check=False):
+        if cmd and cmd[:2] == ["qemu-img", "commit"]:
+            return ShellResult(
+                success=False,
+                stdout="",
+                stderr="qemu-img: error while writing to output file: No space left on device",
+                returncode=1,
+                error="qemu-img: error while writing to output file: No space left on device",
+            )
+        return orig_run(cmd, timeout=timeout, check=check)
+
+    with patch.object(shell, "run", side_effect=_enospc_run):
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            result = core.prune(vm_name)
+
+    # No VM abort: the per-VM result is successful (deferral is not a failure).
+    assert result.results[0].success, (
+        f"ENOSPC commit deferral must not abort the VM: {result.results[0].error}"
+    )
+    # Space-limited run drives exit code 4.
+    assert result.space_limited is True, "ENOSPC-deferred commit must mark the run space_limited"
+
+    # Deferred entry with reason "enospc" holds the oldest snapshot.
+    deferred = state.get_deferred_operations(vm_name)
+    assert len(deferred) == 1, f"Expected 1 deferred entry, got {len(deferred)}"
+    assert deferred[0].reason == "enospc", (
+        f"Expected reason 'enospc', got {deferred[0].reason!r}"
+    )
+    assert oldest.name in deferred[0].snapshots, (
+        f"Deferred entry must contain the oldest snapshot, got {deferred[0].snapshots}"
+    )
+
+    # Snapshot records and files are INTACT (never-delete-on-ENOSPC).
+    remaining = state.get_snapshots(vm_name)
+    assert {s.name for s in remaining} == {oldest.name, newest.name}, (
+        "ENOSPC must not remove snapshot state records"
+    )
+    assert oldest_path.exists(), f"Oldest file must survive ENOSPC: {oldest_path}"
+    assert newest_path.exists(), f"Newest file must survive ENOSPC: {newest_path}"
+
+    # Step 4: free space (unpatch) → next run drains with a REAL commit.
+    # The deferred queue is drained by ``_check_deferred_operations`` at
+    # the start of the next pipeline run (``prune`` itself only evaluates
+    # retention + lifecycle; it does not consult the queue).
+    core._check_deferred_operations(vm_config)
+
+    # Oldest file committed (deleted), chain shortened, queue empty.
+    assert not oldest_path.exists(), (
+        f"Oldest snapshot must be committed after drain: {oldest_path}"
+    )
+    chain_len_after = _backing_chain_length(newest_path, shell)
+    assert chain_len_after is not None and chain_len_after < chain_len_before, (
+        f"Chain must be shorter after drain: was {chain_len_before}, now {chain_len_after}"
+    )
+    assert state.get_deferred_operations(vm_name) == [], (
+        "Deferred queue must be empty after the drain"
+    )
+
+    # Cleanup: restart and stop the VM for teardown (fixture destroys
+    # and undefines the domain afterwards).
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
     shell.run(["virsh", "destroy", vm_name], timeout=30)

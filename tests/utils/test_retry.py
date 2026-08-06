@@ -1,14 +1,20 @@
 """Unit tests for pure retry utility functions in qsnap.utils.retry.
 
-Tests cover ``is_retryable()``, ``parse_retry_duration()``, and
-``compute_backoff()``.  All functions are pure — no I/O, no side effects.
+Tests cover ``is_retryable()``, ``is_space_error()``,
+``parse_retry_duration()``, and ``compute_backoff()``.  All functions are
+pure — no I/O, no side effects.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
+from qsnap.utils.retry import (
+    compute_backoff,
+    is_retryable,
+    is_space_error,
+    parse_retry_duration,
+)
 
 # ── is_retryable ───────────────────────────────────────────────────────────
 
@@ -71,6 +77,44 @@ def test_is_retryable_format_verification_error():
     will convert a raw image to qcow2, so they must NOT be retried.
     """
     assert is_retryable("verification failed: expected format qcow2, got raw") is False
+
+
+# ── is_space_error ───────────────────────────────────────────────────────
+
+
+def test_is_space_error_no_space_left_on_device():
+    """``is_space_error`` classifies ENOSPC messages as space errors.
+
+    ``is_space_error("qemu-img: error writing: No space left on device")``
+    returns True (spec: enospc-fault-handling scenario 1; design D1).
+    """
+    assert is_space_error("qemu-img: error writing: No space left on device") is True
+
+
+def test_is_space_error_disk_quota_exceeded():
+    """``is_space_error`` classifies EDQUOT messages as space errors.
+
+    ``is_space_error("write error: Disk quota exceeded")`` returns True
+    (spec: enospc-fault-handling scenario 2; design D1).
+    """
+    assert is_space_error("write error: Disk quota exceeded") is True
+
+
+def test_is_space_error_unrelated_and_none():
+    """``is_space_error`` does not classify unrelated errors or ``None``.
+
+    ``is_space_error("connection refused")`` and ``is_space_error(None)``
+    return False (spec: enospc-fault-handling scenario 3; design D1).
+    """
+    assert is_space_error("connection refused") is False
+    assert is_space_error(None) is False
+    assert is_space_error("") is False
+
+
+def test_is_space_error_case_insensitive():
+    """The space-error match is case-insensitive (design D1)."""
+    assert is_space_error("NO SPACE LEFT ON DEVICE") is True
+    assert is_space_error("Disk Quota EXCEEDED") is True
 
 
 # ── parse_retry_duration ───────────────────────────────────────────────────

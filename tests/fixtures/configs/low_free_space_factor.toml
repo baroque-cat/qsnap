@@ -1,0 +1,10 @@
+# free_space_factor below 1.0 — must be >= 1.0
+free_space_factor = 0.5
+
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"

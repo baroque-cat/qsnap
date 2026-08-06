@@ -374,3 +374,212 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
     )
 
     _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 3: per-target ENOSPC isolation does NOT weaken verify-before-delete
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _fake_full_backup_factory(error: str):
+    """Return a ``create_full_backup`` replacement failing with *error*."""
+
+    def _fake_full(
+        vm_name,
+        source_snapshot,
+        target,
+        compress=False,
+        compression_type="zstd",
+        stall_timeout=1800,
+        convert_parallel=4,
+        convert_out_of_order=True,
+    ):
+        from qsnap.models.results import BackupResult
+
+        return BackupResult(
+            success=False,
+            snapshot_name=source_snapshot.name,
+            source_path=source_snapshot.path,
+            target_path=target.path / "fake-full.qcow2",
+            bytes_transferred=0,
+            error=error,
+            duration=0.0,
+            disk=source_snapshot.disk,
+        )
+
+    return _fake_full
+
+
+def _seed_old_generation(shell, target_dir, state, vm_name, gen_name: str) -> Path:
+    """Create a valid old FULL on *target_dir*, recorded in state."""
+    old_path = target_dir / f"{vm_name}.FULL.{gen_name}.20300101T000001_a1b2c3.qcow2"
+    shell.run(["qemu-img", "create", "-f", "qcow2", str(old_path), "128K"], timeout=30)
+    assert old_path.exists(), f"Old FULL file must exist: {old_path}"
+    state.record_full_backup(
+        str(target_dir), old_path.name, datetime(2030, 1, 1), disk="vda"
+    )
+    return old_path
+
+
+def _build_vbd_core(
+    shell,
+    vm_name,
+    base_image,
+    snapshot_dir,
+    target_dir,
+    tmpdir,
+    state,
+    snap,
+) -> tuple[Core, VMConfig]:
+    """Build Core whose target keep_generations=1 would delete the old gen."""
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        snapshot_chain_length=999,  # prevent blockcommit from interfering
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+                target_keep_generations=1,
+            )
+        ],
+    )
+    config = MockConfigFacade(
+        global_config=GlobalConfig(
+            state_dir="/var/tmp",
+            full_verify_before_delete="check",
+            backup_retry_max=1,  # one attempt — no retry backoff delay
+        ),
+        vms=[vm_config],
+        config_path=tmpdir / "vbd_isolation.toml",
+    )
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+    state.record_snapshot(vm_name, snap)
+    return core, vm_config
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_verification_failure_still_aborts_old_generation_preserved(test_vm, caplog):
+    """A verification failure (non-space) STILL aborts via BackupAbortError.
+
+    Per-target ENOSPC isolation must not weaken the verify-before-delete
+    gate: a non-space FULL failure (e.g. M1/M2 verification) raises
+    ``BackupAbortError`` (backup_failed=True) and the old generation is
+    NOT deleted.
+    """
+    from unittest.mock import patch
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Stop the VM (direct-convert path; provider is patched anyway).
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(0.5)
+
+    # Real snapshot + state; old generation on target.
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.vbd-abort-snap", base_image, snapshot_dir)
+    state = InMemoryStateManager()
+    old_gen = _seed_old_generation(shell, target_dir, state, vm_name, "abort")
+    core, _ = _build_vbd_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir, state, snap
+    )
+    # Force the FULL-creation path (an old FULL in state would otherwise
+    # skip it via the count-based chain check).
+    core._force_full_targets.add(str(target_dir))
+
+    with patch(
+        "qsnap.modules.backup.bitmap.BitmapBackupProvider.create_full_backup",
+        side_effect=_fake_full_backup_factory(
+            "verification failed: content comparison mismatch at offset 0x1000"
+        ),
+    ):
+        result = core.backup(vm_name)
+
+    # VM marked failed with backup_failed=True (BackupAbortError semantics).
+    vm_result = result.results[0]
+    assert vm_result.success is False, "Verification failure must fail the VM"
+    assert vm_result.backup_failed is True, (
+        "Verification failure must map to backup_failed (exit 10)"
+    )
+    assert "old generations preserved" in (vm_result.error or ""), (
+        f"Abort message must state old generations preserved: {vm_result.error}"
+    )
+
+    # Old generation NOT deleted (verify-before-delete gate holds).
+    assert old_gen.exists(), (
+        f"Old generation must NOT be deleted on verification failure: {old_gen}"
+    )
+
+    # No fake/new FULL on target beyond the old generation.
+    fulls = [p for p in target_dir.glob("*.FULL.*.qcow2") if p != old_gen]
+    assert fulls == [], f"No new FULL may be recorded on failure: {fulls}"
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_space_error_suspends_target_no_abort_old_generation_preserved(test_vm, caplog):
+    """A space-classified FULL failure suspends the target, does NOT abort.
+
+    ENOSPC isolation: no ``BackupAbortError`` (backup_failed=False), the
+    run is ``space_limited`` (exit 4), the VM result is a success, and
+    the old generation is preserved (never-delete-on-ENOSPC).
+    """
+    from unittest.mock import patch
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(0.5)
+
+    snap = _snapshot_create(shell, vm_name, f"{vm_name}.vbd-space-snap", base_image, snapshot_dir)
+    state = InMemoryStateManager()
+    old_gen = _seed_old_generation(shell, target_dir, state, vm_name, "space")
+    core, _ = _build_vbd_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir, state, snap
+    )
+    # Force the FULL-creation path (see verification-failure test above).
+    core._force_full_targets.add(str(target_dir))
+
+    with patch(
+        "qsnap.modules.backup.bitmap.BitmapBackupProvider.create_full_backup",
+        side_effect=_fake_full_backup_factory(
+            "qemu-img: error while writing to output file: No space left on device"
+        ),
+    ):
+        result = core.backup(vm_name)
+
+    # No abort: VM result success, not backup_failed.
+    vm_result = result.results[0]
+    assert vm_result.success is True, (
+        f"Space failure must not abort the VM: {vm_result.error}"
+    )
+    assert vm_result.backup_failed is False, (
+        "Space failure must NOT set backup_failed (no BackupAbortError)"
+    )
+
+    # Space-limited run → CLI exit 4.
+    assert result.space_limited is True, (
+        "Space-classified FULL failure must mark the run space_limited"
+    )
+
+    # Never-delete-on-ENOSPC: old generation preserved.
+    assert old_gen.exists(), (
+        f"Old generation must NOT be deleted on ENOSPC: {old_gen}"
+    )
+
+    _cleanup_checkpoints(shell, vm_name)

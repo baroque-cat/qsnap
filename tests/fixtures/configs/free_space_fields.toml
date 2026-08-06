@@ -1,0 +1,15 @@
+# Config with valid free-space gate fields set at the global level
+free_space_check = "warn"
+free_space_reserve = 1073741824
+free_space_factor = 1.1
+
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"

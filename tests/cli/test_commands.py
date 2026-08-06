@@ -31,7 +31,12 @@ from qsnap.cli.commands import (
     handle_snapshot,
     handle_stats,
 )
-from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
+from qsnap.cli.errors import (
+    EXIT_BACKUP_ABORT,
+    EXIT_DISKFULL,
+    EXIT_GENERIC,
+    EXIT_SUCCESS,
+)
 from qsnap.core import Core, PipelineResult, VMRunResult
 from qsnap.models.config import DiskConfig, GlobalConfig, VMConfig
 from qsnap.models.results import (
@@ -548,6 +553,92 @@ def test_generic_failure_exit_when_no_backup_failure(capsys):
     assert result == EXIT_GENERIC
     captured = capsys.readouterr()
     assert "vm1: FAILED" in captured.out
+
+
+# ── disk-full (space_limited) exit-code mapping ─────────────────────────
+
+
+def test_space_limited_run_exits_four(capsys):
+    """PipelineResult(space_limited=True) maps to EXIT_DISKFULL (4)."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[VMRunResult(vm_name="vm1", success=True)],
+        actions=[],
+        dry_run=False,
+        space_limited=True,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_DISKFULL
+    captured = capsys.readouterr()
+    assert "vm1: OK" in captured.out
+    assert "qsnap Backup Summary" in captured.out
+
+
+def test_space_limited_precedence_over_generic(capsys):
+    """space_limited=True + success=False maps to 4, not 1."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm1", success=False, error="snapshot failed"),
+        ],
+        actions=[],
+        dry_run=False,
+        space_limited=True,
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_DISKFULL
+    captured = capsys.readouterr()
+    assert "vm1: FAILED" in captured.out
+
+
+def test_backup_abort_precedence_over_space_limited(capsys):
+    """space_limited=True + backup_failed=True maps to 4 (disk-full
+    takes precedence over backup abort — spec: cli-interface
+    "Exit codes" scenario "Disk-full precedence over generic failure")."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(
+                vm_name="vm1",
+                success=False,
+                error="FULL backup verification failed",
+                backup_failed=True,
+            ),
+        ],
+        actions=[],
+        dry_run=False,
+        space_limited=True,
+        space_limited_targets=["/mnt/backup/vm1"],
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_DISKFULL
+
+
+def test_summary_names_space_limited_target(capsys):
+    """The summary printed after a space-limited run SHALL name the
+    space-limited target (spec: cli-interface, "Disk-full exit code")."""
+    mock_core = _make_mock_core()
+    mock_core.run.return_value = PipelineResult(
+        results=[VMRunResult(vm_name="vm1", success=True)],
+        actions=[],
+        dry_run=False,
+        space_limited=True,
+        space_limited_targets=["/mnt/backup/vm1"],
+    )
+    args = _make_action_args()
+    result = handle_run(mock_core, args)
+
+    assert result == EXIT_DISKFULL
+    captured = capsys.readouterr()
+    assert "qsnap Backup Summary" in captured.out
+    assert "space-limited" in captured.out.lower()
+    assert "/mnt/backup/vm1" in captured.out
 
 
 def test_summary_printed_after_dry_run(capsys):

@@ -329,13 +329,17 @@ def test_preserve_backups_skips_provider_delete_calls(
 # ── Snapshot preserve_min post-processing filter ────────────────────────────
 
 
-def test_preserve_min_inactive_default(
+def test_preserve_min_inactive_explicit_zero(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """100 snapshots, chain_length=72, preserve_min=0 → no trimming, all 28 removed."""
+    """100 snapshots, chain_length=72, preserve_min=0 (explicit) → no trimming, all 28 removed.
+
+    The "inactive" case only exists for an explicit ``snapshot_preserve_min=0``
+    — the GlobalConfig default is now 48 (snapshot-preserve-min spec).
+    """
     vm = make_vm_config(name="testvm", snapshot_chain_length=72, snapshot_preserve_min=0)
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -370,6 +374,115 @@ def test_preserve_min_inactive_default(
     policy = eval_spy.call_args.args[1]
     assert policy.chain_length == 72
     assert policy.preserve_min == 0
+
+
+# ── test_default_preserve_min_48_keeps_newest_48 ──────────────────────────
+
+
+def test_default_preserve_min_48_keeps_newest_48(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """100 snapshots, chain_length=24, default preserve_min=48 → keep 48/remove 52.
+
+    The default floor dominates the chain length: retention's 76 removals
+    are trimmed to the oldest 52, keeping the newest 48 uncommitted
+    (snapshot-preserve-min scenario 2).
+    """
+    vm = make_vm_config(name="testvm", snapshot_chain_length=24, snapshot_preserve_min=48)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    base = datetime(2025, 7, 13, 10, 0)
+    for i in range(100):
+        snap = SnapshotInfo(
+            name=f"snap{i + 1:03d}",
+            path=Path(f"/tmp/snap{i + 1:03d}.qcow2"),
+            timestamp=base + timedelta(hours=i),
+            allocation=1000,
+            disk="vda",
+        )
+        mock_state.record_snapshot("testvm", snap)
+
+    # Engine: keep=24 newest, remove=76 oldest.
+    keep_names = [f"snap{i:03d}" for i in range(77, 101)]
+    remove_names = [f"snap{i:03d}" for i in range(1, 77)]
+    with patch.object(
+        mock_factory._retention_engine,
+        "evaluate",
+        return_value=RetentionResult(keep=keep_names, remove=remove_names),
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # max_removable = 100 - 48 = 52 → remove trimmed to the oldest 52.
+    assert len(result.remove) == 52, (
+        f"default preserve_min=48 should trim remove to 52, got {len(result.remove)}"
+    )
+    assert len(result.keep) == 48, (
+        f"the newest 48 snapshots must be kept, got {len(result.keep)}"
+    )
+
+
+# ── test_default_floor_dominates_chain_length ─────────────────────────────
+
+
+def test_default_floor_dominates_chain_length(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """30 snapshots, chain_length=24, default preserve_min=48 → remove 0.
+
+    When the floor (48) exceeds the total snapshot count, the chain-length
+    removals are fully suppressed — nothing is blockcommitted
+    (snapshot-preserve-min scenario 3).
+    """
+    vm = make_vm_config(name="testvm", snapshot_chain_length=24, snapshot_preserve_min=48)
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    base = datetime(2025, 7, 13, 10, 0)
+    for i in range(30):
+        snap = SnapshotInfo(
+            name=f"snap{i + 1:02d}",
+            path=Path(f"/tmp/snap{i + 1:02d}.qcow2"),
+            timestamp=base + timedelta(hours=i),
+            allocation=1000,
+            disk="vda",
+        )
+        mock_state.record_snapshot("testvm", snap)
+
+    # Engine: keep=24 newest, remove=6 oldest.
+    keep_names = [f"snap{i:02d}" for i in range(7, 31)]
+    remove_names = [f"snap{i:02d}" for i in range(1, 7)]
+    with patch.object(
+        mock_factory._retention_engine,
+        "evaluate",
+        return_value=RetentionResult(keep=keep_names, remove=remove_names),
+    ):
+        result = core._evaluate_snapshot_retention(vm)
+
+    assert result is not None
+    # max_removable = max(0, 30 - 48) = 0 → the floor dominates chain_length.
+    assert len(result.remove) == 0, (
+        f"default preserve_min=48 must dominate chain_length=24, "
+        f"got {len(result.remove)} removals"
+    )
+    assert len(result.keep) == 30
 
 
 def test_preserve_min_trim_excess_from_newest(

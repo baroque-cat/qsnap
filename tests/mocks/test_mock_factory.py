@@ -5,18 +5,20 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from qsnap.core import Core
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.change import IChangeDetector
 from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.snapshot import ISnapshotProvider
 from qsnap.models.config import RetentionPolicy
-from qsnap.models.results import BackupResult, SnapshotInfo
+from qsnap.models.results import BackupResult, SnapshotInfo, SnapshotResult, SnapshotSpec
 from tests.mocks.mock_factory import MockVMModuleFactory
 from tests.mocks.mock_modules import (
     MockBitmapBackupProvider,
     MockChangeDetector,
     MockLifecycleManager,
+    MockSnapshotProvider,
 )
 
 
@@ -294,3 +296,51 @@ def test_default_compression_type_is_zstd_on_both_mocks(make_vm_config, make_tar
         r2 = provider.transfer_missing(make_vm_config(), make_target(), snapshots)
         assert isinstance(r2, list)
         assert all(isinstance(r, BackupResult) for r in r2)
+
+
+def test_mock_snapshot_provider_has_create_multi(make_vm_config):
+    """MockSnapshotProvider.create_multi returns list[SnapshotResult].
+
+    The mock satisfies ISnapshotProvider, does not inherit from Core
+    (design D1), and implements ``create_multi`` returning one
+    ``SnapshotResult`` per spec, in spec order.
+    """
+    provider = MockSnapshotProvider()
+    assert isinstance(provider, ISnapshotProvider)
+    assert not isinstance(provider, Core), (
+        "MockSnapshotProvider must not inherit from Core (design D1)"
+    )
+    assert hasattr(provider, "create_multi"), "MockSnapshotProvider must define create_multi()"
+    assert callable(provider.create_multi)
+
+    specs = [
+        SnapshotSpec(disk="vda", name="test-snap-vda", path=Path("/tmp/testvm_vda.qcow2")),
+        SnapshotSpec(disk="vdb", name="test-snap-vdb", path=Path("/tmp/testvm_vdb.qcow2")),
+    ]
+    results = provider.create_multi(make_vm_config(), specs, quiesce=True)
+    assert isinstance(results, list)
+    assert len(results) == len(specs)
+    assert all(isinstance(r, SnapshotResult) for r in results)
+
+
+def test_mock_factory_snapshot_provider_create_multi(make_vm_config):
+    """MockVMModuleFactory.create_snapshot_provider() returns a provider
+    whose create_multi() returns one SnapshotResult per spec."""
+    factory = MockVMModuleFactory()
+    provider = factory.create_snapshot_provider(make_vm_config())
+    assert isinstance(provider, ISnapshotProvider)
+    assert isinstance(provider, MockSnapshotProvider)
+
+    specs = [
+        SnapshotSpec(disk="vda", name="batch-vda", path=Path("/tmp/batch_vda.qcow2")),
+        SnapshotSpec(disk="vdb", name="batch-vdb", path=Path("/tmp/batch_vdb.qcow2")),
+    ]
+    results = provider.create_multi(make_vm_config(), specs, quiesce=False)
+    assert isinstance(results, list)
+    assert len(results) == len(specs)
+    for result, spec in zip(results, specs):
+        assert isinstance(result, SnapshotResult)
+        assert result.success is True
+        assert result.disk == spec.disk
+        assert result.name == spec.name
+        assert result.path == spec.path

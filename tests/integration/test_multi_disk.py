@@ -72,6 +72,24 @@ def _list_qcow2_files(directory: Path) -> set[str]:
     return {p.name for p in directory.glob("*.qcow2")}
 
 
+def _spy_snapshot_create_as(shell: SubprocessShell, log: list[list[str]]):
+    """Wrap ``shell.run`` to record ``virsh snapshot-create-as`` invocations.
+
+    Real commands still execute; only the batch snapshot command is
+    appended to *log* (used to assert the batch command shape — one
+    call with 2 ``--diskspec`` entries plus ``--atomic``/``--quiesce``).
+    """
+
+    orig_run = shell.run
+
+    def _spy(cmd, timeout=30, check=False):
+        if cmd and cmd[0] == "virsh" and cmd[1] == "snapshot-create-as":
+            log.append(list(cmd))
+        return orig_run(cmd, timeout=timeout, check=check)
+
+    shell.run = _spy  # type: ignore[method-assign]
+
+
 # ── Test A: Snapshot + blockcommit isolation ───────────────────────────
 
 
@@ -518,3 +536,184 @@ def test_backup_both_disks(test_vm_multi_disk):
         f"vdb backup name should contain '_vdb_': {full_vdb.target_path.name}"
     )
     assert full_vdb.target_path.exists(), f"VDB backup missing: {full_vdb.target_path}"
+
+
+# ── Test E: Batch snapshot via Core (create_multi) ─────────────────────
+
+
+def _build_multi_core(ctx, quiesce: bool):
+    """Build Core + VMConfig for the 2-disk fixture with batch snapshots."""
+    from qsnap.core import Core
+    from qsnap.factory.default import DefaultFactory
+    from qsnap.models.config import TargetConfig
+    from tests.mocks.mock_config import MockConfigFacade
+    from tests.mocks.mock_state import InMemoryStateManager
+
+    shell: SubprocessShell = ctx["shell"]
+    vm_name: str = ctx["vm_name"]
+    tmpdir: Path = ctx["tmpdir"]
+    disk_configs = ctx["disk_configs"]
+
+    state = InMemoryStateManager()
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=disk_configs,
+        snapshot_dir=None,  # each disk has its own override
+        snapshot_quiesce=quiesce,
+        targets=[
+            TargetConfig(path=ctx["target_dir"], compress=False, verify="off"),
+        ],
+    )
+    config = MockConfigFacade(
+        vms=[vm_config],
+        config_path=tmpdir / "multi_batch.toml",
+    )
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+    return core, vm_config, state
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_quiesced_batch_snapshot_multi_disk(test_vm_multi_disk):
+    """Core issues ONE quiesced batch snapshot call covering both disks.
+
+    1. Start the 2-disk VM.
+    2. Run ``Core._create_snapshot`` with ``snapshot_quiesce=True``.
+    3. Assert exactly ONE ``virsh snapshot-create-as`` call carrying two
+       ``--dispspec`` entries (vda + vdb) plus ``--disk-only --atomic
+       --no-metadata --quiesce``.
+    4. This test VM has no qemu-guest-agent, so the quiesced freeze is
+       expected to fail (all-or-nothing batch → ``RuntimeError``, nothing
+       recorded).  The command SHAPE is the primary assertion; the
+       no-quiesce fallback (next test) proves the batch itself works.
+    """
+    ctx = test_vm_multi_disk
+    shell: SubprocessShell = ctx["shell"]
+    vm_name: str = ctx["vm_name"]
+
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    core, vm_config, state = _build_multi_core(ctx, quiesce=True)
+
+    batch_calls: list[list[str]] = []
+    _spy_snapshot_create_as(shell, batch_calls)
+
+    # The guest agent is absent → the quiesced batch fails all-or-nothing.
+    with pytest.raises(RuntimeError, match="Snapshot batch creation failed"):
+        core._create_snapshot(vm_config)
+
+    # Exactly ONE batch virsh call was attempted.
+    assert len(batch_calls) == 1, (
+        f"Expected exactly 1 virsh snapshot-create-as call, got {len(batch_calls)}"
+    )
+    cmd = batch_calls[0]
+
+    # The command must carry two --diskspec entries (vda and vdb).
+    # ``create_multi`` emits ``--diskspec`` and its value as separate
+    # list elements, so pair each flag with the following element.
+    diskspec_values = [
+        cmd[i + 1] for i, a in enumerate(cmd) if a == "--diskspec" and i + 1 < len(cmd)
+    ]
+    assert len(diskspec_values) == 2, f"Expected 2 --diskspec entries, got {diskspec_values}"
+    joined = " ".join(diskspec_values)
+    assert "vda,file=" in joined and "vdb,file=" in joined, (
+        f"Both disks must appear in --diskspec: {joined}"
+    )
+    # Batch flags: atomic + quiesce cover ALL disks under one freeze.
+    assert "--disk-only" in cmd, f"Missing --disk-only: {cmd}"
+    assert "--atomic" in cmd, f"Missing --atomic: {cmd}"
+    assert "--no-metadata" in cmd, f"Missing --no-metadata: {cmd}"
+    assert "--quiesce" in cmd, f"Missing --quiesce: {cmd}"
+
+    # All-or-nothing: nothing recorded after the failed batch.
+    assert state.get_snapshots(vm_name) == [], (
+        "No snapshot may be recorded after a failed quiesced batch"
+    )
+
+    # Cleanup: destroy VM (no snapshots were created).
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_batch_snapshot_no_quiesce_default(test_vm_multi_disk):
+    """Non-quiesced batch snapshot: ONE call, both files exist, both recorded.
+
+    1. Start the 2-disk VM.
+    2. Run ``Core._create_snapshot`` with ``snapshot_quiesce=False``
+       (default).
+    3. Assert exactly ONE ``virsh snapshot-create-as`` call with 2
+       ``--diskspec`` entries, ``--atomic``, and NO ``--quiesce``.
+    4. Assert both .qcow2 files exist in their per-disk dirs and both
+       ``SnapshotInfo`` records (disk="vda" / disk="vdb") are in state.
+    """
+    ctx = test_vm_multi_disk
+    shell: SubprocessShell = ctx["shell"]
+    vm_name: str = ctx["vm_name"]
+    snapshot_dirs: dict[str, Path] = ctx["snapshot_dirs"]
+
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    core, vm_config, state = _build_multi_core(ctx, quiesce=False)
+
+    batch_calls: list[list[str]] = []
+    _spy_snapshot_create_as(shell, batch_calls)
+
+    results = core._create_snapshot(vm_config)
+    assert len(results) == 2, f"Expected 2 SnapshotResults, got {len(results)}"
+    assert all(r.success for r in results), (
+        f"Batch snapshot failed: {[r.error for r in results if not r.success]}"
+    )
+
+    # One batch call, no --quiesce.
+    assert len(batch_calls) == 1, (
+        f"Expected exactly 1 virsh snapshot-create-as call, got {len(batch_calls)}"
+    )
+    cmd = batch_calls[0]
+    diskspec_values = [
+        cmd[i + 1] for i, a in enumerate(cmd) if a == "--diskspec" and i + 1 < len(cmd)
+    ]
+    assert len(diskspec_values) == 2, f"Expected 2 --diskspec entries, got {diskspec_values}"
+    assert "--atomic" in cmd, f"Missing --atomic: {cmd}"
+    assert "--quiesce" not in cmd, f"Non-quiesced batch must not pass --quiesce: {cmd}"
+
+    # Both files exist in the correct per-disk dirs.
+    # (The real provider does not populate SnapshotResult.disk — derive
+    # the disk from the result path's parent directory instead.)
+    by_disk: dict[str, object] = {}
+    for r in results:
+        for disk, snap_dir in snapshot_dirs.items():
+            if r.path.parent == snap_dir:
+                by_disk[disk] = r
+                break
+    assert set(by_disk) == {"vda", "vdb"}, f"Unexpected disks: {set(by_disk)}"
+    for disk in ("vda", "vdb"):
+        path = by_disk[disk].path
+        assert path.exists(), f"Snapshot file for {disk} missing: {path}"
+        assert path.parent == snapshot_dirs[disk], (
+            f"Snapshot for {disk} should land in {snapshot_dirs[disk]}, got {path.parent}"
+        )
+
+    # Both records in state with the right disk tags (spec:
+    # core-orchestrator — SnapshotInfo records have disk="vda" and
+    # disk="vdb").
+    recorded = state.get_snapshots(vm_name)
+    assert len(recorded) == 2, f"Expected 2 recorded snapshots, got {len(recorded)}"
+    assert {s.disk for s in recorded} == {"vda", "vdb"}, (
+        f"Both disks must be recorded with their disk tags, got "
+        f"{[(s.name, s.disk) for s in recorded]}"
+    )
+
+    # VM still running and healthy.
+    assert _vm_is_running(shell, vm_name), "VM should still be running"
+
+    shell.run(["virsh", "destroy", vm_name], timeout=30)

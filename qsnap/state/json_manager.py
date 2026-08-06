@@ -97,18 +97,48 @@ class JsonStateManager(IStateManager):
         Before writing, previous state file versions are rotated up to
         ``state_backup_count`` backups.  When ``state_backup_count`` is
         0, no rotation occurs.
+
+        ENOSPC and other OS-level write failures are caught, logged at
+        CRITICAL, and re-raised as ``RuntimeError`` so the per-VM
+        exception handler in ``Core._run_pipeline`` can contain the
+        failure to one VM (design D3).  State files are never deleted
+        or renamed in the handler — losing the in-flight record is safe
+        because state only advances after successful operations.
         """
-        self._state_dir.mkdir(parents=True, exist_ok=True)
         state_path = self._state_path(vm_name)
-
-        # Rotate previous versions (only if the main file exists).
-        if self._state_backup_count > 0 and state_path.exists():
-            self._rotate_backups(vm_name)
-
         tmp = self._tmp_path(vm_name)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, default=str)
-        os.replace(tmp, state_path)
+        try:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write the new state to a temp file FIRST — if the write
+            # fails (e.g., ENOSPC), no rotation occurs and the existing
+            # state file is untouched (design D3 / state-recovery spec).
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, default=str)
+
+            # Rotate previous versions (only if the main file exists).
+            if self._state_backup_count > 0 and state_path.exists():
+                self._rotate_backups(vm_name)
+
+            os.replace(tmp, state_path)
+        except OSError as exc:
+            logger.critical(
+                "Failed to save state for VM %s: %s (path: %s)",
+                vm_name,
+                exc,
+                state_path,
+            )
+            # Best-effort remove the partial temp file so no stale
+            # .tmp is left behind (pre-flight cleanup handles the
+            # rest, but the state-recovery spec requires no rotation
+            # and no stale tmp).
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"State write failed for VM {vm_name}: {exc}"
+            ) from exc
 
     def _rotate_backups(self, vm_name: str) -> None:
         """Rotate ``vm.json`` → ``vm.json.1`` → … up to backup count.

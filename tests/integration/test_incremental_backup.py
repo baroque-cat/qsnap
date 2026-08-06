@@ -22,6 +22,7 @@ Run only when explicitly requested::
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -663,6 +664,152 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         f"must be proportional to 5 MB dirty data. "
         f"Max expected: {max_expected / (1024 * 1024):.0f} MB"
     )
+
+    _cleanup_snapshots(shell, vm_name)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test: Free-space gate blocks the incremental transfer before it starts
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_free_space_gate_strict_blocks_incremental_before_transfer(test_vm, caplog):
+    """Strict gate suspends the target BEFORE the incremental transfer.
+
+    1. Write data (VM stopped), start VM, create a FULL backup and
+       record it in state (checkpoint exists → next backup is
+       incremental).
+    2. Create an external snapshot (pending transfer) and record it.
+    3. Configure ``free_space_check="strict"`` with a reserve above the
+       filesystem free space and run ``core.backup()``.
+    4. Assert NO new backup file appears and the run is space_limited
+       (the incremental transfer never starts).
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    target_dir: Path = test_vm["target_dir"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    from qsnap.core import Core
+    from qsnap.factory.default import DefaultFactory
+    from tests.mocks.mock_config import MockConfigFacade
+    from tests.mocks.mock_state import InMemoryStateManager
+
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin + checkpoint not available")
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed — required for incremental transfer")
+
+    # Step 1: Write data (VM stopped), then start.
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(1)
+    if not _write_data(shell, base_image, 100):
+        pytest.skip(f"Failed to write initial data to {base_image}")
+
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    _cleanup_checkpoints(shell, vm_name)
+    _cleanup_snapshots(shell, vm_name)
+
+    # Step 2: FULL backup → checkpoint baseline; record in state so Core
+    # sees a FULL anchor (next backup becomes an incremental).
+    provider = BitmapBackupProvider(shell)
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
+    full_source = SnapshotInfo(
+        name=f"{vm_name}.gate-full",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+    full_result = provider.create_full_backup(vm_name, full_source, target, compress=False)
+    if not full_result.success:
+        pytest.skip(f"FULL backup failed: {full_result.error}")
+    full_name = full_result.target_path.stem
+
+    state = InMemoryStateManager()
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", full_source.timestamp, disk="vda")
+
+    # Step 3: external snapshot (the pending incremental).
+    snap_name = f"{vm_name}.gate-incr"
+    snap_result = shell.run(
+        [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
+        ],
+        timeout=60,
+        check=True,
+    )
+    if not snap_result.success:
+        pytest.skip(f"Snapshot creation failed: {snap_result.error}")
+    overlay = _get_snapshot_disk_path(shell, vm_name)
+    if overlay is None:
+        pytest.skip("Could not determine overlay path")
+    state.record_snapshot(
+        vm_name,
+        SnapshotInfo(
+            name=snap_name,
+            path=overlay,
+            timestamp=datetime.now(),
+            allocation=0,
+            disk="vda",
+        ),
+    )
+
+    # Step 4: strict gate with an impossible reserve → the incremental
+    # transfer must be blocked BEFORE any dirty-block transfer.
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        free_space_check="strict",
+        free_space_reserve=10**18,
+        targets=[target],
+    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "gate_incr.toml")
+    core = Core(
+        config=config,
+        factory=DefaultFactory(shell=shell, state=state),
+        state=state,
+        shell=shell,
+    )
+
+    caplog.set_level(logging.DEBUG)
+    result = core.backup(vm_name)
+
+    # Suspended → space_limited.
+    assert result.space_limited is True, (
+        f"Strict incremental gate must mark the run space_limited, got {result.space_limited}"
+    )
+
+    # No NEW backup file beyond the FULL created in step 2.
+    new_files = [p for p in target_dir.glob("*.qcow2") if p.name != f"{full_name}.qcow2"]
+    assert new_files == [], (
+        f"No incremental backup may be created when the strict gate blocks: {new_files}"
+    )
+
+    # No incremental transfer actually ran (no NBD copy loop, no new file).
+    nbd_pull = [
+        r.message for r in caplog.records if "dirty" in r.message and "copy" in r.message.lower()
+    ]
+    assert nbd_pull == [], f"No dirty-block copy may start: {nbd_pull[:3]}"
 
     _cleanup_snapshots(shell, vm_name)
     _cleanup_checkpoints(shell, vm_name)

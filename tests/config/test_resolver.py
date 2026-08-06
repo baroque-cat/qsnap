@@ -326,6 +326,70 @@ def test_vm_sets_snapshot_preserve_min_to_zero(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Scenario: VM inherits free-space gate fields from global
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_inherits_free_space_check_from_global(tmp_path: Path) -> None:
+    """VM without free-space fields inherits all three from the global section."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'free_space_check = "warn"\n'
+        "free_space_reserve = 1073741824\n"
+        "free_space_factor = 1.1\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.free_space_check == "warn"
+    assert global_cfg.free_space_reserve == 1073741824
+    assert global_cfg.free_space_factor == 1.1
+    assert vm.free_space_check == "warn"
+    assert vm.free_space_reserve == 1073741824
+    assert vm.free_space_factor == 1.1
+
+
+@pytest.mark.unit
+def test_vm_overrides_free_space_check_from_global(tmp_path: Path) -> None:
+    """VM-level free_space_check overrides the global value."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'free_space_check = "strict"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'free_space_check = "off"\n'
+        "free_space_reserve = 1048576\n"
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.free_space_check == "strict"
+    assert vm.free_space_check == "off"
+    assert vm.free_space_reserve == 1048576
+    # Unset VM-level factor still inherits from the global default.
+    assert vm.free_space_factor == global_cfg.free_space_factor
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Scenario: Valid snapshot_preserve_min accepted
 # ──────────────────────────────────────────────────────────────────────────
 

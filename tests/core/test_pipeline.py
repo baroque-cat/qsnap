@@ -32,6 +32,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
     SnapshotResult,
+    SnapshotSpec,
 )
 from tests.mocks import MockConfigFacade
 
@@ -46,9 +47,9 @@ def test_pipeline_always_mode_creates_snapshot(
 ):
     """In ``always`` mode, a snapshot is created and change detection is skipped.
 
-    The pipeline should call ``snapshot_provider.create()`` and should NOT
-    call ``factory.create_change_detector()`` (always mode bypasses change
-    detection entirely).
+    The pipeline should call ``snapshot_provider.create_multi()`` and should
+    NOT call ``factory.create_change_detector()`` (always mode bypasses
+    change detection entirely).
     """
     vm = make_vm_config(name="testvm", snapshot_create="always")
     config = MockConfigFacade(vms=[vm])
@@ -64,8 +65,8 @@ def test_pipeline_always_mode_creates_snapshot(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             mock_factory,
@@ -80,8 +81,10 @@ def test_pipeline_always_mode_creates_snapshot(
     ):
         result = core.run()
 
-    # Snapshot creation was invoked.
-    assert create_spy.called, "Snapshot provider.create() should be called in always mode"
+    # Snapshot creation was invoked (one batch call per VM).
+    assert create_spy.called, (
+        "Snapshot provider.create_multi() should be called in always mode"
+    )
 
     # Change detection was NOT invoked (always mode skips it).
     assert not cd_spy.called, "create_change_detector() should NOT be called in always mode"
@@ -131,8 +134,8 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             change_detector,
@@ -149,7 +152,7 @@ def test_pipeline_onchange_no_changes_skips_snapshot(
 
     # Snapshot creation was NOT invoked (no changes detected).
     assert not create_spy.called, (
-        "Snapshot provider.create() should NOT be called when onchange "
+        "Snapshot provider.create_multi() should NOT be called when onchange "
         "detector reports changed=False"
     )
 
@@ -235,8 +238,8 @@ def test_snapshot_command_skips_backup(
 ):
     """``core.snapshot()`` runs only snapshot steps (1-4); backup is skipped.
 
-    The snapshot provider's ``create()`` should be called, but the backup
-    provider's ``transfer_missing()`` should NOT be called.
+    The snapshot provider's ``create_multi()`` should be called, but the
+    backup provider's ``transfer_missing()`` should NOT be called.
     """
     vm = make_vm_config(name="testvm", targets=[make_target()])
     config = MockConfigFacade(vms=[vm])
@@ -253,8 +256,8 @@ def test_snapshot_command_skips_backup(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             backup_provider,
@@ -265,7 +268,7 @@ def test_snapshot_command_skips_backup(
         result = core.snapshot()
 
     # Snapshot steps were executed.
-    assert create_spy.called, "snapshot() should call snapshot_provider.create()"
+    assert create_spy.called, "snapshot() should call snapshot_provider.create_multi()"
 
     # Backup steps were NOT executed.
     assert not transfer_spy.called, "snapshot() should NOT call backup_provider.transfer_missing()"
@@ -287,8 +290,8 @@ def test_backup_command_skips_snapshot(
     """``core.backup()`` runs only backup steps (5); snapshot creation is skipped.
 
     The backup provider's ``transfer_missing()`` should be called (the VM
-    has a target), but the snapshot provider's ``create()`` should NOT be
-    called.
+    has a target), but the snapshot provider's ``create_multi()`` should
+    NOT be called.
     """
     vm = make_vm_config(name="testvm", targets=[make_target()])
     config = MockConfigFacade(vms=[vm])
@@ -305,8 +308,8 @@ def test_backup_command_skips_snapshot(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             backup_provider,
@@ -320,7 +323,9 @@ def test_backup_command_skips_snapshot(
     assert transfer_spy.called, "backup() should call backup_provider.transfer_missing()"
 
     # Snapshot creation was NOT executed.
-    assert not create_spy.called, "backup() should NOT call snapshot_provider.create()"
+    assert not create_spy.called, (
+        "backup() should NOT call snapshot_provider.create_multi()"
+    )
 
     # Pipeline succeeded.
     assert result.success is True
@@ -374,8 +379,8 @@ def test_prune_command_only_retention(
         ) as retention_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             backup_provider,
@@ -389,7 +394,7 @@ def test_prune_command_only_retention(
     assert retention_spy.called, "prune() should call create_retention_engine()"
 
     # Snapshot creation was NOT called.
-    assert not create_spy.called, "prune() should NOT call snapshot_provider.create()"
+    assert not create_spy.called, "prune() should NOT call snapshot_provider.create_multi()"
 
     # Backup transfer was NOT called.
     assert not transfer_spy.called, "prune() should NOT call backup_provider.transfer_missing()"
@@ -448,8 +453,8 @@ def test_dry_run_logs_no_mutation(
         ) as shell_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
     ):
         result = core.run()
@@ -482,7 +487,7 @@ def test_dry_run_logs_no_mutation(
             f"Unexpected shell call in dry-run: {cmd_str}"
         )
 
-    # Snapshot provider's create() was NOT called (dry-run skips actual
+    # Snapshot provider's create_multi() was NOT called (dry-run skips actual
     # mutations).
     create_spy.assert_not_called()
 
@@ -521,7 +526,7 @@ def test_create_snapshot_single_disk_sda_not_vda(
     mock_state,
     mock_shell,
 ):
-    """Explicit sda disk config. Verify snapshot name has _sda suffix."""
+    """Explicit sda disk config. Verify the batch spec carries the sda suffix."""
     vm = make_vm_config(
         name="testvm",
         disks=[DiskConfig(target="sda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2"))],
@@ -537,29 +542,35 @@ def test_create_snapshot_single_disk_sda_not_vda(
     snapshot_provider = mock_factory._snapshot_provider
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
     ) as create_spy:
         core.snapshot()
 
     assert create_spy.called
-    snapshot_name = create_spy.call_args.args[1]
-    disk = create_spy.call_args.args[2]
-    assert disk == "sda"
-    assert "_sda_" in snapshot_name
-    assert "_vda_" not in snapshot_name
+    specs = create_spy.call_args.args[1]
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.disk == "sda"
+    assert "_sda_" in spec.name
+    assert "_vda_" not in spec.name
 
 
-# ── test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix ───────
+# ── test_create_multi_multi_disk_batch_names ──────────────────────────────
 
 
-def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
+def test_create_multi_multi_disk_batch_names(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Explicit vda+vdb disk configs. Verify two snapshots with _vda and _vdb."""
+    """Explicit vda+vdb disk configs. ONE create_multi batch call with both specs.
+
+    core-orchestrator scenario "VM with multiple disks (vda, vdb)": the
+    whole VM is snapshotted in a single batch; per-disk names carry the
+    ``_vda_``/``_vdb_`` segments and both snapshots are recorded.
+    """
     vm = make_vm_config(
         name="testvm",
         disks=[
@@ -578,17 +589,24 @@ def test_create_snapshot_multi_disk_vda_vdb_creates_two_with_suffix(
     snapshot_provider = mock_factory._snapshot_provider
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
     ) as create_spy:
         core.snapshot()
 
-    assert create_spy.call_count == 2
-    disk_names = [call.args[2] for call in create_spy.call_args_list]
-    assert set(disk_names) == {"vda", "vdb"}
-    snapshot_names = [call.args[1] for call in create_spy.call_args_list]
+    # ONE batch call per VM — not per disk.
+    create_spy.assert_called_once()
+    specs = create_spy.call_args.args[1]
+    assert [s.disk for s in specs] == ["vda", "vdb"]
+    assert all(isinstance(s, SnapshotSpec) for s in specs)
+    assert all(s.path.name.endswith(".qcow2") for s in specs)
+    snapshot_names = [s.name for s in specs]
     assert any("_vda_" in name for name in snapshot_names)
     assert any("_vdb_" in name for name in snapshot_names)
+
+    # Both disks recorded with per-disk SnapshotInfo.
+    snapshots = mock_state.get_snapshots("testvm")
+    assert {s.disk for s in snapshots} == {"vda", "vdb"}
 
 
 # ── test_create_snapshot_explicit_disk_list_overrides_discovery ───────────
@@ -617,8 +635,8 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
     ):
@@ -628,24 +646,25 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
     shell_spy.assert_not_called()
     # Snapshot should use sda
     assert create_spy.called
-    assert create_spy.call_args.args[2] == "sda"
-    assert "_sda_" in create_spy.call_args.args[1]
+    spec = create_spy.call_args.args[1][0]
+    assert spec.disk == "sda"
+    assert "_sda_" in spec.name
 
 
-# ── test_multi_disk_vda_succeeds_vdb_fails_continues_pipeline ─────────────
+# ── test_create_multi_all_success_all_recorded ────────────────────────────
 
 
-def test_multi_disk_vdb_snapshot_failure_aborts_vm_pipeline(
+def test_create_multi_all_success_all_recorded(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
-    caplog,
 ):
-    """vda snapshot succeeds, vdb fails → the VM pipeline aborts (VM-level isolation).
+    """Batch success → every disk's snapshot is recorded (post-creation-validation).
 
-    The vda snapshot created before the failure is kept (no rollback), the
-    VM is marked unsuccessful, and an error ActionRecord is appended.
+    After ``create_multi`` returns all-success, Core records one
+    :class:`SnapshotInfo` per disk and audits one ``snapshot_create``
+    action per disk (design D10 all-or-nothing success branch).
     """
     vm = make_vm_config(
         name="testvm",
@@ -663,29 +682,179 @@ def test_multi_disk_vdb_snapshot_failure_aborts_vm_pipeline(
     )
 
     snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
+    ) as create_spy:
+        result = core.snapshot()
 
-    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
-        if disk == "vda":
-            return SnapshotResult(
+    create_spy.assert_called_once()
+
+    snapshots = mock_state.get_snapshots("testvm")
+    assert len(snapshots) == 2, "all disks' snapshots must be recorded"
+    assert {s.disk for s in snapshots} == {"vda", "vdb"}
+    assert all(s.path.name.endswith(".qcow2") for s in snapshots)
+
+    actions = [a for a in result.actions if a.action == "snapshot_create"]
+    assert len(actions) == 2, "one snapshot_create action per disk"
+    assert {a.disk for a in actions} == {"vda", "vdb"}
+
+
+# ── test_single_disk_vm_uses_batch_path ───────────────────────────────────
+
+
+def test_single_disk_vm_uses_batch_path(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Single-disk VM is the degenerate case of the same create_multi path.
+
+    core-orchestrator scenario "single-disk VM uses the same batch path":
+    one ``create_multi`` call with a single spec.
+    """
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
+    ) as create_spy:
+        result = core.snapshot()
+
+    create_spy.assert_called_once()
+    specs = create_spy.call_args.args[1]
+    assert len(specs) == 1
+    assert specs[0].disk == "vda"
+
+    snapshots = mock_state.get_snapshots("testvm")
+    assert len(snapshots) == 1
+    assert snapshots[0].disk == "vda"
+    assert result.results[0].success is True
+
+
+# ── test_onchange_gate_vm_wide_snapshots_all_disks ────────────────────────
+
+
+def test_onchange_gate_vm_wide_snapshots_all_disks(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """The onchange gate is VM-wide: ALL disks are snapshotted in one batch.
+
+    core-orchestrator scenario "onchange gate is VM-wide, snapshots cover
+    all disks": when any disk changed, one ``create_multi`` call covers
+    every configured disk.
+    """
+    vm = make_vm_config(
+        name="testvm",
+        snapshot_create="onchange",
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+        ],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # The mock change detector reports changed=True (default) → gate opens.
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
+    ) as create_spy:
+        result = core.snapshot()
+
+    create_spy.assert_called_once()
+    specs = create_spy.call_args.args[1]
+    assert [s.disk for s in specs] == ["vda", "vdb"]
+    assert result.results[0].success is True
+
+
+# ── test_vdb_failure_aborts_remaining_steps ───────────────────────────────
+
+
+def test_vdb_failure_aborts_remaining_steps(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """vdb batch failure → the VM pipeline aborts (VM-level isolation).
+
+    All-or-nothing batch semantics (design D10): when one disk of the
+    batch fails, NOTHING is recorded and the remaining steps of the VM
+    (backup transfer) never run.
+    """
+    vm = make_vm_config(
+        name="testvm",
+        targets=[make_target()],
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+        ],
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    backup_provider = mock_factory._backup_provider
+
+    def create_multi_side_effect(vm_config, specs, quiesce=False):
+        return [
+            SnapshotResult(
                 success=True,
-                name=snapshot_name,
-                path=snapshot_path,
+                name=specs[0].name,
+                path=specs[0].path,
                 new_allocation=65536,
                 error=None,
-            )
-        return SnapshotResult(
-            success=False,
-            name=snapshot_name,
-            path=snapshot_path,
-            new_allocation=0,
-            error="virsh timeout for vdb",
-        )
+                disk=specs[0].disk,
+            ),
+            SnapshotResult(
+                success=False,
+                name=specs[1].name,
+                path=specs[1].path,
+                new_allocation=0,
+                error="virsh timeout for vdb",
+                disk=specs[1].disk,
+            ),
+        ]
 
     caplog.set_level(logging.ERROR)
     with (
-        patch.object(snapshot_provider, "create", side_effect=create_side_effect),
+        patch.object(snapshot_provider, "create_multi", side_effect=create_multi_side_effect),
+        patch.object(
+            backup_provider,
+            "transfer_missing",
+            wraps=backup_provider.transfer_missing,
+        ) as transfer_spy,
     ):
-        result = core.snapshot()
+        result = core.run()
 
     # VM-level isolation: the vdb failure aborts this VM's pipeline.
     assert result.success is False
@@ -693,10 +862,12 @@ def test_multi_disk_vdb_snapshot_failure_aborts_vm_pipeline(
     assert result.results[0].success is False
     assert "virsh timeout for vdb" in (result.results[0].error or "")
 
-    # vda snapshot created before the failure is kept (no rollback).
+    # All-or-nothing: NOTHING is recorded (not even the successful vda).
     snapshots = mock_state.get_snapshots("testvm")
-    assert len(snapshots) == 1
-    assert "_vda_" in snapshots[0].name
+    assert len(snapshots) == 0
+
+    # Remaining steps of the aborted VM never run.
+    transfer_spy.assert_not_called()
 
     # An error ActionRecord was appended to the audit trail.
     error_records = [a for a in result.actions if a.action == "error"]
@@ -715,7 +886,7 @@ def test_snapshot_failure_on_one_vm_does_not_affect_others(
 ):
     """VM-level isolation: a snapshot failure aborts only the affected VM.
 
-    vm1's snapshot creation fails; vm2 is processed normally and succeeds.
+    vm1's snapshot batch fails; vm2 is processed normally and succeeds.
     """
     vm1 = make_vm_config(name="vm1")
     vm2 = make_vm_config(name="vm2")
@@ -729,31 +900,37 @@ def test_snapshot_failure_on_one_vm_does_not_affect_others(
 
     snapshot_provider = mock_factory._snapshot_provider
 
-    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
+    def create_multi_side_effect(vm_config, specs, quiesce=False):
         if vm_config.name == "vm1":
-            return SnapshotResult(
-                success=False,
-                name=snapshot_name,
-                path=snapshot_path,
-                new_allocation=0,
-                error="virsh failed for vm1",
+            return [
+                SnapshotResult(
+                    success=False,
+                    name=specs[0].name,
+                    path=specs[0].path,
+                    new_allocation=0,
+                    error="virsh failed for vm1",
+                    disk=specs[0].disk,
+                )
+            ]
+        return [
+            SnapshotResult(
+                success=True,
+                name=specs[0].name,
+                path=specs[0].path,
+                new_allocation=65536,
+                error=None,
+                disk=specs[0].disk,
             )
-        return SnapshotResult(
-            success=True,
-            name=snapshot_name,
-            path=snapshot_path,
-            new_allocation=65536,
-            error=None,
-        )
+        ]
 
-    with patch.object(snapshot_provider, "create", side_effect=create_side_effect):
+    with patch.object(snapshot_provider, "create_multi", side_effect=create_multi_side_effect):
         result = core.snapshot()
 
     by_name = {r.vm_name: r for r in result.results}
     assert by_name["vm1"].success is False
     assert by_name["vm2"].success is True
 
-    # vm2's snapshot was recorded; vm1 has none.
+    # vm2's snapshot was recorded; vm1 has none (all-or-nothing batch).
     assert len(mock_state.get_snapshots("vm1")) == 0
     assert len(mock_state.get_snapshots("vm2")) == 1
 
@@ -879,8 +1056,9 @@ def test_pipeline_always_mode_validation_first(
 ):
     """Verify validation runs before snapshot creation in always mode.
 
-    If validation fails, snapshot_provider.create() must NOT be called.
-    This proves validation executes first and short-circuits the pipeline.
+    If validation fails, snapshot_provider.create_multi() must NOT be
+    called.  This proves validation executes first and short-circuits the
+    pipeline.
     """
     from qsnap.models.results import ShellResult
 
@@ -909,8 +1087,8 @@ def test_pipeline_always_mode_validation_first(
         ) as validate_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
     ):
         result = core.run()
@@ -967,8 +1145,8 @@ def test_pipeline_onchange_no_changes_validation_first(
         ) as validate_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             change_detector,
@@ -4267,8 +4445,8 @@ def test_dry_run_logs_planned_actions(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             backup_provider,
@@ -4291,7 +4469,9 @@ def test_dry_run_logs_planned_actions(
     assert result.actions == []
 
     # No mutations executed
-    assert not create_spy.called, "snapshot provider create() must NOT be called in dry-run"
+    assert not create_spy.called, (
+        "snapshot provider create_multi() must NOT be called in dry-run"
+    )
     assert not transfer_spy.called, (
         "backup provider transfer_missing() must NOT be called in dry-run"
     )
@@ -4330,8 +4510,8 @@ def test_dry_run_activated_from_cli(
     with (
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
         patch.object(
             backup_provider,
@@ -4466,8 +4646,8 @@ def test_resolve_disks_returns_empty_on_failure(
 
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
     ) as create_spy:
         core.run()
 
@@ -7419,12 +7599,15 @@ def test_full_creation_not_retried_non_transient(
     make_vm_config,
     make_target,
 ):
-    """FULL creation fails with ``"No space left on device"`` → NOT retried.
+    """FULL creation fails with a non-space, non-retryable error → NOT retried.
 
-    ``is_retryable("No space left on device")`` returns ``False``, so
+    ``is_retryable("EACCES: permission denied")`` returns ``False``, so
     ``_execute_with_retry`` returns the failure immediately.
     ``create_full_backup()`` is called exactly once, and the definitive
     failure raises ``BackupAbortError`` (VM-level isolation).
+
+    Note: space errors no longer raise — they suspend the target
+    (see tests/core/test_enospc_isolation.py).
     """
 
     target = make_target(backup_retry_max=3, backup_retry_base="0s")
@@ -7457,7 +7640,7 @@ def test_full_creation_not_retried_non_transient(
             source_path=Path("/tmp/snap1.qcow2"),
             target_path=target.path / "testvm.FULL.qcow2",
             bytes_transferred=0,
-            error="No space left on device",
+            error="EACCES: permission denied",
         )
 
     with (
@@ -7678,22 +7861,21 @@ def test_chain_verify_missing_file_aborts_vm_pipeline(
     assert "qsnap check --deep" in critical_logs[0].message
 
 
-# ── GAP-1: Snapshot creation failure → no state record ────────────────────
+# ── test_batch_failure_records_nothing_aborts_vm ──────────────────────────
 
 
-def test_snapshot_creation_failure_does_not_record_state(
+def test_batch_failure_records_nothing_aborts_vm(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
     caplog,
 ):
-    """SnapshotResult(success=False) → Core does NOT record in state, logs error,
-    and aborts the VM pipeline (VM-level isolation).
+    """A batch failure records NOTHING and aborts the VM (all-or-nothing).
 
-    Verifies that when ExternalSnapshotProvider.create() returns failure,
-    Core does not call record_snapshot() for the failed disk and the VM
-    is marked unsuccessful.
+    Replaces the obsolete partial-recording test: under ``create_multi``
+    batch semantics (design D10) a failed disk rejects the whole batch —
+    the successful vda disk is NOT recorded either.
     """
     vm = make_vm_config(
         name="testvm",
@@ -7712,34 +7894,36 @@ def test_snapshot_creation_failure_does_not_record_state(
 
     snapshot_provider = mock_factory._snapshot_provider
 
-    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
-        if disk == "vda":
-            return SnapshotResult(
+    def create_multi_side_effect(vm_config, specs, quiesce=False):
+        return [
+            SnapshotResult(
                 success=True,
-                name=snapshot_name,
-                path=snapshot_path,
+                name=specs[0].name,
+                path=specs[0].path,
                 new_allocation=65536,
                 error=None,
-            )
-        return SnapshotResult(
-            success=False,
-            name=snapshot_name,
-            path=snapshot_path,
-            new_allocation=0,
-            error="snapshot-create-as failed for vdb",
-        )
+                disk=specs[0].disk,
+            ),
+            SnapshotResult(
+                success=False,
+                name=specs[1].name,
+                path=specs[1].path,
+                new_allocation=0,
+                error="snapshot-create-as failed for vdb",
+                disk=specs[1].disk,
+            ),
+        ]
 
     caplog.set_level(logging.ERROR)
-    with patch.object(snapshot_provider, "create", side_effect=create_side_effect):
+    with patch.object(snapshot_provider, "create_multi", side_effect=create_multi_side_effect):
         result = core.snapshot()
 
     # VM-level isolation: the vdb failure aborts this VM's pipeline.
     assert result.success is False
 
-    # vda recorded in state — vdb NOT.
+    # All-or-nothing: NOTHING is recorded — not even the successful vda.
     snapshots = mock_state.get_snapshots("testvm")
-    assert len(snapshots) == 1
-    assert "_vda_" in snapshots[0].name
+    assert len(snapshots) == 0
 
     # vdb failure logged.
     assert "vdb" in caplog.text
@@ -7785,19 +7969,22 @@ def test_pipeline_skips_blockcommit_when_snapshot_creation_fails(
 
     snapshot_provider = mock_factory._snapshot_provider
 
-    # New snapshot creation FAILS for vda.
-    def create_side_effect(vm_config, snapshot_name, disk, snapshot_path, **kwargs):
-        return SnapshotResult(
-            success=False,
-            name=snapshot_name,
-            path=snapshot_path,
-            new_allocation=0,
-            error="snapshot-create-as failed",
-        )
+    # New snapshot creation FAILS for vda (whole batch rejected).
+    def create_multi_side_effect(vm_config, specs, quiesce=False):
+        return [
+            SnapshotResult(
+                success=False,
+                name=specs[0].name,
+                path=specs[0].path,
+                new_allocation=0,
+                error="snapshot-create-as failed",
+                disk=specs[0].disk,
+            )
+        ]
 
     lifecycle = mock_factory._lifecycle_manager
     with (
-        patch.object(snapshot_provider, "create", side_effect=create_side_effect),
+        patch.object(snapshot_provider, "create_multi", side_effect=create_multi_side_effect),
         patch.object(lifecycle, "blockcommit", wraps=lifecycle.blockcommit) as bc_spy,
         patch("os.path.exists", return_value=False),  # no collision files
     ):

@@ -606,3 +606,51 @@ def test_missing_per_disk_reset_fails_instantiation():
 
     with pytest.raises(TypeError):
         _MissingPerDiskReset()
+
+
+# ── deferred blockcommit enospc contract ──────────────────────────────────
+
+
+def test_inmemory_add_deferred_blockcommit_accepts_enospc_reason():
+    """InMemoryStateManager.add_deferred_blockcommit accepts reason='enospc'.
+
+    The entry is stored and round-trips through get_deferred_operations
+    with reason='enospc' intact (deferred-operations requirement:
+    "Add deferred blockcommit with enospc reason").
+    """
+    mgr = InMemoryStateManager()
+    mgr.add_deferred_blockcommit("testvm", "vda", ["snap1.qcow2"], "enospc")
+
+    deferred = mgr.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    entry = deferred[0]
+    assert entry.reason == "enospc"
+    assert entry.disk == "vda"
+    assert entry.snapshots == ["snap1.qcow2"]
+    assert entry.last_warned_at is None
+
+    # Round-trip: reading again returns the same entry with reason intact.
+    deferred_again = mgr.get_deferred_operations("testvm")
+    assert len(deferred_again) == 1
+    assert deferred_again[0].reason == "enospc"
+
+
+def test_json_add_deferred_blockcommit_accepts_enospc_reason(tmp_path):
+    """JsonStateManager.add_deferred_blockcommit accepts reason='enospc'.
+
+    The entry persists across a state round-trip: a fresh manager reading
+    the same state directory returns the entry with reason='enospc' intact
+    (deferred-operations requirement + state-recovery persistence).
+    """
+    mgr = JsonStateManager(state_dir=tmp_path)
+    mgr.add_deferred_blockcommit("testvm", "vda", ["snap1.qcow2"], "enospc")
+
+    # Round-trip through a fresh manager reading the persisted state file.
+    mgr2 = JsonStateManager(state_dir=tmp_path)
+    deferred = mgr2.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    entry = deferred[0]
+    assert entry.reason == "enospc"
+    assert entry.disk == "vda"
+    assert entry.snapshots == ["snap1.qcow2"]
+    assert entry.last_warned_at is None

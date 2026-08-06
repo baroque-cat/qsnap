@@ -49,6 +49,25 @@ def stress_env():
     if not create_result.success:
         pytest.skip(f"qemu-img create failed (qemu-img not available?): {create_result.error}")
 
+    # Pre-cleanup: destroy, delete checkpoints, and undefine any stale
+    # domain left behind by a crashed stress run (mirrors the integration
+    # conftest).  Without this, a single SIGKILL/timeout poisons every
+    # subsequent stress session with "domain already exists".
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    cp_result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if cp_result.success:
+        for line in cp_result.stdout.strip().splitlines():
+            cp = line.strip()
+            if cp:
+                shell.run(
+                    ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
+                    timeout=30,
+                )
+    shell.run(["virsh", "undefine", vm_name], timeout=30)
+
     xml = (
         f'<domain type="qemu">\n'
         f"  <name>{vm_name}</name>\n"

@@ -319,8 +319,162 @@ def test_preserve_min_exceeds_total_no_blockcommit_integration(test_vm, caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 3: source-disk onchange gate opens after write
+# Test 7: default preserve_min=48 dominates chain_length (real blockcommit)
 # ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
+    """Default ``snapshot_preserve_min=48`` blocks blockcommit under 48 snaps.
+
+    D13: the global default is 48.  With 30 snapshots and the default
+    ``snapshot_chain_length=24``, the preserve_min floor dominates —
+    ``core.prune()`` must perform ZERO blockcommits and delete nothing.
+    Flipping ``snapshot_preserve_min=0`` (explicit opt-out) restores the
+    old behavior: prune then commits the 6 oldest snapshots.
+
+    1. Start VM, create 30 snapshots via ``Core._create_snapshot`` with
+       the facade-resolved defaults (chain_length=24, preserve_min=48).
+    2. Run ``core.prune()`` — verify zero blockcommits: all 30 files
+       still exist, state still holds 30 snapshots, deferred queue empty.
+    3. Rebuild Core with ``snapshot_preserve_min=0`` and prune again —
+       verify the 6 oldest files are deleted and 24 newest remain.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Start VM for snapshot creation.
+    start_result = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start_result.success:
+        pytest.skip(f"virsh start failed: {start_result.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    # ── Phase 1: default floor (preserve_min=48) ──────────────────────
+    # These are the values ConfigFacade resolves when the TOML omits
+    # snapshot_preserve_min and snapshot_chain_length (D13).
+    state = InMemoryStateManager()
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        snapshot_chain_length=24,
+        snapshot_preserve_min=48,
+        lifecycle_mode="virsh",
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+            )
+        ],
+    )
+    config = MockConfigFacade(
+        vms=[vm_config],
+        config_path=tmpdir / "preserve_min_default48.toml",
+    )
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+
+    # Create 30 snapshots.
+    for i in range(30):
+        results = core._create_snapshot(vm_config)
+        assert len(results) >= 1, f"Snapshot {i + 1} creation returned no results"
+        assert results[0].success, f"Snapshot {i + 1} failed: {results[0].error}"
+        time.sleep(0.35)  # distinct timestamps (name embeds seconds + hex)
+
+    snapshots = state.get_snapshots(vm_name)
+    assert len(snapshots) == 30, f"Expected 30 snapshots, got {len(snapshots)}"
+    snap_paths_before = {s.name: s.path for s in snapshots}
+
+    # Retention: floor dominates chain_length → empty remove list.
+    retention = core._evaluate_snapshot_retention(vm_config)
+    assert retention is not None, "Retention result should not be None"
+    assert len(retention.remove) == 0, (
+        f"Expected empty remove list under default preserve_min=48 "
+        f"(30 < 48), got {len(retention.remove)}: {retention.remove}"
+    )
+    assert len(retention.keep) == 30, (
+        f"Expected all 30 snapshots kept, got {len(retention.keep)}"
+    )
+
+    # Prune → zero blockcommits, zero deletions.
+    with caplog.at_level(logging.INFO):
+        core.prune(vm_name)
+
+    for snap in snapshots:
+        path = snap_paths_before[snap.name]
+        assert path.exists(), (
+            f"Snapshot file must NOT be deleted under default preserve_min=48: {path}"
+        )
+    remaining = state.get_snapshots(vm_name)
+    assert len(remaining) == 30, (
+        f"State must still hold 30 snapshots after default-floor prune, got {len(remaining)}"
+    )
+    assert state.get_deferred_operations(vm_name) == [], (
+        "No deferred blockcommit entries may be created by a floor-blocked prune"
+    )
+
+    # ── Phase 2: explicit opt-out (preserve_min=0) restores old behavior ─
+    state2 = InMemoryStateManager()
+    # Re-seed state2 with the same 30 snapshot records so the second
+    # Core sees the identical chain (fresh VM state would be empty).
+    for snap in snapshots:
+        state2.record_snapshot(vm_name, snap)
+
+    vm_config_zero = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        snapshot_chain_length=24,
+        snapshot_preserve_min=0,
+        lifecycle_mode="virsh",
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+            )
+        ],
+    )
+    config_zero = MockConfigFacade(
+        vms=[vm_config_zero],
+        config_path=tmpdir / "preserve_min_optout.toml",
+    )
+    core_zero = Core(
+        config=config_zero, factory=DefaultFactory(shell=shell, state=state2),
+        state=state2, shell=shell,
+    )
+
+    retention_zero = core_zero._evaluate_snapshot_retention(vm_config_zero)
+    assert retention_zero is not None and len(retention_zero.remove) == 6, (
+        f"With preserve_min=0 and chain_length=24, exactly 6 oldest must be "
+        f"removed, got {len(retention_zero.remove) if retention_zero else 'None'}"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        core_zero.prune(vm_name)
+
+    # The 6 oldest files deleted, 24 newest remain.
+    sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
+    for snap in sorted_snaps[:6]:
+        path = snap_paths_before[snap.name]
+        assert not path.exists(), (
+            f"Oldest snapshot should be committed when preserve_min=0: {path}"
+        )
+    for snap in sorted_snaps[6:]:
+        path = snap_paths_before[snap.name]
+        assert path.exists(), f"Newest snapshot should be preserved: {path}"
+
+    assert _vm_is_running(shell, vm_name), "VM should still be running after live blockcommit"
+
+    _cleanup_checkpoints(shell, vm_name)
 
 
 @pytest.mark.integration

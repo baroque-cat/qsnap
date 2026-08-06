@@ -54,3 +54,21 @@ Provides resilience for the JSON state manager by recovering from corrupted stat
 #### Scenario: Default state_backup_count
 - **WHEN** `GlobalConfig` is constructed without `state_backup_count`
 - **THEN** `state_backup_count` is `2`
+
+### Requirement: State write survives ENOSPC without crashing the process
+`JsonStateManager._save()` SHALL catch `OSError` raised while writing or replacing a state file (including ENOSPC in the state directory). On failure it SHALL log a CRITICAL message naming the path and the OS error, and propagate the failure as a `RuntimeError` so the per-VM isolation in `Core._run_pipeline()` contains it to one VM. The process SHALL NOT crash; remaining VMs SHALL continue. The handler SHALL never delete, rename, or truncate the existing state file or its rotated backups. The atomic write pattern (`os.replace`) SHALL remain the primary mechanism on the success path, and rotation SHALL only occur when the write succeeds.
+
+#### Scenario: ENOSPC during save contained to one VM
+- **WHEN** `_save()` fails with `OSError: [Errno 28] No space left on device`
+- **THEN** a CRITICAL log names the state path and the error
+- **AND** the current VM's run is marked failed via per-VM isolation
+- **AND** remaining VMs are processed normally
+
+#### Scenario: Partial temp file does not corrupt existing state
+- **WHEN** `_save()` writes a partial temp file due to ENOSPC before `os.replace`
+- **THEN** the partial temp file does not overwrite or corrupt the existing `{vm}.json` state file
+- **AND** the existing state file is readable and returns correct data
+
+#### Scenario: Successful save behavior unchanged
+- **WHEN** `_save()` writes normally
+- **THEN** behavior is identical to before (atomic `.tmp` + `os.replace` + rotation)

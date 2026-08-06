@@ -47,6 +47,7 @@ from qsnap.models.results import (
     ScheduleResult,
     SnapshotInfo,
     SnapshotResult,
+    SnapshotSpec,
     StateCheckResult,
 )
 from qsnap.utils.convert import convert_with_retry, verify_standalone_image
@@ -57,7 +58,8 @@ from qsnap.utils.parsing import (
     parse_domblklist_path_map,
     parse_timestamp,
 )
-from qsnap.utils.retry import compute_backoff, is_retryable, parse_retry_duration
+from qsnap.utils.retry import compute_backoff, is_retryable, is_space_error, parse_retry_duration
+from qsnap.utils.space import SpaceCheckResult, check_free_space, estimate_full_size, estimate_incremental_size
 from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.transaction import TransactionWriter
 from qsnap.utils.verification import scan_backing_chain, verify_full_backup
@@ -89,6 +91,15 @@ class PipelineResult:
     run WOULD have performed (always empty in real runs).  Predictions are
     never written to the transaction log (design D7 of
     fix-dry-run-predictions).
+
+    ``space_limited`` is True when at least one target or blockcommit was
+    limited by a disk-full error.  Drives exit code ``EXIT_DISKFULL`` (4)
+    and signals to monitoring that the run auto-resumes on the next
+    schedule (design D6).
+
+    ``space_limited_targets`` lists the string keys of affected targets
+    and blockcommit operations for operator visibility in the summary
+    (spec: cli-interface "Disk-full exit code").
     """
 
     results: list[VMRunResult] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
@@ -96,6 +107,8 @@ class PipelineResult:
     predictions: list[ActionRecord] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     dry_run: bool = False
     config_path: str | None = None
+    space_limited: bool = False
+    space_limited_targets: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
     @property
     def success(self) -> bool:
@@ -202,6 +215,11 @@ class Core:
         # _validate_state_at_startup(); consumed and cleared by
         # _backup_target() (design D3: auto-recovery).
         self._force_full_targets: set[str] = set()
+        # Space-limited targets (ENOSPC encountered during backup).
+        # Populated by _backup_target() when a transfer fails or is
+        # gate-rejected due to disk-full; drives EXIT_DISKFULL (4) and
+        # per-target suspension (design D2/D6).
+        self._space_limited_targets: set[str] = set()
 
     # ── properties ─────────────────────────────────────────────────────
 
@@ -2422,6 +2440,8 @@ class Core:
             predictions=list(self._predictions),
             dry_run=self._dry_run,
             config_path=str(self._config.config_path),
+            space_limited=bool(self._space_limited_targets),
+            space_limited_targets=sorted(self._space_limited_targets),
         )
 
     def _check_deferred_thresholds(self) -> None:
@@ -3474,17 +3494,18 @@ class Core:
         return simulated
 
     def _create_snapshot(self, vm_config: VMConfig) -> list[SnapshotResult]:
-        """Step 2: Create a snapshot for each disk of *vm_config*.
+        """Step 2: Create snapshots for ALL disks of *vm_config* in ONE
+        ``virsh snapshot-create-as`` call via ``create_multi``.
 
-        Multi-disk (refactor): iterates the configured ``DiskConfig`` list,
-        creating one snapshot per disk with the naming convention
-        ``{vm_name}.{timestamp}_{disk}.qcow2``.  Each disk uses its own
-        effective snapshot directory.  The ``--quiesce`` guest-agent freeze
-        is VM-wide, so it is applied only to the FIRST disk's snapshot.
+        Multi-disk (refactor): generates all per-disk names/paths first,
+        calls the provider once with the full batch, and records state
+        only on full batch success.  Any failure rejects the whole batch:
+        nothing is recorded, leftover files are removed best-effort,
+        and ``RuntimeError`` aborts the VM pipeline (VM-level isolation).
 
-        If one disk fails, raises ``RuntimeError`` to abort the remaining
-        pipeline steps of this VM (VM-level isolation).  Snapshots already
-        created for earlier disks are kept; other VMs are unaffected.
+        ``--quiesce``, when enabled, covers ALL disks under a single
+        guest-agent freeze (spec: quiesce-snapshot; design D9/D10).
+        The ``index == 0`` quiesce hack is removed.
 
         Dry-run: no snapshot is created.  Simulated snapshots (design D1
         of fix-dry-run-predictions) are logged per disk, recorded as
@@ -3525,44 +3546,44 @@ class Core:
             return results
 
         disks = self._resolve_disks(vm_config)
-        results: list[SnapshotResult] = []
 
-        for index, disk in enumerate(disks):
+        # Generate all per-disk names/paths first (design D10).
+        specs: list[SnapshotSpec] = []
+        for disk in disks:
             snapshot_name = self._generate_snapshot_name(vm_config, disk.target)
             snapshot_dir = vm_config.snapshot_dir_for(disk)
             if snapshot_dir is None:
-                # Defensive: config parsing guarantees a resolvable
-                # snapshot_dir per disk.  If we ever get here the VM is
-                # misconfigured — abort the VM pipeline (VM-level
-                # isolation) instead of silently skipping the disk.
                 msg = f"No snapshot_dir resolved for disk {disk.target} of VM {vm_config.name}"
                 logger.error(msg)
                 raise RuntimeError(msg)
             snapshot_path = snapshot_dir / f"{snapshot_name}.qcow2"
-
-            # Quiesce is a VM-wide guest-agent freeze — apply it only to
-            # the first disk's snapshot to avoid repeated freezes.
-            quiesce = vm_config.snapshot_quiesce and index == 0
-
-            provider = self._factory.create_snapshot_provider(vm_config)
-            result = provider.create(
-                vm_config,
-                snapshot_name,
-                disk.target,
-                snapshot_path,
-                quiesce=quiesce,
+            specs.append(
+                SnapshotSpec(disk=disk.target, name=snapshot_name, path=snapshot_path)
             )
-            if result.success:
+
+        # One batch call via create_multi — single guest-agent freeze
+        # for all disks when quiesce=True (design D9/D10).
+        provider = self._factory.create_snapshot_provider(vm_config)
+        results = provider.create_multi(
+            vm_config,
+            specs,
+            quiesce=vm_config.snapshot_quiesce,
+        )
+
+        # All-or-nothing: record state only on full batch success.
+        if all(r.success for r in results):
+            for result in results:
                 info = SnapshotInfo(
                     name=result.name,
                     path=result.path,
                     timestamp=datetime.now(),
                     allocation=result.new_allocation,
-                    disk=disk.target,
+                    disk=result.disk or "",
                 )
                 self._state.record_snapshot(vm_config.name, info)
-                self._state.set_last_allocation(vm_config.name, disk.target, result.new_allocation)
-                # Audit trail + btrbk-style INFO log (design D4, D5).
+                self._state.set_last_allocation(
+                    vm_config.name, result.disk or "", result.new_allocation
+                )
                 self._actions.append(
                     ActionRecord(
                         action="snapshot_create",
@@ -3570,28 +3591,30 @@ class Core:
                         name=result.name,
                         path=result.path,
                         size=result.new_allocation,
-                        disk=disk.target,
+                        disk=result.disk,
                     )
                 )
                 logger.info(
                     "[snapshot] %s/%s: created %s (%d B)",
                     vm_config.name,
-                    disk.target,
+                    result.disk,
                     result.name,
                     result.new_allocation,
                 )
-            else:
-                # VM-level isolation: a definitive snapshot failure aborts
-                # the remaining steps of this VM.  Snapshots already
-                # created for earlier disks are kept (no rollback); other
-                # VMs continue processing.
-                msg = (
-                    f"Snapshot creation failed for {vm_config.name} "
-                    f"disk {disk.target}: {result.error}"
-                )
-                logger.error(msg)
-                raise RuntimeError(msg)
-            results.append(result)
+        else:
+            # Any failure rejects the whole batch — nothing is recorded,
+            # leftover files are removed best-effort and caught by
+            # pre-flight orphan detection otherwise (design D10).
+            failed = [r for r in results if not r.success]
+            failure_details = "; ".join(
+                f"{r.name}: {r.error}" for r in failed
+            )
+            msg = (
+                f"Snapshot batch creation failed for VM {vm_config.name}: "
+                f"{failure_details}"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         return results
 
@@ -4300,6 +4323,32 @@ class Core:
             )
             return
 
+        # Check for ENOSPC — defer if the commit failed because of
+        # disk-full.  Snapshot state records remain (they are only
+        # removed after successful commit), so the merge is retried
+        # intact by the next run (design D4).
+        if (
+            not result.success
+            and result.error
+            and is_space_error(result.error)
+        ):
+            self._state.add_deferred_blockcommit(
+                vm_config.name,
+                disk,
+                [s.name for s in committable],
+                "enospc",
+            )
+            logger.warning(
+                "Blockcommit deferred due to disk-full for VM %s disk %s — "
+                "will retry on next run",
+                vm_config.name,
+                disk,
+            )
+            # Track for exit code EXIT_DISKFULL (design D6).
+            target_key = f"blockcommit:{vm_config.name}:{disk}"
+            self._space_limited_targets.add(target_key)
+            return
+
         if not result.success:
             # VM-level isolation: a definitive blockcommit failure (MAC
             # denials are deferred above and never reach this branch)
@@ -4648,6 +4697,11 @@ class Core:
         # into backup retention/cleanup so predictions simulate the new
         # chains (design D6 of fix-dry-run-predictions).
         predicted_full_disks: list[str] = []
+        # Per-target suspension flag: set when a space error prevents
+        # transfers to this target.  Remaining disks are skipped, but
+        # retention + cleanup still run for the suspended target
+        # (deletion frees space — self-heal; design D2).
+        target_suspended = False
         if not skip_transfer:
             # Count-based FULL backup decision (design D2).
             # The decision is a simple count check: create a new
@@ -4732,8 +4786,70 @@ class Core:
                         target.path,
                     )
                 global_cfg = self._config.get_global()
+                free_space_check = vm_config.free_space_check or global_cfg.free_space_check
+                free_space_reserve = (
+                    vm_config.free_space_reserve
+                    if vm_config.free_space_reserve is not None
+                    else global_cfg.free_space_reserve
+                )
+                free_space_factor = (
+                    vm_config.free_space_factor
+                    if vm_config.free_space_factor is not None
+                    else global_cfg.free_space_factor
+                )
+
+                def _apply_free_space_gate(
+                    estimate: int | None,
+                    context: str,
+                ) -> bool:
+                    """Check free space before a transfer; return True to suspend."""
+                    if free_space_check == "off":
+                        return False
+                    result = check_free_space(
+                        Path(target.path),
+                        estimate,
+                        reserve=free_space_reserve,
+                        factor=free_space_factor,
+                    )
+                    if result.sufficient:
+                        return False
+                    if free_space_check == "warn":
+                        logger.warning(
+                            "[backup] %s target %s: %s estimated %s, "
+                            "free %s, required %s — WARNING, proceeding anyway",
+                            vm_config.name,
+                            target.path,
+                            context,
+                            self._format_bytes(estimate or 0),
+                            self._format_bytes(result.free_bytes),
+                            self._format_bytes(result.required or 0),
+                        )
+                        return False
+                    # Strict mode: gate blocks the transfer.
+                    logger.critical(
+                        "[backup] %s target %s: %s estimated %s, "
+                        "free %s, required %s — suspending target (strict)",
+                        vm_config.name,
+                        target.path,
+                        context,
+                        self._format_bytes(estimate or 0),
+                        self._format_bytes(result.free_bytes),
+                        self._format_bytes(result.required or 0),
+                    )
+                    self._space_limited_targets.add(str(target.path))
+                    return True
 
                 for disk_cfg in vm_config.disks:
+                    # Skip remaining disks when the target is suspended
+                    # due to a space error (design D2).
+                    if target_suspended:
+                        logger.debug(
+                            "[backup] %s target %s disk %s: target suspended — skipping",
+                            vm_config.name,
+                            target.path,
+                            disk_cfg.target,
+                        )
+                        continue
                     disk_target = disk_cfg.target
                     disk_fulls = [f for f in all_fulls if f.disk == disk_target]
                     if force_full:
@@ -4762,6 +4878,39 @@ class Core:
                         )
                         continue
                     most_recent = max(disk_snaps, key=lambda s: s.timestamp)
+
+                    # Proactive free-space gate before FULL transfer.
+                    # Full estimate = sum of actual-size over backing
+                    # chain (worst-case standalone copy size, design D5).
+                    # In dry-run, gating is a prediction entry only.
+                    if self._dry_run:
+                        full_estimate = estimate_full_size(self._shell, most_recent.path)
+                        if free_space_check == "strict":
+                            result = check_free_space(
+                                Path(target.path),
+                                full_estimate,
+                                reserve=free_space_reserve,
+                                factor=free_space_factor,
+                            )
+                            self._predictions.append(
+                                ActionRecord(
+                                    action="free_space_gate",
+                                    vm_name=vm_config.name,
+                                    name=str(target.path),
+                                    path=target.path,
+                                    size=full_estimate or 0,
+                                    error=(
+                                        None if result.sufficient
+                                        else "insufficient space (would suspend target)"
+                                    ),
+                                )
+                            )
+                    elif not self._dry_run and _apply_free_space_gate(
+                        estimate_full_size(self._shell, most_recent.path),
+                        f"FULL backup for disk {disk_target}",
+                    ):
+                        target_suspended = True
+                        break
 
                     if self._dry_run:
                         # Log FULL-would-be-created without executing and
@@ -4855,7 +5004,7 @@ class Core:
                                 source_path=full_result.source_path,
                                 target_path=full_result.target_path,
                                 bytes_transferred=full_result.bytes_transferred,
-                                error=verify_error,
+                                error="[verify-failure] " + verify_error,
                                 duration=full_result.duration,
                                 disk=full_result.disk,
                             )
@@ -4889,6 +5038,23 @@ class Core:
 
                     full_result = self._execute_with_retry(_create_full_operation, target)
                     if not full_result.success:
+                        # Space errors suspend only this target — remaining
+                        # disks are skipped, but retention + cleanup still
+                        # run (deletion frees space, design D2).  The
+                        # verify-before-delete gate is not weakened:
+                        # verification failures are never space-classified.
+                        if is_space_error(full_result.error):
+                            logger.critical(
+                                "[backup] %s target %s disk %s: FULL backup failed "
+                                "due to disk-full — suspending target: %s",
+                                vm_config.name,
+                                target.path,
+                                disk_target,
+                                full_result.error,
+                            )
+                            self._space_limited_targets.add(str(target.path))
+                            target_suspended = True
+                            break
                         # All retries exhausted or non-retryable failure.
                         # VM-level isolation: abort the remaining steps of
                         # this VM.  Old generations stay untouched — the
@@ -4915,7 +5081,41 @@ class Core:
             # timestamp rolls past the snapshot's microsecond timestamp
             # (a spurious "backup failed" on an otherwise healthy FULL).
             if not self._dry_run:
+                # Proactive free-space gate before incremental transfers.
+                # Estimate the active-layer size per disk of snapshots
+                # pending transfer (upper bound for a dirty-block delta,
+                # design D5).
+                if not target_suspended:
+                    candidate_list = [
+                        s for s in snapshots if s.name not in full_source_names
+                    ]
+                    for disk_cfg in vm_config.disks:
+                        disk_transfers = [
+                            s for s in candidate_list
+                            if s.disk == disk_cfg.target
+                        ]
+                        if not disk_transfers:
+                            continue
+                        most_recent_pending = max(
+                            disk_transfers, key=lambda s: s.timestamp
+                        )
+                        if _apply_free_space_gate(
+                            estimate_incremental_size(
+                                self._shell, most_recent_pending.path
+                            ),
+                            f"incremental transfer for disk {disk_cfg.target}",
+                        ):
+                            target_suspended = True
+                            break
+
                 transfer_list = [s for s in snapshots if s.name not in full_source_names]
+                if target_suspended:
+                    logger.debug(
+                        "[backup] %s target %s: target suspended — skipping incremental transfers",
+                        vm_config.name,
+                        target.path,
+                    )
+                    transfer_list = []  # skip all transfers
                 results = self._transfer_with_retry(
                     provider,
                     vm_config,
@@ -4988,15 +5188,35 @@ class Core:
                         )
 
                 # VM-level isolation: successful transfers of this batch
-                # were audited above; now abort the remaining steps of
-                # this VM if any transfer definitively failed (retries
-                # already exhausted in _transfer_with_retry).
+                # were audited above.  Space errors suspend only this
+                # target (design D2); non-space failures still abort the
+                # VM via BackupAbortError.
                 if failed:
-                    msg = (
-                        f"Backup transfer failed for VM {vm_config.name} "
-                        f"target {target.path}: {len(failed)} snapshot(s) failed"
-                    )
-                    raise BackupAbortError(msg)
+                    # If ALL failures are space errors, suspend the target
+                    # instead of aborting the VM.
+                    all_space = all(is_space_error(r.error) for r in failed)
+                    if all_space:
+                        failure_details = "; ".join(
+                            f"{r.snapshot_name}: {r.error}" for r in failed
+                        )
+                        logger.critical(
+                            "[backup] %s target %s: incremental transfers failed "
+                            "due to disk-full — suspending target: %s",
+                            vm_config.name,
+                            target.path,
+                            failure_details,
+                        )
+                        self._space_limited_targets.add(str(target.path))
+                        target_suspended = True
+                        # Skip remaining disks of this suspended target
+                        # (break out of try-except scope below, then
+                        # continue to retention + cleanup).
+                    else:
+                        msg = (
+                            f"Backup transfer failed for VM {vm_config.name} "
+                            f"target {target.path}: {len(failed)} snapshot(s) failed"
+                        )
+                        raise BackupAbortError(msg)
             else:
                 # Dry-run: predict incremental transfers read-only
                 # (design D4 of fix-dry-run-predictions).  Predicted
@@ -5033,9 +5253,15 @@ class Core:
         # at the time of the last successful backup.  Failures never reach
         # this point (BackupAbortError aborts earlier — fail-safe: next
         # run retries).  Not updated when the gate skipped transfer
-        # (baseline already current) or in dry-run (no actual transfer
-        # occurred).
-        if change_results is not None and not skip_transfer and not self._dry_run:
+        # (baseline already current), in dry-run (no actual transfer
+        # occurred), or when the target was suspended due to space error
+        # (dirty data not transferred — next run auto-resumes, design D7).
+        if (
+            change_results is not None
+            and not skip_transfer
+            and not self._dry_run
+            and not target_suspended
+        ):
             for disk_target, cr in change_results.items():
                 self._state.set_last_backup_allocation(
                     str(target.path), disk_target, cr.current_allocation

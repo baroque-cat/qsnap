@@ -171,6 +171,15 @@ class ConfigFacade(IConfigFacade):
         if "backup_create" in raw:
             global_kwargs["backup_create"] = str(raw["backup_create"])
 
+        # Proactive free-space gate before backup transfers
+        # (design D5/D16).
+        if "free_space_check" in raw:
+            global_kwargs["free_space_check"] = str(raw["free_space_check"])
+        if "free_space_reserve" in raw:
+            global_kwargs["free_space_reserve"] = int(raw["free_space_reserve"])
+        if "free_space_factor" in raw:
+            global_kwargs["free_space_factor"] = float(raw["free_space_factor"])
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate count-based retention fields (when set).
@@ -189,6 +198,21 @@ class ConfigFacade(IConfigFacade):
         if self._global.snapshot_preserve_min < 0:
             raise ConfigError(
                 f"snapshot_preserve_min must be >= 0, got {self._global.snapshot_preserve_min}"
+            )
+
+        # Validate free-space gate fields (design D5/D16).
+        _free_space_check = self._global.free_space_check
+        if _free_space_check not in ("strict", "warn", "off"):
+            raise ConfigError(
+                f"free_space_check must be 'strict', 'warn', or 'off', got {_free_space_check!r}"
+            )
+        if self._global.free_space_reserve < 0:
+            raise ConfigError(
+                f"free_space_reserve must be >= 0, got {self._global.free_space_reserve}"
+            )
+        if self._global.free_space_factor < 1.0:
+            raise ConfigError(
+                f"free_space_factor must be >= 1.0, got {self._global.free_space_factor}"
             )
 
         # rate_limit is deprecated (removed backup strategy) — log a
@@ -354,6 +378,42 @@ class ConfigFacade(IConfigFacade):
         else:
             snapshot_preserve_min = global_cfg.snapshot_preserve_min
 
+        # free-space gate fields: VM overrides global.
+        free_space_check: str
+        if "free_space_check" in vm_raw:
+            free_space_check = str(vm_raw["free_space_check"])
+        else:
+            free_space_check = global_cfg.free_space_check
+
+        free_space_reserve: int
+        if "free_space_reserve" in vm_raw:
+            free_space_reserve = int(vm_raw["free_space_reserve"])
+        else:
+            free_space_reserve = global_cfg.free_space_reserve
+
+        free_space_factor: float
+        if "free_space_factor" in vm_raw:
+            free_space_factor = float(vm_raw["free_space_factor"])
+        else:
+            free_space_factor = global_cfg.free_space_factor
+
+        # Validate VM-level free-space gate fields.
+        if free_space_check not in ("strict", "warn", "off"):
+            raise ConfigError(
+                f"VM {name!r}: free_space_check must be 'strict', 'warn', or 'off', "
+                f"got {free_space_check!r}"
+            )
+        if free_space_reserve < 0:
+            raise ConfigError(
+                f"VM {name!r}: free_space_reserve must be >= 0, "
+                f"got {free_space_reserve}"
+            )
+        if free_space_factor < 1.0:
+            raise ConfigError(
+                f"VM {name!r}: free_space_factor must be >= 1.0, "
+                f"got {free_space_factor}"
+            )
+
         # Validate count-based retention fields (when set).
         if snapshot_chain_length is not None and snapshot_chain_length < 1:
             raise ConfigError("snapshot_chain_length must be >= 1")
@@ -451,6 +511,9 @@ class ConfigFacade(IConfigFacade):
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,
+            free_space_check=free_space_check,
+            free_space_reserve=free_space_reserve,
+            free_space_factor=free_space_factor,
             blockcommit_deep_verify=blockcommit_deep_verify,
             targets=targets,
         )

@@ -178,6 +178,16 @@ def format_summary(result: PipelineResult) -> str:
         lines.append(f"    {symbol}  {desc}")
     lines.append("")
 
+    # ── Space-limited targets ───────────────────────────────────────────
+    # Report every target/blockcommit limited by a disk-full error so
+    # operators see exactly what needs free space (spec: cli-interface
+    # "Disk-full exit code").
+    if result.space_limited and result.space_limited_targets:
+        lines.append("Space-limited (disk-full):")
+        for target in result.space_limited_targets:
+            lines.append(f"  space-limited: {target}")
+        lines.append("")
+
     # ── Per-VM blocks ──────────────────────────────────────────────────
     vm_groups = _group_by_vm(result.actions)
     for vm_name, actions in vm_groups:

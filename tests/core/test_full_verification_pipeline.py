@@ -1877,9 +1877,9 @@ def test_full_backup_creation_not_retried_no_space(
 
     ``is_retryable("No space left on device")`` returns ``False``, so
     ``_execute_with_retry`` returns the failure immediately without entering
-    the retry loop.  Core logs a CRITICAL message preserving old generations
-    and raises ``BackupAbortError`` to abort the VM pipeline (VM-level
-    isolation).
+    the retry loop.  Under the ENOSPC hardening, a space-classified failure
+    SUSPENDS the target (design D2) instead of raising ``BackupAbortError``:
+    no FULL is recorded and the target is flagged space-limited.
     """
     import logging
 
@@ -1932,8 +1932,8 @@ def test_full_backup_creation_not_retried_no_space(
             "record_full_backup",
             wraps=mock_state.record_full_backup,
         ) as record_spy,
-        pytest.raises(BackupAbortError),
     ):
+        # Space errors suspend the target — they must NOT raise.
         core._backup_target(vm, target, [snap])
 
     # create_full_backup called exactly once — no retry
@@ -1942,10 +1942,12 @@ def test_full_backup_creation_not_retried_no_space(
     )
     # FULL was NOT recorded in state
     assert not record_spy.called, "record_full_backup should NOT be called when FULL fails"
-    # CRITICAL log about preserving old generations
+    # Target suspended and flagged space-limited (drives EXIT_DISKFULL).
+    assert str(target.path) in core._space_limited_targets
+    # CRITICAL log about suspending the target
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert critical_logs, "CRITICAL log should be emitted"
-    assert "old generations preserved" in critical_logs[0].message.lower()
+    assert "suspending target" in critical_logs[0].message.lower()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

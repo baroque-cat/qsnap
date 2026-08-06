@@ -178,8 +178,8 @@ def test_validate_environment_ondemand_target_missing_skipped(
         ) as validate_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
     ):
         result = core.run()
@@ -254,8 +254,8 @@ def test_pipeline_continues_after_validation_pass(
         ) as validate_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
     ):
         result = core.run()
@@ -301,8 +301,8 @@ def test_pipeline_returns_failure_on_missing_snapshot_dir(
         ) as validate_spy,
         patch.object(
             snapshot_provider,
-            "create",
-            wraps=snapshot_provider.create,
+            "create_multi",
+            wraps=snapshot_provider.create_multi,
         ) as create_spy,
     ):
         result = core.run()

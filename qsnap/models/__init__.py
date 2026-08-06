@@ -20,6 +20,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
     SnapshotResult,
+    SnapshotSpec,
 )
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "ShellResult",
     "SnapshotInfo",
     "SnapshotResult",
+    "SnapshotSpec",
     "TargetConfig",
     "VMConfig",
 ]

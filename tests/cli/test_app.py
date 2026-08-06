@@ -8,7 +8,14 @@ import pytest
 
 from qsnap.cli import commands as cli_commands
 from qsnap.cli.app import _DISPATCH, build_argparser, main
-from qsnap.cli.errors import EXIT_LOCKFILE, EXIT_PARSE, EXIT_SUCCESS
+from qsnap.cli.errors import (
+    EXIT_BACKUP_ABORT,
+    EXIT_DISKFULL,
+    EXIT_GENERIC,
+    EXIT_LOCKFILE,
+    EXIT_PARSE,
+    EXIT_SUCCESS,
+)
 from qsnap.core import PipelineResult, VMRunResult
 from tests.mocks import MockConfigFacade
 
@@ -154,6 +161,185 @@ def test_lockfile_held_returns_exit_code_three(
 def test_unknown_subcommand_returns_parse_error_exit_code_2():
     code = main(["bogus"])
     assert code == EXIT_PARSE
+
+
+# ── disk-full (ENOSPC) exit code tests ──────────────────────────────────
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_diskfull_run_exit_code_four(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """A run limited by a space-classified error (space_limited=True) exits 4."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(
+        results=[VMRunResult(vm_name="vm1", success=True)],
+        space_limited=True,
+    )
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_DISKFULL
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_diskfull_precedence_over_generic(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """space_limited=True with success=False exits 4, not 1 (4 > 1 precedence)."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm1", success=False, error="snapshot failed"),
+        ],
+        space_limited=True,
+    )
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_DISKFULL
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_non_space_backup_abort_exits_ten(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """A non-space backup abort (backup_failed=True, space_limited=False)
+    exits 10 per spec: cli-interface "Non-space backup abort still exits 10".
+
+    Disk-full (4) only takes precedence when space_limited=True; a pure
+    verification/non-space backup failure without any space error still
+    reports exit code 10."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(
+                vm_name="vm1",
+                success=False,
+                error="FULL backup verification failed",
+                backup_failed=True,
+            ),
+        ],
+        space_limited=False,
+    )
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_BACKUP_ABORT
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_no_space_error_exits_one(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """A run failing without any space involvement exits 1, not 4."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm1", success=False, error="broken backing chain"),
+        ],
+        space_limited=False,
+    )
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_GENERIC
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_backup_abort_still_exits_ten(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """A non-space BackupAbortError exits 10 even without space errors."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(
+        results=[
+            VMRunResult(
+                vm_name="vm1",
+                success=False,
+                error="FULL backup verification failed",
+                backup_failed=True,
+            ),
+        ],
+        space_limited=False,
+    )
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_BACKUP_ABORT
+
+
+# ── help epilog documents exit codes ────────────────────────────────────
+
+
+def test_help_epilog_documents_exit_code_4(capsys):
+    """The --help epilog documents exit code 4 (disk-full)."""
+    import re
+
+    parser = build_argparser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    captured = capsys.readouterr()
+    text = captured.out
+    # argparse collapses the epilog's leading spaces/newlines and wraps
+    # long lines at the em-dash, so match with flexible whitespace.
+    assert "4 — disk-full" in text
+    assert re.search(r"10\s*—\s*backup abort", text) is not None
 
 
 # ── restore and check argument parsing tests ────────────────────────────

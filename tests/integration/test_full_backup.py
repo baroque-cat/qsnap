@@ -534,8 +534,180 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 6: Custom convert_parallel and convert_out_of_order flags
+# Test 7: Proactive free-space gate runs BEFORE the real transfer
 # ──────────────────────────────────────────────────────────────────────
+
+
+def _build_gate_core(
+    shell: SubprocessShell,
+    vm_name: str,
+    base_image: Path,
+    snapshot_dir: Path,
+    target_dir: Path,
+    tmpdir: Path,
+    free_space_check: str,
+    reserve: int,
+) -> tuple[Core, VMConfig, InMemoryStateManager]:
+    """Build Core + state with one recorded snapshot (disk="vda")."""
+    from qsnap.core import Core
+    from qsnap.factory.default import DefaultFactory
+    from qsnap.models.config import DiskConfig, VMConfig
+    from tests.mocks.mock_config import MockConfigFacade
+    from tests.mocks.mock_state import InMemoryStateManager
+
+    state = InMemoryStateManager()
+    snap = SnapshotInfo(
+        name=f"{vm_name}.gate-source",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+    state.record_snapshot(vm_name, snap)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        free_space_check=free_space_check,
+        free_space_reserve=reserve,
+        targets=[
+            TargetConfig(path=target_dir, compress=False, verify="off"),
+        ],
+    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "gate.toml")
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+    return core, vm_config, state
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_free_space_gate_strict_blocks_full_before_transfer(test_vm, caplog):
+    """Strict free-space gate suspends the target BEFORE any transfer.
+
+    1. Start VM; record one snapshot (disk="vda").
+    2. Configure ``free_space_check="strict"`` with a reserve far above
+       the filesystem's free space.
+    3. Run ``core.backup()``.
+    4. Assert NO ``qemu-img convert`` starts, NO backup file appears,
+       the run is ``space_limited``, and a CRITICAL "suspending target"
+       log names the target.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Start VM so the transfer WOULD be possible (proving the gate, not
+    # the environment, blocked it).
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+
+    core, _, _ = _build_gate_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir,
+        free_space_check="strict", reserve=10**18,
+    )
+
+    caplog.set_level(logging.DEBUG)
+    result = core.backup(vm_name)
+
+    # Target suspended by the gate → space_limited run.
+    assert result.space_limited is True, (
+        f"Strict gate rejection must mark the run space_limited, got {result.space_limited}"
+    )
+
+    # NO qemu-img convert may start.
+    convert_msgs = [
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
+    ]
+    assert convert_msgs == [], (
+        f"No qemu-img convert may start when the strict gate blocks: {convert_msgs}"
+    )
+
+    # NO backup file on the target.
+    assert list(target_dir.glob("*.qcow2")) == [], (
+        f"No backup file may be created when the strict gate blocks: "
+        f"{list(target_dir.glob('*.qcow2'))}"
+    )
+
+    # CRITICAL log names the target suspension.
+    suspend_logs = [
+        r.message for r in caplog.records if "suspending target (strict)" in r.message
+    ]
+    assert len(suspend_logs) >= 1, (
+        f"Expected a 'suspending target (strict)' CRITICAL log. "
+        f"Logs: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_free_space_gate_warn_proceeds_with_warning(test_vm, caplog):
+    """Warn-mode free-space gate logs WARNING and lets the transfer run.
+
+    1. Start VM; record one snapshot (disk="vda").
+    2. Configure ``free_space_check="warn"`` with a reserve far above
+       free space (the gate WOULD block in strict mode).
+    3. Run ``core.backup()``.
+    4. Assert a WARNING "proceeding anyway" log names target/estimate,
+       ``qemu-img convert`` runs, and a FULL backup file appears.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    core, _, _ = _build_gate_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir,
+        free_space_check="warn", reserve=10**18,
+    )
+
+    caplog.set_level(logging.DEBUG)
+    result = core.backup(vm_name)
+
+    # WARNING naming the target with estimate/free/required.
+    warn_logs = [r.message for r in caplog.records if "proceeding anyway" in r.message]
+    assert len(warn_logs) >= 1, (
+        f"Warn mode must log 'proceeding anyway'. Logs: {[r.message for r in caplog.records]}"
+    )
+
+    # Transfer ran: qemu-img convert + a FULL file on the target.
+    convert_msgs = [
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
+    ]
+    assert len(convert_msgs) > 0, (
+        f"Warn mode must proceed with the transfer (qemu-img convert). "
+        f"Logs: {[r.message for r in caplog.records]}"
+    )
+    full_files = list(target_dir.glob("*.FULL.*.qcow2"))
+    assert len(full_files) >= 1, (
+        f"Expected a FULL backup on target in warn mode. Got: "
+        f"{[p.name for p in target_dir.glob('*.qcow2')]}"
+    )
+
+    # Warn mode never marks the run space_limited (no suspension).
+    assert result.space_limited is False, (
+        f"Warn mode must not suspend the target, got space_limited={result.space_limited}"
+    )
+
+    _cleanup_checkpoints(shell, vm_name)
 
 
 @pytest.mark.integration

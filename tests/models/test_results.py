@@ -27,6 +27,7 @@ from qsnap.models.results import (
     RetentionResult,
     ShellResult,
     SnapshotResult,
+    SnapshotSpec,
 )
 from qsnap.state.json_manager import JsonStateManager
 
@@ -61,6 +62,55 @@ def test_snapshot_result_failure():
     )
     assert result.success is False
     assert result.error == "virsh timed out"
+
+
+# ── SnapshotSpec (multi-disk batch spec, design D8) ─────────────────────
+
+
+def test_snapshot_spec_fields():
+    """SnapshotSpec carries disk/name/path and is declared frozen."""
+    spec = SnapshotSpec(
+        disk="vda",
+        name="testvm.20260101T000000Z_vda_a1b2c3",
+        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.20260101T000000Z_vda_a1b2c3.qcow2"),
+    )
+    assert spec.disk == "vda"
+    assert spec.name == "testvm.20260101T000000Z_vda_a1b2c3"
+    assert spec.path == Path(
+        "/var/lib/libvirt/snapshots/testvm/testvm.20260101T000000Z_vda_a1b2c3.qcow2"
+    )
+    # Verify the dataclass is declared frozen.
+    assert spec.__dataclass_params__.frozen is True
+
+
+def test_snapshot_spec_is_frozen():
+    """SnapshotSpec mutation raises FrozenInstanceError for every field."""
+    spec = SnapshotSpec(
+        disk="vda",
+        name="testvm.20260101T000000Z_vda_a1b2c3",
+        path=Path("/var/lib/libvirt/snapshots/testvm/snap.qcow2"),
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spec.disk = "vdb"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spec.name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spec.path = Path("/mutated.qcow2")
+
+
+def test_snapshot_spec_field_names():
+    """SnapshotSpec has exactly the fields disk, name, path."""
+    field_names = {f.name for f in dataclasses.fields(SnapshotSpec)}
+    assert field_names == {"disk", "name", "path"}
+
+
+def test_snapshot_spec_equality():
+    """SnapshotSpec instances with equal fields compare equal."""
+    a = SnapshotSpec(disk="vda", name="n", path=Path("/p"))
+    b = SnapshotSpec(disk="vda", name="n", path=Path("/p"))
+    c = SnapshotSpec(disk="vdb", name="n", path=Path("/p"))
+    assert a == b
+    assert a != c
 
 
 def test_backup_result_success():

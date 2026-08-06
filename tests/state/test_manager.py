@@ -88,11 +88,16 @@ def test_record_and_list_snapshots(tmp_path: Path) -> None:
     assert snapshots[0].path == snap_early.path
 
 
-def test_atomic_write_pattern(tmp_path: Path) -> None:
+def test_atomic_write_pattern(tmp_path: Path, caplog) -> None:
     """Atomic write: no .tmp remains on success; crash leaves original intact.
 
     This covers the CRITICAL risk in test-plan.md line 134: a crash during
     the rename step must not corrupt the existing state file.
+
+    Since the state-recovery change (design D3), ``_save`` catches
+    ``OSError`` from the rename, logs a CRITICAL naming the state path and
+    the OS error, and re-raises as ``RuntimeError`` so the per-VM handler in
+    ``Core._run_pipeline`` contains the failure to one VM.
     """
     manager = JsonStateManager(state_dir=tmp_path)
 
@@ -112,15 +117,25 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     crash_state_file = tmp_path / "crashvm.json"
 
-    # Mock os.replace to raise mid-operation (the rename step).
+    # Mock os.replace to raise mid-operation (the rename step).  The save
+    # surfaces as RuntimeError (not OSError) per design D3.
     with (
+        caplog.at_level(logging.CRITICAL, logger="qsnap.state.json_manager"),
         patch(
             "qsnap.state.json_manager.os.replace",
             side_effect=OSError("simulated crash during rename"),
         ),
-        pytest.raises(OSError, match="simulated crash"),
+        pytest.raises(RuntimeError, match="State write failed for VM crashvm"),
     ):
         manager.set_last_allocation("crashvm", "vda", 999)
+
+    # The CRITICAL log names the state path and the OS error.
+    assert any(
+        r.levelno == logging.CRITICAL
+        and "crashvm.json" in r.message
+        and "simulated crash during rename" in r.message
+        for r in caplog.records
+    ), "CRITICAL log must name the state path and the OS error"
 
     # The original state file must still exist and be valid JSON — no
     # partial corruption is observable by a concurrent reader.
@@ -134,6 +149,155 @@ def test_atomic_write_pattern(tmp_path: Path) -> None:
 
     # Re-reading through the manager must yield the original value.
     assert manager.get_last_allocation("crashvm", "vda") == 100
+
+
+# ── state write resilience on ENOSPC (design D3) ────────────────────────
+
+
+def test_save_oserror_raises_runtime_error_critical(tmp_path: Path, caplog) -> None:
+    """``_save`` ENOSPC → CRITICAL log naming path+errno, re-raised as RuntimeError.
+
+    Spec: "ENOSPC in state directory does not crash the process" — the
+    ``OSError`` is caught, a CRITICAL names the state path and the error,
+    and a ``RuntimeError`` is raised so ``Core._run_pipeline``'s per-VM
+    handler contains the failure (design D3).
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    manager.set_last_allocation("testvm", "vda", 4096)
+
+    enospc = OSError(28, "No space left on device")
+
+    with (
+        caplog.at_level(logging.CRITICAL, logger="qsnap.state.json_manager"),
+        patch("qsnap.state.json_manager.os.replace", side_effect=enospc),
+        pytest.raises(RuntimeError, match="State write failed for VM testvm"),
+    ):
+        manager.set_last_allocation("testvm", "vda", 8192)
+
+    # CRITICAL log names the state path and the errno text.
+    assert any(
+        r.levelno == logging.CRITICAL
+        and "testvm.json" in r.message
+        and "No space left on device" in r.message
+        for r in caplog.records
+    ), "CRITICAL log must name the state path and the OS error (errno)"
+
+    # The original state file is untouched and still readable.
+    assert manager.get_last_allocation("testvm", "vda") == 4096
+    with open(tmp_path / "testvm.json", encoding="utf-8") as fh:
+        assert json.load(fh).get("last_allocation", {}).get("vda") == 4096
+
+
+def test_save_oserror_contained_per_vm(tmp_path: Path) -> None:
+    """A state-write failure is contained: other VMs' state still saves.
+
+    Spec: "ENOSPC during save contained to one VM" — the failing save raises
+    ``RuntimeError`` (which Core's per-VM try/except records as
+    ``VMRunResult(success=False)`` for that VM only); vm2 and later VMs are
+    still processed and writable.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    manager.set_last_allocation("vm1", "vda", 100)
+    manager.set_last_allocation("vm2", "vda", 200)
+
+    # vm1's save fails with ENOSPC → RuntimeError (contained failure).
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ),
+        pytest.raises(RuntimeError, match="State write failed for VM vm1"),
+    ):
+        manager.set_last_allocation("vm1", "vda", 999)
+
+    # vm1's state file remains intact with its pre-failure value.
+    assert manager.get_last_allocation("vm1", "vda") == 100
+    with open(tmp_path / "vm1.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data.get("last_allocation", {}).get("vda") == 100
+
+    # vm2 is still processed normally — the failure did not break the
+    # manager or the state directory.
+    manager.set_last_allocation("vm2", "vda", 300)
+    assert manager.get_last_allocation("vm2", "vda") == 300
+
+
+def test_save_partial_tmp_does_not_corrupt_state(tmp_path: Path, caplog) -> None:
+    """A partial temp-file write never corrupts the existing state file.
+
+    Spec: "Partial temp file does not corrupt existing state" — when the
+    temp-file write fails before ``os.replace``, the existing ``{vm}.json``
+    remains untouched and valid; the save surfaces as RuntimeError.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    manager.set_last_allocation("testvm", "vda", 4096)
+    manager.set_last_allocation("testvm", "vda", 8192)
+
+    # Fail the tmp-file write itself (json.dump raises ENOSPC mid-write).
+    with (
+        caplog.at_level(logging.CRITICAL, logger="qsnap.state.json_manager"),
+        patch(
+            "qsnap.state.json_manager.json.dump",
+            side_effect=OSError(28, "No space left on device"),
+        ),
+        pytest.raises(RuntimeError, match="State write failed for VM testvm"),
+    ):
+        manager.set_last_allocation("testvm", "vda", 999)
+
+    # CRITICAL log names the path and the error.
+    assert any(
+        r.levelno == logging.CRITICAL
+        and "testvm.json" in r.message
+        and "No space left on device" in r.message
+        for r in caplog.records
+    )
+
+    # Existing {vm}.json is untouched — valid JSON with the previous data.
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists(), "existing state file must survive a failed save"
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)  # must parse without error
+    assert data.get("last_allocation", {}).get("vda") == 8192, (
+        "state file content must be unchanged after a failed save"
+    )
+
+    # Reads through the manager return the pre-failure value.
+    assert manager.get_last_allocation("testvm", "vda") == 8192
+
+
+def test_save_failed_write_does_not_rotate_backups(tmp_path: Path) -> None:
+    """A failed save must not rotate the state backup chain.
+
+    Spec (state-recovery, "Partial temp file does not corrupt existing
+    state"): "no rotation has been performed for this failed save".  When
+    the temp-file write fails, the ``.1``/``.2`` backup artifacts must be
+    exactly as they were before the failed save.
+
+    NOTE: this encodes the spec clause verbatim.  The current ``_save``
+    implementation rotates BEFORE the temp-file write, so a failed write
+    still shifts the backup chain — this test documents that gap (see QA
+    report).
+    """
+    manager = JsonStateManager(state_dir=tmp_path, state_backup_count=2)
+    manager.set_last_allocation("testvm", "vda", 4096)
+    manager.set_last_allocation("testvm", "vda", 8192)
+
+    backup_files_before = sorted(p.name for p in tmp_path.glob("testvm.json.*"))
+
+    # Fail the tmp-file write (json.dump raises ENOSPC mid-write).
+    with (
+        patch(
+            "qsnap.state.json_manager.json.dump",
+            side_effect=OSError(28, "No space left on device"),
+        ),
+        pytest.raises(RuntimeError, match="State write failed for VM testvm"),
+    ):
+        manager.set_last_allocation("testvm", "vda", 999)
+
+    backup_files_after = sorted(p.name for p in tmp_path.glob("testvm.json.*"))
+    assert backup_files_after == backup_files_before, (
+        f"failed save must not rotate backups: {backup_files_before} -> {backup_files_after}"
+    )
 
 
 # ── deferred operations tests ────────────────────────────────────────────
@@ -191,6 +355,39 @@ def test_add_deferred_blockcommit_active_layer_reason(tmp_path: Path) -> None:
     assert isinstance(op.since, datetime)
     # New entries have no warning timestamp yet.
     assert op.last_warned_at is None
+
+
+def test_add_deferred_blockcommit_enospc_reason(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry with "enospc" reason.
+
+    Blockcommit failures classified as space errors (is_space_error) are
+    deferred with reason="enospc" instead of aborting the VM (spec:
+    deferred-operations scenario "Add deferred blockcommit with enospc
+    reason"; design D4).  The reason must round-trip through persistent
+    state.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "enospc")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2"]
+    assert op.reason == "enospc"
+    assert op.disk == "vda"
+    assert isinstance(op.since, datetime)
+    # New entries have no warning timestamp yet.
+    assert op.last_warned_at is None
+
+    # The enospc reason must survive a full state round-trip (re-load).
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    ops2 = manager2.get_deferred_operations("vm1")
+    assert len(ops2) == 1
+    assert ops2[0].reason == "enospc"
+    assert ops2[0].disk == "vda"
 
 
 def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
@@ -1289,6 +1486,11 @@ def test_json_clear_last_backup_allocation_atomic(tmp_path: Path) -> None:
     .tmp file then calls os.replace.  If os.replace raises (simulating a
     crash), the original _target_state.json must remain intact with its
     original data.
+
+    NOTE: this path routes through ``_save_target_state``, which the
+    state-recovery implementer left UNWRAPPED (only ``_save`` catches
+    ``OSError`` → ``RuntimeError``, design D3).  The OSError expectation is
+    therefore kept — verified against qsnap/state/json_manager.py:638.
     """
     manager = JsonStateManager(state_dir=tmp_path)
 
@@ -1696,13 +1898,14 @@ def test_reset_vm_disk_state_unknown_noop(tmp_path: Path) -> None:
     )
 
 
-def test_reset_vm_disk_state_atomic(tmp_path: Path) -> None:
+def test_reset_vm_disk_state_atomic(tmp_path: Path, caplog) -> None:
     """Crash during os.replace leaves original state file unchanged.
 
     Pre-populate snapshots, last_allocation, and deferred operations for
     both vda and vdb.  Mock os.replace to raise OSError, then call
     reset_vm_disk_state for vda.  The original state file must remain
-    valid JSON with all vda data intact.
+    valid JSON with all vda data intact.  The save surfaces as RuntimeError
+    with a CRITICAL log naming the path (design D3).
     """
     manager = JsonStateManager(state_dir=tmp_path)
 
@@ -1738,13 +1941,22 @@ def test_reset_vm_disk_state_atomic(tmp_path: Path) -> None:
 
     # ── simulate crash during os.replace ─────────────────────────────
     with (
+        caplog.at_level(logging.CRITICAL, logger="qsnap.state.json_manager"),
         patch(
             "qsnap.state.json_manager.os.replace",
             side_effect=OSError("simulated crash during rename"),
         ),
-        pytest.raises(OSError, match="simulated crash"),
+        pytest.raises(RuntimeError, match="State write failed for VM myvm"),
     ):
         manager.reset_vm_disk_state("myvm", "vda")
+
+    # The CRITICAL log names the state path and the OS error.
+    assert any(
+        r.levelno == logging.CRITICAL
+        and "myvm.json" in r.message
+        and "simulated crash during rename" in r.message
+        for r in caplog.records
+    ), "CRITICAL log must name the state path and the OS error"
 
     # ── original state file must be intact ───────────────────────────
     assert state_file.exists(), "state file must still exist after crash"
@@ -1881,6 +2093,12 @@ def test_reset_target_disk_state_atomic(tmp_path: Path) -> None:
     with data for (myvm, vda).  Mock os.replace to raise OSError, then call
     reset_target_disk_state.  All three files must remain intact with their
     original content.
+
+    NOTE: this path routes through ``_save_full_backups``/``_save_dependencies``/
+    ``_save_target_state``, which the state-recovery implementer left
+    UNWRAPPED (only ``_save`` catches ``OSError`` → ``RuntimeError``, design
+    D3).  The OSError expectation is therefore kept — verified against
+    qsnap/state/json_manager.py:413/533/638.
     """
     manager = JsonStateManager(state_dir=tmp_path)
     target = "/mnt/backup/shared"

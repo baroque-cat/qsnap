@@ -5,6 +5,7 @@ Each mock satisfies its ABC and returns valid result types.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from qsnap.models.results import (
     ShellResult,
     SnapshotInfo,
     SnapshotResult,
+    SnapshotSpec,
 )
 
 
@@ -45,6 +47,25 @@ class MockSnapshotProvider(ISnapshotProvider):
             new_allocation=65536,
             error=None,
         )
+
+    def create_multi(
+        self,
+        vm_config: VMConfig,
+        specs: Sequence[SnapshotSpec],
+        quiesce: bool = False,
+    ) -> list[SnapshotResult]:
+        """Return one successful SnapshotResult per spec in order."""
+        return [
+            SnapshotResult(
+                success=True,
+                name=spec.name,
+                path=spec.path,
+                new_allocation=65536,
+                error=None,
+                disk=spec.disk,
+            )
+            for spec in specs
+        ]
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
         return []

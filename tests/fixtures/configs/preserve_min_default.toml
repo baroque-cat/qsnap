@@ -1,0 +1,12 @@
+# Config that omits snapshot_preserve_min at ALL levels (global and VM).
+# The default 48 must resolve through inheritance: VM ← global default.
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"

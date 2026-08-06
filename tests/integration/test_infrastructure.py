@@ -361,3 +361,124 @@ def test_stale_state_self_healing(test_vm):
     # No backup for stale snapshot.
     stale_results = [r for r in results if r.snapshot_name == stale.name]
     assert len(stale_results) == 0, "No backup must be attempted for stale snapshot"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test 5: JsonStateManager._save OSError → RuntimeError + CRITICAL log
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_state_save_oserror_surfaces_runtime_error(tmp_path: Path, caplog):
+    """An OSError during a state save surfaces as RuntimeError + CRITICAL.
+
+    New ``_save`` contract (design D3): ENOSPC and other OS-level write
+    failures are caught, logged at CRITICAL, and re-raised as
+    ``RuntimeError`` so ``Core._run_pipeline`` can contain the failure
+    to one VM.  The in-flight state file is never deleted or renamed.
+    """
+    import json as _json
+
+    from qsnap.models.results import SnapshotInfo
+    from qsnap.state.json_manager import JsonStateManager
+
+    state_dir = tmp_path / "state"
+    manager = JsonStateManager(state_dir=state_dir, state_backup_count=1)
+    info = SnapshotInfo(
+        name="vm1.snap",
+        path=tmp_path / "snap.qcow2",
+        timestamp=datetime.now(),
+        allocation=1024,
+        disk="vda",
+    )
+
+    # A pre-existing state file makes the save path exercise rotation.
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "vm1.json").write_text(_json.dumps({"snapshots": []}))
+
+    with patch(
+        "qsnap.state.json_manager.os.replace",
+        side_effect=OSError(28, "No space left on device"),
+    ):
+        with pytest.raises(RuntimeError, match="State write failed for VM vm1"):
+            manager.record_snapshot("vm1", info)
+
+    # CRITICAL log names the VM and the state path.
+    critical_msgs = [
+        r.message for r in caplog.records if r.levelname == "CRITICAL" and "Failed to save state" in r.message
+    ]
+    assert len(critical_msgs) >= 1, (
+        f"Expected a CRITICAL 'Failed to save state' log. "
+        f"Logs: {[r.message for r in caplog.records]}"
+    )
+    assert "vm1" in critical_msgs[0] and str(state_dir / "vm1.json") in critical_msgs[0], (
+        f"CRITICAL log must name the VM and state path: {critical_msgs[0]}"
+    )
+
+    # The original state file survives (atomic write guarantee).
+    assert (state_dir / "vm1.json").exists(), (
+        "Existing state file must survive a failed save"
+    )
+
+
+@pytest.mark.integration
+def test_stale_state_self_healing_save_failure_surfaces_runtime_error(
+    tmp_path: Path, caplog
+):
+    """Stale-state self-healing surfaces RuntimeError when the save fails.
+
+    The self-healing path (``transfer_missing`` → ``state.remove_snapshot``
+    → ``JsonStateManager._save``) now raises ``RuntimeError`` on OSError
+    instead of swallowing it — the per-VM pipeline handler contains it.
+    """
+    from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+    from qsnap.models.results import SnapshotInfo
+    from qsnap.state.json_manager import JsonStateManager
+
+    state_dir = tmp_path / "state"
+    manager = JsonStateManager(state_dir=state_dir, state_backup_count=0)
+    vm_name = "selfheal-save-fail"
+
+    stale = SnapshotInfo(
+        name=f"{vm_name}.stale",
+        path=tmp_path / "does-not-exist.qcow2",
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+    manager.record_snapshot(vm_name, stale)
+    assert len(manager.get_snapshots(vm_name)) == 1, "Stale snapshot must be recorded"
+
+    target = TargetConfig(path=tmp_path / "target", verify="off")
+    (tmp_path / "target").mkdir(exist_ok=True)
+    (tmp_path / "target" / "_keep_nonempty.qcow2").write_bytes(b"\x00" * 1024)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=tmp_path / "base.qcow2")],
+        snapshot_dir=tmp_path / "snapshots",
+    )
+
+    provider = BitmapBackupProvider(shell=SubprocessShell(), state=manager)
+
+    with patch(
+        "qsnap.state.json_manager.os.replace",
+        side_effect=OSError(28, "No space left on device"),
+    ):
+        # remove_snapshot → _save fails → RuntimeError surfaces (the
+        # stale entry is NOT silently dropped).
+        with pytest.raises(RuntimeError, match="State write failed"):
+            provider.transfer_missing(
+                vm_config=vm_config,
+                target=target,
+                snapshots=[stale],
+            )
+
+    critical_msgs = [
+        r.message for r in caplog.records if r.levelname == "CRITICAL" and "Failed to save state" in r.message
+    ]
+    assert len(critical_msgs) >= 1, "Expected a CRITICAL 'Failed to save state' log"
+
+    # The stale entry is still recorded (state only advances on success).
+    assert len(manager.get_snapshots(vm_name)) == 1, (
+        "Stale entry must remain in state when the save fails (never lose records)"
+    )

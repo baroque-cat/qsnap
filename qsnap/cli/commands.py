@@ -14,7 +14,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
-from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_GENERIC, EXIT_SUCCESS
+from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_DISKFULL, EXIT_GENERIC, EXIT_SUCCESS
 from qsnap.cli.format import (
     format_deferred_raw,
     format_deferred_table,
@@ -266,9 +266,15 @@ def _stats_to_rows(
 def _format_pipeline_result(result: PipelineResult) -> int:
     """Print pipeline results and return exit code.
 
-    Returns ``EXIT_BACKUP_ABORT`` (10) if any VM had a backup-stage
-    failure (checked before generic failure), ``EXIT_GENERIC`` (1) if
+    Returns ``EXIT_DISKFULL`` (4) when any target/blockcommit was limited
+    by a disk-full error (checked first — 4 takes precedence over all
+    post-run codes per spec: cli-interface "Exit codes"),
+    ``EXIT_BACKUP_ABORT`` (10) when a non-space backup-stage failure
+    occurred without disk-full involvement, ``EXIT_GENERIC`` (1) if
     any VM failed otherwise, ``EXIT_SUCCESS`` (0) when all succeeded.
+
+    Precedence: 2/3 (parse/lockfile) are handled in ``main()`` before
+    reaching this function.  Among the post-run codes: 4 > 10 > 1 > 0.
 
     After computing the exit code, prints a btrbk-style summary table
     to stdout via :func:`qsnap.cli.summary.format_summary`.
@@ -282,9 +288,13 @@ def _format_pipeline_result(result: PipelineResult) -> int:
     # Print btrbk-style summary table (spec: cli-interface/backup-summary).
     print(format_summary(result))
 
-    # Backup-stage failures map to EXIT_BACKUP_ABORT even though the
-    # affected VM is marked unsuccessful (VM-level isolation): the
-    # backup_failed flag is the more specific signal.
+    # Disk-full takes precedence over all post-run exit codes
+    # (spec: cli-interface "Exit codes" — a run exhibiting both
+    # disk-full and backup-abort reports 4, not 10).
+    if result.space_limited:
+        return EXIT_DISKFULL
+    # Backup-stage failures (non-space) map to EXIT_BACKUP_ABORT.
+    # Only reached when no space error occurred.
     if any(r.backup_failed for r in result.results):
         return EXIT_BACKUP_ABORT
     if not result.success:

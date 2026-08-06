@@ -34,6 +34,24 @@ _NON_RETRYABLE_PATTERNS = [
 ]
 
 
+def is_space_error(error: str | None) -> bool:
+    """Check whether *error* indicates a disk-space or quota failure.
+
+    Returns ``True`` for errors containing "no space left on device" or
+    "disk quota exceeded" (case-insensitive).  Returns ``False`` for
+    ``None``, empty strings, or unrelated errors.
+
+    This is a pure function (no I/O, no side effects) and is the single
+    classification point for space errors used by state writes, backup
+    transfer isolation, blockcommit deferral, and exit-code gating
+    (design D1).
+    """
+    if not error:
+        return False
+    lower = error.lower()
+    return "no space left on device" in lower or "disk quota exceeded" in lower
+
+
 def is_retryable(error: str) -> bool:
     """Check whether *error* indicates a transient, retryable failure.
 

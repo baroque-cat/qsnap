@@ -8,7 +8,7 @@ Post-creation validation ensures that snapshots and backups are verifiably corre
 
 ### Requirement: Post-creation snapshot validation
 
-After `virsh snapshot-create-as` returns exit code 0, `ExternalSnapshotProvider.create()` SHALL perform the following validation steps before returning `SnapshotResult(success=True)`:
+After `virsh snapshot-create-as` returns exit code 0, `ExternalSnapshotProvider.create()` and `ExternalSnapshotProvider.create_multi()` SHALL perform the following validation steps before returning `SnapshotResult(success=True)`:
 
 1. **File existence**: `test -f <snapshot_path>` via `IShell.run()` — verify the snapshot file landed on disk.
 2. **qcow2 metadata**: Parse the already-obtained `qemu-img info --force-share --output=json` output and verify:
@@ -20,6 +20,8 @@ After `virsh snapshot-create-as` returns exit code 0, `ExternalSnapshotProvider.
 4. **libvirt pivot**: `virsh domblklist --domain <vm>` — verify the source path for the snapshotted disk equals `<snapshot_path>`, confirming libvirt pivoted the active layer.
 
 If ANY validation step fails, the method SHALL return `SnapshotResult(success=False, error=<descriptive message>)`. Core SHALL NOT call `record_snapshot()` for failed snapshots.
+
+For `create_multi()`, steps 1–3 SHALL run for EVERY spec's file, and step 4 SHALL run once via a single `virsh domblklist` call covering all disks of the batch. Validation SHALL have batch semantics: if ANY disk's file fails any check, the entire batch is considered failed — Core SHALL record NONE of the batch's snapshots in state, and the provider SHALL best-effort remove all batch files. Partial recording of a batch is forbidden.
 
 #### Scenario: All validation checks pass
 
@@ -53,6 +55,20 @@ If ANY validation step fails, the method SHALL return `SnapshotResult(success=Fa
 - **WHEN** `virsh snapshot-create-as` returns exit code 0
 - **AND** `virsh domblklist` still shows the previous active layer (not the new snapshot)
 - **THEN** `SnapshotResult(success=False, error="libvirt pivot not confirmed: domblklist still shows <old_path>")` is returned
+
+#### Scenario: Batch — one file fails validation, whole batch rejected
+- **WHEN** `create_multi` is called for disks `vda` and `vdb`
+- **AND** virsh returns exit code 0
+- **AND** `vda`'s file passes all checks but `vdb`'s `backing-filename` check fails
+- **THEN** the `SnapshotResult` for `vdb` has `success=False`
+- **AND** Core records NEITHER snapshot in state
+- **AND** the provider best-effort removes both batch files
+
+#### Scenario: Batch — all files valid, all recorded
+- **WHEN** `create_multi` is called for disks `vda` and `vdb`
+- **AND** every file passes steps 1–3 and the single domblklist check confirms both pivots
+- **THEN** both `SnapshotResult` entries have `success=True`
+- **AND** Core records both snapshots in state with their disks
 
 ### Requirement: Post-transfer incremental backup validation
 

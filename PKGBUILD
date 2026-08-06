@@ -5,7 +5,7 @@
 # The version is read dynamically at runtime via importlib.metadata.
 
 pkgname=qsnap
-pkgver=0.7.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="QEMU/KVM snapshot and backup orchestration tool for qcow2 images (btrbk-inspired)"
 arch=('any')

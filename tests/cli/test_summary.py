@@ -669,3 +669,57 @@ def test_summary_multi_disk_distinguishes_disks():
     assert "snap_vda" in output
     assert "+++ [vdb]" in output
     assert "snap_vdb" in output
+
+
+# ---------------------------------------------------------------------------
+# Space-limited run summary (spec: cli-interface “Disk-full exit code”)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_with_space_limited_does_not_crash():
+    """space_limited=True is accepted by format_summary without crashing.
+
+    The summary remains a pure function of the PipelineResult fields; the
+    flag must never raise.  This is the currently-implemented behavior."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=True),
+        ],
+        actions=[
+            _make_action(
+                "backup_transfer",
+                vm_name="vm-test",
+                name="inc_001",
+                path=Path("/backups/vm-test/inc_001.qcow2"),
+                size=52428800,
+                duration=2.5,
+            ),
+        ],
+        dry_run=False,
+        space_limited=True,
+    )
+    output = format_summary(result)
+
+    assert "qsnap Backup Summary" in output
+    assert "vm-test:" in output
+    assert "inc_001" in output
+
+
+def test_summary_names_space_limited_target():
+    """The summary SHALL name the space-limited target when
+    ``space_limited=True`` (spec: cli-interface, "Disk-full exit code" —
+    "AND the summary names the space-limited target")."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=True),
+        ],
+        actions=[],
+        dry_run=False,
+        space_limited=True,
+        space_limited_targets=["/mnt/backup/test-target"],
+    )
+    output = format_summary(result)
+
+    assert "qsnap Backup Summary" in output
+    assert "space-limited" in output.lower()
+    assert "/mnt/backup/test-target" in output

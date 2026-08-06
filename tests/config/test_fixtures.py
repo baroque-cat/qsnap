@@ -81,7 +81,12 @@ def test_make_global_config_chain_length_defaults(
     make_global_config,
 ) -> None:
     """make_global_config() has snapshot_chain_length=None and
-    snapshot_preserve_min=0 by default (GlobalConfig default)."""
+    snapshot_preserve_min=0.
+
+    NOTE: the fixture pins snapshot_preserve_min=0 EXPLICITLY (its factory
+    parameter default) — this is NOT the GlobalConfig dataclass default,
+    which is 48.  Tests using the fixture get the floor disabled unless
+    they pass snapshot_preserve_min explicitly."""
     cfg = make_global_config()
     assert cfg.snapshot_chain_length is None
     assert cfg.target_chain_length is None
@@ -126,7 +131,11 @@ def test_example_config_parseable() -> None:
     assert global_cfg.snapshot_chain_length == 24
     assert global_cfg.target_chain_length == 168
     assert global_cfg.target_keep_generations == 2
-    assert global_cfg.snapshot_preserve_min == 0
+    assert global_cfg.snapshot_preserve_min == 48
+    # Free-space gate fields — defaults are strict/0/1.0 when commented out.
+    assert global_cfg.free_space_check == "strict"
+    assert global_cfg.free_space_reserve == 0
+    assert global_cfg.free_space_factor == 1.0
 
     # Verify VM de facto.
     vm = facade.get_vm("debiantest")
@@ -140,7 +149,7 @@ def test_example_config_parseable() -> None:
     assert vm.snapshot_chain_length == 24
     assert vm.target_chain_length == 168
     assert vm.target_keep_generations == 2
-    assert vm.snapshot_preserve_min == 0
+    assert vm.snapshot_preserve_min == 48
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -574,9 +583,16 @@ def test_engine_config_toml_parses_correctly() -> None:
 def test_make_global_config_snapshot_preserve_min() -> None:
     """GlobalConfig(snapshot_preserve_min=24) stores the value correctly.
 
-    NOTE: The make_global_config fixture in tests/conftest.py does NOT
-    accept snapshot_preserve_min as a parameter — it needs to be added.
-    This test uses GlobalConfig directly as a workaround.
-    """
+    NOTE: the make_global_config fixture accepts snapshot_preserve_min as
+    a parameter (default 0 — the floor disabled).  This test uses
+    GlobalConfig directly to verify the dataclass field."""
     cfg = GlobalConfig(snapshot_preserve_min=24)
     assert cfg.snapshot_preserve_min == 24
+
+
+@pytest.mark.unit
+def test_make_global_config_accepts_snapshot_preserve_min(make_global_config) -> None:
+    """make_global_config(snapshot_preserve_min=48) forwards the kwarg —
+    the fixture default pins 0, an explicit value overrides it."""
+    cfg = make_global_config(snapshot_preserve_min=48)
+    assert cfg.snapshot_preserve_min == 48

@@ -44,9 +44,11 @@ state_dir = "/var/lib/qsnap/state"
 
 # Snapshot preservation floor — guarantees the newest N snapshots are
 # never blockcommitted, even when snapshot_chain_length is exceeded.
-# Set to 0 (default) to disable.  Set to a positive integer N to always
-# keep the newest N snapshots for rollback, regardless of chain_length.
-# snapshot_preserve_min = 0
+# Default: 48 (with the default snapshot_chain_length=24, this means ~2
+# days of hourly snapshots are always kept uncommitted).  Set to 0 to
+# disable the floor (use only chain_length for retention).  When
+# preserve_min > chain_length, the floor dominates effective retention.
+# snapshot_preserve_min = 48
 
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
@@ -105,6 +107,26 @@ state_dir = "/var/lib/qsnap/state"
 # the VM's active disk directly via IChangeDetector, independent of
 # snapshot existence).  Inherited by VM and target levels.
 # backup_create = "always"
+
+# ── Proactive free-space gate before backup transfers ──────────────────
+#
+# Before every FULL or incremental transfer, qsnap estimates the required
+# space and checks the target filesystem via shutil.disk_usage.  Gating
+# prevents starting transfers doomed to ENOSPC.
+
+# free_space_check: "strict" (suspend target when free space is
+#   insufficient, default), "warn" (log WARNING and proceed anyway), or
+#   "off" (no check — reactive ENOSPC handling only).
+# free_space_check = "strict"
+
+# free_space_reserve: extra safety margin in bytes added to the
+#   estimated transfer size.  Default: 0.
+# free_space_reserve = 0
+
+# free_space_factor: multiplier for the estimate (>= 1.0) to account for
+#   compression, sparse allocation, and estimation inaccuracy.
+#   Default: 1.0.
+# free_space_factor = 1.0
 
 
 # ── VM definitions ──────────────────────────────────────────────────────

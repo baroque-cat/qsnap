@@ -394,8 +394,8 @@ def test_ondemand_snapshot_created_when_target_reachable(
     snapshot_provider = mock_factory._snapshot_provider
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
     ) as create_spy:
         core.run()
 
@@ -429,8 +429,8 @@ def test_ondemand_snapshot_skipped_when_no_target_reachable(
     snapshot_provider = mock_factory._snapshot_provider
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
     ) as create_spy:
         core.run()
 
@@ -439,23 +439,27 @@ def test_ondemand_snapshot_skipped_when_no_target_reachable(
     )
 
 
-# ── test_core_passes_quiesce_true_to_snapshot_provider ────────────────────
+# ── test_core_create_multi_quiesce_all_disks ──────────────────────────────
 
 
-def test_core_passes_quiesce_true_to_snapshot_provider(
+def test_core_create_multi_quiesce_all_disks(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Core passes ``quiesce=True`` to ``snapshot_provider.create()``.
+    """Quiesce enabled → ONE create_multi call covering ALL disks.
 
-    When ``VMConfig.snapshot_quiesce`` is ``True``, the ``create()`` call
-    must receive ``quiesce=True`` as a keyword argument.
+    ``quiesce=vm_config.snapshot_quiesce`` is passed to the single batch
+    call; both disk specs are delivered in one freeze (design D9/D10).
     """
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=True,
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+        ],
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -469,32 +473,35 @@ def test_core_passes_quiesce_true_to_snapshot_provider(
 
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
-    ) as create_spy:
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
+    ) as create_multi_spy:
         core.snapshot()
 
-    assert create_spy.called
-    assert create_spy.call_args.kwargs.get("quiesce") is True
+    create_multi_spy.assert_called_once()
+    call = create_multi_spy.call_args
+    assert call.kwargs.get("quiesce") is True
+    specs = call.args[1]
+    assert [s.disk for s in specs] == ["vda", "vdb"]
 
 
-# ── test_core_passes_quiesce_false_to_snapshot_provider ───────────────────
+# ── test_core_create_multi_no_quiesce_default ─────────────────────────────
 
 
-def test_core_passes_quiesce_false_to_snapshot_provider(
+def test_core_create_multi_no_quiesce_default(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Core passes ``quiesce=False`` to ``snapshot_provider.create()``.
-
-    When ``VMConfig.snapshot_quiesce`` is ``False`` (the default), the
-    ``create()`` call must receive ``quiesce=False``.
-    """
+    """Quiesce disabled (default) → ONE create_multi call with quiesce=False."""
     vm = make_vm_config(
         name="testvm",
         snapshot_quiesce=False,
+        disks=[
+            DiskConfig(target="vda", base_image=Path("/var/lib/libvirt/images/testvm.qcow2")),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+        ],
     )
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -508,13 +515,109 @@ def test_core_passes_quiesce_false_to_snapshot_provider(
 
     with patch.object(
         snapshot_provider,
-        "create",
-        wraps=snapshot_provider.create,
-    ) as create_spy:
+        "create_multi",
+        wraps=snapshot_provider.create_multi,
+    ) as create_multi_spy:
         core.snapshot()
 
-    assert create_spy.called
-    assert create_spy.call_args.kwargs.get("quiesce") is False
+    create_multi_spy.assert_called_once()
+    call = create_multi_spy.call_args
+    assert call.kwargs.get("quiesce") is False
+    specs = call.args[1]
+    assert [s.disk for s in specs] == ["vda", "vdb"]
+
+
+# ── test_pipeline_result_space_limited_true ───────────────────────────────
+
+
+def test_pipeline_result_space_limited_true(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A space-limited run is flagged on PipelineResult.space_limited.
+
+    core-orchestrator scenario "space-limited run flagged": an ENOSPC
+    transfer failure suspends the target and sets the flag without
+    failing the VM.
+    """
+    target = make_target(path=str(tmp_path / "backup"))
+    target.path.mkdir(parents=True, exist_ok=True)
+    (target.path / "testvm.FULL.anchor.qcow2").touch()
+
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    mock_state.record_snapshot("testvm", snap)
+    mock_state.record_full_backup(
+        str(target.path), "testvm.FULL.anchor.qcow2", datetime(2025, 7, 12, 10, 0), "vda"
+    )
+
+    failed = BackupResult(
+        success=False,
+        snapshot_name="snap1",
+        source_path=snap.path,
+        target_path=target.path / "snap1.qcow2",
+        bytes_transferred=0,
+        error="No space left on device",
+        disk="vda",
+    )
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "transfer_missing",
+        return_value=[failed],
+    ):
+        result = core.run()
+
+    assert result.space_limited is True
+    assert result.results[0].success is True
+    assert result.results[0].backup_failed is False
+
+
+# ── test_pipeline_result_space_limited_false ──────────────────────────────
+
+
+def test_pipeline_result_space_limited_false(
+    make_vm_config,
+    make_target,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A clean run is NOT flagged space_limited (default False)."""
+    global_cfg = make_global_config(full_verify_after_create="off")
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    result = core.run()
+
+    assert result.space_limited is False
+    assert result.success is True
 
 
 # ── test_core_imports_from_utils_not_backup_modules ──────────────────────

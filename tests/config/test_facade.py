@@ -774,3 +774,87 @@ def test_change_detection_mode_explicit_allocation_size_preserved(tmp_path: Path
     vm = facade.get_vm("testvm")
 
     assert vm.change_detection_mode == "allocation-size"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Proactive free-space gate fields — parsing and validation (design D5/D16)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_free_space_fields_parsed() -> None:
+    """free_space_fields.toml parses valid free-space gate fields into GlobalConfig."""
+    facade = ConfigFacade(FIXTURES / "free_space_fields.toml")
+    global_cfg = facade.get_global()
+
+    assert global_cfg.free_space_check == "warn"
+    assert global_cfg.free_space_reserve == 1073741824
+    assert global_cfg.free_space_factor == 1.1
+
+    # VM inherits the global values when it omits them.
+    vm = facade.get_vm("testvm")
+    assert vm.free_space_check == "warn"
+    assert vm.free_space_reserve == 1073741824
+    assert vm.free_space_factor == 1.1
+
+
+@pytest.mark.unit
+def test_invalid_free_space_check_raises_config_error() -> None:
+    """free_space_check='hard' raises ConfigError naming strict/warn/off."""
+    with pytest.raises(ConfigError, match="strict.*warn.*off"):
+        ConfigFacade(FIXTURES / "invalid_free_space_check.toml")
+
+
+@pytest.mark.unit
+def test_negative_free_space_reserve_raises_config_error() -> None:
+    """free_space_reserve=-1 raises ConfigError indicating >= 0."""
+    with pytest.raises(ConfigError, match="free_space_reserve must be >= 0"):
+        ConfigFacade(FIXTURES / "negative_free_space_reserve.toml")
+
+
+@pytest.mark.unit
+def test_free_space_factor_below_one_raises_config_error() -> None:
+    """free_space_factor=0.5 raises ConfigError indicating >= 1.0."""
+    with pytest.raises(ConfigError, match="free_space_factor must be >= 1.0"):
+        ConfigFacade(FIXTURES / "low_free_space_factor.toml")
+
+
+@pytest.mark.unit
+def test_free_space_fields_absent_use_defaults(tmp_path: Path) -> None:
+    """A config omitting all three free-space fields uses strict/0/1.0 defaults."""
+    config_file = _write_single_disk_config(tmp_path)
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+
+    assert global_cfg.free_space_check == "strict"
+    assert global_cfg.free_space_reserve == 0
+    assert global_cfg.free_space_factor == 1.0
+
+    # VM-level fields resolve from the global defaults.
+    vm = facade.get_vm("testvm")
+    assert vm.free_space_check == "strict"
+    assert vm.free_space_reserve == 0
+    assert vm.free_space_factor == 1.0
+
+
+@pytest.mark.unit
+def test_preserve_min_default_resolves_to_48() -> None:
+    """preserve_min_default.toml omits snapshot_preserve_min at all levels;
+    both GlobalConfig and VMConfig resolve to the default 48."""
+    facade = ConfigFacade(FIXTURES / "preserve_min_default.toml")
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.snapshot_preserve_min == 48
+    assert vm.snapshot_preserve_min == 48
+
+
+@pytest.mark.unit
+def test_global_fields_toml_free_space_assertions() -> None:
+    """global_fields.toml carries free-space fields alongside all other globals."""
+    facade = ConfigFacade(FIXTURES / "global_fields.toml")
+    global_cfg = facade.get_global()
+
+    assert global_cfg.free_space_check == "warn"
+    assert global_cfg.free_space_reserve == 1073741824
+    assert global_cfg.free_space_factor == 1.1

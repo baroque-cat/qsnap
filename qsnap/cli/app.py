@@ -46,6 +46,16 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qsnap",
         description="QEMU/KVM snapshot and backup orchestration for qcow2 images",
+        epilog=(
+            "Exit codes:\n"
+            "  0  — success\n"
+            "  1  — generic error\n"
+            "  2  — parse error (CLI args or config file)\n"
+            "  3  — lockfile error (another instance running)\n"
+            "  4  — disk-full (at least one target/VM was limited by\n"
+            "        a space error; auto-resumes on the next run)\n"
+            "  10 — backup abort (at least one backup task failed)\n"
+        ),
     )
     # Global flags
     parser.add_argument(

@@ -83,6 +83,21 @@ class SnapshotResult:
     disk: str | None = None
 
 
+@dataclass(frozen=True)
+class SnapshotSpec:
+    """Specification for a single disk in a multi-disk snapshot batch.
+
+    ``disk`` is the disk target (e.g. ``"vda"``), ``name`` is the
+    per-disk snapshot name (e.g. ``"vm.20260101T000000Z_vda_abc123"``),
+    and ``path`` is the absolute path to the qcow2 overlay file to
+    create (design D8).
+    """
+
+    disk: str
+    name: str
+    path: Path
+
+
 # ── Backup ───────────────────────────────────────────────────────────────
 
 

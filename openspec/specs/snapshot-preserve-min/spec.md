@@ -8,15 +8,29 @@ Configurable snapshot preservation floor — guarantees the newest N snapshots o
 
 ### Requirement: Per-disk snapshot preserve_min post-processing filter
 
-Within `_evaluate_disk_retention`, after the retention engine produces keep/remove lists and the oldest-prefix post-processing filter has been applied for one disk's snapshots, Core SHALL apply a `preserve_min` filter that guarantees the newest N snapshots of that disk are never blockcommitted. The filter SHALL work as follows: if `len(final_remove) > len(disk_snapshots) - preserve_min`, Core SHALL trim `final_remove` to the oldest `max(0, len(disk_snapshots) - preserve_min)` items and SHALL move the trimmed (newest excess) items from `remove` to `keep`. When `preserve_min` is 0 (default), the filter SHALL be inactive (no trimming).
+Within `_evaluate_disk_retention`, after the retention engine produces keep/remove lists and the oldest-prefix post-processing filter has been applied for one disk's snapshots, Core SHALL apply a `preserve_min` filter that guarantees the newest N snapshots of that disk are never blockcommitted. The filter SHALL work as follows: if `len(final_remove) > len(disk_snapshots) - preserve_min`, Core SHALL trim `final_remove` to the oldest `max(0, len(disk_snapshots) - preserve_min)` items and SHALL move the trimmed (newest excess) items from `remove` to `keep`. The default value of `preserve_min` is `48` (inherited from `GlobalConfig.snapshot_preserve_min`), so the floor is ACTIVE by default. When `preserve_min` is explicitly set to 0, the filter SHALL be inactive (no trimming). When `preserve_min` exceeds `snapshot_chain_length`, the floor dominates: effective retention keeps at least `preserve_min` newest snapshots per disk.
 
-#### Scenario: preserve_min inactive (default)
+#### Scenario: preserve_min inactive when explicitly zero
 
-- **WHEN** `preserve_min = 0` and one disk has 100 snapshots with `chain_length=72`
+- **WHEN** `preserve_min = 0` (explicit) and one disk has 100 snapshots with `chain_length=72`
 - **THEN** the retention engine produces keep=72, remove=28
 - **AND** the oldest-prefix filter produces remove=28 (contiguous)
 - **AND** the preserve_min filter does not trim (0 = inactive)
 - **AND** all 28 snapshots are eligible for blockcommit
+
+#### Scenario: default preserve_min 48 keeps newest 48
+- **WHEN** no `snapshot_preserve_min` is configured anywhere (default `48`)
+- **AND** one disk has 100 snapshots with the default `chain_length=24`
+- **THEN** the retention engine produces keep=24, remove=76
+- **AND** `max_removable = max(0, 100 - 48) = 52`
+- **AND** the preserve_min filter trims remove to the oldest 52 items
+- **AND** final keep = 48 (newest), final remove = 52 (oldest)
+
+#### Scenario: default floor dominates chain_length
+- **WHEN** defaults apply (`preserve_min=48`, `chain_length=24`) and one disk has 30 snapshots
+- **THEN** `max_removable = max(0, 30 - 48) = 0`
+- **AND** no snapshot is eligible for blockcommit
+- **AND** all 30 snapshots are preserved
 
 #### Scenario: preserve_min preserves newest snapshots of a disk
 

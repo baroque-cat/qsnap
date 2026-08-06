@@ -23,6 +23,11 @@ Scenarios (from ``specs/snapshot-provider/spec.md`` + post-creation-validation):
 6. Successful file deletion — rm -f returns success.
 7. File not found — rm -f is idempotent, still returns success.
 8-11. Post-creation validation: file missing, wrong backing, corrupt bit, pivot.
+12+. ``create_multi`` suite (design D9): one batch virsh call with N
+    ``--diskspec`` args, lock retry wrapping the WHOLE call, quiesce
+    timeouts (180s / 120+30×(N−1)), per-file post-creation validation
+    with batch semantics (one bad file rejects the batch), single
+    domblklist pivot, and best-effort cleanup on failure.
 """
 
 from __future__ import annotations
@@ -32,11 +37,11 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 
-from qsnap.models.results import ShellResult, SnapshotInfo
+from qsnap.models.results import ShellResult, SnapshotInfo, SnapshotSpec
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -151,15 +156,15 @@ def test_create_snapshot_success(mock_shell, make_vm_config):
     domblklist_calls = [cmd for cmd in all_cmds if "domblklist" in cmd]
     # One pre-creation call (previous active capture), one post-creation
     # (pivot check) — both satisfied by the same expect_first expectation.
-    assert len(domblklist_calls) >= 2, (
-        f"Expected at least 2 domblklist calls (pre + post), got {len(domblklist_calls)}"
-    )
+    assert (
+        len(domblklist_calls) >= 2
+    ), f"Expected at least 2 domblklist calls (pre + post), got {len(domblklist_calls)}"
 
     # Assert test -f was called for post-creation file existence check
     test_f_calls = [cmd for cmd in all_cmds if cmd.startswith("test -f")]
-    assert any(str(snapshot_path) in cmd for cmd in test_f_calls), (
-        "Post-creation file existence check (test -f) should have been called"
-    )
+    assert any(
+        str(snapshot_path) in cmd for cmd in test_f_calls
+    ), "Post-creation file existence check (test -f) should have been called"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -204,16 +209,16 @@ def test_create_snapshot_virsh_fails(mock_shell, make_vm_config):
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     # Pre-creation domblklist (step 0) + virsh snapshot-create-as (step 1) = 2 calls.
     # chmod and qemu-img info must NOT have been called.
-    assert len(all_cmds) == 2, (
-        f"Only domblklist + virsh should have been called, but got {len(all_cmds)} calls"
-    )
+    assert (
+        len(all_cmds) == 2
+    ), f"Only domblklist + virsh should have been called, but got {len(all_cmds)} calls"
     assert "snapshot-create-as" in all_cmds[1]
-    assert not any("chmod" in cmd for cmd in all_cmds), (
-        "chmod should NOT be called when virsh fails"
-    )
-    assert not any("qemu-img" in cmd for cmd in all_cmds), (
-        "qemu-img info should NOT be called when virsh fails"
-    )
+    assert not any(
+        "chmod" in cmd for cmd in all_cmds
+    ), "chmod should NOT be called when virsh fails"
+    assert not any(
+        "qemu-img" in cmd for cmd in all_cmds
+    ), "qemu-img info should NOT be called when virsh fails"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -470,9 +475,9 @@ def test_create_snapshot_quiesce_guest_agent_not_installed(mock_shell, make_vm_c
 
     # No silent fallback: exactly ONE virsh call (with --quiesce), no retry
     virsh_cmds = [" ".join(c.args[0]) for c in _virsh_create_calls(shell_spy)]
-    assert len(virsh_cmds) == 1, (
-        f"Should not retry/fallback — exactly one virsh call expected, but got {len(virsh_cmds)}"
-    )
+    assert (
+        len(virsh_cmds) == 1
+    ), f"Should not retry/fallback — exactly one virsh call expected, but got {len(virsh_cmds)}"
     assert "--quiesce" in virsh_cmds[0]
 
 
@@ -611,9 +616,9 @@ def test_risk_quiesce_no_silent_fallback(mock_shell, make_vm_config):
         "Must NOT retry without --quiesce — exactly one virsh call expected, "
         f"but got {len(virsh_cmds)}"
     )
-    assert "--quiesce" in virsh_cmds[0], (
-        "The single virsh call must include --quiesce (no silent fallback)"
-    )
+    assert (
+        "--quiesce" in virsh_cmds[0]
+    ), "The single virsh call must include --quiesce (no silent fallback)"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -697,9 +702,9 @@ def test_create_snapshot_retry_lock_conflict_resolves(mock_shell, make_vm_config
     assert result.success is True
     assert result.new_allocation == 1048576
     assert result.error is None
-    assert len(virsh_attempts) == 2, (
-        f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), got {len(virsh_attempts)}"
-    )
+    assert (
+        len(virsh_attempts) == 2
+    ), f"Expected 2 virsh attempts (1 lock-conflict fail + 1 success), got {len(virsh_attempts)}"
 
 
 def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config):
@@ -741,9 +746,9 @@ def test_create_snapshot_retry_lock_conflict_persists(mock_shell, make_vm_config
 
     assert result.success is False
     assert result.error == lock_error
-    assert len(virsh_attempts) == 3, (
-        f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
-    )
+    assert (
+        len(virsh_attempts) == 3
+    ), f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
 
 
 def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
@@ -783,9 +788,9 @@ def test_create_snapshot_no_retry_non_lock_error(mock_shell, make_vm_config):
         for c in shell_spy.call_args_list
         if "snapshot-create-as" in " ".join(c.args[0])
     ]
-    assert len(virsh_cmds) == 1, (
-        f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_cmds)}"
-    )
+    assert (
+        len(virsh_cmds) == 1
+    ), f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_cmds)}"
 
 
 def test_create_snapshot_retry_lock_conflict_timeout(mock_shell, make_vm_config):
@@ -1183,9 +1188,9 @@ def test_post_snapshot_info_uses_force_share(mock_shell, make_vm_config):
     # Verify --force-share is in the qemu-img info command
     all_cmds = [" ".join(call_obj.args[0]) for call_obj in shell_spy.call_args_list]
     qemu_cmd = next(cmd for cmd in all_cmds if "qemu-img info" in cmd)
-    assert "--force-share" in qemu_cmd, (
-        f"qemu-img info command must include --force-share, got: {qemu_cmd}"
-    )
+    assert (
+        "--force-share" in qemu_cmd
+    ), f"qemu-img info command must include --force-share, got: {qemu_cmd}"
 
 
 def test_post_snapshot_info_without_force_share_regression(mock_shell, make_vm_config):
@@ -1762,3 +1767,955 @@ def test_post_creation_actual_size_unreasonable(mock_shell, make_vm_config):
     assert "actual-size" in result.error
     assert "unreasonable" in result.error
     assert result.new_allocation == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 17. create_multi — shared helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _make_spec(disk: str, suffix: str = "a1b2c3") -> SnapshotSpec:
+    """Build a ``SnapshotSpec`` for *disk* with a deterministic name/path.
+
+    Naming follows the core-orchestrator convention
+    ``{vm}.{timestamp}_{disk}_{6hex}.qcow2`` so the batch ``--name``
+    derivation (``rsplit("_", 1)[0]``) is exercised naturally.
+    """
+    name = f"testvm.20260101T000000Z_{disk}_{suffix}"
+    return SnapshotSpec(
+        disk=disk,
+        name=name,
+        path=Path(f"/var/lib/libvirt/snapshots/testvm/{name}.qcow2"),
+    )
+
+
+def _valid_qemu_info(
+    *,
+    backing: str,
+    actual_size: int = 1048576,
+    virtual_size: int = 1073741824,
+    corrupt: bool = False,
+    **extra: object,
+) -> dict[str, object]:
+    """A ``qemu-img info`` JSON payload that passes post-creation validation.
+
+    ``corrupt=True`` adds the hyphenated ``incompatible-features`` key
+    exactly as ``qemu-img info --output=json`` emits it (the source reads
+    ``info.get("incompatible-features", [])``).
+    """
+    info: dict[str, object] = {
+        "format": "qcow2",
+        "actual-size": actual_size,
+        "virtual-size": virtual_size,
+        "backing-filename": backing,
+    }
+    if corrupt:
+        info["incompatible-features"] = ["corrupt"]
+    info.update(extra)
+    return info
+
+
+def _expect_multi_success(
+    mock_shell,
+    specs: list[SnapshotSpec],
+    *,
+    actual_size: int = 1048576,
+    virtual_size: int = 1073741824,
+    sources: dict[str, str] | None = None,
+) -> None:
+    """Configure MockShell for a successful ``create_multi()`` batch.
+
+    Pre- and post-creation ``virsh domblklist`` report the same sources
+    (same convention as the single-disk ``_expect_successful_create``):
+    the pre call drives the backing-filename check, the post call is the
+    single pivot check.  When *sources* is omitted, each disk maps to its
+    own snapshot path (pivot confirmed, backing-filename matches).
+
+    One per-path ``qemu-img info`` expectation serves BOTH the snapshot
+    metadata read AND the base-image virtual-size comparison whenever the
+    pre-active source equals the snapshot path (both commands contain the
+    same path).
+    """
+    if sources is None:
+        sources = {spec.disk: str(spec.path) for spec in specs}
+    domblklist_out = "Target   Source\n--------------------------------\n" + "".join(
+        f"{disk}   {src}\n" for disk, src in sources.items()
+    )
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=domblklist_out,
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("chmod").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    for spec in specs:
+        info = _valid_qemu_info(
+            backing=str(spec.path), actual_size=actual_size, virtual_size=virtual_size
+        )
+        mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec.path))}").returns(
+            ShellResult(
+                success=True,
+                stdout=json.dumps(info),
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 18. create_multi — batch command shape
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_two_disks_one_virsh_call(mock_shell, make_vm_config):
+    """Two disks are snapshotted with ONE ``virsh snapshot-create-as``
+    call carrying one ``--diskspec`` per disk plus
+    ``--disk-only --atomic --no-metadata --quiesce`` (design D9).
+
+    Returns one successful ``SnapshotResult`` per spec, in spec order.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=True,
+        )
+
+    # One result per spec, in spec order, all successful.
+    assert len(results) == 2
+    assert results[0].success is True
+    assert results[0].name == spec_vda.name
+    assert results[0].path == spec_vda.path
+    assert results[0].new_allocation == 1048576
+    assert results[1].success is True
+    assert results[1].name == spec_vdb.name
+    assert results[1].path == spec_vdb.path
+    assert results[1].new_allocation == 1048576
+
+    # Exactly ONE virsh snapshot-create-as call.
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1, f"Expected exactly 1 batch virsh call, got {len(virsh_calls)}"
+    cmd = " ".join(virsh_calls[0].args[0])
+    assert (
+        "--diskspec vda,file="
+        "/var/lib/libvirt/snapshots/testvm/testvm.20260101T000000Z_vda_a1b2c3.qcow2"
+        ",snapshot=external"
+    ) in cmd
+    assert (
+        "--diskspec vdb,file="
+        "/var/lib/libvirt/snapshots/testvm/testvm.20260101T000000Z_vdb_d4e5f6.qcow2"
+        ",snapshot=external"
+    ) in cmd
+    for flag in ("--disk-only", "--atomic", "--no-metadata", "--quiesce"):
+        assert flag in cmd
+    # Batch name derived from the first spec's name (rsplit on last _).
+    assert "--name testvm.20260101T000000Z_vda" in cmd
+
+    # Exactly 2 domblklist calls: 1 pre-creation + 1 pivot check.
+    all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
+    domblklist_calls = [c for c in all_cmds if "domblklist" in c]
+    assert (
+        len(domblklist_calls) == 2
+    ), f"Expected 1 pre + 1 pivot domblklist, got {len(domblklist_calls)}"
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_single_disk_degenerate(mock_shell, make_vm_config):
+    """A single-disk VM is the degenerate case: ONE ``--diskspec``, no
+    ``--quiesce``, and the 120s timeout (120 + 30×(N−1) with N=1).
+    """
+    vm_config = make_vm_config()
+    spec = _make_spec("vda", "a1b2c3")
+
+    _expect_multi_success(mock_shell, [spec])
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec],
+            quiesce=False,
+        )
+
+    assert len(results) == 1
+    assert results[0].success is True
+    assert results[0].new_allocation == 1048576
+
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    cmd = " ".join(virsh_calls[0].args[0])
+    assert cmd.count("--diskspec") == 1
+    assert "--quiesce" not in cmd
+    assert virsh_calls[0].kwargs["timeout"] == 120
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 19. create_multi — batch failure semantics
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_one_file_fails_validation_batch_failed(mock_shell, make_vm_config):
+    """virsh succeeds but vdb's file fails validation (actual-size
+    unreasonable for an overlay): the batch is reported failed — vdb
+    carries the descriptive error, vda is downgraded to 'batch rejected'.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+    # vdb: actual-size == virtual-size → exceeds the 50% overlay threshold.
+    bad_info = _valid_qemu_info(
+        backing=str(spec_vdb.path), actual_size=1073741824, virtual_size=1073741824
+    )
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(bad_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    results = provider.create_multi(
+        vm_config=vm_config,
+        specs=[spec_vda, spec_vdb],
+        quiesce=False,
+    )
+
+    assert len(results) == 2
+    assert results[0].success is False
+    assert "batch rejected" in results[0].error
+    assert results[1].success is False
+    assert "unreasonable" in results[1].error
+    assert results[1].new_allocation == 0
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_virsh_failure_all_failed(mock_shell, make_vm_config):
+    """When the single batch virsh call returns non-zero, EVERY
+    ``SnapshotResult`` fails with the virsh stderr; chmod/qemu-img are
+    never called and the batch files are best-effort removed.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    stderr_msg = "error: internal error: snapshot creation failed"
+
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with (
+        patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(results) == 2
+    for r in results:
+        assert r.success is False
+        assert r.error == stderr_msg
+        assert r.new_allocation == 0
+
+    all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
+    assert len([c for c in all_cmds if "snapshot-create-as" in c]) == 1
+    assert not any(
+        "chmod" in c for c in all_cmds
+    ), "chmod must NOT be called when the batch virsh call fails"
+    assert not any(
+        "qemu-img" in c for c in all_cmds
+    ), "qemu-img info must NOT be called when the batch virsh call fails"
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_batch_timeout(mock_shell, make_vm_config):
+    """A batch timeout fails EVERY spec result.  A non-quiesce 2-disk
+    batch uses 120 + 30×(2−1) = 150s; the error contains 'timed out' and
+    the provider best-effort removes the batch files.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error="Command timed out after 150s",
+        )
+    )
+
+    with (
+        patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(results) == 2
+    for r in results:
+        assert r.success is False
+        assert "timed out" in r.error.lower()
+
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    assert virsh_calls[0].kwargs["timeout"] == 150
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_validation_failure_removes_files(mock_shell, make_vm_config):
+    """When one file fails validation, the provider best-effort removes
+    ALL batch files (spec: 'Batch leftover cleanup on failure') before
+    returning the per-spec results.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+    # vdb: actual-size == virtual-size → unreasonable-overlay failure.
+    bad_info = _valid_qemu_info(
+        backing=str(spec_vdb.path), actual_size=1073741824, virtual_size=1073741824
+    )
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(bad_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(results) == 2
+    assert results[1].success is False
+    assert "unreasonable" in results[1].error
+    assert results[0].success is False
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 20. create_multi — lock conflict retry (design D5/D9)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_lock_conflict_resolved_on_retry(mock_shell, make_vm_config):
+    """First virsh attempt fails with 'cannot acquire state change lock',
+    the second succeeds after the 2s backoff — the whole batch succeeds.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+
+    virsh_attempts: list[str] = []
+    original_run = mock_shell.run
+    lock_error = "error: internal error: cannot acquire state change lock"
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(cmd_str)
+            if len(virsh_attempts) == 1:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    returncode=1,
+                    error=lock_error,
+                )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None) as sleep_mock,
+        patch.object(mock_shell, "run", side_effect=side_effect),
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert (
+        len(virsh_attempts) == 2
+    ), f"Expected 2 virsh attempts (1 lock conflict + 1 success), got {len(virsh_attempts)}"
+    sleep_mock.assert_called_once_with(2.0)
+    assert len(results) == 2
+    assert all(r.success for r in results)
+    assert results[0].new_allocation == 1048576
+    assert results[1].new_allocation == 1048576
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_lock_conflict_exhausted(mock_shell, make_vm_config):
+    """All 3 attempts fail with the lock conflict — every spec result
+    fails with the lock error, backoffs were 2s then 4s, and the batch
+    files are cleaned up.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    lock_error = "error: internal error: cannot acquire state change lock"
+
+    virsh_attempts: list[str] = []
+    original_run = mock_shell.run
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(cmd_str)
+            return ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                returncode=1,
+                error=lock_error,
+            )
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None) as sleep_mock,
+        patch.object(mock_shell, "run", side_effect=side_effect),
+        patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock,
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert (
+        len(virsh_attempts) == 3
+    ), f"Expected 3 virsh attempts (1 initial + 2 retries), got {len(virsh_attempts)}"
+    assert sleep_mock.call_args_list == [call(2.0), call(4.0)]
+    assert len(results) == 2
+    for r in results:
+        assert r.success is False
+        assert r.error == lock_error
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_no_retry_non_lock_error(mock_shell, make_vm_config):
+    """A non-lock virsh error ('No space left on device') is NOT retried:
+    exactly 1 virsh call and every spec result fails immediately.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    stderr_msg = "error: internal error: No space left on device"
+
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert (
+        len(virsh_calls) == 1
+    ), f"Non-lock errors must NOT be retried; expected 1 virsh call, got {len(virsh_calls)}"
+    assert len(results) == 2
+    for r in results:
+        assert r.success is False
+        assert r.error == stderr_msg
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_lock_retry_wraps_batch(mock_shell, make_vm_config):
+    """The retry re-executes the WHOLE batch command: both attempts
+    contain BOTH ``--diskspec`` arguments and no per-disk virsh calls are
+    ever made (spec: 'Batch lock retry wraps the whole call').
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+
+    virsh_attempts: list[str] = []
+    original_run = mock_shell.run
+
+    def side_effect(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "snapshot-create-as" in cmd_str:
+            virsh_attempts.append(cmd_str)
+            if len(virsh_attempts) == 1:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    returncode=1,
+                    error="error: internal error: cannot acquire state change lock",
+                )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+        return original_run(cmd, timeout=timeout, check=check)
+
+    with (
+        patch("qsnap.modules.snapshot.external.time.sleep", return_value=None),
+        patch.object(mock_shell, "run", side_effect=side_effect),
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(virsh_attempts) == 2
+    for attempt_cmd in virsh_attempts:
+        assert "--diskspec vda,file=" in attempt_cmd
+        assert "--diskspec vdb,file=" in attempt_cmd
+        assert (
+            attempt_cmd.count("--diskspec") == 2
+        ), "The retry must re-issue the full batch command, never per-disk virsh calls"
+    assert all(r.success for r in results)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 21. create_multi — quiesce behavior and timeouts
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_quiesce_timeout_180s(mock_shell, make_vm_config):
+    """Quiesce-enabled batch: timeout is exactly 180s regardless of the
+    number of disks, and one ``--quiesce`` freeze covers all disks.
+    """
+    vm_config = make_vm_config()
+    specs = [
+        _make_spec("vda", "a1b2c3"),
+        _make_spec("vdb", "d4e5f6"),
+        _make_spec("vdc", "feed00"),
+    ]
+
+    _expect_multi_success(mock_shell, specs)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=specs,
+            quiesce=True,
+        )
+
+    assert all(r.success for r in results)
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    cmd = " ".join(virsh_calls[0].args[0])
+    assert cmd.count("--diskspec") == 3
+    assert "--quiesce" in cmd
+    assert virsh_calls[0].kwargs["timeout"] == 180
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_non_quiesce_timeout_scales(mock_shell, make_vm_config):
+    """Non-quiesce batch with N=3 disks: timeout = 120 + 30×(3−1) = 180s
+    and the command carries NO ``--quiesce``.
+    """
+    vm_config = make_vm_config()
+    specs = [
+        _make_spec("vda", "a1b2c3"),
+        _make_spec("vdb", "d4e5f6"),
+        _make_spec("vdc", "feed00"),
+    ]
+
+    _expect_multi_success(mock_shell, specs)
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=specs,
+            quiesce=False,
+        )
+
+    assert all(r.success for r in results)
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert len(virsh_calls) == 1
+    cmd = " ".join(virsh_calls[0].args[0])
+    assert "--quiesce" not in cmd
+    timeout = virsh_calls[0].kwargs["timeout"]
+    assert timeout == 180, f"Expected 120+30×(N−1)=180s for N=3, got {timeout}"
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_quiesce_guest_agent_missing_all_failed(mock_shell, make_vm_config):
+    """A quiesced batch with no guest agent fails for ALL specs with the
+    virsh error — no non-quiesced fallback and no retry are attempted.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    stderr_msg = (
+        "error: internal error: unable to execute guest agent: " "qemu-guest-agent is not running"
+    )
+
+    mock_shell.expect("virsh snapshot-create-as").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr=stderr_msg,
+            returncode=1,
+            error=stderr_msg,
+        )
+    )
+
+    with (
+        patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+    ):
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=True,
+        )
+
+    assert len(results) == 2
+    for r in results:
+        assert r.success is False
+        assert r.error == stderr_msg
+
+    # Exactly ONE virsh call, still with --quiesce (no silent fallback).
+    virsh_calls = _virsh_create_calls(shell_spy)
+    assert (
+        len(virsh_calls) == 1
+    ), f"Must not retry/fall back — exactly one virsh call expected, got {len(virsh_calls)}"
+    assert "--quiesce" in " ".join(virsh_calls[0].args[0])
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 22. create_multi — post-creation validation (batch semantics)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_all_validation_checks_pass(mock_shell, make_vm_config):
+    """Every post-creation check runs per file and passes: file existence
+    (test -f), qcow2 format, virtual-size match (base image queried),
+    actual-size ≤ 50% of virtual-size, no corrupt bit, backing-filename,
+    and the single domblklist pivot covering both disks.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(results) == 2
+    assert all(r.success for r in results)
+    assert results[0].new_allocation == 1048576
+    assert results[1].new_allocation == 1048576
+
+    all_cmds = [" ".join(c.args[0]) for c in shell_spy.call_args_list]
+    # Per file: snapshot metadata read + base virtual-size read = 2 qemu-img calls.
+    qemu_info_calls = [c for c in all_cmds if "qemu-img info" in c]
+    assert (
+        len(qemu_info_calls) == 4
+    ), f"Expected 2 qemu-img info calls per disk (snapshot + base), got {len(qemu_info_calls)}"
+    # Per-file existence check.
+    test_f_calls = [c for c in all_cmds if c.startswith("test -f")]
+    assert len(test_f_calls) == 2
+    # ONE pivot domblklist + one pre-creation domblklist.
+    domblklist_calls = [c for c in all_cmds if "domblklist" in c]
+    assert len(domblklist_calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_file_missing_fails_batch(mock_shell, make_vm_config):
+    """virsh succeeds but vdb's file is missing (``test -f`` fails): vdb
+    fails with 'snapshot file not found on disk after virsh success' and
+    the whole batch is rejected (vda downgraded).
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+    mock_shell.expect_first(f"test -f.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=1,
+            error="File not found",
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    results = provider.create_multi(
+        vm_config=vm_config,
+        specs=[spec_vda, spec_vdb],
+        quiesce=False,
+    )
+
+    assert len(results) == 2
+    assert results[0].success is False
+    assert "batch rejected" in results[0].error
+    assert results[1].success is False
+    assert "snapshot file not found on disk after virsh success" in results[1].error
+    assert results[1].new_allocation == 0
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_wrong_backing_fails_batch(mock_shell, make_vm_config):
+    """vdb's overlay points at the wrong backing file: vdb fails with the
+    exact 'backing-filename mismatch: expected <prev>, got <actual>'
+    message and the batch is rejected.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    wrong_backing = "/var/lib/libvirt/images/wrong.qcow2"
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+    bad_info = _valid_qemu_info(backing=wrong_backing)
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(bad_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    results = provider.create_multi(
+        vm_config=vm_config,
+        specs=[spec_vda, spec_vdb],
+        quiesce=False,
+    )
+
+    assert results[1].success is False
+    assert "backing-filename mismatch" in results[1].error
+    assert str(spec_vdb.path) in results[1].error  # expected = pre-active layer
+    assert wrong_backing in results[1].error  # actual backing reported
+    assert results[0].success is False
+    assert "batch rejected" in results[0].error
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_corrupt_bit_fails_batch(mock_shell, make_vm_config):
+    """A single-disk batch whose overlay has the corrupt bit set fails
+    with 'snapshot has corrupt bit set'.
+    """
+    vm_config = make_vm_config()
+    spec = _make_spec("vda", "a1b2c3")
+
+    _expect_multi_success(mock_shell, [spec])
+    bad_info = _valid_qemu_info(backing=str(spec.path), corrupt=True)
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(bad_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    results = provider.create_multi(
+        vm_config=vm_config,
+        specs=[spec],
+        quiesce=False,
+    )
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "snapshot has corrupt bit set" in results[0].error
+    assert results[0].new_allocation == 0
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_pivot_not_confirmed(mock_shell, make_vm_config):
+    """The single post-batch domblklist still shows the old active layer
+    for vdb: vdb fails with 'libvirt pivot not confirmed' and the batch
+    is rejected.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    old_vdb = "/var/lib/libvirt/images/testvm-b.qcow2"
+
+    # domblklist (pre AND post) shows vda pivoted to its snapshot but vdb
+    # still on the old active layer → pivot check fails for vdb.
+    _expect_multi_success(
+        mock_shell,
+        [spec_vda, spec_vdb],
+        sources={spec_vda.disk: str(spec_vda.path), spec_vdb.disk: old_vdb},
+    )
+    # vdb snapshot metadata must pass the backing check (points at the old
+    # active layer) so the failure surfaces at the pivot step, not earlier.
+    vdb_info = _valid_qemu_info(backing=old_vdb)
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(vdb_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Base-image virtual-size read for vdb (previous_active = old_vdb).
+    base_info = _valid_qemu_info(backing="")
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(old_vdb)}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(base_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = ExternalSnapshotProvider(mock_shell)
+    results = provider.create_multi(
+        vm_config=vm_config,
+        specs=[spec_vda, spec_vdb],
+        quiesce=False,
+    )
+
+    assert results[1].success is False
+    assert "libvirt pivot not confirmed" in results[1].error
+    assert old_vdb in results[1].error
+    assert results[0].success is False
+    assert "batch rejected" in results[0].error
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_create_multi_batch_rejected_on_one_bad_file(mock_shell, make_vm_config):
+    """Batch semantics (spec: 'Batch — one file fails validation, whole
+    batch rejected'): vdb fails the backing-filename check, so BOTH
+    results are failures — vdb with the specific error, vda with the
+    exact 'batch rejected due to another disk's validation failure'
+    message — and both batch files are removed.
+    """
+    vm_config = make_vm_config()
+    spec_vda = _make_spec("vda", "a1b2c3")
+    spec_vdb = _make_spec("vdb", "d4e5f6")
+    wrong_backing = "/var/lib/libvirt/images/wrong.qcow2"
+
+    _expect_multi_success(mock_shell, [spec_vda, spec_vdb])
+    bad_info = _valid_qemu_info(backing=wrong_backing)
+    mock_shell.expect_first(f"qemu-img info.*{re.escape(str(spec_vdb.path))}").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(bad_info),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with patch.object(ExternalSnapshotProvider, "_rm_files") as rm_mock:
+        provider = ExternalSnapshotProvider(mock_shell)
+        results = provider.create_multi(
+            vm_config=vm_config,
+            specs=[spec_vda, spec_vdb],
+            quiesce=False,
+        )
+
+    assert len(results) == 2
+    assert results[1].success is False
+    assert "backing-filename mismatch" in results[1].error
+    assert results[0].success is False
+    assert results[0].error == "batch rejected due to another disk's validation failure"
+    assert results[0].new_allocation == 0
+    assert results[1].new_allocation == 0
+    rm_mock.assert_called_once_with([spec_vda.path, spec_vdb.path])

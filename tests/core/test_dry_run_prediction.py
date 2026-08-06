@@ -1384,3 +1384,93 @@ def test_real_run_phantom_cleanup_still_executes(
     assert "removed (cascade:" in log_text, (
         f"Log should contain 'removed (cascade:', got: ...{log_text[-500:]}"
     )
+
+
+# ── test_dry_run_predicts_gate_entry ──────────────────────────────────────
+
+
+def test_dry_run_predicts_gate_entry(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+) -> None:
+    """Dry-run predicts the strict free-space gate with target + estimate.
+
+    A ``free_space_gate`` prediction names the target path and carries the
+    FULL estimate; no transfer/suspension/mutation happens in dry-run
+    (core-orchestrator scenario 15; design D12).
+    """
+    from qsnap.utils.space import SpaceCheckResult
+
+    vm = _make_vm(name="testvm")
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+
+    insufficient = SpaceCheckResult(
+        sufficient=False, free_bytes=100, estimate=5000, required=10000
+    )
+    with (
+        patch("qsnap.core.estimate_full_size", return_value=5000),
+        patch("qsnap.core.check_free_space", return_value=insufficient),
+    ):
+        result = core.run()
+
+    assert result.dry_run is True
+
+    gate_preds = [p for p in result.predictions if p.action == "free_space_gate"]
+    assert len(gate_preds) == 1, (
+        f"Expected exactly one free_space_gate prediction, got {len(gate_preds)}"
+    )
+    pred = gate_preds[0]
+    assert Path(pred.name) == vm.targets[0].path, (
+        f"Gate prediction must name the target, got {pred.name!r}"
+    )
+    assert Path(pred.path) == vm.targets[0].path
+    assert pred.size == 5000, f"Gate prediction must carry the estimate, got {pred.size}"
+    assert pred.error == "insufficient space (would suspend target)", (
+        f"Unexpected gate prediction error: {pred.error!r}"
+    )
+
+    # Dry-run never flags space_limited and never mutates state.
+    assert result.space_limited is False
+    assert mock_state.get_full_backups(str(vm.targets[0].path)) == []
+
+
+# ── test_dry_run_space_limited_false ──────────────────────────────────────
+
+
+def test_dry_run_space_limited_false(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+) -> None:
+    """Dry-run is never flagged space_limited — even when the gate would block.
+
+    core-orchestrator scenario "dry-run never flagged": predictions are
+    recorded but the run reports ``space_limited=False`` (design D12).
+    """
+    from qsnap.utils.space import SpaceCheckResult
+
+    vm = _make_vm(name="testvm")
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+
+    # Plain dry-run.
+    result = core.run()
+    assert result.space_limited is False
+
+    # Dry-run with the strict gate blocked — still not flagged.
+    insufficient = SpaceCheckResult(
+        sufficient=False, free_bytes=100, estimate=5000, required=10000
+    )
+    with (
+        patch("qsnap.core.estimate_full_size", return_value=5000),
+        patch("qsnap.core.check_free_space", return_value=insufficient),
+    ):
+        result2 = core.run()
+
+    assert result2.space_limited is False
+    gate_preds = [p for p in result2.predictions if p.action == "free_space_gate"]
+    assert len(gate_preds) >= 1, "gate-blocked dry-run should still predict the gate"

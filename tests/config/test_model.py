@@ -157,17 +157,49 @@ def test_global_config_snapshot_preserve_min_immutable():
 
 def test_global_chain_length_defaults_are_sensible():
     """GlobalConfig().snapshot_chain_length is 24, target_chain_length is 168,
-    target_keep_generations is 2, snapshot_preserve_min is 0 (not None)."""
+    target_keep_generations is 2, snapshot_preserve_min is 48 (active floor)."""
     cfg = GlobalConfig()
     assert cfg.snapshot_chain_length == 24
     assert cfg.target_chain_length == 168
     assert cfg.target_keep_generations == 2
-    assert cfg.snapshot_preserve_min == 0
+    assert cfg.snapshot_preserve_min == 48
 
 
 def test_global_config_snapshot_preserve_min_default():
-    """GlobalConfig().snapshot_preserve_min defaults to 0 (inactive preservation floor)."""
-    assert GlobalConfig().snapshot_preserve_min == 0
+    """GlobalConfig().snapshot_preserve_min defaults to 48 (active preservation floor —
+    ~2 days of hourly snapshots).  Explicit 0 disables the floor."""
+    assert GlobalConfig().snapshot_preserve_min == 48
+
+
+def test_global_config_preserve_min_zero_disables():
+    """Explicit snapshot_preserve_min=0 disables the floor (design D13)."""
+    cfg = GlobalConfig(snapshot_preserve_min=0)
+    assert cfg.snapshot_preserve_min == 0
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig free-space gate fields (design D5/D16)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_free_space_defaults():
+    """GlobalConfig() free-space gate defaults: strict check, no reserve, factor 1.0."""
+    cfg = GlobalConfig()
+    assert cfg.free_space_check == "strict"
+    assert cfg.free_space_reserve == 0
+    assert cfg.free_space_factor == 1.0
+
+
+def test_global_config_free_space_override():
+    """GlobalConfig(free_space_check='warn', ...) stores explicit overrides."""
+    cfg = GlobalConfig(
+        free_space_check="warn",
+        free_space_reserve=1073741824,
+        free_space_factor=1.1,
+    )
+    assert cfg.free_space_check == "warn"
+    assert cfg.free_space_reserve == 1073741824
+    assert cfg.free_space_factor == 1.1
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,10 @@
+# Negative free_space_reserve — must be >= 0
+free_space_reserve = -1
+
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"

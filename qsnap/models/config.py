@@ -47,6 +47,11 @@ class GlobalConfig:
     snapshots, ~1 day of history), ``target_chain_length=168`` (hourly
     incrementals, ~1 week of history), ``target_keep_generations=2``
     (keep 2 FULL chains on targets).
+
+    ``snapshot_preserve_min`` defaults to 48 — a safe floor keeping
+    ~2 days of hourly snapshots uncommitted.  When preserve_min exceeds
+    chain_length, the floor dominates effective retention.  Explicit
+    ``snapshot_preserve_min = 0`` still disables the floor (design D13).
     """
 
     state_dir: str = "/var/lib/qsnap/state"
@@ -54,7 +59,10 @@ class GlobalConfig:
     snapshot_chain_length: int | None = 24
     target_chain_length: int | None = 168
     target_keep_generations: int | None = 2
-    snapshot_preserve_min: int = 0
+    # Snapshot preservation floor — active by default (48 = ~2 days of
+    # hourly snapshots).  Explicit 0 disables; when > chain_length, the
+    # floor dominates effective retention (design D13).
+    snapshot_preserve_min: int = 48
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
@@ -109,6 +117,16 @@ class GlobalConfig:
     #   appended in ``localtime type status target_url source_url parent_url``
     #   format.  Skipped in dry-run mode.
     transaction_log: str | None = None
+    # Proactive free-space gate before backup transfers.
+    # ``free_space_check``: ``"strict"`` (suspend target when free space is
+    #   insufficient — default), ``"warn"`` (log WARNING and proceed), or
+    #   ``"off"`` (no check).  ``free_space_reserve`` (bytes) is an extra
+    #   safety margin added to the estimated transfer size.  ``free_space_factor``
+    #   multiplies the estimate (>= 1.0) to account for compression/sparse
+    #   inaccuracy (design D5/D16).
+    free_space_check: str = "strict"
+    free_space_reserve: int = 0
+    free_space_factor: float = 1.0
     # When to create backups (global default): ``"always"`` (default —
     # always transfer backups) or ``"onchange"`` (skip backup transfer
     # when the VM disk has not changed since the last backup to that
@@ -235,6 +253,10 @@ class VMConfig:
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-map"
+    # Proactive free-space gate (inherited from global).
+    free_space_check: str | None = None
+    free_space_reserve: int | None = None
+    free_space_factor: float | None = None
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False
     targets: list[TargetConfig] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]

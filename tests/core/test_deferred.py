@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from qsnap.core import Core
 from qsnap.models.config import DiskConfig
 from qsnap.models.results import (
@@ -1383,3 +1385,277 @@ def test_deferred_threshold_warning_dry_run_no_state_write(
     ) as warn_spy_real:
         core._check_deferred_thresholds()
     assert warn_spy_real.call_count == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ENOSPC deferral (design D4 — blockcommit space errors defer, not abort)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_offline_commit_enospc_defers_no_runtime_error(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """An offline (qemu-img) commit hitting ENOSPC defers — no RuntimeError.
+
+    The commit failure is queued with reason ``"enospc"``, the snapshot
+    state record is preserved (removal only happens after a successful
+    commit), and the run is flagged space-limited (design D4/D6).
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    snap_info = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    _set_vm_state(mock_shell, "shut off")
+    # domblklist points elsewhere → snap1 is NOT the tip → committable
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    enospc = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="qemu-img commit failed: No space left on device",
+    )
+
+    with patch.object(mock_factory._lifecycle_manager, "blockcommit", return_value=enospc):
+        # Must NOT raise RuntimeError.
+        core._blockcommit_one_disk(vm, "vda", [snap_info])
+
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].reason == "enospc"
+    assert remaining[0].snapshots == ["snap1"]
+
+    # Snapshot state record preserved — the merge is retried intact.
+    assert len(mock_state.get_snapshots("testvm")) == 1
+
+    # Exit-code tracking: blockcommit space errors set the disk-full flag.
+    assert "blockcommit:testvm:vda" in core._space_limited_targets
+
+
+def test_live_commit_enospc_defers(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A live (virsh) commit hitting ENOSPC also defers with reason "enospc"."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    snap_info = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    _set_vm_state(mock_shell, "running")
+    # domblklist points to a NEWER file → snap1 is below the active layer
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+
+    enospc = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="virsh blockcommit failed: disk quota exceeded",
+    )
+
+    with patch.object(mock_factory._lifecycle_manager, "blockcommit", return_value=enospc):
+        core._blockcommit_one_disk(vm, "vda", [snap_info])
+
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].reason == "enospc"
+    assert len(mock_state.get_snapshots("testvm")) == 1
+
+
+def test_deferred_enospc_drained_later(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A deferred enospc entry is drained by the next run after space frees.
+
+    Run 1: offline commit hits ENOSPC → deferred, no exception, snapshot
+    record intact.  Run 2: the deferred drain commits and removes the
+    snapshot; the queue is cleared.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    snap_info = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    _set_vm_state(mock_shell, "shut off")
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    # Run 1: ENOSPC → deferred.
+    enospc = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="qemu-img commit failed: No space left on device",
+    )
+    with patch.object(mock_factory._lifecycle_manager, "blockcommit", return_value=enospc):
+        core._blockcommit_one_disk(vm, "vda", [snap_info])
+
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "enospc"
+
+    # Run 2: space freed → the next run drains the entry.
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with patch.object(
+        lifecycle_manager,
+        "blockcommit",
+        wraps=lifecycle_manager.blockcommit,
+    ) as bc_spy:
+        core._check_deferred_operations(vm)
+
+    assert bc_spy.called, "the deferred enospc entry must be drained on the next run"
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert mock_state.get_snapshots("testvm") == [], (
+        "the committed snapshot is removed from state after a successful drain"
+    )
+
+
+def test_enospc_deferred_threshold_monitoring(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Deferred enospc entries appear in threshold monitoring and listing."""
+    global_config = make_global_config(
+        deferred_warn_count="5",
+        deferred_crit_count="10",
+        deferred_warn_age="7d",
+        deferred_crit_age="14d",
+    )
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(global_config=global_config, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    for i in range(5):
+        mock_state.add_deferred_blockcommit("testvm", "vda", [f"snap{i}"], "enospc")
+
+    # Threshold monitoring logs the warning naming the enospc reason.
+    caplog.set_level(logging.WARNING)
+    core._check_deferred_thresholds()
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) >= 1
+    assert "enospc" in warnings[0].getMessage()
+
+    # list_deferred summarizes the enospc entries per disk.
+    summaries = core.list_deferred()
+    assert len(summaries) == 1
+    assert summaries[0].reason == "enospc"
+    assert summaries[0].snapshot_count == 5
+
+
+def test_non_space_commit_failure_aborts(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A non-space commit failure still aborts the VM (RuntimeError).
+
+    Only space-classified failures defer; everything else keeps the
+    VM-level isolation abort (verify-before-delete is not weakened).
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    snap_info = SnapshotInfo(
+        name="snap1",
+        path=Path("/tmp/snap1.qcow2"),
+        timestamp=datetime(2025, 7, 13, 10, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    _set_vm_state(mock_shell, "shut off")
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    failure = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="qemu-img commit failed: input/output error",
+    )
+
+    with (
+        patch.object(mock_factory._lifecycle_manager, "blockcommit", return_value=failure),
+        pytest.raises(RuntimeError, match="Blockcommit failed"),
+    ):
+        core._blockcommit_one_disk(vm, "vda", [snap_info])
+
+    # Not deferred, not space-limited — a definitive non-space abort.
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert core._space_limited_targets == set()
