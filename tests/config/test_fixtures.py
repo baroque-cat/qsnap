@@ -596,3 +596,122 @@ def test_make_global_config_accepts_snapshot_preserve_min(make_global_config) ->
     the fixture default pins 0, an explicit value overrides it."""
     cfg = make_global_config(snapshot_preserve_min=48)
     assert cfg.snapshot_preserve_min == 48
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TOML fixture: vm_engine_options.toml — VM-level backup engine options
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_engine_options_toml_parses() -> None:
+    """vm_engine_options.toml parses — VM-level engine options override
+    globals and are inherited by targets.
+
+    - vm_all_vm_level: all six engine options set at VM level; the target
+      inherits every value.
+    - vm_global_inherit: no engine options set — VM and target inherit
+      the non-standard global defaults (verify defaults to "metadata"
+      at the VM level because no global verify key exists).
+    """
+    facade = ConfigFacade(FIXTURES / "vm_engine_options.toml")
+    vms = facade.get_vms()
+
+    assert len(vms) == 3
+
+    # vm_all_vm_level: all six options at VM level.
+    vm_all = facade.get_vm("vm_all_vm_level")
+    assert vm_all.compress is True
+    assert vm_all.compression_type == "zstd"
+    assert vm_all.convert_parallel == 8
+    assert vm_all.convert_out_of_order is True
+    assert vm_all.backup_stall_timeout == "30m"
+    assert vm_all.verify == "compare"
+
+    # Target inherits the VM values.
+    assert len(vm_all.targets) == 1
+    target_all = vm_all.targets[0]
+    assert target_all.compress is True
+    assert target_all.compression_type == "zstd"
+    assert target_all.convert_parallel == 8
+    assert target_all.convert_out_of_order is True
+    assert target_all.backup_stall_timeout == "30m"
+    assert target_all.verify == "compare"
+
+    # vm_global_inherit: everything inherited from global defaults.
+    vm_inh = facade.get_vm("vm_global_inherit")
+    assert vm_inh.compress is False
+    assert vm_inh.compression_type == "zlib"
+    assert vm_inh.convert_parallel == 2
+    assert vm_inh.convert_out_of_order is False
+    assert vm_inh.backup_stall_timeout == "1h"
+    assert vm_inh.verify == "metadata"
+
+    # Target inherits from VM.
+    assert len(vm_inh.targets) == 1
+    target_inh = vm_inh.targets[0]
+    assert target_inh.compress is False
+    assert target_inh.compression_type == "zlib"
+    assert target_inh.convert_parallel == 2
+    assert target_inh.convert_out_of_order is False
+    assert target_inh.backup_stall_timeout == "1h"
+    assert target_inh.verify == "metadata"
+
+
+@pytest.mark.unit
+def test_vm_engine_options_toml_target_inheritance() -> None:
+    """vm_engine_options.toml — vm_target_override resolves target-level
+    overrides on top of VM-level engine options.
+
+    The VM pins the global values explicitly; the target overrides
+    compression_type, convert_parallel, and backup_stall_timeout while
+    inheriting compress, convert_out_of_order, and verify from the VM.
+    """
+    facade = ConfigFacade(FIXTURES / "vm_engine_options.toml")
+
+    vm_ovr = facade.get_vm("vm_target_override")
+
+    # VM-level engine options.
+    assert vm_ovr.compress is False
+    assert vm_ovr.compression_type == "zlib"
+    assert vm_ovr.convert_parallel == 2
+    assert vm_ovr.convert_out_of_order is False
+    assert vm_ovr.backup_stall_timeout == "1h"
+    assert vm_ovr.verify == "metadata"
+
+    # Target overrides some options.
+    assert len(vm_ovr.targets) == 1
+    target_ovr = vm_ovr.targets[0]
+    assert target_ovr.compression_type == "zstd"
+    assert target_ovr.convert_parallel == 4
+    assert target_ovr.backup_stall_timeout == "30m"
+
+    # Target inherits the rest from the VM.
+    assert target_ovr.compress is False
+    assert target_ovr.convert_out_of_order is False
+    assert target_ovr.verify == "metadata"
+
+
+@pytest.mark.unit
+def test_make_vm_config_forwards_engine_option_kwargs(make_vm_config) -> None:
+    """make_vm_config forwards backup engine option kwargs to VMConfig.
+
+    The conftest helper accepts compress, compression_type,
+    convert_parallel, convert_out_of_order, backup_stall_timeout, and
+    verify as **kwargs and passes them straight to VMConfig.
+    """
+    vm = make_vm_config(
+        "testvm",
+        compress=False,
+        compression_type="zlib",
+        convert_parallel=8,
+        convert_out_of_order=False,
+        backup_stall_timeout="1h",
+        verify="compare",
+    )
+    assert vm.compress is False
+    assert vm.compression_type == "zlib"
+    assert vm.convert_parallel == 8
+    assert vm.convert_out_of_order is False
+    assert vm.backup_stall_timeout == "1h"
+    assert vm.verify == "compare"

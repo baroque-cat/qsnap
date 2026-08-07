@@ -8,6 +8,7 @@ for VMConfig.targets, and count-based retention configuration.
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -227,6 +228,74 @@ def test_vm_config_required_fields():
     assert vm.snapshot_preserve_min is None
     # Deep verification fields (T2) default to False.
     assert vm.blockcommit_deep_verify is False
+    # Backup engine options (vm-level-backup-engine-options change) default
+    # to the spec values on a bare-minimum VMConfig.
+    assert vm.compress is True
+    assert vm.compression_type == "zstd"
+    assert vm.convert_parallel == 4
+    assert vm.convert_out_of_order is True
+    assert vm.backup_stall_timeout == "30m"
+    assert vm.verify == "metadata"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6b: VMConfig backup engine options
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vm_config_engine_option_defaults():
+    """VMConfig with no engine options carries the six spec defaults:
+    compress=True, compression_type='zstd', convert_parallel=4,
+    convert_out_of_order=True, backup_stall_timeout='30m', verify='metadata'."""
+    disk = DiskConfig(target="vda", base_image=Path("/images/vm.qcow2"))
+    vm = VMConfig(name="myvm", disks=[disk])
+
+    assert vm.compress is True
+    assert vm.compression_type == "zstd"
+    assert vm.convert_parallel == 4
+    assert vm.convert_out_of_order is True
+    assert vm.backup_stall_timeout == "30m"
+    assert vm.verify == "metadata"
+
+
+@pytest.mark.unit
+def test_vm_config_engine_options_immutable():
+    """VMConfig engine options are frozen; mutating compression_type or
+    convert_parallel raises FrozenInstanceError."""
+    disk = DiskConfig(target="vda", base_image=Path("/images/vm.qcow2"))
+    vm = VMConfig(name="myvm", disks=[disk], compression_type="zlib", convert_parallel=8)
+
+    assert vm.compression_type == "zlib"
+    assert vm.convert_parallel == 8
+
+    with pytest.raises(FrozenInstanceError):
+        vm.compression_type = "zstd"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        vm.convert_parallel = 4  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_vm_config_engine_options_explicit():
+    """VMConfig with explicit engine options carries exactly those values."""
+    disk = DiskConfig(target="vda", base_image=Path("/images/vm.qcow2"))
+    vm = VMConfig(
+        name="myvm",
+        disks=[disk],
+        compress=False,
+        compression_type="zlib",
+        convert_parallel=8,
+        convert_out_of_order=False,
+        backup_stall_timeout="1h",
+        verify="compare",
+    )
+
+    assert vm.compress is False
+    assert vm.compression_type == "zlib"
+    assert vm.convert_parallel == 8
+    assert vm.convert_out_of_order is False
+    assert vm.backup_stall_timeout == "1h"
+    assert vm.verify == "compare"
 
 
 # ---------------------------------------------------------------------------

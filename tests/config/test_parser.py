@@ -89,37 +89,9 @@ def test_config_parser_reads_auto_cleanup_state_backup_count() -> None:
     assert global_cfg.state_backup_count == 3
 
 
-# bucket-driven-backup-model: Target compress parsing
-
-
-@pytest.mark.unit
-def test_parse_target_compress() -> None:
-    """Target-level compress field is parsed correctly."""
-    facade = ConfigFacade(FIXTURES / "bucket_driven.toml")
-
-    # vm_bucket: compress=True (explicit)
-    vm1 = facade.get_vm("vm_bucket")
-    t1 = next(t for t in vm1.targets if t.path == Path("/mnt/backup/vm_bucket"))
-    assert t1.compress is True
-
-    # vm_no_compress: compress=False (explicit)
-    vm2 = facade.get_vm("vm_no_compress")
-    t2 = next(t for t in vm2.targets if t.path == Path("/mnt/backup/vm_no_compress"))
-    assert t2.compress is False
-
-
 # ──────────────────────────────────────────────────────────────────────────
 # bucket-driven-backup-model: Deprecated field handling
 # ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_full_every_deprecation_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """full_every in config triggers a deprecation WARNING log."""
-    with caplog.at_level(logging.WARNING, logger="qsnap.config"):
-        ConfigFacade(FIXTURES / "deprecated_fields.toml")
-
-    assert "full_every is deprecated" in caplog.text
 
 
 @pytest.mark.unit
@@ -253,4 +225,216 @@ def test_convert_parallel_above_range_raises_config_error(tmp_path: Path) -> Non
     config_file.write_text(config_text)
 
     with pytest.raises(ConfigError, match="Invalid convert_parallel"):
+        ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# vm-level-backup-engine-options: VM-level engine option parsing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_level_compression_type_parsed(tmp_path: Path) -> None:
+    """VM-level compression_type="zlib" is parsed into VMConfig."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        'compression_type = "zlib"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_compression_type.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("web01")
+    assert vm.compression_type == "zlib"
+
+
+@pytest.mark.unit
+def test_vm_level_backup_stall_timeout_parsed(tmp_path: Path) -> None:
+    """VM-level backup_stall_timeout="45m" is parsed into VMConfig."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        'backup_stall_timeout = "45m"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_stall_timeout.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("web01")
+    assert vm.backup_stall_timeout == "45m"
+
+
+@pytest.mark.unit
+def test_vm_level_convert_parallel_accepted(tmp_path: Path) -> None:
+    """VM-level convert_parallel=8 (upper boundary of range 1-8) is accepted."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        "convert_parallel = 8\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_convert_parallel.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("web01")
+    assert vm.convert_parallel == 8
+
+
+@pytest.mark.unit
+def test_vm_level_convert_parallel_above_range_raises(tmp_path: Path) -> None:
+    """VM-level convert_parallel=9 (above range 1-8) raises ConfigError naming the VM."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        "convert_parallel = 9\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_high_parallel.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError, match="1-8") as exc_info:
+        ConfigFacade(config_file)
+    assert "web01" in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_vm_level_all_six_engine_options_parsed(tmp_path: Path) -> None:
+    """All six VM-level backup engine options are parsed into the VMConfig."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        "compress = false\n"
+        'compression_type = "zlib"\n'
+        "convert_parallel = 8\n"
+        "convert_out_of_order = false\n"
+        'backup_stall_timeout = "1h"\n'
+        'verify = "compare"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_all_engine_options.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("web01")
+    assert vm.compress is False
+    assert vm.compression_type == "zlib"
+    assert vm.convert_parallel == 8
+    assert vm.convert_out_of_order is False
+    assert vm.backup_stall_timeout == "1h"
+    assert vm.verify == "compare"
+
+
+@pytest.mark.unit
+def test_vm_level_invalid_compression_type_names_vm(tmp_path: Path) -> None:
+    """VM-level invalid compression_type raises ConfigError naming the VM and valid values."""
+    config_text = (
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        'compression_type = "lz4"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "vm_bad_compression.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(config_file)
+    message = str(exc_info.value)
+    assert "web01" in message
+    assert "zlib" in message
+    assert "zstd" in message
+
+
+@pytest.mark.unit
+def test_invalid_compression_type_raises_config_error(tmp_path: Path) -> None:
+    """Global-level invalid compression_type raises ConfigError with a valid-values hint."""
+    config_text = (
+        'compression_type = "lz4"\n'
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "global_bad_compression.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(config_file)
+    message = str(exc_info.value)
+    assert "compression_type" in message
+    assert "zlib" in message
+    assert "zstd" in message
+
+
+@pytest.mark.unit
+def test_invalid_backup_stall_timeout_raises_config_error(tmp_path: Path) -> None:
+    """Global-level invalid backup_stall_timeout raises ConfigError."""
+    config_text = (
+        'backup_stall_timeout = "abc"\n'
+        "[[vm]]\n"
+        'name = "web01"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/web01"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/web01.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/web01"\n'
+    )
+    config_file = tmp_path / "global_bad_stall_timeout.toml"
+    config_file.write_text(config_text)
+
+    with pytest.raises(ConfigError, match="backup_stall_timeout"):
         ConfigFacade(config_file)

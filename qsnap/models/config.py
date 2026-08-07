@@ -151,8 +151,9 @@ class TargetConfig:
     incrementals — backing-filename plus the dirty-size regression
     barrier).  ``"compare"`` additionally runs chain-traversing
     ``qemu-img compare`` content verification, ``"off"`` skips
-    verification.  When the user explicitly sets ``verify``, the
-    explicit value takes precedence.
+    verification.  Resolution follows VM → target inheritance (the
+    VM-level ``verify``, defaulting to ``"metadata"`` when absent,
+    serves as the fallback for every target — no global-level key exists).
 
     ``compress`` controls whether backups are compressed (default
     ``True``).  Applies to FULL backups (compress driver on the
@@ -176,10 +177,10 @@ class TargetConfig:
     compress: bool = True
     compression_type: str = "zstd"
     # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
-    # Inherited from global → target.
+    # Inherited from global → VM → target.
     convert_parallel: int = 4
     # ``qemu-img convert -W`` flag (out-of-order writes).  Inherited
-    # from global → target.
+    # from global → VM → target.
     convert_out_of_order: bool = True
     backup_stall_timeout: str = "30m"
     # Backup retry controls (target-level — network reliability varies
@@ -237,6 +238,13 @@ class VMConfig:
     ``qemu-img map`` allocated regions) or ``"allocation-size"``
     (compares ``qemu-img info`` actual-size).
 
+    ``compress``, ``compression_type``, ``convert_parallel``,
+    ``convert_out_of_order``, ``backup_stall_timeout`` are backup
+    engine options inherited from ``GlobalConfig`` when absent from the
+    VM-level ``[[vm]]`` section; each target inherits the VM-resolved
+    value as its fallback.  ``verify`` is similar but defaults to
+    ``"metadata"`` at the VM level (no global key).
+
     ``disks`` and ``targets`` use defensive copies on construction so
     that external mutation of the original lists does not affect this
     instance.
@@ -259,6 +267,26 @@ class VMConfig:
     free_space_factor: float | None = None
     # Deep verification controls (T2 — per-VM because disk sizes differ).
     blockcommit_deep_verify: bool = False
+    # Compress full backups (VM-level override of global default).
+    compress: bool = True
+    # Compression algorithm for FULL backups (``"zstd"`` default,
+    # ``"zlib"`` alternative).  Only effective when ``compress=True``.
+    compression_type: str = "zstd"
+    # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
+    # VM-level override of global default; inherited by targets.
+    convert_parallel: int = 4
+    # ``qemu-img convert -W`` flag (out-of-order writes).  ``True``
+    # optimizes for HDDs; ``False`` for in-order writes (some SSDs).
+    # VM-level override of global default; inherited by targets.
+    convert_out_of_order: bool = True
+    # Stall detection timeout for data-transfer commands (``qemu-img
+    # convert``).  Duration string (e.g. ``"30m"``, ``"1h"``).
+    # VM-level override of global default; inherited by targets.
+    backup_stall_timeout: str = "30m"
+    # Post-transfer verification mode: ``"metadata"`` (default, M1),
+    # ``"check"`` (M1 + M2), ``"compare"`` (M1 + M2 + M3), ``"off"``.
+    # Resolution follows VM → target inheritance (no global-level key).
+    verify: str = "metadata"
     targets: list[TargetConfig] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
 
     def __post_init__(self) -> None:

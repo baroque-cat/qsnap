@@ -178,6 +178,12 @@ Configuration is TOML. Keys are organized in four levels: **global** (top-level)
 | `lifecycle_mode` | string | `"virsh"` | `"virsh"` (live blockcommit while running, offline commit when shut off) or `"qemu-img"` (offline-only) |
 | `change_detection_mode` | string | `"allocation-map"` | `"allocation-map"` (compare `qemu-img map` regions) or `"allocation-size"` (compare `qemu-img info` actual-size) |
 | `blockcommit_deep_verify` | bool | `false` | Run `qemu-img check` on the base image after offline commits |
+| `compress` | bool | `true` | Compress FULL backups for this VM (inherited by targets) |
+| `compression_type` | string | `"zstd"` | Compression algorithm: `"zstd"` (faster) or `"zlib"` (smaller) |
+| `convert_parallel` | int | `4` | `qemu-img convert -m` parallel coroutines (1-8) |
+| `convert_out_of_order` | bool | `true` | `qemu-img convert -W` out-of-order writes |
+| `backup_stall_timeout` | string | `"30m"` | Stall detection timeout for data-transfer commands |
+| `verify` | string | `"metadata"` | Post-transfer verification: `"off"`, `"metadata"`, `"check"`, `"compare"` |
 
 ### Disk Keys (`[[vm.disk]]`)
 

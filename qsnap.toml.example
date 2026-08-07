@@ -126,6 +126,9 @@ state_dir = "/var/lib/qsnap/state"
 # free_space_factor: multiplier for the estimate (>= 1.0) to account for
 #   compression, sparse allocation, and estimation inaccuracy.
 #   Default: 1.0.
+#   NOTE: the estimate is a heuristic; switching compression algorithms
+#   (e.g. zstd ↔ zlib) changes the effective compression ratio and may
+#   require adjusting this factor for accurate gating.
 # free_space_factor = 1.0
 
 
@@ -204,6 +207,38 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # T2 — Run qemu-img check after blockcommit on shut-off VMs (deferred).
 # blockcommit_deep_verify = false
 
+  # ── Backup engine options (per-VM, overrides global defaults) ─────────
+  #
+  # These options are inherited by every target of this VM.  Each target
+  # may further override them individually.  Resolution order:
+  # global → VM → target (more specific wins).
+  #
+  # Compress full backups for this VM (default: true).
+  # compress = true
+  #
+  # Compression algorithm for FULL backups:
+  #   "zstd" (default) — 11x faster, slightly larger files
+  #   "zlib"           — slower, standard qcow2 compression
+  # Only effective when compress = true.
+  # compression_type = "zstd"
+  #
+  # qemu-img convert parallel coroutines (1-8, default: 4).
+  # convert_parallel = 4
+  #
+  # qemu-img convert out-of-order writes (default: true).
+  # convert_out_of_order = true
+  #
+  # Stall detection timeout for data-transfer commands.
+  # Duration string (e.g. "30m", "1h").  "0s" disables stall detection.
+  # backup_stall_timeout = "30m"
+  #
+  # Post-transfer verification mode:
+  #   "metadata" (default) — qcow2 format + corrupt-bit check
+  #   "check"              — metadata + qemu-img check
+  #   "compare"            — metadata + check + qemu-img compare
+  #   "off"                — no verification
+  # verify = "metadata"
+
   # ── Backup targets ───────────────────────────────────────────────────
   # Backups use NBD dirty-block extraction via checkpoint (bitmap mode).
   # libvirt >= 7.2 and python3-libnbd are hard requirements.
@@ -244,9 +279,10 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 
   # Backup verification level:
   #   "metadata" — verify qcow2 format + structure (default)
-  #   "hash"     — metadata + chain-traversing qemu-img compare
-  #   "full"     — same as "hash" for bitmap chains
+  #   "check"    — metadata + qemu-img check
+  #   "compare"  — metadata + check + chain-traversing qemu-img compare
   #   "off"      — no verification
+  # (inherited from VM → target; VM defaults to "metadata")
   # verify = "metadata"
 
   # ── Backup retry controls (per-target) ───────────────────────────────

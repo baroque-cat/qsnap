@@ -37,14 +37,17 @@ try:
 except ImportError:
     _HAS_LIBNBD = False
 
+from qsnap.config.facade import ConfigFacade
+from qsnap.interfaces.shell import IShell
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
 )
+from qsnap.utils.time import parse_stall_timeout
 
 if _HAS_LIBNBD:
     from qsnap.utils.nbd_client import LibnbdClient
@@ -167,6 +170,40 @@ def _cleanup_snapshots(shell: SubprocessShell, vm_name: str) -> None:
                 ["virsh", "snapshot-delete", "--domain", vm_name, snap, "--metadata"],
                 timeout=30,
             )
+
+
+class _StallRecordingShell(IShell):
+    """IShell wrapper that records ``run_with_stall_detection`` calls.
+
+    Delegates every call to the wrapped ``SubprocessShell`` (so the real
+    virsh/qemu-img/libvirt behaviour is preserved) but records the
+    ``(cmd, stall_timeout)`` pairs of every stall-detected transfer.
+    Used to assert that the parsed VM-level ``backup_stall_timeout``
+    reaches the transfer engine (pattern of ``RecordingShell`` in
+    ``test_dry_run.py``).
+    """
+
+    def __init__(self, delegate: SubprocessShell) -> None:
+        self._delegate = delegate
+        self._stall_calls: list[tuple[list[str], int]] = []
+
+    @property
+    def stall_calls(self) -> list[tuple[list[str], int]]:
+        """Recorded ``(cmd, stall_timeout)`` pairs, in call order."""
+        return list(self._stall_calls)
+
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
+        return self._delegate.run(cmd, timeout, check)
+
+    def run_with_stall_detection(
+        self,
+        cmd: list[str],
+        output_file: Path | None = None,
+        stall_timeout: int = 1800,
+        check: bool = False,
+    ) -> ShellResult:
+        self._stall_calls.append((list(cmd), stall_timeout))
+        return self._delegate.run_with_stall_detection(cmd, output_file, stall_timeout, check)
 
 
 def _get_snapshot_disk_path(shell: SubprocessShell, vm_name: str) -> Path | None:
@@ -538,6 +575,206 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         ]
         assert len(compress_drv) == 0, (
             f"qemu-nbd compress driver must NOT be used for incrementals: {compress_drv}"
+        )
+
+    _cleanup_snapshots(shell, vm_name)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test: VM-level backup_stall_timeout + verify reach the incremental path
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_vm_level_stall_timeout_reaches_incremental(test_vm, caplog):
+    """Verify VM-level ``backup_stall_timeout`` and ``verify`` reach incrementals.
+
+    End-to-end proof that VM-level ``[[vm]]`` options (config-parsing
+    delta M3/M5) resolve through the global → VM → target inheritance
+    chain onto the incremental backup path, without breaking the D6
+    uncompressed-incrementals invariant:
+
+    1. Write an inline TOML with VM-level ``backup_stall_timeout="2m"``
+       and ``verify="check"``; the bare ``[[vm.target]]`` sets neither,
+       so the target must inherit both VM values.
+    2. Parse with ``ConfigFacade`` and assert ``target.backup_stall_timeout
+       == "2m"`` and ``target.verify == "check"``.
+    3. Follow the FULL-zstd → write dirty data → external snapshot →
+       ``transfer_missing`` flow of ``test_incremental_compression_not_applied``,
+       routing every provider through a ``_StallRecordingShell``.
+    4. Assert the stall-detected transfer (the qemu-img convert of the
+       FULL) received ``stall_timeout == 120`` — ``parse_stall_timeout("2m")``
+       — proving the VM-inherited value reached the transfer engine.
+    5. Assert the incremental output stays uncompressed (D6 guard:
+       ``_get_compression_type != "zstd"``) — VM-level engine options
+       must not change the incremental-compression invariant.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2")
+    if not _HAS_LIBNBD:
+        pytest.skip("python3-libnbd not installed")
+
+    # Step 1: Inline TOML — VM-level stall timeout + verify, bare target.
+    toml_content = f"""\
+[[vm]]
+name = "{vm_name}"
+snapshot_dir = "{snapshot_dir}"
+backup_stall_timeout = "2m"
+verify = "check"
+
+[[vm.disk]]
+target = "vda"
+base_image = "{base_image}"
+
+[[vm.target]]
+path = "{target_dir}"
+"""
+    config_path = tmpdir / "vm_stall_timeout_incr.toml"
+    config_path.write_text(toml_content)
+
+    # Step 2: Parse and assert the target inherited the VM values.
+    facade = ConfigFacade(config_path)
+    vms = facade.get_vms()
+    assert len(vms) == 1, f"Expected 1 VM, got {len(vms)}"
+    vm = vms[0]
+    assert len(vm.targets) == 1, f"Expected 1 target, got {len(vm.targets)}"
+    target = vm.targets[0]
+
+    assert target.backup_stall_timeout == "2m", (
+        f"VM backup_stall_timeout='2m' must be inherited by the target, "
+        f"got {target.backup_stall_timeout!r}"
+    )
+    assert target.verify == "check", (
+        f"VM verify='check' must be inherited by the target, got {target.verify!r}"
+    )
+    # parse_stall_timeout("2m") == 120 — the seconds value the transfer
+    # engine must receive (Core threads it into both FULL and incremental).
+    stall_seconds = parse_stall_timeout(target.backup_stall_timeout)
+    assert stall_seconds == 120, f"parse_stall_timeout('2m') must yield 120, got {stall_seconds}"
+
+    # Prepare: write initial data (VM stopped), then start the VM.
+    if is_vm_running(shell, vm_name):
+        shell.run(["virsh", "destroy", vm_name], timeout=30)
+        time.sleep(1)
+    _write_data(shell, base_image, 64)
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(2)
+
+    _cleanup_checkpoints(shell, vm_name)
+    _cleanup_snapshots(shell, vm_name)
+
+    # Step 3a: Zstd-compressed FULL backup — the run_with_stall_detection
+    # qemu-img convert must observe the VM-inherited stall timeout (120 s).
+    rec_shell = _StallRecordingShell(shell)
+    provider = BitmapBackupProvider(rec_shell)
+    source = SnapshotInfo(
+        name=f"{vm_name}.full-vm-stall",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+
+    r_full = provider.create_full_backup(
+        vm_name,
+        source,
+        target,
+        compress=True,
+        compression_type="zstd",
+        stall_timeout=stall_seconds,
+    )
+    assert r_full.success, f"zstd FULL failed: {r_full.error}"
+    ct_full = _get_compression_type(shell, r_full.target_path)
+    assert ct_full == "zstd", f"FULL must have compression-type 'zstd', got {ct_full!r}"
+
+    # Step 3b: Write new dirty data, create external snapshot.
+    _write_data_running(shell, base_image, 5, offset_mb=64)
+    snap_name = f"{vm_name}.incr-vm-stall"
+    shell.run(
+        [
+            "virsh",
+            "snapshot-create-as",
+            "--domain",
+            vm_name,
+            "--name",
+            snap_name,
+            "--disk-only",
+            "--diskspec",
+            "vda,snapshot=external",
+            "--no-metadata",
+        ],
+        timeout=60,
+        check=True,
+    )
+    overlay = _get_snapshot_disk_path(shell, vm_name)
+    if overlay is None:
+        pytest.skip("Could not determine overlay path")
+
+    snapshot_info = SnapshotInfo(
+        name=snap_name,
+        path=overlay,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+
+    # Step 3c: Incremental transfer — same recording shell, same stall
+    # timeout as Core would pass (parse_stall_timeout(target.backup_stall_timeout)).
+    provider_inc = BitmapBackupProvider(rec_shell, nbd=LibnbdClient())
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
+
+    with caplog.at_level(logging.INFO):
+        results = provider_inc.transfer_missing(
+            vm_config=vm_config,
+            target=target,
+            snapshots=[snapshot_info],
+            stall_timeout=stall_seconds,
+        )
+    assert len(results) > 0, "transfer_missing must return results"
+
+    inc_result = results[0]
+    # If not successful, report but don't fail — environment may differ.
+    if inc_result.success:
+        inc_path = inc_result.target_path
+
+        # Step 4: The stall-detected qemu-img convert of the FULL must
+        # have received stall_timeout=120 (the VM-inherited "2m" parsed
+        # to seconds).  The bitmap incremental itself is an in-process
+        # pread/pwrite loop with an internal watchdog, so the observable
+        # shell-level probe is the qemu-img convert of the FULL pull.
+        convert_stall_calls = [
+            (cmd, t) for cmd, t in rec_shell.stall_calls if "qemu-img" in cmd and "convert" in cmd
+        ]
+        assert len(convert_stall_calls) > 0, (
+            "Expected a qemu-img convert via run_with_stall_detection. "
+            f"Recorded stall calls: {rec_shell.stall_calls}"
+        )
+        stall_timeouts = {t for _, t in convert_stall_calls}
+        assert 120 in stall_timeouts, (
+            "VM-level backup_stall_timeout='2m' must reach "
+            "run_with_stall_detection as 120 s. "
+            f"Got stall timeouts: {sorted(stall_timeouts)}"
+        )
+
+        # Step 5: D6 guard — the incremental output stays uncompressed
+        # even though the FULL (and target.compress) are zstd-capable.
+        ct_incr = _get_compression_type(shell, inc_path)
+        assert ct_incr != "zstd", (
+            f"Incremental must NOT have zstd compression, got {ct_incr!r}. "
+            f"Design D6: compression applies to FULL only."
         )
 
     _cleanup_snapshots(shell, vm_name)

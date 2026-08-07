@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from qsnap.config.facade import ConfigFacade
 from qsnap.models.config import TargetConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
@@ -45,6 +46,7 @@ from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
 )
+from qsnap.utils.time import parse_stall_timeout
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -808,4 +810,172 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
     )
 
     _assert_standalone_qcow2(shell, result.target_path)
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test: VM-level TOML engine options reach the real qemu-img convert
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_vm_level_engine_options_reach_convert_command(test_vm, caplog):
+    """Verify VM-level TOML engine options reach the real ``qemu-img convert``.
+
+    End-to-end proof that the VM-level ``[[vm]]`` engine options
+    (config-parsing delta A1/M1) survive the global → VM → target
+    inheritance chain and reach both the ``qemu-img convert`` argv and
+    the resulting qcow2 metadata:
+
+    1. Write an inline TOML with global defaults that the VM overrides:
+       global ``compress=false, compression_type="zlib", convert_parallel=2,
+       convert_out_of_order=false, backup_stall_timeout="1h"``; VM-level
+       ``compress=true, compression_type="zstd", convert_parallel=8,
+       convert_out_of_order=false, backup_stall_timeout="30m",
+       verify="compare"``; a bare ``[[vm.target]]`` (path only) so the
+       target inherits every option from the VM.
+    2. Parse with ``ConfigFacade`` and assert the target resolved the
+       VM values (not the global ones).
+    3. Start the VM and run ``create_full_backup()`` passing the parsed
+       target fields (exactly like Core does).
+    4. Assert at DEBUG level that the ``qemu-img convert`` argv contains
+       ``-m 8`` and ``-o compression_type=zstd`` and does NOT contain
+       ``-W`` (VM-level ``convert_out_of_order=false``).
+    5. Verify the resulting qcow2 reports ``compression-type: "zstd"``.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    # Step 1: Inline TOML — global defaults overridden at VM level; the
+    # bare target inherits the VM-resolved values (config-parsing M1).
+    toml_content = f"""\
+compress = false
+compression_type = "zlib"
+convert_parallel = 2
+convert_out_of_order = false
+backup_stall_timeout = "1h"
+
+[[vm]]
+name = "{vm_name}"
+snapshot_dir = "{snapshot_dir}"
+compress = true
+compression_type = "zstd"
+convert_parallel = 8
+convert_out_of_order = false
+backup_stall_timeout = "30m"
+verify = "compare"
+
+[[vm.disk]]
+target = "vda"
+base_image = "{base_image}"
+
+[[vm.target]]
+path = "{target_dir}"
+"""
+    config_path = tmpdir / "vm_engine_options_full.toml"
+    config_path.write_text(toml_content)
+
+    # Step 2: Parse and assert the target inherited the VM values.
+    facade = ConfigFacade(config_path)
+    vms = facade.get_vms()
+    assert len(vms) == 1, f"Expected 1 VM, got {len(vms)}"
+    vm = vms[0]
+    assert len(vm.targets) == 1, f"Expected 1 target, got {len(vm.targets)}"
+    target = vm.targets[0]
+
+    # VM overrides global for every engine option.
+    assert target.compress is True, (
+        f"VM compress=true must override global false, got {target.compress}"
+    )
+    assert target.compression_type == "zstd", (
+        f"VM compression_type='zstd' must override global 'zlib', got {target.compression_type!r}"
+    )
+    assert target.convert_parallel == 8, (
+        f"VM convert_parallel=8 must override global 2, got {target.convert_parallel}"
+    )
+    assert target.convert_out_of_order is False, (
+        f"VM convert_out_of_order=false must be inherited, got {target.convert_out_of_order}"
+    )
+    assert target.backup_stall_timeout == "30m", (
+        f"VM backup_stall_timeout='30m' must override global '1h', "
+        f"got {target.backup_stall_timeout!r}"
+    )
+    assert target.verify == "compare", (
+        f"VM verify='compare' must be inherited by the target, got {target.verify!r}"
+    )
+
+    # Step 3: Start the VM and run the FULL backup with the parsed
+    # target fields (Core threads exactly these into create_full_backup).
+    shell.run(["virsh", "start", vm_name], timeout=30)
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    snapshot = SnapshotInfo(
+        name=f"{vm_name}.vm-level-options",
+        path=base_image,
+        timestamp=datetime.now(),
+        allocation=0,
+        disk="vda",
+    )
+
+    provider = BitmapBackupProvider(shell)
+    caplog.set_level(logging.DEBUG)
+    result = provider.create_full_backup(
+        vm_name,
+        snapshot,
+        target,
+        compress=target.compress,
+        compression_type=target.compression_type,
+        stall_timeout=parse_stall_timeout(target.backup_stall_timeout),
+        convert_parallel=target.convert_parallel,
+        convert_out_of_order=target.convert_out_of_order,
+    )
+
+    assert result.success, f"VM-level engine options FULL must succeed, got: {result.error}"
+
+    # Step 4: Assert the convert argv at DEBUG level.
+    convert_messages = [
+        r.message for r in caplog.records if "qemu-img" in r.message and "convert" in r.message
+    ]
+    assert len(convert_messages) > 0, "qemu-img convert must be used"
+
+    # -m 8 (VM convert_parallel=8) — the pattern follows the existing
+    # test_full_backup_custom_convert_parallel_and_out_of_order test.
+    parallel_8_found = any(
+        "convert" in msg and "'-m'" in msg and "'8'" in msg for msg in convert_messages
+    )
+    assert parallel_8_found, (
+        f"convert command must contain -m 8 (VM convert_parallel=8); "
+        f"got convert messages: {convert_messages}"
+    )
+
+    # -o compression_type=zstd (VM compression_type='zstd').
+    compression_zstd_found = any("compression_type=zstd" in msg for msg in convert_messages)
+    assert compression_zstd_found, (
+        "convert command must contain -o compression_type=zstd (VM "
+        f"compression_type='zstd'); got convert messages: {convert_messages}"
+    )
+
+    # No -W (VM convert_out_of_order=false).
+    out_of_order_found = any("'-W'" in msg for msg in convert_messages)
+    assert not out_of_order_found, (
+        "convert command must NOT contain -W (VM convert_out_of_order=false); "
+        f"got convert messages: {convert_messages}"
+    )
+
+    # Step 5: The resulting qcow2 must actually be zstd-compressed.
+    _assert_standalone_qcow2(shell, result.target_path)
+    ct = _get_compression_type(shell, result.target_path)
+    assert ct == "zstd", f"Expected compression-type 'zstd', got {ct!r}"
+
     _cleanup_checkpoints(shell, vm_name)

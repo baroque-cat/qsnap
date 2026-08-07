@@ -18,7 +18,8 @@ extents into the target qcow2 served by a forked ``qemu-nbd``.
 For FULL backups (no prior checkpoint): ``qemu-img convert`` reads
 from the NBD source socket (running VMs) or directly from the source
 qcow2 file (stopped VMs), writing to the target qcow2 with optional
-``-c`` compression and parallel coroutines (``-m 4``, ``-W``).  For
+``-c`` compression, parallel coroutines (``-m N``, configurable),
+and out-of-order writes (``-W``, configurable).  For
 incremental exports: ``zero_skip=False`` intersects dirty extents with
 allocated extents and copies only dirty∩allocated blocks into a
 **backing-chained** qcow2 delta (created via ``qemu-img create -b
@@ -771,9 +772,10 @@ class BitmapBackupProvider(IBackupProvider):
         ``-o compression_type=<compression_type>`` are included.
         When ``False``, neither is present.
 
-        ``-m 4`` (4 parallel coroutines), ``-W`` (out-of-order writes),
-        and ``-p`` (progress bar) are always included for optimal
-        throughput.
+        ``-m N`` (parallel coroutines, configurable via
+        ``convert_parallel``), ``-W`` (out-of-order writes, configurable
+        via ``convert_out_of_order``), and ``-p`` (progress bar) are
+        included for optimal throughput.
 
         Executed via :meth:`IShell.run_with_stall_detection` with
         *tmp_file* as ``output_file`` and *stall_timeout* as

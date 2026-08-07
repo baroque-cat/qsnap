@@ -30,6 +30,150 @@ def _is_valid_duration(raw: str) -> bool:
     return bool(re.match(r"^\d+s$", raw))
 
 
+# ── Per-level key whitelists (design D3: strict unknown-key rejection) ──
+
+_GLOBAL_KEYS: frozenset[str] = frozenset(
+    {
+        # Parsed global keys.
+        "state_dir",
+        "lockfile",
+        "snapshot_chain_length",
+        "target_chain_length",
+        "target_keep_generations",
+        "snapshot_preserve_min",
+        "deferred_warn_count",
+        "deferred_crit_count",
+        "deferred_warn_age",
+        "deferred_crit_age",
+        "auto_cleanup",
+        "state_backup_count",
+        "chain_verify_before_commit",
+        "chain_verify_after_commit",
+        "deep_check_schedule",
+        "compress",
+        "compression_type",
+        "convert_parallel",
+        "convert_out_of_order",
+        "backup_stall_timeout",
+        "backup_retry_max",
+        "backup_retry_base",
+        "full_verify_after_create",
+        "full_verify_before_delete",
+        "transaction_log",
+        "backup_create",
+        "free_space_check",
+        "free_space_reserve",
+        "free_space_factor",
+        # Deprecated-but-tolerated global keys (warn-and-ignore).
+        "snapshot_preserve",
+        "target_preserve",
+        "target_preserve_min",
+        "preserve_day_of_week",
+        "rate_limit",
+        # Structural key.
+        "vm",
+    }
+)
+
+_VM_KEYS: frozenset[str] = frozenset(
+    {
+        # Parsed VM keys.
+        "name",
+        "snapshot_dir",
+        "snapshot_create",
+        "snapshot_chain_length",
+        "target_chain_length",
+        "target_keep_generations",
+        "snapshot_preserve_min",
+        "snapshot_quiesce",
+        "lifecycle_mode",
+        "change_detection_mode",
+        "blockcommit_deep_verify",
+        "free_space_check",
+        "free_space_reserve",
+        "free_space_factor",
+        "backup_create",
+        "compress",
+        "compression_type",
+        "convert_parallel",
+        "convert_out_of_order",
+        "backup_stall_timeout",
+        "verify",
+        # Structural keys.
+        "disk",
+        "target",
+    }
+)
+
+_DISK_KEYS: frozenset[str] = frozenset(
+    {
+        "target",
+        "base_image",
+        "snapshot_dir",
+    }
+)
+
+_TARGET_KEYS: frozenset[str] = frozenset(
+    {
+        # Parsed target keys.
+        "path",
+        "target_chain_length",
+        "target_keep_generations",
+        "verify",
+        "compress",
+        "compression_type",
+        "convert_parallel",
+        "convert_out_of_order",
+        "backup_stall_timeout",
+        "backup_retry_max",
+        "backup_retry_base",
+        "backup_create",
+        # Deprecated-but-tolerated target keys (warn-and-ignore).
+        "incremental",
+        "incremental_mode",
+        "rate_limit",
+        "copy_base",
+        "full_every",
+        "full_compress",
+    }
+)
+
+# Cross-level reference tables for hint generation: map keys that are valid
+# at *another* level to the level they belong to.
+_KEY_TO_LEVEL: dict[str, str] = {}
+for _key in _GLOBAL_KEYS - {"vm"}:
+    _KEY_TO_LEVEL[_key] = "[global]"
+for _key in _VM_KEYS - {"disk", "target"}:
+    _KEY_TO_LEVEL[_key] = "[[vm]]"
+for _key in _DISK_KEYS:
+    _KEY_TO_LEVEL[_key] = "[[vm.disk]]"
+for _key in _TARGET_KEYS:
+    _KEY_TO_LEVEL[_key] = "[[vm.target]]"
+
+
+def _check_unknown_keys(
+    raw: dict[str, object],
+    whitelist: frozenset[str],
+    table_label: str,
+) -> None:
+    """Raise ``ConfigError`` if *raw* contains any key not in *whitelist*.
+
+    Cross-level hints are appended when an unknown key is recognized at
+    another level.
+    """
+    unknown = set(raw) - whitelist
+    if not unknown:
+        return
+    parts: list[str] = [f"Unknown key(s) in {table_label}:"]
+    for key in sorted(unknown):
+        line = f"  • {key}"
+        correct_level = _KEY_TO_LEVEL.get(key)
+        if correct_level and correct_level != table_label.split(maxsplit=1)[0]:
+            line += f" — did you mean to set it in {correct_level}?"
+        parts.append(line)
+    raise ConfigError("\n".join(parts))
+
+
 class ConfigFacade(IConfigFacade):
     """Concrete config facade that parses a TOML file.
 
@@ -70,6 +214,9 @@ class ConfigFacade(IConfigFacade):
             if not isinstance(global_section, dict):
                 raise ConfigError("[global] section must be a table")
             raw = {**global_section, **raw}
+
+        # Validate top-level keys after [global] unwrap (design D3).
+        _check_unknown_keys(raw, _GLOBAL_KEYS, "[global] / top-level")
 
         # Build global config from top-level keys.
         global_kwargs: dict[str, str | int | bool | None] = {}
@@ -435,6 +582,86 @@ class ConfigFacade(IConfigFacade):
         else:
             vm_backup_create = global_cfg.backup_create
 
+        # Backup engine options: VM overrides global (target may override VM).
+        # compress.
+        vm_compress: bool
+        if "compress" in vm_raw:
+            vm_compress = bool(vm_raw["compress"])
+        else:
+            vm_compress = global_cfg.compress
+
+        # compression_type.
+        vm_compression_type: str
+        if "compression_type" in vm_raw:
+            vm_compression_type = str(vm_raw["compression_type"])
+        else:
+            vm_compression_type = global_cfg.compression_type
+
+        # convert_parallel.
+        vm_convert_parallel: int
+        if "convert_parallel" in vm_raw:
+            vm_convert_parallel = int(vm_raw["convert_parallel"])
+        else:
+            vm_convert_parallel = global_cfg.convert_parallel
+
+        # convert_out_of_order.
+        vm_convert_out_of_order: bool
+        if "convert_out_of_order" in vm_raw:
+            vm_convert_out_of_order = bool(vm_raw["convert_out_of_order"])
+        else:
+            vm_convert_out_of_order = global_cfg.convert_out_of_order
+
+        # backup_stall_timeout.
+        vm_backup_stall_timeout: str
+        if "backup_stall_timeout" in vm_raw:
+            vm_backup_stall_timeout = str(vm_raw["backup_stall_timeout"])
+        else:
+            vm_backup_stall_timeout = global_cfg.backup_stall_timeout
+
+        # verify: VM overrides the default "metadata" (no global key).
+        vm_verify: str
+        verify_raw_vm = vm_raw.get("verify")
+        if verify_raw_vm is None:
+            vm_verify = "metadata"
+        else:
+            vm_verify = str(verify_raw_vm)
+            _DEPRECATED_VERIFY_VALUES = {"hash": "compare", "full": "compare"}
+            if vm_verify in _DEPRECATED_VERIFY_VALUES:
+                logger.warning(
+                    "verify=%r in VM %r is deprecated — treating as %r",
+                    vm_verify,
+                    name,
+                    _DEPRECATED_VERIFY_VALUES[vm_verify],
+                )
+                vm_verify = _DEPRECATED_VERIFY_VALUES[vm_verify]
+            elif vm_verify not in ("off", "metadata", "check", "compare"):
+                raise ConfigError(
+                    f"VM {name!r}: invalid verify={vm_verify!r}. "
+                    f"Must be one of: off, metadata, check, compare."
+                )
+
+        # Validate VM-level engine options (same rules as global/target).
+        valid_compression = {"zstd", "zlib"}
+        if vm_compression_type.lower() not in valid_compression:
+            raise ConfigError(
+                f"VM {name!r}: invalid compression_type={vm_compression_type!r}. "
+                f"Must be one of: {', '.join(sorted(valid_compression))}"
+            )
+
+        if not 1 <= vm_convert_parallel <= 8:
+            raise ConfigError(
+                f"VM {name!r}: invalid convert_parallel={vm_convert_parallel}. "
+                f"Must be an integer in range 1-8."
+            )
+
+        try:
+            parse_stall_timeout(vm_backup_stall_timeout)
+        except ValueError as exc:
+            raise ConfigError(
+                f"VM {name!r}: invalid backup_stall_timeout={vm_backup_stall_timeout!r}. "
+                f"Must be a duration string like '30m', '1h', '0s'."
+            ) from exc
+
         # disks: one or more [[vm.disk]] sections, each describing a disk
         # target with its own base image (multi-disk refactor).  A VM must
         # define at least one disk; disk targets must be unique.
@@ -488,14 +715,18 @@ class ConfigFacade(IConfigFacade):
                     tgt_raw,
                     target_chain_length,
                     target_keep_generations,
-                    global_cfg.compress,
-                    global_cfg.compression_type,
-                    global_cfg.backup_stall_timeout,
-                    global_cfg.convert_parallel,
-                    global_cfg.convert_out_of_order,
+                    vm_compress,
+                    vm_compression_type,
+                    vm_backup_stall_timeout,
+                    vm_convert_parallel,
+                    vm_convert_out_of_order,
                     vm_backup_create,
+                    vm_verify,
                 )
             )
+
+        # Validate VM-level keys (design D3).
+        _check_unknown_keys(vm_raw, _VM_KEYS, f"[[vm]] {name!r}")
 
         return VMConfig(
             name=name,
@@ -513,6 +744,12 @@ class ConfigFacade(IConfigFacade):
             free_space_reserve=free_space_reserve,
             free_space_factor=free_space_factor,
             blockcommit_deep_verify=blockcommit_deep_verify,
+            compress=vm_compress,
+            compression_type=vm_compression_type,
+            convert_parallel=vm_convert_parallel,
+            convert_out_of_order=vm_convert_out_of_order,
+            backup_stall_timeout=vm_backup_stall_timeout,
+            verify=vm_verify,
             targets=targets,
         )
 
@@ -544,6 +781,9 @@ class ConfigFacade(IConfigFacade):
         base_image = Path(str(disk_raw["base_image"]))
         snapshot_dir = Path(str(disk_raw["snapshot_dir"])) if "snapshot_dir" in disk_raw else None
 
+        # Validate disk-level keys (design D3).
+        _check_unknown_keys(disk_raw, _DISK_KEYS, f"[[vm.disk]] {target!r} in VM {vm_name!r}")
+
         return DiskConfig(target=target, base_image=base_image, snapshot_dir=snapshot_dir)
 
     @staticmethod
@@ -551,12 +791,13 @@ class ConfigFacade(IConfigFacade):
         tgt_raw: dict[str, object],
         vm_target_chain_length: int | None,
         vm_target_keep_generations: int | None = None,
-        global_compress: bool = True,
-        global_compression_type: str = "zstd",
-        global_backup_stall_timeout: str = "30m",
-        global_convert_parallel: int = 4,
-        global_convert_out_of_order: bool = True,
-        global_backup_create: str = "always",
+        vm_compress: bool = True,
+        vm_compression_type: str = "zstd",
+        vm_backup_stall_timeout: str = "30m",
+        vm_convert_parallel: int = 4,
+        vm_convert_out_of_order: bool = True,
+        vm_backup_create: str = "always",
+        vm_verify: str = "metadata",
     ) -> TargetConfig:
         if "path" not in tgt_raw:
             raise ConfigError("Missing required target field: 'path'")
@@ -635,10 +876,10 @@ class ConfigFacade(IConfigFacade):
             )
             compress = bool(tgt_raw["full_compress"])
         else:
-            compress = global_compress
+            compress = vm_compress
 
-        # compression_type: target overrides global default.
-        compression_type = str(tgt_raw.get("compression_type", global_compression_type))
+        # compression_type: target overrides VM default.
+        compression_type = str(tgt_raw.get("compression_type", vm_compression_type))
         valid_compression = {"zstd", "zlib"}
         if compression_type.lower() not in valid_compression:
             raise ConfigError(
@@ -646,20 +887,18 @@ class ConfigFacade(IConfigFacade):
                 f"Must be one of: {', '.join(sorted(valid_compression))}"
             )
 
-        # convert_parallel: target overrides global default.
-        convert_parallel = cast(int, tgt_raw.get("convert_parallel", global_convert_parallel))
+        # convert_parallel: target overrides VM default.
+        convert_parallel = cast(int, tgt_raw.get("convert_parallel", vm_convert_parallel))
         if not 1 <= convert_parallel <= 8:
             raise ConfigError(
                 f"Invalid convert_parallel: {convert_parallel}. Must be an integer in range 1-8."
             )
 
-        # convert_out_of_order: target overrides global default.
-        convert_out_of_order = bool(
-            tgt_raw.get("convert_out_of_order", global_convert_out_of_order)
-        )
+        # convert_out_of_order: target overrides VM default.
+        convert_out_of_order = bool(tgt_raw.get("convert_out_of_order", vm_convert_out_of_order))
 
-        # backup_stall_timeout: target overrides global default.
-        backup_stall_timeout = str(tgt_raw.get("backup_stall_timeout", global_backup_stall_timeout))
+        # backup_stall_timeout: target overrides VM default.
+        backup_stall_timeout = str(tgt_raw.get("backup_stall_timeout", vm_backup_stall_timeout))
         try:
             parse_stall_timeout(backup_stall_timeout)
         except ValueError as exc:
@@ -668,13 +907,10 @@ class ConfigFacade(IConfigFacade):
                 f"Must be a duration string like '30m', '1h', '0s'."
             ) from exc
 
-        # verify: default "metadata", or explicit user value.  No
-        # mode-dependence — bitmap is the only backup strategy; the
-        # "compare" tier runs chain-traversing qemu-img compare via
-        # verify_bitmap_incremental (live-source reliability caveat).
+        # verify: target overrides VM (VM defaults to "metadata").
         verify_raw = tgt_raw.get("verify")
         if verify_raw is None:
-            verify = "metadata"
+            verify = vm_verify
         else:
             verify = str(verify_raw)
             # Deprecation: "hash" and "full" were replaced by "compare"
@@ -704,14 +940,17 @@ class ConfigFacade(IConfigFacade):
                 "Must be a duration string like '1s', '5s', '10s'."
             )
 
-        # backup_create: target overrides global default.
-        backup_create = str(tgt_raw.get("backup_create", global_backup_create))
+        # backup_create: target overrides VM default.
+        backup_create = str(tgt_raw.get("backup_create", vm_backup_create))
         valid_backup_create = {"always", "onchange"}
         if backup_create not in valid_backup_create:
             raise ConfigError(
                 f"Invalid backup_create: {backup_create!r}. "
                 f"Must be one of: {', '.join(sorted(valid_backup_create))}"
             )
+
+        # Validate target-level keys (design D3).
+        _check_unknown_keys(tgt_raw, _TARGET_KEYS, f"[[vm.target]] {path!s}")
 
         return TargetConfig(
             path=path,

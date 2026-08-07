@@ -445,3 +445,226 @@ def test_negative_snapshot_preserve_min_raises_config_error(
 
     with pytest.raises(ConfigError, match="snapshot_preserve_min"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# vm-level-backup-engine-options: engine option inheritance (global → VM → target)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_vm_overrides_global_engine_option(tmp_path: Path) -> None:
+    """VM-level compression_type overrides the global compression_type."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "zstd"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'compression_type = "zlib"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    vm = facade.get_vm("testvm")
+
+    assert global_cfg.compression_type == "zstd"
+    assert vm.compression_type == "zlib"
+    assert vm.compression_type != global_cfg.compression_type
+
+
+@pytest.mark.unit
+def test_target_inherits_vm_engine_option(tmp_path: Path) -> None:
+    """Target without convert_parallel inherits the VM-level convert_parallel=8."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "convert_parallel = 8\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.convert_parallel == 8
+    assert len(vm.targets) == 1
+    assert vm.targets[0].convert_parallel == 8
+
+
+@pytest.mark.unit
+def test_target_overrides_vm_engine_option(tmp_path: Path) -> None:
+    """Target overrides the VM-level compression_type: VM=zlib, target=zstd."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'compression_type = "zstd"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'compression_type = "zlib"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  compression_type = "zstd"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.compression_type == "zlib"
+    target = vm.targets[0]
+    assert target.compression_type == "zstd"
+    assert target.compression_type != vm.compression_type
+
+
+@pytest.mark.unit
+def test_target_inherits_vm_verify(tmp_path: Path) -> None:
+    """Target without verify inherits the VM-level verify="check"."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'verify = "check"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.verify == "check"
+    assert len(vm.targets) == 1
+    assert vm.targets[0].verify == "check"
+
+
+@pytest.mark.unit
+def test_target_overrides_vm_verify(tmp_path: Path) -> None:
+    """Target overrides the VM-level verify: VM=check, target=off."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'verify = "check"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        '  verify = "off"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.verify == "check"
+    target = vm.targets[0]
+    assert target.verify == "off"
+    assert target.verify != vm.verify
+
+
+@pytest.mark.unit
+def test_vm_inherits_all_engine_options_from_global(tmp_path: Path) -> None:
+    """VM without engine options inherits all five from global plus verify='metadata'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "compress = false\n"
+        'compression_type = "zlib"\n'
+        "convert_parallel = 2\n"
+        "convert_out_of_order = false\n"
+        'backup_stall_timeout = "1h"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.compress is False
+    assert vm.compression_type == "zlib"
+    assert vm.convert_parallel == 2
+    assert vm.convert_out_of_order is False
+    assert vm.backup_stall_timeout == "1h"
+    assert vm.verify == "metadata"
+
+
+@pytest.mark.unit
+def test_vm_engine_options_feed_target_resolution(tmp_path: Path) -> None:
+    """VM-level compression_type and convert_parallel flow into targets."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        'compression_type = "zlib"\n'
+        "convert_parallel = 8\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    target = vm.targets[0]
+    assert target.compression_type == "zlib"
+    assert target.convert_parallel == 8
+
+
+@pytest.mark.unit
+def test_target_inherits_vm_convert_out_of_order(tmp_path: Path) -> None:
+    """Target without convert_out_of_order inherits the VM-level False."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "convert_out_of_order = false\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+
+    assert vm.convert_out_of_order is False
+    assert len(vm.targets) == 1
+    assert vm.targets[0].convert_out_of_order is False

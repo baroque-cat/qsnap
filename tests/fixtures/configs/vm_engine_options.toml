@@ -1,0 +1,78 @@
+# Config fixture testing VM-level backup engine options with the
+# global → VM → target inheritance cascade.
+#
+# Global defaults (non-standard values to distinguish from VM-level
+# overrides): compress=false, compression_type="zlib",
+# convert_parallel=2, convert_out_of_order=false,
+# backup_stall_timeout="1h".
+#
+# - vm_all_vm_level:    all six engine options set at VM level;
+#                       the target inherits the VM values.
+# - vm_target_override: VM-level engine options set; the target
+#                       overrides some of them and inherits the rest.
+# - vm_global_inherit:  no engine options set anywhere — everything
+#                       inherits from the global defaults.
+#
+# NOTE: VM-level options must appear BEFORE the [[vm.disk]] header so
+# they belong to the [[vm]] table (TOML sub-table semantics).
+
+compress = false
+compression_type = "zlib"
+convert_parallel = 2
+convert_out_of_order = false
+backup_stall_timeout = "1h"
+
+[[vm]]
+name = "vm_all_vm_level"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_all_vm_level"
+
+  # All six engine options set at VM level
+  compress = true
+  compression_type = "zstd"
+  convert_parallel = 8
+  convert_out_of_order = true
+  backup_stall_timeout = "30m"
+  verify = "compare"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_all_vm_level.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_all_vm_level"
+
+[[vm]]
+name = "vm_target_override"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_target_override"
+
+  # VM-level engine options
+  compress = false
+  compression_type = "zlib"
+  convert_parallel = 2
+  convert_out_of_order = false
+  backup_stall_timeout = "1h"
+  verify = "metadata"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_target_override.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_target_override"
+  # Target overrides VM values for some options
+  compression_type = "zstd"
+  convert_parallel = 4
+  backup_stall_timeout = "30m"
+
+[[vm]]
+name = "vm_global_inherit"
+snapshot_dir = "/var/lib/libvirt/snapshots/vm_global_inherit"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/vm_global_inherit.qcow2"
+
+  # No engine options set — everything inherits from global
+
+  [[vm.target]]
+  path = "/mnt/backup/vm_global_inherit"

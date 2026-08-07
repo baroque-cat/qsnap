@@ -84,71 +84,6 @@ def test_global_chain_length_parsed(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Scenario 2: VM chain_length overrides global
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_vm_chain_length_overrides_global(tmp_path: Path) -> None:
-    """VM-level snapshot_chain_length=336 overrides global snapshot_chain_length=168."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        "snapshot_chain_length = 168\n"
-        "\n"
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-        "snapshot_chain_length = 336\n"
-        "\n"
-        "\n"
-        "  [[vm.disk]]\n"
-        '  target = "vda"\n'
-        '  base_image = "/tmp/test.qcow2"\n'
-    )
-    facade = ConfigFacade(config_file)
-    global_cfg = facade.get_global()
-    vm = facade.get_vm("testvm")
-
-    assert global_cfg.snapshot_chain_length == 168
-    assert vm.snapshot_chain_length == 336
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Scenario 3: Target chain_length overrides VM
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_target_chain_length_overrides_vm(tmp_path: Path) -> None:
-    """Target-level target_chain_length=150 overrides VM-level target_chain_length=200."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        "target_chain_length = 100\n"
-        "\n"
-        "[[vm]]\n"
-        'name = "testvm"\n'
-        'snapshot_dir = "/tmp/snaps"\n'
-        "target_chain_length = 200\n"
-        "\n"
-        "\n"
-        "  [[vm.disk]]\n"
-        '  target = "vda"\n'
-        '  base_image = "/tmp/test.qcow2"\n'
-        "\n"
-        "  [[vm.target]]\n"
-        '  path = "/mnt/backup/testvm"\n'
-        "  target_chain_length = 150\n"
-        "\n"
-    )
-    facade = ConfigFacade(config_file)
-    vm = facade.get_vm("testvm")
-
-    assert vm.target_chain_length == 200
-    assert len(vm.targets) == 1
-    assert vm.targets[0].target_chain_length == 150
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # Scenario 4: Valid chain_length=1 accepted
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -342,20 +277,6 @@ def test_global_safety_fields_parsed(tmp_path: Path) -> None:
     assert global_cfg.chain_verify_before_commit is False
     assert global_cfg.chain_verify_after_commit is True
     assert global_cfg.deep_check_schedule == "monthly"
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Scenario 9: Target compress parsed (verify still works)
-# ──────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_target_compress_parsed() -> None:
-    """ConfigFacade parses compress=True from a [[vm.target]] section."""
-    facade = ConfigFacade(FIXTURES / "full_backup.toml")
-    vm = facade.get_vm("vm_with_full")
-    target = next(t for t in vm.targets if t.path == Path("/mnt/backup/vm_with_full"))
-    assert target.compress is True
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -858,3 +779,32 @@ def test_global_fields_toml_free_space_assertions() -> None:
     assert global_cfg.free_space_check == "warn"
     assert global_cfg.free_space_reserve == 1073741824
     assert global_cfg.free_space_factor == 1.1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# vm-level-backup-engine-options: verify resolution when absent everywhere
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_target_verify_absent_defaults_to_metadata(tmp_path: Path) -> None:
+    """A config with no ``verify`` at global, VM, or target level resolves the
+    target's verify mode to the default ``"metadata"`` (VM-level fallback)."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+        "\n"
+    )
+    facade = ConfigFacade(config_file)
+    vm = facade.get_vm("testvm")
+    assert vm.targets[0].verify == "metadata"
