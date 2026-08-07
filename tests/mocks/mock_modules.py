@@ -5,6 +5,7 @@ Each mock satisfies its ABC and returns valid result types.
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,9 @@ from qsnap.interfaces.lifecycle import ILifecycleManager
 from qsnap.interfaces.retention import IRetentionEngine
 from qsnap.interfaces.shell import IShell
 from qsnap.interfaces.snapshot import ISnapshotProvider
-from qsnap.models.config import RetentionPolicy, TargetConfig, VMConfig
+from qsnap.models.config import DiskConfig, RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
+    BackupInfo,
     BackupResult,
     ChangeResult,
     CommitResult,
@@ -83,80 +85,63 @@ class MockSnapshotProvider(ISnapshotProvider):
 class MockBitmapBackupProvider(IBackupProvider):
     """Mock bitmap backup provider returning valid result types.
 
-    ``transfer_missing`` returns ``BackupResult`` objects whose
+    ``run_backup`` returns ``BackupResult`` objects whose
     ``target_path`` points to a standalone qcow2 file (no backing chain),
     reflecting bitmap backup semantics (design D3).
     """
 
-    def __init__(self, shell: IShell | None = None) -> None:
+    def __init__(self, shell: IShell | None = None, deferred: bool = False) -> None:
         # Constructor accepts IShell but doesn't need it for mock behavior.
+        # ``deferred=True`` simulates the stopped-VM-with-checkpoint case:
+        # run_backup() reports success but defers the transfer (no file,
+        # no checkpoint mutation, baseline not updated — design D8).
         self._shell = shell
+        self._deferred = deferred
 
-    def transfer_missing(
+    def run_backup(
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        snapshots: list[SnapshotInfo],
+        disk: DiskConfig,
         *,
+        force_full: bool = False,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
-    ) -> list[BackupResult]:
-        return [
-            BackupResult(
-                success=True,
-                snapshot_name=s.name,
-                source_path=s.path,
-                target_path=target.path / f"{s.name}.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk=s.disk,
-            )
-            for s in snapshots
-        ]
+    ) -> BackupResult:
+        """Return a successful backup result.
 
-    def list(self, target: TargetConfig) -> list[SnapshotInfo]:
+        Generates a freeze-timestamp name matching the orthogonal model.
+        """
+        disk_target = disk.target
+        freeze_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        hex_suffix = secrets.token_hex(3)
+        if force_full:
+            name = f"{vm_config.name}.FULL.{freeze_ts}_{disk_target}_{hex_suffix}"
+        else:
+            name = f"{vm_config.name}.{freeze_ts}_{disk_target}_{hex_suffix}"
+        return BackupResult(
+            success=True,
+            snapshot_name=name,
+            source_path=disk.base_image,
+            target_path=target.path / f"{name}.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+            disk=disk_target,
+            deferred=self._deferred,
+        )
+
+    def list(self, target: TargetConfig) -> list[BackupInfo]:
         return []
 
-    def delete(self, backup: SnapshotInfo) -> ShellResult:
+    def delete(self, backup: BackupInfo) -> ShellResult:
         return ShellResult(
             success=True,
             stdout="",
             stderr="",
             returncode=0,
             error=None,
-        )
-
-    def create_full_backup(
-        self,
-        vm_name: str,
-        source_snapshot: SnapshotInfo,
-        target: TargetConfig,
-        compress: bool = False,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-        checkpoint: str | None = None,
-    ) -> BackupResult:
-        """Return a successful FULL result.
-
-        ``checkpoint`` mirrors the production provider (design D1 of
-        fix-checkpoint-rollback): the exact libvirt checkpoint name
-        created during a running-VM FULL, ``None`` on the stopped-VM
-        path where no checkpoint is created.  Default ``None`` keeps all
-        existing Core tests green.
-        """
-        return BackupResult(
-            success=True,
-            snapshot_name=source_snapshot.name,
-            source_path=source_snapshot.path,
-            target_path=target.path / f"{vm_name}.FULL.qcow2",
-            bytes_transferred=1048576,
-            error=None,
-            disk=source_snapshot.disk,
-            checkpoint=checkpoint,
         )
 
     def list_checkpoints(self, vm_name: str) -> list[str]:

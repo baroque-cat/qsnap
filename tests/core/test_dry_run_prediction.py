@@ -252,15 +252,19 @@ def test_retention_counts_simulated_snapshot(
     assert len(snapshot_create_preds) == 1, "Simulated snapshot should be predicted"
 
 
-# ── Test 5: first run FULL from simulated snapshot ─────────────────────────
+# ── Test 5: no checkpoint predicts FULL ────────────────────────────────────
 
 
-def test_first_run_full_from_simulated_snapshot(
+def test_no_checkpoint_predicts_full(
     mock_factory: MockVMModuleFactory,
     mock_state: InMemoryStateManager,
     mock_shell: MockShell,
 ) -> None:
-    """First run (no existing backups) predicts FULL sourced from simulated snapshot."""
+    """First run (no checkpoints/backups on target) predicts FULL.
+
+    Backup predictions come from target-internal data (checkpoint state,
+    FULL records, dependency count) — never from snapshot data.
+    """
     vm = _make_vm(name="testvm")
     core = _build_core(
         vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
@@ -276,113 +280,6 @@ def test_first_run_full_from_simulated_snapshot(
     for p in full_predictions:
         assert ".FULL." in p.name, f"FULL name should contain .FULL.: {p.name}"
         assert p.disk is not None, "disk field must be set"
-
-
-# ── Test 6: two untransferred snapshots produce two predictions ────────────
-
-
-def test_incremental_transfer_predictions_two_snapshots(
-    mock_factory: MockVMModuleFactory,
-    mock_state: InMemoryStateManager,
-    mock_shell: MockShell,
-) -> None:
-    """Two untransferred snapshots produce two backup_transfer predictions."""
-    # Populate state with 2 snapshots.
-    base = datetime(2025, 8, 1, 12, 0, 0)
-    snap1 = SnapshotInfo(
-        name="testvm.snap1_vda_abc001",
-        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1_vda_abc001.qcow2"),
-        timestamp=base.replace(hour=13),
-        allocation=1048576,
-        disk="vda",
-    )
-    snap2 = SnapshotInfo(
-        name="testvm.snap2_vda_abc002",
-        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap2_vda_abc002.qcow2"),
-        timestamp=base.replace(hour=14),
-        allocation=2097152,
-        disk="vda",
-    )
-    mock_state.record_snapshot("testvm", snap1)
-    mock_state.record_snapshot("testvm", snap2)
-
-    # Backup provider.list returns [] (nothing on target).
-    # The backup_transfer predictions will be for both snapshots.
-    # Since paths don't exist on disk, _estimate_file_actual_size returns
-    # None → falls back to allocation.  So transfer sizes will be the
-    # allocations (1048576 and 2097152).
-
-    vm = _make_vm(name="testvm")
-    core = _build_core(
-        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
-    )
-
-    # Configure MockShell to make qemu-img info succeed (needed for FULL
-    # prediction that runs first).  The default conftest already does this.
-
-    result = core.run()
-
-    transfer_predictions = [p for p in result.predictions if p.action == "backup_transfer"]
-    # Simulated snapshot from dry-run is also threaded into backup steps as
-    # extra_snapshots, so we get 3 predictions (2 state + 1 simulated).
-    # Filter to just the state snapshots for assertion.
-    state_transfer_names = {snap1.name, snap2.name}
-    transfer_names = {p.name for p in transfer_predictions}
-    assert state_transfer_names.issubset(transfer_names), (
-        f"Transfer predictions should include state snapshots; got: {transfer_names}"
-    )
-    assert len(transfer_predictions) >= 2, (
-        f"Expected at least 2 backup_transfer predictions, got {len(transfer_predictions)}"
-    )
-
-    for p in transfer_predictions:
-        assert p.disk == "vda", f"disk should be vda, got {p.disk}"
-        assert p.size > 0, f"transfer size should be > 0, got {p.size}"
-
-
-# ── Test 7: already-on-target not predicted ────────────────────────────────
-
-
-def test_already_on_target_not_predicted(
-    mock_factory: MockVMModuleFactory,
-    mock_state: InMemoryStateManager,
-    mock_shell: MockShell,
-) -> None:
-    """Snapshot already on target (provider.list) is not predicted for transfer."""
-    snap1 = SnapshotInfo(
-        name="testvm.snap1_vda_abc001",
-        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap1_vda_abc001.qcow2"),
-        timestamp=datetime(2025, 8, 1, 13, 0, 0),
-        allocation=1048576,
-        disk="vda",
-    )
-    snap2 = SnapshotInfo(
-        name="testvm.snap2_vda_abc002",
-        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.snap2_vda_abc002.qcow2"),
-        timestamp=datetime(2025, 8, 1, 14, 0, 0),
-        allocation=2097152,
-        disk="vda",
-    )
-    mock_state.record_snapshot("testvm", snap1)
-    mock_state.record_snapshot("testvm", snap2)
-
-    # Provider.list returns snap1 as already present on target.
-    vm = _make_vm(name="testvm")
-    core = _build_core(
-        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
-    )
-
-    with patch.object(
-        mock_factory._bitmap_backup_provider,
-        "list",
-        return_value=[snap1],
-    ):
-        result = core.run()
-
-    transfer_predictions = [p for p in result.predictions if p.action == "backup_transfer"]
-    names = {p.name for p in transfer_predictions}
-    assert snap1.name not in names, f"{snap1.name} should NOT be predicted for transfer"
-    assert snap2.name in names, f"{snap2.name} should be predicted for transfer"
 
 
 # ── Test 8: FULL prediction carries chain size estimate ────────────────────
@@ -470,9 +367,9 @@ def test_full_prediction_estimation_failure_graceful(
     mock_shell: MockShell,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When chain-size estimation fails for BOTH the source probe and the
-    base_image fallback, prediction is still recorded with size 0 and log
-    says 'size unknown' (pipeline not aborted)."""
+    """When chain-size estimation fails for the base_image probe,
+    prediction is still recorded with size 0 and log says 'size unknown'
+    (pipeline not aborted)."""
     failure = ShellResult(
         success=False,
         stdout="",
@@ -480,11 +377,8 @@ def test_full_prediction_estimation_failure_graceful(
         returncode=1,
         error="command failed",
     )
-    # Simulated snapshot probe fails (file not found)...
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
-    ).returns(failure)
-    # ...AND the base_image fallback probe also fails (design D3).
+    # The base_image chain probe fails (the only probe — the estimate is
+    # always computed from disk.base_image, never from snapshot data).
     mock_shell.expect_first(
         r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
     ).returns(failure)
@@ -507,11 +401,7 @@ def test_full_prediction_estimation_failure_graceful(
         f"Size should be 0 when estimation fails (chain_size or 0 = 0), got {full_pred.size}"
     )
 
-    # Both probes were attempted before degrading (design D3): the source
-    # snapshot path AND the base_image fallback path.
-    assert any(
-        "/snapshots/testvm/" in cmd and "--backing-chain" in cmd for cmd in mock_shell.call_history
-    ), f"Source snapshot probe should have been attempted, got: {mock_shell.call_history}"
+    # The base_image fallback probe was attempted before degrading.
     assert any(
         "/var/lib/libvirt/images/testvm.qcow2" in cmd and "--backing-chain" in cmd
         for cmd in mock_shell.call_history
@@ -1550,8 +1440,12 @@ def test_real_run_phantom_cleanup_still_executes(
 
     # ── Assert: state IS mutated — phantom FULL gone ─────────────────
     remaining = mock_state.get_full_backups(target_path)
-    assert len(remaining) == 0, (
-        f"Phantom FULL should be removed from state (real run), got {len(remaining)}"
+    assert all(f.name != f"{full_name}.qcow2" for f in remaining), (
+        f"Phantom FULL should be removed from state (real run), got {remaining}"
+    )
+    assert len(remaining) == 1, (
+        "The run creates one new FULL (no checkpoint remains after phantom cleanup), "
+        f"got {len(remaining)}"
     )
 
     deps = mock_state.get_incremental_dependencies(target_path, full_name)

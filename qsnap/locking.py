@@ -4,6 +4,9 @@ Provides a simple advisory lock mechanism so that only one ``qsnap``
 pipeline runs at a time.  Uses ``fcntl.flock`` with ``LOCK_EX | LOCK_NB``
 (non-blocking) — ``acquire()`` returns ``False`` immediately if the lock
 is already held by another process.
+
+Default lockfile is ``/var/lib/qsnap/qsnap.lock`` when not explicitly
+configured.  The sentinel value ``"off"`` disables locking entirely.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from typing import IO
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_LOCKFILE = "/var/lib/qsnap/qsnap.lock"
+
 
 def resolve_lockfile_path(
     cli_path: str | None,
@@ -22,12 +27,23 @@ def resolve_lockfile_path(
 ) -> str | None:
     """Resolve the effective lockfile path.
 
-    Precedence: CLI ``--lockfile`` → ``GlobalConfig.lockfile`` → ``None``
-    (no locking).
+    Precedence: CLI ``--lockfile`` → ``GlobalConfig.lockfile`` →
+    default ``/var/lib/qsnap/qsnap.lock``.  The sentinel ``"off"``
+    (evaluated at each level) disables locking explicitly and returns
+    ``None``.
     """
+    # CLI override
     if cli_path is not None:
+        if cli_path == "off":
+            return None
         return cli_path
-    return config_path
+    # Config value
+    if config_path is not None:
+        if config_path == "off":
+            return None
+        return config_path
+    # Default
+    return _DEFAULT_LOCKFILE
 
 
 class LockManager:

@@ -9,6 +9,7 @@ from qsnap.models.config import (
     VMConfig,
 )
 from qsnap.models.results import (
+    BackupInfo,
     BackupResult,
     ChangeResult,
     CheckResult,
@@ -24,6 +25,7 @@ from qsnap.models.results import (
 )
 
 __all__ = [
+    "BackupInfo",
     "BackupResult",
     "ChangeResult",
     "CheckResult",

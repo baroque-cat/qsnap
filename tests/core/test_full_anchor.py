@@ -64,82 +64,19 @@ def test_first_backup_creates_full(
     # No prior FULLs exist in state.
     assert mock_state.get_full_backups(str(target.path)) == []
 
-    with (
-        patch.object(
-            mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
-        ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None),
-    ):
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called on first backup"
+    assert full_spy.called, "run_backup should be called on first backup"
+    assert full_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True when no prior FULL exists"
+    )
     fulls = mock_state.get_full_backups(str(target.path))
     assert len(fulls) == 1, "One FULL backup should be recorded after first backup"
-
-
-# ── test_full_source_snapshot_excluded_from_transfer ──────────────────────
-
-
-@pytest.mark.unit
-@pytest.mark.mock
-def test_full_source_snapshot_excluded_from_transfer(
-    make_vm_config,
-    make_target,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """The snapshot consumed as the FULL source is excluded from transfer.
-
-    The FULL anchor already contains the source snapshot's data.  Re-
-    transferring it as an incremental against the checkpoint created by
-    the FULL export itself trips the design-D5 temporal cross-check when
-    the checkpoint's second-granularity timestamp rolls past the
-    snapshot's microsecond timestamp — a spurious "backup failed" on an
-    otherwise healthy FULL.  Older snapshots still pending transfer must
-    still be transferred.
-    """
-    target = make_target()
-    vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(vms=[vm])
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    # Older snapshot — still needs an incremental transfer.
-    snap_old = SnapshotInfo(
-        name="snap0",
-        path=Path("/tmp/snap0.qcow2"),
-        timestamp=datetime(2025, 7, 13, 9, 0),
-        allocation=500,
-        disk="vda",
-    )
-    # Newest snapshot — becomes the FULL source.
-    snap_new = _record_snap(mock_state, target, vm)
-    mock_state.record_snapshot(vm.name, snap_old)
-
-    with (
-        patch.object(
-            mock_factory._backup_provider,
-            "transfer_missing",
-            wraps=mock_factory._backup_provider.transfer_missing,
-        ) as transfer_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None),
-    ):
-        core._backup_target(vm, target, [snap_old, snap_new])
-
-    assert transfer_spy.called, "transfer_missing should still be called"
-    transferred = transfer_spy.call_args[0][2]
-    transferred_names = [s.name for s in transferred]
-    assert snap_new.name not in transferred_names, (
-        "FULL source snapshot must not be re-transferred as incremental"
-    )
-    assert snap_old.name in transferred_names, "older pending snapshots must still be transferred"
 
 
 # ── test_incremental_count_exceeds_chain_length_triggers_full ──────────────
@@ -182,17 +119,19 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None),
         # Patch os.path.exists so the pre-populated FULL is not treated as phantom.
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
     assert full_spy.called, (
-        "create_full_backup should be called when incremental_count (6) > chain_length (5)"
+        "run_backup should be called when incremental_count (6) > chain_length (5)"
+    )
+    assert full_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True when count exceeds chain_length"
     )
 
 
@@ -235,16 +174,19 @@ def test_target_chain_length_none_no_full_triggered(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as full_spy,
         # Patch os.path.exists so the pre-populated FULL is not treated as phantom.
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called when target_chain_length is None"
+    assert full_spy.called, (
+        "run_backup should be called when target_chain_length is None"
+    )
+    assert full_spy.call_args.kwargs["force_full"] is False, (
+        "run_backup should NOT be called with force_full=True when target_chain_length is None"
     )
 
 
@@ -288,16 +230,18 @@ def test_incremental_count_within_chain_length_skips_full(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as full_spy,
         # Patch os.path.exists so the pre-populated FULL is not treated as phantom.
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called when incremental_count (3) <= chain_length (5)"
+    assert full_spy.called, "run_backup should be called for the incremental"
+    assert full_spy.call_args.kwargs["force_full"] is False, (
+        "run_backup should NOT be called with force_full=True when incremental_count "
+        "(3) <= chain_length (5)"
     )
 
 
@@ -331,19 +275,16 @@ def test_backup_retry_max_zero_single_full_attempt(
     snap = _record_snap(mock_state, target, vm)
 
     # No prior FULLs → first backup triggers FULL creation.
-    with (
-        patch.object(
-            mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
-        ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None),
-    ):
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    # create_full_backup should be called exactly once.
+    # run_backup should be called exactly once.
     assert full_spy.call_count == 1, (
-        f"create_full_backup should be called exactly once with backup_retry_max=0, "
+        f"run_backup should be called exactly once with backup_retry_max=0, "
         f"got {full_spy.call_count}"
     )
 
@@ -393,26 +334,25 @@ def test_dry_run_logs_full_would_be_created(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as full_spy,
         # Patch os.path.exists so the pre-populated FULL is not treated as phantom.
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
-    # create_full_backup should NOT be called in dry-run mode.
-    assert not full_spy.called, "create_full_backup should NOT be called in dry-run mode"
-    # INFO log should contain the dry-run FULL creation message with
-    # per-disk context, chain-size estimate, and chain length (design D5/D9
-    # of fix-dry-run-predictions).  The default MockShell expectation for
-    # qemu-img info --backing-chain returns no actual-size, producing a zero
-    # estimate formatted as "~0 B".
+    # run_backup should NOT be called in dry-run mode.
+    assert not full_spy.called, "run_backup should NOT be called in dry-run mode"
+    # INFO log should contain the dry-run FULL prediction message with
+    # per-disk context and VM state.  The default MockShell expectation for
+    # qemu-img info --backing-chain returns no actual-size, so the estimate
+    # is undecidable and logged as "size unknown".
     expected_fragment = (
         "[dry-run] Would create FULL backup for disk vda"
-        " (~0 B, chain_length=5, method=NBD, VM=running)"
+        " (size unknown, method=NBD, VM=running)"
     )
     assert expected_fragment in caplog.text, (
-        "Dry-run should log 'Would create FULL backup' with per-disk context, "
-        "chain-size estimate, and chain_length"
+        "Dry-run should log 'Would create FULL backup' with per-disk context "
+        "and method/VM-state details"
     )

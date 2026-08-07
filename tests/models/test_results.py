@@ -1,8 +1,9 @@
 """Tests for immutable result dataclasses.
 
-Covers SnapshotResult, BackupResult, CommitResult, RetentionResult,
-ShellResult, and ChangeResult -- verifying field values, success/failure
-semantics, and frozen immutability where specified.
+Covers SnapshotResult, BackupResult, BackupInfo, CommitResult,
+RetentionResult, ShellResult, ChangeResult, ActionRecord, and friends --
+verifying field values, success/failure semantics, defaults, and frozen
+immutability where specified.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pytest
 from qsnap.core import PipelineResult, VMRunResult
 from qsnap.models.results import (
     ActionRecord,
+    BackupInfo,
     BackupResult,
     ChainVerifyResult,
     ChangeResult,
@@ -208,6 +210,127 @@ def test_backup_result_checkpoint_defaults_none():
         error=None,
     )
     assert result.checkpoint is None
+
+
+def test_backup_result_deferred_defaults_false():
+    """BackupResult.deferred defaults to False when the argument is omitted."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+    )
+    assert result.deferred is False
+
+
+def test_backup_result_deferred_true():
+    """BackupResult carries deferred=True for stopped-VM-with-checkpoint runs.
+
+    A deferred result represents a backup skipped because the VM is
+    stopped while a checkpoint exists (transfer requires a running VM);
+    it must remain frozen like every other result.
+    """
+    result = BackupResult(
+        success=True,
+        snapshot_name="myvm.20260808T031542_vda_a1b2c3",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+        disk="vda",
+        deferred=True,
+    )
+    assert result.deferred is True
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+    # Verify mutation raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.deferred = False
+
+
+# ── BackupInfo (target-world model, design D2) ───────────────────────────
+
+
+def test_backup_info_fields_and_frozen():
+    """BackupInfo carries name/path/timestamp/disk/is_full and is frozen."""
+    ts = datetime(2026, 8, 8, 3, 15, 42)
+    info = BackupInfo(
+        name="testvm.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/testvm.20260808T031542_vda_a1b2c3.qcow2"),
+        timestamp=ts,
+        disk="vda",
+        is_full=False,
+    )
+    assert info.name == "testvm.20260808T031542_vda_a1b2c3"
+    assert info.path == Path("/mnt/backup/testvm/testvm.20260808T031542_vda_a1b2c3.qcow2")
+    assert info.timestamp == ts
+    assert info.disk == "vda"
+    assert info.is_full is False
+    # Verify the dataclass is declared frozen.
+    assert info.__dataclass_params__.frozen is True
+
+
+def test_backup_info_carries_full_flag():
+    """A FULL backup entry carries is_full=True; a delta carries False."""
+    ts = datetime(2026, 8, 8, 3, 15, 42)
+    full = BackupInfo(
+        name="testvm.FULL.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20260808T031542_vda_a1b2c3.qcow2"),
+        timestamp=ts,
+        disk="vda",
+        is_full=True,
+    )
+    assert full.is_full is True
+
+
+def test_backup_info_is_frozen():
+    """BackupInfo mutation raises FrozenInstanceError for every field."""
+    info = BackupInfo(
+        name="testvm.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/snap.qcow2"),
+        timestamp=datetime(2026, 8, 8, 3, 15, 42),
+        disk="vda",
+        is_full=False,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.name = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.path = Path("/mutated.qcow2")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.timestamp = datetime(2020, 1, 1)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.disk = "vdb"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.is_full = True
+
+
+def test_backup_info_field_names():
+    """BackupInfo has exactly the fields name, path, timestamp, disk, is_full."""
+    field_names = {f.name for f in dataclasses.fields(BackupInfo)}
+    assert field_names == {"name", "path", "timestamp", "disk", "is_full"}
+
+
+def test_backup_info_equality():
+    """BackupInfo instances with equal fields compare equal."""
+    ts = datetime(2026, 8, 8, 3, 15, 42)
+    a = BackupInfo(name="n", path=Path("/p"), timestamp=ts, disk="vda", is_full=False)
+    b = BackupInfo(name="n", path=Path("/p"), timestamp=ts, disk="vda", is_full=False)
+    c = BackupInfo(name="n", path=Path("/p"), timestamp=ts, disk="vda", is_full=True)
+    assert a == b
+    assert a != c
+
+
+def test_backup_info_is_full_defaults_false():
+    """BackupInfo.is_full defaults to False when the argument is omitted."""
+    info = BackupInfo(
+        name="testvm.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/snap.qcow2"),
+        timestamp=datetime(2026, 8, 8, 3, 15, 42),
+        disk="vda",
+    )
+    assert info.is_full is False
 
 
 def test_commit_result_success():
@@ -487,6 +610,7 @@ def test_action_record_defaults_zero():
     assert record.size == 0
     assert record.duration == 0.0
     assert record.error is None
+    assert record.target is None
 
 
 def test_action_record_handles_unicode_error():
@@ -527,7 +651,7 @@ def test_action_record_disk_frozen():
 
 
 def test_action_record_disk_defaults():
-    """ActionRecord size/duration default to zero, disk defaults to None when omitted."""
+    """ActionRecord size/duration default to zero, disk and target default to None."""
     record = ActionRecord(
         action="backup_transfer",
         vm_name="testvm",
@@ -537,6 +661,7 @@ def test_action_record_disk_defaults():
     assert record.size == 0
     assert record.duration == 0.0
     assert record.disk is None
+    assert record.target is None
 
 
 def test_action_record_carries_disk():
@@ -551,8 +676,66 @@ def test_action_record_carries_disk():
     assert record.disk == "vda"
 
 
+def test_action_record_target_defaults_none():
+    """ActionRecord.target defaults to None when the argument is omitted."""
+    record = ActionRecord(
+        action="backup_transfer",
+        vm_name="testvm",
+        name="backup-snap1.qcow2",
+        path=Path("/mnt/backup/backup-snap1.qcow2"),
+    )
+    assert record.target is None
+
+
+def test_action_record_target_frozen():
+    """ActionRecord is immutable — the target field cannot be mutated."""
+    record = ActionRecord(
+        action="backup_transfer",
+        vm_name="testvm",
+        name="backup-snap1.qcow2",
+        path=Path("/mnt/backup/backup-snap1.qcow2"),
+        disk="vda",
+        target="/mnt/backup/testvm",
+    )
+    assert record.__dataclass_params__.frozen is True
+    assert record.target == "/mnt/backup/testvm"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.target = "/mutated"
+
+
+def test_action_record_carries_target():
+    """ActionRecord carries the target path for backup-scoped actions."""
+    record = ActionRecord(
+        action="backup_full",
+        vm_name="testvm",
+        name="testvm.FULL.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20260808T031542_vda_a1b2c3.qcow2"),
+        disk="vda",
+        target="/mnt/backup/testvm",
+    )
+    assert record.disk == "vda"
+    assert record.target == "/mnt/backup/testvm"
+
+
+def test_action_record_backup_failure_carries_disk_and_target():
+    """A backup-failure error ActionRecord carries both disk and target."""
+    record = ActionRecord(
+        action="error",
+        vm_name="testvm",
+        name="testvm.FULL.20260808T031542_vda_a1b2c3",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20260808T031542_vda_a1b2c3.qcow2"),
+        error="NBD export failed: connection refused",
+        disk="vda",
+        target="/backup/vm/testvm",
+    )
+    assert record.action == "error"
+    assert record.error == "NBD export failed: connection refused"
+    assert record.disk == "vda"
+    assert record.target == "/backup/vm/testvm"
+
+
 def test_action_record_error_disk_none():
-    """VM-level error ActionRecord has no disk (disk=None)."""
+    """VM-level error ActionRecord has no disk or target (both None)."""
     record = ActionRecord(
         action="error",
         vm_name="testvm",
@@ -563,6 +746,7 @@ def test_action_record_error_disk_none():
     assert record.action == "error"
     assert record.error == "pipeline failure"
     assert record.disk is None
+    assert record.target is None
 
 
 # ── PipelineResult ────────────────────────────────────────────────────────

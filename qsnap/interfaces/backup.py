@@ -4,30 +4,41 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from qsnap.models.config import TargetConfig, VMConfig
-from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+from qsnap.models.results import BackupInfo, BackupResult, ShellResult
 
 
 class IBackupProvider(ABC):
     """Abstract interface for transferring and managing backups."""
 
+    # ── New (orthogonal) API ────────────────────────────────────────
+
     @abstractmethod
-    def transfer_missing(
+    def run_backup(
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        snapshots: list[SnapshotInfo],
+        disk: DiskConfig,
         *,
+        force_full: bool = False,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
-    ) -> list[BackupResult]:
-        """Transfer snapshots not yet present at *target*.
+    ) -> BackupResult:
+        """Create exactly one backup for *disk* on *target*.
+
+        The provider decides the backup kind autonomously: no checkpoint
+        exists for this VM+target+disk → FULL; a checkpoint exists →
+        delta of dirty blocks since the newest checkpoint.
+
+        When *force_full* is ``True`` the provider SHALL create a FULL
+        even when a checkpoint already exists.
 
         ``compression_type`` selects the compression algorithm for
         transfer (``"zstd"`` default, ``"zlib"`` alternative).  Only
-        effective when ``target.compress`` is ``True``.
+        effective when ``target.compress`` is ``True`` and a FULL
+        export is pulled.
 
         ``stall_timeout`` is the stall-detection timeout in seconds for
         data-transfer commands.  When ``0``, stall detection is
@@ -41,72 +52,23 @@ class IBackupProvider(ABC):
         """
         ...
 
+    # ── Discovery API ────────────────────────────────────────────────
+
     @abstractmethod
-    def list(self, target: TargetConfig) -> list[SnapshotInfo]:
+    def list(self, target: TargetConfig) -> list[BackupInfo]:
         """List existing backups at *target*."""
         ...
 
     @abstractmethod
-    def delete(self, backup: SnapshotInfo) -> ShellResult:
+    def delete(self, backup: BackupInfo) -> ShellResult:
         """Delete a backup."""
         ...
 
-    def create_full_backup(
-        self,
-        vm_name: str,
-        source_snapshot: SnapshotInfo,
-        target: TargetConfig,
-        compress: bool = False,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-    ) -> BackupResult:
-        """Create a standalone full (anchor) backup via the NBD engine.
-
-        ``vm_name`` is the full, untruncated VM name (e.g.
-        ``"3.Projects_opencode"``), passed from Core's
-        ``vm_config.name``.  Implementations SHALL NOT extract the VM
-        name from the snapshot filename — the explicit parameter is the
-        single source of truth (design D1: dependency injection over
-        fragile parsing).
-
-        ``compression_type`` selects the compression algorithm
-        (``"zstd"`` default, ``"zlib"`` alternative).  Only effective
-        when ``compress`` is ``True``.
-
-        ``stall_timeout`` is the stall-detection timeout in seconds
-        for the transfer.  When ``0``, stall detection is disabled.
-
-        ``convert_parallel`` maps to the ``qemu-img convert -m`` flag
-        (range 1-8).
-
-        ``convert_out_of_order`` maps to the ``qemu-img convert -W``
-        flag.
-
-        Default implementation raises ``NotImplementedError``.  Concrete
-        providers that support full backups should override this.
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not support full backups")
-
     def list_checkpoints(self, vm_name: str) -> list[str]:
-        """Return qsnap-owned checkpoint names for *vm_name*.
-
-        Used by Core's orphan-checkpoint detection to identify
-        checkpoints whose target no longer exists or has moved.
-        On failure, returns an empty list (non-fatal).
-
-        Default implementation returns an empty list.  Concrete
-        providers that manage checkpoints should override this.
-        """
+        """Return qsnap-owned checkpoint names for *vm_name*."""
         return []
 
     @staticmethod
     def target_hash(target_path: str) -> str:
-        """Short hash of *target_path* for checkpoint naming.
-
-        Default implementation returns an empty string.  Concrete
-        providers that use target-hashed checkpoint names should
-        override this.
-        """
+        """Short hash of *target_path* for checkpoint naming."""
         return ""

@@ -100,3 +100,26 @@ def test_no_business_logic_in_cli():
     assert not all_violations, (
         f"CLI files import forbidden business-logic modules: {all_violations}"
     )
+
+
+# ── backup-world orthogonality ─────────────────────────────────────────────
+# The snapshot world and the backup-target world are orthogonal (design
+# "Orthogonality: Two Worlds, One Bridge").  The CLI must never import the
+# backup provider interface or modules — Core mediates between the worlds.
+
+
+def test_no_backup_world_logic_in_cli():
+    """No CLI module may import the backup provider interface or the backup
+    module package — the CLI stays thin and target-world logic stays out."""
+    cli_files = [
+        _PROJECT_ROOT / "qsnap" / "cli" / "app.py",
+        _PROJECT_ROOT / "qsnap" / "cli" / "commands.py",
+        _PROJECT_ROOT / "qsnap" / "cli" / "format.py",
+        _PROJECT_ROOT / "qsnap" / "cli" / "summary.py",
+    ]
+    forbidden = ("qsnap.interfaces.backup", "qsnap.modules.backup")
+    violations: list[str] = []
+    for path in cli_files:
+        modules = _imported_modules(path.read_text())
+        violations.extend(m for m in modules if _starts_with_any(m, forbidden))
+    assert not violations, f"CLI files import backup-world logic: {violations}"

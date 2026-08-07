@@ -440,31 +440,17 @@ When `virsh backup-begin` fails with an error containing "bitmap" and "exists" (
 - **AND** fallback to `--metadata` is attempted for each checkpoint that fails full delete
 
 
-### Requirement: Temporal mismatch detection
+### Requirement: Size-based sanity check for incremental transfer
 
-`transfer_missing()` SHALL skip snapshots whose timestamp predates the newest checkpoint's creation time for that disk. The checkpoint timestamp SHALL be parsed from the checkpoint name via `_parse_checkpoint_timestamp(name, target_hash, disk)`. The snapshot timestamp SHALL come from `SnapshotInfo.timestamp`. If `snapshot_ts < checkpoint_ts`, the snapshot SHALL be skipped with `BackupResult(success=False, error="temporal mismatch: ...")` and a WARNING log.
-
-#### Scenario: Snapshot predating checkpoint is skipped
-
-- **WHEN** the newest checkpoint for disk `vda` was created at 2026-07-27T0106
-- **AND** a snapshot has timestamp 2026-07-27T0008 (before the checkpoint)
-- **THEN** the snapshot is skipped
-- **AND** `BackupResult(success=False, error="temporal mismatch: ...")` is returned
-- **AND** a WARNING log explains the temporal mismatch
-
-#### Scenario: Snapshot after checkpoint proceeds normally
-
-- **WHEN** the newest checkpoint for disk `vda` was created at 2026-07-27T0106
-- **AND** a snapshot has timestamp 2026-07-27T0200 (after the checkpoint)
-- **THEN** the snapshot is transferred normally (no temporal mismatch)
-
-
-### Requirement: Size-based sanity check for temporal mismatch
-
-After incremental transfer, if the transferred bytes exceed 10× the snapshot's allocation size, a WARNING SHALL be logged indicating possible temporal mismatch. This is a diagnostic warning only — the transfer is not aborted.
+After incremental transfer, if the transferred bytes exceed 10× the expected delta upper bound, a WARNING SHALL be logged indicating a possible stale bitmap or write burst. The expected delta upper bound SHALL be the growth of the source disk's active-layer allocation since the last successful backup of this disk+target (from `_target_state.json` `last_backup_allocation`); when no baseline exists, the check SHALL be skipped. This is a diagnostic warning only — the transfer is not aborted. The check SHALL NOT reference snapshot allocation or snapshot timestamps.
 
 #### Scenario: Large transfer triggers warning
 
-- **WHEN** an incremental transfer transfers 15 GiB for a snapshot with allocation 100 MiB
-- **THEN** a WARNING is logged: "dirty bytes (N) exceeds 10× snapshot allocation (N) for <name> — possible stale bitmap or large write burst"
+- **WHEN** an incremental transfer transfers 15 GiB and the active-layer allocation grew by 100 MiB since the last backup of this disk
+- **THEN** a WARNING is logged naming the disk, target, dirty bytes, and expected bound
 - **AND** the transfer is NOT aborted (warning only)
+
+#### Scenario: No baseline skips the check
+
+- **WHEN** no `last_backup_allocation` baseline exists for this disk+target
+- **THEN** the sanity check is skipped without a warning

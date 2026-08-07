@@ -41,6 +41,7 @@ from qsnap.core import Core, PipelineResult, VMRunResult
 from qsnap.models.config import DiskConfig, GlobalConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
+    BackupInfo,
     CheckResult,
     DeferredSummary,
     ReconcileResult,
@@ -179,6 +180,71 @@ def test_list_latest_subcommand_dispatches_to_core_list_latest():
     mock_core.list_latest.assert_called_once_with(None)
 
 
+def test_list_restore_points_dispatches_to_core(cli_app, capsys):
+    """'list restore-points' calls core.list_restore_points(None) and
+    prints per-VM freeze points."""
+    mock_core = _make_mock_core()
+    mock_core.list_restore_points.return_value = [
+        (
+            "testvm",
+            [
+                BackupInfo(
+                    name="testvm.FULL.20250701T120000_abc123",
+                    path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
+                    timestamp=datetime(2025, 7, 1, 12, 0),
+                    disk="vda",
+                    is_full=True,
+                ),
+                BackupInfo(
+                    name="testvm.20250702T120000_def456",
+                    path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+                    timestamp=datetime(2025, 7, 2, 12, 0),
+                    disk="vda",
+                    is_full=False,
+                ),
+            ],
+        )
+    ]
+
+    args = cli_app.parse_args(["list", "restore-points"])
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    mock_core.list_restore_points.assert_called_once_with(None)
+    captured = capsys.readouterr()
+    assert "VM: testvm" in captured.out
+    assert "Target: /mnt/backup/testvm" in captured.out
+    assert "FULL" in captured.out
+    assert "INCR" in captured.out
+    assert "testvm.FULL.20250701T120000_abc123" in captured.out
+    assert "testvm.20250702T120000_def456" in captured.out
+
+
+def test_list_restore_points_with_vm_filter_dispatches(cli_app):
+    """'list restore-points myvm' passes the VM filter to core."""
+    mock_core = _make_mock_core()
+    mock_core.list_restore_points.return_value = []
+
+    args = cli_app.parse_args(["list", "restore-points", "myvm"])
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    mock_core.list_restore_points.assert_called_once_with("myvm")
+
+
+def test_list_restore_points_empty_prints_message(cli_app, capsys):
+    """'list restore-points' with no points prints the empty message."""
+    mock_core = _make_mock_core()
+    mock_core.list_restore_points.return_value = []
+
+    args = cli_app.parse_args(["list", "restore-points"])
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    assert "No restore points found." in captured.out
+
+
 # ── stats and check dispatch tests ─────────────────────────────────────
 
 
@@ -271,7 +337,7 @@ def test_handle_restore_dispatches_to_core_restore(cli_app):
     mock_core = _make_mock_core()
     args = cli_app.parse_args(["restore", "SNAP", "--yes"])
     handle_restore(mock_core, args)
-    mock_core.restore.assert_called_once_with("SNAP", None)
+    mock_core.restore.assert_called_once_with(name="SNAP", vm_filter=None, at=None)
 
 
 def test_handle_restore_with_vm_filter(cli_app):
@@ -279,7 +345,16 @@ def test_handle_restore_with_vm_filter(cli_app):
     mock_core = _make_mock_core()
     args = cli_app.parse_args(["restore", "SNAP", "myvm", "--yes"])
     handle_restore(mock_core, args)
-    mock_core.restore.assert_called_once_with("SNAP", "myvm")
+    mock_core.restore.assert_called_once_with(name="SNAP", vm_filter="myvm", at=None)
+
+
+def test_handle_restore_at_selects_point(cli_app):
+    """Parse 'restore --at <ts>', verify core.restore(name=None, at=<ts>)."""
+    mock_core = _make_mock_core()
+    ts = datetime(2025, 7, 14, 10, 0)
+    args = cli_app.parse_args(["restore", "--at", ts.isoformat(), "--yes"])
+    handle_restore(mock_core, args)
+    mock_core.restore.assert_called_once_with(name=None, vm_filter=None, at=ts)
 
 
 def test_handle_restore_nonexistent_backup_returns_exit_1(cli_app):
@@ -1042,7 +1117,7 @@ def test_handle_restore_prompts_confirmation_without_yes(cli_app, capsys, monkey
     result2 = handle_restore(mock_core2, args)
 
     assert result2 == EXIT_SUCCESS
-    mock_core2.restore.assert_called_once_with("SNAP", None)
+    mock_core2.restore.assert_called_once_with(name="SNAP", vm_filter=None, at=None)
 
 
 @pytest.mark.unit

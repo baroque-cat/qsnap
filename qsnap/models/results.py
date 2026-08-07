@@ -126,6 +126,7 @@ class BackupResult:
     duration: float = 0.0
     disk: str | None = None
     checkpoint: str | None = None
+    deferred: bool = False
 
 
 # ── Commit (blockcommit) ─────────────────────────────────────────────────
@@ -176,6 +177,20 @@ class SnapshotInfo:
     timestamp: datetime
     allocation: int
     disk: str
+
+
+# ── Backup info (target-world model) ──────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BackupInfo:
+    """A backup file on a target, discovered via ``IBackupProvider.list()``."""
+
+    name: str
+    path: Path
+    timestamp: datetime
+    disk: str
+    is_full: bool = False
 
 
 # ── Full backup info (state record) ───────────────────────────────────────
@@ -472,3 +487,4 @@ class ActionRecord:
     duration: float = 0.0
     error: str | None = None
     disk: str | None = None
+    target: str | None = None

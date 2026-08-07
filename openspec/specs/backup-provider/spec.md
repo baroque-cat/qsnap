@@ -6,12 +6,12 @@ Backup transfer via NBD pull-model dirty-block extraction. Copies missing snapsh
 ## Requirements
 ### Requirement: List existing backups on target
 
-The system SHALL scan the `target.path` directory for `.qcow2` files. For each file the system SHALL obtain metadata via `qemu-img info --output=json` and produce a `SnapshotInfo` with name, path, timestamp (from filename or mtime), allocation, and disk (parsed from the filename via `parse_disk_from_snapshot_name`).
+The system SHALL scan the `target.path` directory for `.qcow2` files. For each file the system SHALL obtain metadata via `qemu-img info --output=json` and produce a `BackupInfo` with name, path, timestamp (from filename or mtime), disk (parsed from the filename via `parse_disk_from_snapshot_name`), and `is_full`.
 
 #### Scenario: Target directory exists with backups
 
 - **WHEN** `target.path` contains files `vm.20250101T000000_vda_a1b2c3.qcow2` and `vm.20250102T000000_vda_d4e5f6.qcow2`
-- **THEN** `list()` returns a list of 2 `SnapshotInfo`, sorted by timestamp, each with `disk` set from the filename
+- **THEN** `list()` returns a list of 2 `BackupInfo`, sorted by timestamp, each with `disk` set from the filename
 
 #### Scenario: Target directory does not exist
 
@@ -26,7 +26,7 @@ The system SHALL scan the `target.path` directory for `.qcow2` files. For each f
 
 ### Requirement: Delete backup from target
 
-The system SHALL delete a backup file via `rm -f`. The method accepts a `SnapshotInfo` and returns a `ShellResult`.
+The system SHALL delete a backup file via `rm -f`. The method accepts a `BackupInfo` and returns a `ShellResult`.
 
 #### Scenario: Successful backup deletion
 
@@ -41,27 +41,28 @@ The system SHALL delete a backup file via `rm -f`. The method accepts a `Snapsho
 
 ### Requirement: BitmapBackupProvider implements IBackupProvider
 
-The system SHALL provide a `BitmapBackupProvider` class in `qsnap/modules/backup/bitmap.py` that implements `IBackupProvider`. It SHALL accept `IShell`, an optional `state: IStateManager | None = None`, and an optional `nbd: INbdClient | None = None` as constructor parameters. It SHALL use the `virsh backup-begin` NBD pull-model API.
+The system SHALL provide a `BitmapBackupProvider` class in `qsnap/modules/backup/bitmap.py` that implements `IBackupProvider`. It SHALL accept `IShell` and an optional `nbd: INbdClient | None = None` as constructor parameters. It SHALL NOT accept or consult `IStateManager` (stale snapshot-state healing belongs to the snapshot world; checkpoint discovery is newest-wins via `virsh checkpoint-list`). It SHALL use the `virsh backup-begin` NBD pull-model API. The interface methods SHALL be: `run_backup(vm_config, target, disk, *, opts) -> BackupResult`, `list(target) -> list[BackupInfo]`, `delete(backup: BackupInfo) -> ShellResult`, `list_checkpoints(vm_name) -> list[str]`, and static `target_hash(target_path) -> str`. No method SHALL accept or return `SnapshotInfo`.
 
 #### Scenario: Constructor accepts IShell
 
 - **WHEN** `BitmapBackupProvider(shell=mock_shell)` is instantiated
 - **THEN** `isinstance(provider, IBackupProvider)` is True
-- **AND** the provider is ready for transfer operations
+- **AND** the provider is ready for backup operations
 
-### Requirement: Transfer missing snapshots via dirty bitmap extraction
+#### Scenario: Provider API carries no SnapshotInfo
 
-The system SHALL determine which snapshots are missing on the target and for each SHALL use `virsh backup-begin` with NBD export to transfer data. On first backup for a disk (no prior checkpoint for that VM+target+disk), a full export is performed via `qemu-img convert`. On subsequent backups, only dirty blocks since the last checkpoint are exported via the `INbdClient` pread/pwrite loop with `meta_contexts=["base:allocation", "qemu:dirty-bitmap:backup-<disk>"]` and `zero_skip=False`. Every `backup-begin` SHALL receive a checkpoint XML as its third positional argument so the successor checkpoint is created atomically at the export's freeze point. Incrementals always use the `INbdClient` pread/pwrite engine with a backing-chained qcow2 delta. `qemu-img convert` is the sole FULL backup transfer engine. When `prior` is `None` (no prior checkpoint exists for this VM+target+disk), `transfer_missing()` SHALL perform a full export via `qemu-img convert` as a safety-net — this ensures data is transferred even if Core's FULL-creation path was skipped or failed.
+- **WHEN** any `IBackupProvider` method is inspected
+- **THEN** no parameter or return type references `SnapshotInfo`
 
-Checkpoints and NBD sockets are scoped per disk (multi-disk refactor):
-- Checkpoint format: `qsnap-{target_hash}-{disk}-{yyyymmddTHHMMSS}-{6hex}`
-- NBD socket paths: `/tmp/qsnap-backup-{pid}-{disk}.sock` (source), `/tmp/qsnap-write-{pid}-{disk}.sock` (write)
+### Requirement: Backup creation work unit run_backup
 
-#### Scenario: First backup — full NBD export via qemu-img convert
+`BitmapBackupProvider.run_backup(vm_config, target, disk, *, compression_type, stall_timeout, convert_parallel, convert_out_of_order) -> BackupResult` SHALL create exactly one backup for the given disk: a FULL when no qsnap checkpoint exists for this VM+target+disk, otherwise a delta of dirty blocks since the newest checkpoint. Every `backup-begin` SHALL receive a checkpoint XML as its third positional argument so the successor checkpoint is created atomically at the export's freeze point (running VMs). Deltas SHALL use the `INbdClient` pread/pwrite engine with a backing-chained qcow2 delta onto the newest valid backup of this disk; `qemu-img convert` is the sole FULL transfer engine (shared `_full_pull_lifecycle()` helper for all FULL paths). Checkpoints and NBD sockets remain scoped per disk (`qsnap-{target_hash}-{disk}-{yyyymmddTHHMMSS}-{6hex}`; `/tmp/qsnap-backup-{pid}-{disk}.sock`, `/tmp/qsnap-write-{pid}-{disk}.sock`).
+
+#### Scenario: First backup — full export via qemu-img convert
 
 - **WHEN** no prior qsnap checkpoint exists for this VM+target+disk combination
-- **THEN** `qemu-img convert` reads from `nbd:unix:<socket>:exportname=<disk>` (running VM) or source file (stopped VM) and writes to the target qcow2
-- **THEN** the backup is a standalone qcow2 file on the target containing the complete virtual disk
+- **THEN** `qemu-img convert` reads from `nbd:unix:<socket>:exportname=<disk>` (running VM) or the source file (stopped VM) and writes to the target qcow2
+- **AND** the backup is a standalone qcow2 file named with the FULL scheme
 - **AND** no `INbdClient` pread/pwrite loop runs
 
 #### Scenario: Incremental backup — dirty blocks only
@@ -69,29 +70,51 @@ Checkpoints and NBD sockets are scoped per disk (multi-disk refactor):
 - **WHEN** a prior qsnap checkpoint exists for this VM+target+disk
 - **AND** the VM has written data since that checkpoint
 - **THEN** the `INbdClient` pread/pwrite engine transfers dirty∩allocated extents with `zero_skip=False`
-- **THEN** the resulting backup file size is proportional to the changed data, not the full disk
+- **AND** the resulting backup file size is proportional to the changed data, not the full disk
 
 #### Scenario: Checkpoint rotation after successful transfer
 
-- **WHEN** the transfer completes successfully and verification passes
+- **WHEN** the backup completes successfully and verification passes
 - **THEN** the successor checkpoint created atomically with this export exists
-- **THEN** all superseded (older) qsnap checkpoints for the same VM+target+disk are deleted via `virsh checkpoint-delete` with `--metadata` fallback
+- **AND** all superseded (older) qsnap checkpoints for the same VM+target+disk are deleted via `virsh checkpoint-delete` with `--metadata` fallback
 - **AND** exactly one qsnap checkpoint remains for this VM+target+disk
 
-#### Scenario: Transfer failure preserves prior checkpoint
+#### Scenario: Backup failure preserves prior checkpoint
 
-- **WHEN** the transfer fails (NBD error, stall, or verification)
+- **WHEN** the backup fails (NBD error, stall, or verification)
 - **THEN** the prior checkpoint is NOT deleted
-- **THEN** the successor checkpoint created by the failed run is deleted best-effort
-- **THEN** the module returns `BackupResult(success=False, error=<message>)`
-- **THEN** the NBD sockets and qemu-nbd process are cleaned up
+- **AND** the successor checkpoint created by the failed run is deleted best-effort
+- **AND** the provider returns `BackupResult(success=False, error=<message>, disk=<disk>)`
+- **AND** the NBD sockets and qemu-nbd process are cleaned up
 
-#### Scenario: Scaffolding dedup — both FULL paths use shared helper
+#### Scenario: A second run_backup in the same batch uses the successor as baseline
 
-- **WHEN** `transfer_missing()` full-pull or `create_full_backup()` executes a FULL backup
-- **THEN** both SHALL call the private `_full_pull_lifecycle()` helper
-- **AND** the helper calls `_qemu_img_convert_transfer()` unconditionally
-- **AND** the helper handles: transfer, mv .tmp → final, finally cleanup
+- **WHEN** Core invokes `run_backup` for the same disk again after a successful backup
+- **THEN** the newest-wins discovery selects the successor checkpoint created by the previous invocation
+- **AND** the new delta chains onto the previous backup file (gap-free chain)
+
+### Requirement: Deferred backup result for stopped VMs
+
+`run_backup` SHALL check the VM power state before any `backup-begin`. When the VM is NOT running and a checkpoint exists for this VM+target+disk, the provider SHALL return `BackupResult(success=True, deferred=True, disk=<disk>)` without transferring data and without creating or deleting any checkpoint. Core SHALL NOT update the `last_backup_allocation` baseline for deferred results, so the onchange gate remains open and the first run after the VM boots transfers the complete delta since the last checkpoint (gap-free coverage). When the VM is NOT running and NO checkpoint exists, `run_backup` SHALL create an offline FULL via `qemu-img convert` from the source disk file (existing offline path, no checkpoint).
+
+#### Scenario: Stopped VM with checkpoint defers
+
+- **WHEN** `run_backup` runs for a stopped VM and a checkpoint exists for the disk
+- **THEN** the result is `BackupResult(success=True, deferred=True)`
+- **AND** no `backup-begin`, no file creation, no checkpoint mutation occurs
+- **AND** Core logs INFO "VM stopped — backup deferred" and does not update the baseline
+
+#### Scenario: Stopped VM without checkpoint creates offline FULL
+
+- **WHEN** `run_backup` runs for a stopped VM and no checkpoint exists for the disk
+- **THEN** an offline FULL is created via `qemu-img convert` from the source file
+- **AND** no checkpoint is created
+
+#### Scenario: First run after boot closes the gap
+
+- **WHEN** the VM boots and the next run executes `run_backup`
+- **THEN** the delta since the last checkpoint is transferred
+- **AND** all writes accumulated while the VM was stopped are included (no coverage gap)
 
 ### Requirement: List checkpoints for target
 
@@ -220,16 +243,6 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 - **THEN** the returned `BackupResult.checkpoint` is `None`
 - **AND** `BackupResult.success` is `False`
 
-### Requirement: transfer_missing SHALL NOT create FULL backups
-
-`BitmapBackupProvider.transfer_missing()` SHALL NOT call `create_full_backup()` under any circumstances. FULL backup creation is the sole responsibility of `Core._backup_target()` via the per-disk count-based mechanism, ensuring every FULL passes through Core's verification pipeline before state recording. When `prior is None` (no prior checkpoint), `transfer_missing()` SHALL perform a full `qemu-img convert` export as a safety net but SHALL NOT call `create_full_backup()`.
-
-#### Scenario: transfer_missing never creates a FULL
-
-- **WHEN** `transfer_missing()` runs for a disk with no prior checkpoint
-- **THEN** it performs a full `qemu-img convert` export as a safety net
-- **AND** it does not call `create_full_backup()`
-
 ### Requirement: BitmapBackupProvider domjobabort after NBD transfer
 
 `BitmapBackupProvider.transfer_missing()` SHALL call `virsh domjobabort --domain <vm_name>` in its `finally` block before socket cleanup. The abort SHALL use a 30-second timeout. On abort failure, a WARNING SHALL be logged but the error SHALL NOT be propagated (the abort is best-effort).
@@ -252,69 +265,54 @@ The method SHALL NOT call `self._state.record_full_backup()` — state recording
 - **THEN** a WARNING is logged with the error message
 - **AND** execution continues to socket cleanup
 
-### Requirement: BitmapBackupProvider accepts IStateManager
+### Requirement: BitmapBackupProvider does not consume IStateManager
 
-`BitmapBackupProvider.__init__()` SHALL accept an optional `state: IStateManager | None = None` parameter. The parameter is retained for stale-state cleanup in `transfer_missing()`; checkpoint selection and transfer decisions SHALL NOT consult `IStateManager` (checkpoint discovery is newest-wins via `virsh checkpoint-list`). The `create_full_backup()` method SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after post-create verification passes.
+`BitmapBackupProvider` SHALL NOT accept an `IStateManager` parameter and SHALL NOT perform stale snapshot-state cleanup. Checkpoint selection and backup decisions SHALL NOT consult `IStateManager`. `run_backup()` SHALL NOT call `self._state.record_full_backup()` — state recording is Core's responsibility after verification passes.
 
-#### Scenario: Constructor accepts IStateManager
+#### Scenario: Provider operates without state access
 
-- **WHEN** `BitmapBackupProvider(shell=mock_shell, state=mock_state)` is instantiated
-- **THEN** `isinstance(provider, IBackupProvider)` is True
-- **AND** the provider stores the state reference
+- **WHEN** `BitmapBackupProvider(shell=mock_shell)` is instantiated with no state reference
+- **THEN** all provider operations (run_backup, list, delete, checkpoint discovery) work exclusively from target files, libvirt checkpoints, and `IShell`
 
-#### Scenario: Constructor works without IStateManager
+### Requirement: Factory passes INbdClient to BitmapBackupProvider
 
-- **WHEN** `BitmapBackupProvider(shell=mock_shell)` is instantiated (no state argument)
-- **THEN** `isinstance(provider, IBackupProvider)` is True
-- **AND** `self._state` is `None`
+`DefaultFactory.create_backup_provider(vm_config, target)` SHALL pass `LibnbdClient()` as the `nbd` parameter when constructing `BitmapBackupProvider` and SHALL NOT pass an `IStateManager`. `BitmapBackupProvider` is the single backup provider — there is no `incremental_mode` branch.
 
-#### Scenario: create_full_backup does not self-record in state
+#### Scenario: Factory constructs BitmapBackupProvider with nbd
 
-- **WHEN** `BitmapBackupProvider.create_full_backup(...)` succeeds and `self._state` is not `None`
-- **THEN** `self._state.record_full_backup()` is NOT called by the provider
-- **AND** state recording is deferred to Core's `_backup_target()` after post-create verification
-
-### Requirement: Factory passes IStateManager and INbdClient to BitmapBackupProvider
-
-`DefaultFactory.create_backup_provider(vm_config, target)` SHALL pass `self._state` as the `state` parameter and `LibnbdClient()` as the `nbd` parameter when constructing `BitmapBackupProvider`. `BitmapBackupProvider` is the single backup provider — there is no `incremental_mode` branch.
-
-#### Scenario: Factory constructs BitmapBackupProvider with state and nbd
-
-- **WHEN** factory has `self._state`
-- **THEN** `BitmapBackupProvider(shell=self._shell, state=self._state, nbd=LibnbdClient())` is returned
+- **WHEN** the factory creates a backup provider
+- **THEN** `BitmapBackupProvider(shell=self._shell, nbd=LibnbdClient())` is returned
 
 ### Requirement: Immediate deletion of failed backup files after verification failure
 
-When a definitive per-snapshot failure occurs in `BitmapBackupProvider.transfer_missing()` (temporal mismatch, backup-begin failure, transfer error, verification error, chain-to-FULL not traversable, or checkpoint missing), the provider SHALL delete the partially-transferred target file via `self._shell.run(["rm", "-f", str(target_file)], timeout=10)` where applicable, append `BackupResult(success=False, disk=snapshot.disk)` with the error, and `break` out of the snapshot loop — no further snapshots are attempted in this batch. Skip paths (backup already exists on target, stale-state entry) still `continue`. The provider returns the partial results list; Core decides the abort (`BackupAbortError`, spec: `core-orchestrator` VM-level failure isolation). Immediate deletion prevents the failed file from being discovered by retention cleanup (which lists `*.qcow2` files and would delete it with a misleading `[delete] removed backup` log message).
+When a definitive per-disk failure occurs in `BitmapBackupProvider.run_backup()` (backup-begin failure, transfer error, verification error, chain-to-FULL not traversable, or checkpoint missing), the provider SHALL delete the partially-transferred target file via `self._shell.run(["rm", "-f", str(target_file)], timeout=10)` where applicable and return `BackupResult(success=False, disk=<disk>)` with the error. Core SHALL continue processing the remaining disks of the batch (no early abort at provider level); Core decides the VM-level abort after all disks were attempted (`BackupAbortError`, spec: `core-orchestrator` VM-level failure isolation). Immediate deletion prevents the failed file from being discovered by retention cleanup (which lists `*.qcow2` files and would delete it with a misleading `[delete] removed backup` log message).
 
 #### Scenario: Failed backup file deleted immediately after verification failure
 
-- **WHEN** verification returns an error string for a snapshot transfer
-- **THEN** a WARNING is logged: "backup verification failed for <snapshot>: <error>"
+- **WHEN** verification returns an error string for a disk backup
+- **THEN** a WARNING is logged: "backup failed for <vm> target <target> disk <disk>: <error>"
 - **AND** `rm -f <target_file>` is executed via `IShell.run()` with a 10-second timeout
-- **AND** `BackupResult(success=False, error=<verify_error>, disk=<disk>)` is appended to results
-- **AND** the loop `break`s — remaining snapshots in the batch are not attempted
+- **AND** `BackupResult(success=False, error=<error>, disk=<disk>)` is returned
 - **AND** the target file does NOT exist on disk after this step
 
 #### Scenario: Failed backup file not found by retention cleanup
 
-- **WHEN** verification fails and the file is deleted immediately
+- **WHEN** a backup fails and the file is deleted immediately
 - **AND** retention cleanup runs `provider.list(target)` via `glob("*.qcow2")`
 - **THEN** the failed file is NOT in the list of backups
 - **AND** no `[delete] removed backup` log is emitted for the failed file
 
 #### Scenario: Bitmap NBD convert failure does not leave partial file
 
-- **WHEN** `qemu-img convert` from NBD fails in `BitmapBackupProvider.transfer_missing()`
-- **THEN** the partial target file SHALL be deleted via `rm -f` before appending `BackupResult(success=False)`
-- **AND** the loop `break`s (no further snapshots attempted)
+- **WHEN** `qemu-img convert` from NBD fails in `run_backup()`
+- **THEN** the partial target file SHALL be deleted via `rm -f` before returning `BackupResult(success=False)`
 - **AND** the NBD socket is cleaned up in the `finally` block
 
-#### Scenario: Skip paths do not break the loop
+#### Scenario: One disk failure does not stop other disks
 
-- **WHEN** a snapshot already has a backup on the target, or its source file is gone (stale state)
-- **THEN** the loop `continue`s to the next snapshot
-- **AND** no `BackupResult(success=False)` is appended for these cases
+- **WHEN** `run_backup` fails for disk `vda` of a two-disk VM
+- **AND** Core then invokes `run_backup` for disk `vdb`
+- **THEN** the `vdb` backup proceeds normally and its success is recorded
 
 ### Requirement: Compression type parameter for backup providers
 
@@ -398,26 +396,9 @@ After `BitmapBackupProvider.create_full_backup()` successfully creates a FULL ba
 - **AND** `virsh checkpoint-list` returns no `qsnap-` checkpoints
 - **THEN** `BackupResult(success=False, error="checkpoint missing — next incremental impossible")` is returned
 
-### Requirement: transfer_missing safety net when prior is None
-
-`BitmapBackupProvider.transfer_missing()` SHALL create a FULL export via `_full_pull_lifecycle()` when `prior is None` (no prior checkpoint exists for this VM+target+disk). This is a safety net for the edge case where `Core._backup_target()` bypasses FULL creation (e.g., after a configuration change). The primary path (FULL created by `Core._backup_target()` before `transfer_missing()`) ensures `prior` is always set in normal operation. When the safety net is triggered, the provider SHALL internally call `verify_full_backup()` on the exported file before returning `BackupResult`.
-
-#### Scenario: Normal path — prior is always set
-
-- **WHEN** `Core._backup_target()` creates a FULL via `create_full_backup()` then calls `transfer_missing()`
-- **AND** the prior checkpoint from the FULL's backup-begin exists
-- **THEN** `transfer_missing()` performs incremental transfer via `_copy_dirty_blocks()`
-
-#### Scenario: Safety net — prior is None triggers full export
-
-- **WHEN** `transfer_missing()` is called with `prior = None`
-- **THEN** a full NBD export is performed via `_full_pull_lifecycle()` using `qemu-img convert`
-- **AND** `verify_full_backup()` is called on the exported file
-- **AND** a `BackupResult` is returned with the full export result
-
 ### Requirement: Per-disk FULL backup creation in Core
 
-`Core._backup_target()` SHALL iterate `for disk_cfg in vm_config.disks` and decide per-disk whether a FULL is due. The decision SHALL count that disk's incrementals via `get_incremental_dependencies(target, newest_full.name)` and compare against `target.target_chain_length`. When no FULLs exist for a disk, a FULL SHALL be created unconditionally. FULL creation calls `provider.create_full_backup()` for that disk's most recent snapshot. State recording SHALL use `record_full_backup(target, name, ts, disk)` and `set_last_backup_allocation(target, disk, alloc)` — both accept a per-disk parameter.
+`Core._backup_target()` SHALL iterate `for disk_cfg in vm_config.disks` and decide per-disk whether a FULL is due. The decision SHALL count that disk's incrementals via `get_incremental_dependencies(target, newest_full.name)` and compare against `target.target_chain_length`; dependency keys in both legacy snapshot-name format and backup-name format SHALL be counted. When no FULLs exist for a disk, a FULL SHALL be created unconditionally. FULL creation is performed by `provider.run_backup()` for that disk when the decision says FULL is due. State recording SHALL use `record_full_backup(target, name, ts, disk)` and `set_last_backup_allocation(target, disk, alloc)` — both accept a per-disk parameter.
 
 #### Scenario: First backup creates per-disk FULLs
 
@@ -450,17 +431,18 @@ After `BitmapBackupProvider.create_full_backup()` successfully creates a FULL ba
 
 ### Requirement: Per-disk backup naming
 
-The system SHALL include the disk identifier in backup filenames. FULL backups SHALL use `{vm_name}.FULL.{YYYYMMDDTHHMMSS}_{disk}_{6hex}.qcow2`. Incremental backups SHALL use `{vm_name}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}.qcow2`. The `list()` method SHALL parse the disk from each backup filename via `parse_disk_from_snapshot_name()`.
+The system SHALL include the disk identifier in backup filenames. FULL backups SHALL use `{vm_name}.FULL.{YYYYMMDDTHHMMSS}_{disk}_{6hex}.qcow2`. Incremental backups SHALL use `{vm_name}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}.qcow2`. In both cases the timestamp SHALL be the backup's own freeze point (never a snapshot timestamp) and the hex suffix SHALL be generated via `secrets.token_hex(3)`. The `list()` method SHALL parse the disk from each backup filename via `parse_disk_from_snapshot_name()`.
 
-#### Scenario: FULL backup named with disk
+#### Scenario: FULL backup named with disk and freeze timestamp
 
-- **WHEN** a FULL backup is created for disk `vda`
-- **THEN** the filename matches `vm.FULL.YYYYMMDDTHHMMSS_vda_{6hex}.qcow2`
+- **WHEN** a FULL backup is created for disk `vda` with freeze point 2026-08-08T03:00:00
+- **THEN** the filename matches `vm.FULL.20260808T030000_vda_{6hex}.qcow2`
 
-#### Scenario: Incremental backup named with disk
+#### Scenario: Incremental backup named with disk and freeze timestamp
 
-- **WHEN** a snapshot named `vm.20250801T120000_vda_a1b2c3` is transferred
-- **THEN** the target filename is `vm.20250801T120000_vda_a1b2c3.qcow2`
+- **WHEN** a delta is created for disk `vda` with freeze point 2026-08-08T03:15:42
+- **THEN** the filename matches `vm.20260808T031542_vda_{6hex}.qcow2`
+- **AND** the filename contains no snapshot name
 
 ### Requirement: record_incremental_dependency does not take disk parameter
 
@@ -474,21 +456,15 @@ Core's `record_incremental_dependency(target, incremental_name, full_name)` SHAL
 
 ### Requirement: Backup results carry the source disk
 
-`BitmapBackupProvider.transfer_missing()` SHALL return every `BackupResult` with `disk` set to the disk target of the snapshot being transferred (`snapshot.disk` from the per-snapshot iteration). `BitmapBackupProvider.create_full_backup()` SHALL return its `BackupResult` with `disk` set to the disk target of `source_snapshot.disk`. Core's FULL-creation bookkeeping in `_backup_target()` SHALL propagate the same disk into the `ActionRecord(action="backup_full")` it appends. A `BackupResult` produced by either method for a known snapshot SHALL NOT leave `disk` as `None`.
+`BitmapBackupProvider.run_backup()` SHALL return its `BackupResult` with `disk` set to the disk target being backed up. Core's backup bookkeeping in `_backup_target()` SHALL propagate the same disk into the `ActionRecord(action="backup_full" | "backup_transfer")` it appends. A `BackupResult` produced for a known disk SHALL NOT leave `disk` as `None`.
 
-#### Scenario: Incremental transfer result carries disk
-- **WHEN** `transfer_missing()` transfers snapshot `vm.20250101T120000_vdb_d4e5f6` (disk `vdb`)
+#### Scenario: Backup result carries disk
+
+- **WHEN** `run_backup()` backs up disk `vdb`
 - **THEN** the returned `BackupResult` has `disk="vdb"`
 
-#### Scenario: Multi-disk transfer returns per-disk results
-- **WHEN** `transfer_missing()` receives snapshots spanning disks `vda` and `vdb`
-- **THEN** each returned `BackupResult.disk` matches the disk of the snapshot it reports on
+#### Scenario: Multi-disk run returns per-disk results
 
-#### Scenario: FULL creation result carries disk
-- **WHEN** `create_full_backup()` creates a FULL from a source snapshot with `disk="vda"`
-- **THEN** the returned `BackupResult` has `disk="vda"`
-
-#### Scenario: Failed transfer result still carries disk
-- **WHEN** `transfer_missing()` fails to transfer a snapshot of disk `vda`
-- **THEN** the returned `BackupResult(success=False)` still has `disk="vda"`
+- **WHEN** Core runs backups for disks `vda` and `vdb`
+- **THEN** each returned `BackupResult.disk` matches the disk it reports on
 

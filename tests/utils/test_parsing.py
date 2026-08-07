@@ -184,3 +184,71 @@ def test_parse_timestamp_collision_suffix():
         Path("/path/vm.20250101T120000_vda_abc123_1.qcow2"),
     )
     assert result == datetime(2025, 1, 1, 12, 0, 0)
+
+
+# ── freeze-ts backup naming (backup-target-orthogonality, design D3) ─────
+
+
+def test_parse_timestamp_freeze_ts_delta_name():
+    """Parse the freeze-ts delta name ``vm.20260808T031542_vda_a1b2c3``.
+
+    Delta backups are named by their own freeze point:
+    ``{vm}.{YYYYMMDDTHHMMSS}_{disk}_{6hex}``.  The timestamp must parse to
+    the exact freeze point (2026-08-08T03:15:42), never to a snapshot
+    timestamp.  This is a pure-function check — no libvirt access is
+    required (target-only tooling compatibility).
+    """
+    result = parse_timestamp(
+        "vm.20260808T031542_vda_a1b2c3",
+        Path("/backups/vm.20260808T031542_vda_a1b2c3.qcow2"),
+    )
+    assert result == datetime(2026, 8, 8, 3, 15, 42)
+
+
+def test_parse_timestamp_freeze_ts_full_name():
+    """Parse the freeze-ts FULL name ``vm.FULL.20260808T030000_vda_abc123``.
+
+    FULL backups use the same freeze-timestamp with a ``.FULL.`` infix:
+    ``{vm}.FULL.{YYYYMMDDTHHMMSS}_{disk}_{6hex}``.  The ``.FULL.`` segment
+    must not confuse the timestamp search.
+    """
+    result = parse_timestamp(
+        "vm.FULL.20260808T030000_vda_abc123",
+        Path("/backups/vm.FULL.20260808T030000_vda_abc123.qcow2"),
+    )
+    assert result == datetime(2026, 8, 8, 3, 0, 0)
+
+
+def test_parse_disk_from_freeze_ts_delta_name():
+    """Extract the disk from a freeze-ts delta backup name.
+
+    Delta names embed the disk between the freeze timestamp and the hex
+    suffix (``..._vda_a1b2c3``); ``parse_disk_from_snapshot_name`` must
+    return ``"vda"`` without any libvirt interaction.
+    """
+    result = parse_disk_from_snapshot_name("vm.20260808T031542_vda_a1b2c3")
+    assert result == "vda"
+
+
+def test_parse_disk_from_freeze_ts_full_name():
+    """Extract the disk from a freeze-ts FULL backup name.
+
+    FULL names carry the same ``_{disk}_{6hex}`` segment after the
+    ``.FULL.``-prefixed freeze timestamp, so the disk resolves to ``"vda"``
+    even though the name contains the ``FULL`` marker.
+    """
+    result = parse_disk_from_snapshot_name("vm.FULL.20260808T030000_vda_abc123")
+    assert result == "vda"
+
+
+def test_parse_freeze_ts_names_need_no_libvirt():
+    """Freeze-ts name parsing is pure — works without virsh/libvirt.
+
+    Both the timestamp and disk parsers are plain-string operations.  This
+    guards the target-only tooling contract: listing/restoring backups on a
+    host with no libvirt must still be able to resolve freeze-ts names.
+    """
+    name = "vm.20260808T031542_vda_a1b2c3"
+    ts = parse_timestamp(name, Path("/nonexistent/vm.20260808T031542_vda_a1b2c3.qcow2"))
+    assert ts == datetime(2026, 8, 8, 3, 15, 42)
+    assert parse_disk_from_snapshot_name(name) == "vda"

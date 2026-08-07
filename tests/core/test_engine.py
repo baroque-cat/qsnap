@@ -314,17 +314,18 @@ def test_pipeline_backup_abort_returns_exit_code_10(
 
     failed_backup = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=Path("/mnt/backup/snap1.qcow2"),
         bytes_transferred=0,
         error="transfer failed",
+        disk="vda",
     )
 
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[failed_backup],
+        "run_backup",
+        return_value=failed_backup,
     ):
         result = core.run()
 
@@ -571,7 +572,7 @@ def test_pipeline_result_space_limited_true(
 
     failed = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=snap.path,
         target_path=target.path / "snap1.qcow2",
         bytes_transferred=0,
@@ -581,8 +582,8 @@ def test_pipeline_result_space_limited_true(
 
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[failed],
+        "run_backup",
+        return_value=failed,
     ):
         result = core.run()
 
@@ -824,23 +825,29 @@ def test_action_appended_on_backup_transfer(
         str(target.path), "testvm.FULL.daily.qcow2", datetime(2025, 7, 13, 9, 0), "vda"
     )
 
-    # Spy on transfer_missing to verify new kwargs are passed by Core.
+    # Spy on run_backup to verify new kwargs are passed by Core.
     bitmap_provider = mock_factory._bitmap_backup_provider
     with patch.object(
         bitmap_provider,
-        "transfer_missing",
-        wraps=bitmap_provider.transfer_missing,
+        "run_backup",
+        wraps=bitmap_provider.run_backup,
     ) as transfer_spy:
         result = core.backup()
 
     transfer_actions = [a for a in result.actions if a.action == "backup_transfer"]
     assert len(transfer_actions) == 1, "Should contain one backup_transfer action"
     assert transfer_actions[0].vm_name == "testvm"
-    assert transfer_actions[0].name == "snap1"
+    # The action name is the freeze-ts backup file name, not a snapshot name.
+    assert transfer_actions[0].name.startswith("testvm."), (
+        f"transfer action name should be the backup file name, got: {transfer_actions[0].name}"
+    )
+    assert "_vda_" in transfer_actions[0].name, (
+        f"transfer action name should carry the disk, got: {transfer_actions[0].name}"
+    )
     assert transfer_actions[0].disk == "vda"
     assert transfer_actions[0].size == 1048576  # MockBitmapBackupProvider default
 
-    # Verify Core passes compression_type and stall_timeout to transfer_missing.
+    # Verify Core passes compression_type and stall_timeout to run_backup.
     assert transfer_spy.called
     assert transfer_spy.call_args.kwargs["compression_type"] == "zstd"
     assert transfer_spy.call_args.kwargs["stall_timeout"] == 1800
@@ -878,16 +885,13 @@ def test_action_appended_on_full_backup(
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
 
-    # Spy on create_full_backup to verify new kwargs are passed by Core.
+    # Spy on run_backup to verify new kwargs are passed by Core.
     bitmap_provider = mock_factory._bitmap_backup_provider
-    with (
-        patch.object(
-            bitmap_provider,
-            "create_full_backup",
-            wraps=bitmap_provider.create_full_backup,
-        ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None),
-    ):
+    with patch.object(
+        bitmap_provider,
+        "run_backup",
+        wraps=bitmap_provider.run_backup,
+    ) as full_spy:
         result = core.run()
 
     full_actions = [a for a in result.actions if a.action == "backup_full"]
@@ -895,13 +899,15 @@ def test_action_appended_on_full_backup(
     assert full_actions[0].vm_name == "testvm"
     assert full_actions[0].disk == "vda"
     assert full_actions[0].size == 1048576  # MockBitmapBackupProvider default
+    assert ".FULL." in full_actions[0].name, (
+        f"FULL action name should contain .FULL., got: {full_actions[0].name}"
+    )
 
-    # Verify Core passes compression_type and stall_timeout to create_full_backup.
+    # Verify Core passes force_full, compression_type and stall_timeout to run_backup.
     assert full_spy.called
+    assert full_spy.call_args.kwargs["force_full"] is True
     assert full_spy.call_args.kwargs["compression_type"] == "zstd"
     assert full_spy.call_args.kwargs["stall_timeout"] == 1800
-    # bucket_level is not passed in count-based FULL (Core calls create_full_backup without it).
-    assert full_spy.call_args.kwargs["compress"] is True
 
 
 # ── test_action_appended_on_backup_delete ──────────────────────────────────
@@ -1179,32 +1185,33 @@ def test_backup_failed_warning_with_transfer_failures(
 
     failed_backup = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1.qcow2",
         bytes_transferred=0,
         error="Connection refused",
+        disk="vda",
     )
 
     caplog.set_level(logging.WARNING)
 
     # FULL verification is not the subject of this test — let the FULL
     # succeed so the (patched) transfer failure is what gets exercised.
-    with (
-        patch("qsnap.core.verify_full_backup", return_value=None),
-        patch.object(
-            mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[failed_backup],
-        ),
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        return_value=failed_backup,
     ):
         result = core.run()
 
     assert isinstance(result, PipelineResult)
     assert result.results[0].backup_failed is True
-    assert "Backup transfer failed for VM" in caplog.text
-    assert "snapshot(s) failed" in caplog.text
-    assert "snap1" in caplog.text
+    assert "Backup to target" in caplog.text
+    assert "old generations preserved" in caplog.text
+    assert "snapshot(s) failed" not in caplog.text, (
+        "Backup failure warning must NOT use the snapshot-oriented wording"
+    )
+    assert "vda" in caplog.text
     assert "Connection refused" in caplog.text
 
 
@@ -1438,7 +1445,6 @@ def test_backup_transfer_info_log(
         f"Should have at least one backup transfer log line, got: {transfer_lines}"
     )
     assert "testvm" in transfer_lines[0]
-    assert "snap1" in transfer_lines[0]
     assert "MiB/s" in transfer_lines[0]
     assert "1048576" in transfer_lines[0], "Log should include bytes_transferred"
 

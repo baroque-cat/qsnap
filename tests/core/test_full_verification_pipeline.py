@@ -97,10 +97,10 @@ def _setup_cleanup_backups_context(
 # Post-creation FULL backup verification (M1/M2/M3)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ── test_full_verify_after_create_hash_uses_snapshot_hash ────────────────
+# ── test_full_backup_created_and_recorded ──────────────────────────────────
 
 
-def test_full_verify_after_create_hash_uses_snapshot_hash(
+def test_full_backup_created_and_recorded(
     make_vm_config,
     make_target,
     make_global_config,
@@ -108,11 +108,13 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     mock_state,
     mock_shell,
 ):
-    """When full_verify_after_create="compare", verify_full_backup is called
-    with source_path for comparison.
+    """A successful run_backup (verification passed inside the provider)
+    leads to the FULL being recorded in state.
 
-    Uses count-based FULL trigger: no prior FULLs causes first backup to
-    create a FULL unconditionally.
+    Post-creation verification moved into ``IBackupProvider.run_backup``
+    (orthogonal design D2) — Core no longer calls ``verify_full_backup``
+    after creation.  A successful result means the provider already
+    verified the FULL.
     """
     global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target()
@@ -135,21 +137,26 @@ def test_full_verify_after_create_hash_uses_snapshot_hash(
     mock_state.record_snapshot("testvm", snap)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
-    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as run_spy:
         core._backup_target(vm, target, [snap])
 
-    assert verify_spy.called, "verify_full_backup should be called"
-    assert verify_spy.call_args[0][2] == "compare", "verify_mode should be 'compare'"
-    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for compare mode"
-    assert verify_spy.call_args[1]["source_path"] == snap.path, (
-        "source_path should be the source snapshot's path"
+    assert run_spy.called, "run_backup should be called"
+    assert run_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True on first backup"
     )
+    # FULL should be recorded.
+    fulls = mock_state.get_full_backups(str(target.path))
+    assert len(fulls) == 1, "FULL should be recorded after a successful run_backup"
 
 
-# ── test_full_created_m1_passes_recorded_in_state ────────────────────────
+# ── test_full_created_recorded_in_state ────────────────────────────────────
 
 
-def test_full_created_m1_passes_recorded_in_state(
+def test_full_created_recorded_in_state(
     make_vm_config,
     make_target,
     make_global_config,
@@ -157,7 +164,7 @@ def test_full_created_m1_passes_recorded_in_state(
     mock_state,
     mock_shell,
 ):
-    """create_full_backup succeeds, M1 passes, record_full_backup is called."""
+    """run_backup succeeds → record_full_backup is called."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -173,27 +180,23 @@ def test_full_created_m1_passes_recorded_in_state(
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
 
-    with (
-        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
-        patch.object(
-            mock_state,
-            "record_full_backup",
-            wraps=mock_state.record_full_backup,
-        ) as record_spy,
-    ):
+    with patch.object(
+        mock_state,
+        "record_full_backup",
+        wraps=mock_state.record_full_backup,
+    ) as record_spy:
         core._backup_target(vm, target, [snap])
 
-    assert verify_spy.called, "verify_full_backup should be called"
-    assert record_spy.called, "record_full_backup should be called after verification passes"
+    assert record_spy.called, "record_full_backup should be called after a successful FULL"
     # Verify FULL was recorded
     fulls = mock_state.get_full_backups(str(target.path))
     assert len(fulls) == 1, "One FULL backup should be recorded"
 
 
-# ── test_full_created_m1_fails_corrupt_bit_deleted ───────────────────────
+# ── test_full_created_m1_fails_corrupt_bit_not_recorded ───────────────────
 
 
-def test_full_created_m1_fails_corrupt_bit_deleted(
+def test_full_created_m1_fails_corrupt_bit_not_recorded(
     make_vm_config,
     make_target,
     make_global_config,
@@ -201,8 +204,8 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
     mock_state,
     mock_shell,
 ):
-    """M1 fails with corrupt bit, FULL file deleted, record_full_backup NOT called,
-    and the VM pipeline is aborted (VM-level isolation)."""
+    """run_backup surfaces a corrupt-bit verification failure → FULL is NOT
+    recorded and the VM pipeline aborts (VM-level isolation)."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -216,17 +219,22 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # No prior FULLs → first backup triggers FULL creation (count-based).
-
-    # Configure rm -f expectation so the file-deletion shell command succeeds
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: FULL backup has corrupt bit set — file is damaged",
+        disk="vda",
+        checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
     )
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
         ),
         patch.object(
             mock_state,
@@ -242,10 +250,10 @@ def test_full_created_m1_fails_corrupt_bit_deleted(
     assert len(fulls) == 0, "No FULL should be recorded when verification fails"
 
 
-# ── test_full_created_m1_fails_not_qcow2_deleted ─────────────────────────
+# ── test_full_created_m1_fails_not_qcow2_not_recorded ─────────────────────
 
 
-def test_full_created_m1_fails_not_qcow2_deleted(
+def test_full_created_m1_fails_not_qcow2_not_recorded(
     make_vm_config,
     make_target,
     make_global_config,
@@ -253,7 +261,7 @@ def test_full_created_m1_fails_not_qcow2_deleted(
     mock_state,
     mock_shell,
 ):
-    """M1 fails with wrong format (not qcow2), FULL file deleted."""
+    """run_backup surfaces a wrong-format verification failure → not recorded."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -267,16 +275,21 @@ def test_full_created_m1_fails_not_qcow2_deleted(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # No prior FULLs → first backup triggers FULL creation (count-based).
-
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: expected format qcow2, got raw",
+        disk="vda",
     )
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: expected format qcow2, got raw",
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
         ),
         patch.object(
             mock_state,
@@ -588,7 +601,7 @@ def test_full_verify_hash_match_success(
     mock_state,
     mock_shell,
 ):
-    """Compare mode, compare matches, record_full_backup called."""
+    """Compare mode, run_backup succeeds (provider verified content), FULL recorded."""
     global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -611,18 +624,20 @@ def test_full_verify_hash_match_success(
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
 
-    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as run_spy:
         core._backup_target(vm, target, [snap])
 
-    assert verify_spy.called
-    assert verify_spy.call_args[0][2] == "compare", "verify_mode should be 'compare'"
-    assert "source_path" in verify_spy.call_args[1], "source_path should be passed for compare mode"
-    assert verify_spy.call_args[1]["source_path"] == snap.path, (
-        "source_path should be the source snapshot's path"
+    assert run_spy.called
+    assert run_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True"
     )
     # FULL should be recorded
     fulls = mock_state.get_full_backups(str(target.path))
-    assert len(fulls) == 1, "FULL should be recorded after hash verification passes"
+    assert len(fulls) == 1, "FULL should be recorded after run_backup succeeds"
 
 
 # ── test_full_verify_content_comparison_mismatch_fails ──────────────────────
@@ -636,7 +651,8 @@ def test_full_verify_content_comparison_mismatch_fails(
     mock_state,
     mock_shell,
 ):
-    """Compare mode, content comparison mismatch, FULL deleted, NOT recorded."""
+    """Compare mode, content comparison mismatch surfaced by run_backup,
+    FULL NOT recorded, VM pipeline aborts."""
     global_cfg = make_global_config(full_verify_after_create="compare")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -657,16 +673,21 @@ def test_full_verify_content_comparison_mismatch_fails(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # No prior FULLs → first backup triggers FULL creation (count-based).
-
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: content comparison mismatch",
+        disk="vda",
     )
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: content comparison mismatch",
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
         ),
         pytest.raises(BackupAbortError),
     ):
@@ -680,10 +701,10 @@ def test_full_verify_content_comparison_mismatch_fails(
 # Timing / ordering guarantees
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ── test_full_backup_verified_before_state_recording ──────────────────────
+# ── test_full_backup_recorded_after_run_backup_succeeds ────────────────────
 
 
-def test_full_backup_verified_before_state_recording(
+def test_full_backup_recorded_after_run_backup_succeeds(
     make_vm_config,
     make_target,
     make_global_config,
@@ -691,7 +712,7 @@ def test_full_backup_verified_before_state_recording(
     mock_state,
     mock_shell,
 ):
-    """Timing check: verify_full_backup called BEFORE record_full_backup."""
+    """Timing check: record_full_backup happens only after run_backup succeeds."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -709,9 +730,17 @@ def test_full_backup_verified_before_state_recording(
 
     call_order = []
 
-    def track_verify(*args, **kwargs):
-        call_order.append("verify")
-        return None
+    def track_run(*args, **kwargs):
+        call_order.append("run_backup")
+        return BackupResult(
+            success=True,
+            snapshot_name="testvm.FULL.20250713T100000_vda_a1b2c3",
+            source_path=snap.path,
+            target_path=target.path / "testvm.FULL.20250713T100000_vda_a1b2c3.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+            disk="vda",
+        )
 
     orig_record = mock_state.record_full_backup
 
@@ -720,20 +749,24 @@ def test_full_backup_verified_before_state_recording(
         return orig_record(*args, **kwargs)
 
     with (
-        patch("qsnap.core.verify_full_backup", side_effect=track_verify),
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            side_effect=track_run,
+        ),
         patch.object(mock_state, "record_full_backup", side_effect=track_record),
     ):
         core._backup_target(vm, target, [snap])
 
-    assert call_order == ["verify", "record"], (
-        f"verify_full_backup must be called BEFORE record_full_backup, got order: {call_order}"
+    assert call_order == ["run_backup", "record"], (
+        f"run_backup must succeed BEFORE record_full_backup, got order: {call_order}"
     )
 
 
-# ── test_full_backup_verify_fails_file_deleted_not_recorded ───────────────
+# ── test_full_backup_verify_fails_not_recorded ─────────────────────────────
 
 
-def test_full_backup_verify_fails_file_deleted_not_recorded(
+def test_full_backup_verify_fails_not_recorded(
     make_vm_config,
     make_target,
     make_global_config,
@@ -741,7 +774,7 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
     mock_state,
     mock_shell,
 ):
-    """verify_full_backup fails, file deleted, not recorded."""
+    """run_backup fails verification, FULL not recorded."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -755,16 +788,21 @@ def test_full_backup_verify_fails_file_deleted_not_recorded(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # No prior FULLs → first backup triggers FULL creation (count-based).
-
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: qemu-img check found 3 errors",
+        disk="vda",
     )
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: qemu-img check found 3 errors",
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
         ),
         patch.object(
             mock_state,
@@ -795,7 +833,7 @@ def test_first_backup_creates_full_with_verification(
     mock_state,
     mock_shell,
 ):
-    """First backup to target creates FULL and verifies it."""
+    """First backup to target creates FULL (via run_backup) and records it."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -811,18 +849,17 @@ def test_first_backup_creates_full_with_verification(
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
 
-    with (
-        patch.object(
-            mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
-        ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
-    ):
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called on first backup"
-    assert verify_spy.called, "verify_full_backup should be called after first FULL"
+    assert full_spy.called, "run_backup should be called on first backup"
+    assert full_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True on first backup"
+    )
     # FULL should be recorded
     fulls = mock_state.get_full_backups(str(target.path))
     assert len(fulls) == 1
@@ -839,7 +876,7 @@ def test_new_weekly_creates_full_with_verification(
     mock_state,
     mock_shell,
 ):
-    """New weekly period triggers FULL with verification."""
+    """New weekly period triggers FULL (via run_backup) with recording."""
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(target_chain_length=0)
     vm = make_vm_config(name="testvm", targets=[target])
@@ -879,16 +916,17 @@ def test_new_weekly_creates_full_with_verification(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as full_spy,
-        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
         patch("qsnap.core.os.path.exists", return_value=True),
     ):
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called for new weekly period"
-    assert verify_spy.called, "verify_full_backup should be called"
+    assert full_spy.called, "run_backup should be called for new weekly period"
+    assert full_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True when count exceeds chain_length"
+    )
     fulls = mock_state.get_full_backups(str(target.path))
     assert len(fulls) == 2, "Both old and new FULL should be recorded"
 
@@ -1459,13 +1497,13 @@ def test_incremental_deleted_dependency_removed_from_state(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# source_path passed to verify_full_backup in _backup_target()
+# FULL creation via run_backup in _backup_target()
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ── test_hash_mode_passes_source_path_to_verify ────────────────────────────
+# ── test_compare_mode_creates_full_via_run_backup ──────────────────────────
 
 
-def test_hash_mode_passes_source_path_to_verify(
+def test_compare_mode_creates_full_via_run_backup(
     make_vm_config,
     make_target,
     make_global_config,
@@ -1473,9 +1511,14 @@ def test_hash_mode_passes_source_path_to_verify(
     mock_state,
     mock_shell,
 ):
-    """Compare mode passes source_path=most_recent.path to verify_full_backup."""
+    """Compare verify mode: Core still drives a per-disk run_backup FULL.
+
+    Content verification itself happens inside the provider (which reads
+    ``target.verify``); Core's job is to call ``run_backup`` with the
+    FULL direction and record the result.
+    """
     global_cfg = make_global_config(full_verify_after_create="compare")
-    target = make_target()
+    target = make_target(verify="compare")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(global_config=global_cfg, vms=[vm])
     core = Core(
@@ -1496,17 +1539,19 @@ def test_hash_mode_passes_source_path_to_verify(
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
 
-    with patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy:
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
+    ) as run_spy:
         core._backup_target(vm, target, [snap])
 
-    assert verify_spy.called, "verify_full_backup should be called"
-    kwargs = verify_spy.call_args[1]
-    assert "source_path" in kwargs, (
-        "source_path keyword argument should be passed to verify_full_backup"
+    assert run_spy.called, "run_backup should be called"
+    assert run_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True"
     )
-    assert kwargs["source_path"] == snap.path, (
-        f"source_path should be {snap.path}, got {kwargs['source_path']}"
-    )
+    fulls = mock_state.get_full_backups(str(target.path))
+    assert len(fulls) == 1, "FULL should be recorded after run_backup succeeds"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1524,10 +1569,11 @@ def test_verified_full_triggers_retention_and_cleanup(
     mock_state,
     mock_shell,
 ):
-    """FULL passes M1/M2 verification — record_full_backup + retention + cleanup run.
+    """Successful run_backup FULL — record_full_backup + retention + cleanup run.
 
-    Count-based: no prior FULLs so first backup creates FULL.  Verification
-    passes → state recording + backup retention evaluated.
+    Count-based: no prior FULLs so first backup creates FULL.  The
+    provider verified internally → state recording + backup retention
+    evaluated.
     """
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target()
@@ -1543,29 +1589,24 @@ def test_verified_full_triggers_retention_and_cleanup(
     snap = _record_snap(target, vm, mock_state)
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
-    with (
-        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
-        patch.object(
-            mock_state,
-            "record_full_backup",
-            wraps=mock_state.record_full_backup,
-        ) as record_spy,
-    ):
+    with patch.object(
+        mock_state,
+        "record_full_backup",
+        wraps=mock_state.record_full_backup,
+    ) as record_spy:
         core._backup_target(vm, target, [snap])
 
-    # Verification was called.
-    assert verify_spy.called, "verify_full_backup should be called"
-    # FULL was recorded after verification passed.
-    assert record_spy.called, "record_full_backup should be called after verification passes"
+    # FULL was recorded after run_backup succeeded.
+    assert record_spy.called, "record_full_backup should be called after a successful FULL"
     # At least one FULL is now recorded.
     fulls = mock_state.get_full_backups(str(target.path))
-    assert len(fulls) >= 1, "FULL should be recorded after successful verification"
+    assert len(fulls) >= 1, "FULL should be recorded after successful run_backup"
 
 
-# ── test_failed_full_verification_triggers_rollback ───────────────────────
+# ── test_failed_full_verification_triggers_abort ──────────────────────────
 
 
-def test_failed_full_verification_triggers_rollback(
+def test_failed_full_verification_triggers_abort(
     make_vm_config,
     make_target,
     make_global_config,
@@ -1574,13 +1615,12 @@ def test_failed_full_verification_triggers_rollback(
     mock_shell,
     caplog,
 ):
-    """FULL fails M1/M2 verification — rollback: delete file + checkpoint + state.
+    """A FULL verification failure surfaced by run_backup aborts the VM.
 
-    When verify_full_backup returns an error, Core must:
-    1. Remove the FULL file via rm -f
-    2. Call _cleanup_failed_checkpoint (exact-name checkpoint deletion)
-    3. Remove the FULL from state
-    4. Log a WARNING and retry
+    The provider deletes the failed file and its successor checkpoint
+    inside ``run_backup``; Core's rollback is to abort the VM pipeline
+    (BackupAbortError) so old generations are preserved and nothing is
+    recorded.
     """
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(backup_retry_max=1)
@@ -1595,72 +1635,43 @@ def test_failed_full_verification_triggers_rollback(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Pre-configure rm -f to succeed (rollback file deletion).
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    # Pre-configure checkpoint deletion to succeed (rollback checkpoint cleanup).
-    mock_shell.expect("virsh checkpoint-delete").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: FULL backup has corrupt bit set — file is damaged",
+        disk="vda",
+        checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
     )
 
     caplog.set_level(logging.WARNING)
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-        ),
         patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            return_value=BackupResult(
-                success=True,
-                snapshot_name="snap1",
-                source_path=Path("/tmp/snap1.qcow2"),
-                target_path=target.path / "testvm.FULL.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk="vda",
-                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
-            ),
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
         ),
         patch.object(
             mock_state,
             "remove_full_backup",
             wraps=mock_state.remove_full_backup,
         ) as remove_spy,
-        patch.object(
-            core,
-            "_cleanup_failed_checkpoint",
-            wraps=core._cleanup_failed_checkpoint,
-        ) as checkpoint_spy,
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
         pytest.raises(BackupAbortError),
     ):
         core._backup_target(vm, target, [snap])
 
-    # Rollback: FULL removed from state.
-    assert remove_spy.called, "remove_full_backup should be called on verification failure"
-    # Checkpoint cleanup was called.
-    assert checkpoint_spy.called, "_cleanup_failed_checkpoint should be called on rollback"
-    # Exactly one exact-name checkpoint-delete call (design D1 — no bulk filter).
-    expected_cmd = (
-        "virsh checkpoint-delete --metadata --domain testvm "
-        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
+    # No FULL state was recorded, so no state rollback is needed.
+    assert not remove_spy.called, (
+        "remove_full_backup should NOT be called (the failed FULL was never recorded)"
     )
-    checkpoint_delete_calls = [
-        c
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and " ".join(c.args[0]) == expected_cmd
-    ]
-    assert len(checkpoint_delete_calls) == 1, (
-        "exactly one exact-name virsh checkpoint-delete call expected, got "
-        f"{len(checkpoint_delete_calls)}: "
-        f"{[c for c in shell_spy.call_args_list if c.args and isinstance(c.args[0], list) and 'checkpoint-delete' in ' '.join(c.args[0])]}"
-    )
-    # WARNING logged.
-    assert "rolled back" in caplog.text or "FULL backup verification failed" in caplog.text
+    # WARNING logged with target + disk attribution; CRITICAL logged
+    # because this is a FULL backup failure (old generations preserved).
+    assert "old generations preserved" in caplog.text
+    assert "Backup to target" in caplog.text
+    assert "vda" in caplog.text
 
 
 # ── test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name ──────────
@@ -1671,7 +1682,6 @@ def test_failed_full_verification_triggers_rollback(
 def test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name(
     make_vm_config,
     make_target,
-    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -1679,15 +1689,14 @@ def test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name(
     """Rollback deletes exactly the failed FULL's checkpoint by exact name.
 
     Core-orchestrator scenario "Checkpoint cleaned up after failed FULL":
-    when FULL verification fails, ``_cleanup_failed_checkpoint`` issues
-    exactly one ``virsh checkpoint-delete --metadata --domain testvm``
-    call for ``BackupResult.checkpoint`` — never a
-    ``qsnap-{target_hash}-*`` bulk filter.
+    ``_cleanup_failed_checkpoint`` issues exactly one
+    ``virsh checkpoint-delete --metadata --domain testvm`` call for
+    ``BackupResult.checkpoint`` — never a ``qsnap-{target_hash}-*`` bulk
+    filter.
     """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -1695,58 +1704,33 @@ def test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name(
         shell=mock_shell,
     )
 
-    snap = _record_snap(target, vm, mock_state)
-
-    # Pre-configure rollback shell commands to succeed.
-    mock_shell.expect("rm -f").returns(_OK)
     mock_shell.expect("virsh checkpoint-delete").returns(_OK)
 
-    with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-        ),
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            return_value=BackupResult(
-                success=True,
-                snapshot_name="snap1",
-                source_path=Path("/tmp/snap1.qcow2"),
-                target_path=target.path / "testvm.FULL.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk="vda",
-                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
-            ),
-        ),
-        patch.object(
-            mock_state,
-            "remove_full_backup",
-            wraps=mock_state.remove_full_backup,
-        ) as remove_spy,
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, [snap])
+    full_result = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed",
+        disk="vda",
+        checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+    )
+
+    core._cleanup_failed_checkpoint(vm, target, full_result)
 
     # Exactly ONE exact-name checkpoint-delete call — no bulk filter.
     expected_cmd = (
         "virsh checkpoint-delete --metadata --domain testvm "
         "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
     )
-    checkpoint_delete_calls = [
-        c
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and " ".join(c.args[0]) == expected_cmd
-    ]
-    assert len(checkpoint_delete_calls) == 1, (
-        "exactly one exact-name checkpoint-delete call expected, got "
-        f"{len(checkpoint_delete_calls)}: "
-        f"{[c for c in shell_spy.call_args_list if c.args and isinstance(c.args[0], list) and 'checkpoint-delete' in ' '.join(c.args[0])]}"
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
+    assert len(delete_calls) == 1, (
+        f"exactly one exact-name checkpoint-delete call expected, got: {delete_calls}"
     )
-    # FULL file cleanup from state is separate and still happens.
-    assert remove_spy.called, "remove_full_backup should be called during rollback"
+    assert delete_calls[0] == expected_cmd, (
+        f"checkpoint-delete must target the exact checkpoint name, got: {delete_calls[0]}"
+    )
 
 
 # ── test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks ───────
@@ -1757,7 +1741,6 @@ def test_cleanup_failed_checkpoint_deletes_exact_checkpoint_name(
 def test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks(
     make_vm_config,
     make_target,
-    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -1765,15 +1748,14 @@ def test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks(
     """Multi-disk rollback deletes only the failed disk's checkpoint.
 
     Core-orchestrator scenario "Multi-disk rollback leaves other disks
-    untouched": a vda FULL verification failure must delete only the vda
-    checkpoint — never the vdb/vdc checkpoints (regression against the
-    old ``qsnap-{target_hash}-*`` bulk filter that wiped every disk's
-    checkpoints for the target).
+    untouched": ``_cleanup_failed_checkpoint`` targets the exact vda
+    checkpoint name from ``BackupResult.checkpoint`` — never a
+    ``qsnap-{target_hash}-*`` bulk filter that would wipe every disk's
+    checkpoints for the target.
     """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target], disks=["vda", "vdb", "vdc"])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -1781,65 +1763,32 @@ def test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks(
         shell=mock_shell,
     )
 
-    # Every disk has a snapshot so each would need a FULL of its own.
-    for disk in ["vda", "vdb", "vdc"]:
-        snap = SnapshotInfo(
-            name=f"snap-{disk}",
-            path=Path(f"/tmp/snap-{disk}.qcow2"),
-            timestamp=datetime(2025, 7, 13, 10, 0),
-            allocation=1000,
-            disk=disk,
-        )
-        mock_state.record_snapshot("testvm", snap)
-
-    def full_side_effect(vm_name, source_snapshot, target_cfg, **kwargs):
-        """Per-disk checkpoint naming so vdb/vdc names are distinguishable."""
-        return BackupResult(
-            success=True,
-            snapshot_name=source_snapshot.name,
-            source_path=source_snapshot.path,
-            target_path=target_cfg.path / f"{vm_name}.FULL.{source_snapshot.disk}.qcow2",
-            bytes_transferred=1048576,
-            error=None,
-            disk=source_snapshot.disk,
-            checkpoint=f"qsnap-ab12cd34-{source_snapshot.disk}-20260807T020000-9f8e7d",
-        )
-
-    def verify_side_effect(shell, target_path, verify_mode, **kwargs):
-        """FULL verification fails for vda only — the other disks pass."""
-        source = kwargs.get("source_path")
-        if source is not None and source.name == "snap-vda.qcow2":
-            return "verification failed: FULL backup has corrupt bit set — file is damaged"
-        return None
-
-    mock_shell.expect("rm -f").returns(_OK)
     mock_shell.expect("virsh checkpoint-delete").returns(_OK)
 
-    with (
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            side_effect=full_side_effect,
-        ),
-        patch("qsnap.core.verify_full_backup", side_effect=verify_side_effect),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, mock_state.get_snapshots("testvm"))
+    # vdb/vdc checkpoints exist but must never be targeted.
+    full_result = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=Path("/tmp/snap-vda.qcow2"),
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed",
+        disk="vda",
+        checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+    )
 
-    checkpoint_delete_calls = [
-        " ".join(c.args[0])
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
-    ]
-    # Only the failed vda checkpoint is targeted — exactly one call.
-    assert checkpoint_delete_calls == [
-        "virsh checkpoint-delete --metadata --domain testvm "
-        "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
-    ], f"only the vda checkpoint should be deleted, got: {checkpoint_delete_calls}"
-    # No vdb/vdc checkpoint-delete call may exist.
-    assert not any("vdb" in call or "vdc" in call for call in checkpoint_delete_calls), (
-        f"vdb/vdc checkpoints must be left untouched, got: {checkpoint_delete_calls}"
+    core._cleanup_failed_checkpoint(vm, target, full_result)
+
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
+    assert len(delete_calls) == 1, f"only the failed disk's checkpoint is targeted: {delete_calls}"
+    # Only the vda checkpoint is targeted — no vdb/vdc, no bulk filter.
+    assert "vda-20260807T020000-9f8e7d" in delete_calls[0]
+    assert not any("vdb" in call or "vdc" in call for call in delete_calls), (
+        f"vdb/vdc checkpoints must be left untouched, got: {delete_calls}"
+    )
+    # The checkpoint argument must be the exact name — no glob/bulk filter.
+    assert "*" not in delete_calls[0], (
+        f"no bulk-filter checkpoint-delete allowed, got: {delete_calls[0]}"
     )
 
 
@@ -1851,7 +1800,6 @@ def test_cleanup_failed_checkpoint_multi_disk_preserves_other_disks(
 def test_cleanup_failed_checkpoint_preserves_previous_baseline(
     make_vm_config,
     make_target,
-    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -1859,14 +1807,13 @@ def test_cleanup_failed_checkpoint_preserves_previous_baseline(
     """Rollback preserves the previous baseline checkpoint of the failed disk.
 
     Core-orchestrator scenario "Previous baseline of the failed disk is
-    preserved": a new FULL attempt for vda fails verification, and only
-    the successor checkpoint (from ``BackupResult.checkpoint``) is
-    deleted — the pre-existing baseline checkpoint is never targeted.
+    preserved": only the successor checkpoint (from
+    ``BackupResult.checkpoint``) is deleted — the pre-existing baseline
+    checkpoint is never targeted.
     """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -1874,60 +1821,33 @@ def test_cleanup_failed_checkpoint_preserves_previous_baseline(
         shell=mock_shell,
     )
 
-    snap = _record_snap(target, vm, mock_state)
-
-    # Previous baseline of the failed disk, recorded from a prior
-    # successful transfer.  Its checkpoint must survive the rollback.
+    # Previous baseline of the failed disk.  Its checkpoint must survive.
     baseline_checkpoint = "qsnap-ab12cd34-vda-20260701T010000-a1b2c3"
-    mock_state.record_full_backup(
-        str(target.path),
-        f"{baseline_checkpoint}.qcow2",
-        datetime(2026, 7, 1),
-        "vda",
-    )
-    # Force a new FULL attempt despite the existing baseline.
-    core._force_full_targets.add(str(target.path))
 
-    mock_shell.expect("rm -f").returns(_OK)
     mock_shell.expect("virsh checkpoint-delete").returns(_OK)
 
-    with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-        ),
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            return_value=BackupResult(
-                success=True,
-                snapshot_name="snap1",
-                source_path=Path("/tmp/snap1.qcow2"),
-                target_path=target.path / "testvm.FULL.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk="vda",
-                checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
-            ),
-        ),
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, [snap])
+    full_result = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed",
+        disk="vda",
+        checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+    )
 
-    checkpoint_delete_calls = [
-        " ".join(c.args[0])
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
-    ]
+    core._cleanup_failed_checkpoint(vm, target, full_result)
+
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
     # Only the successor checkpoint is targeted.
-    assert checkpoint_delete_calls == [
+    assert delete_calls == [
         "virsh checkpoint-delete --metadata --domain testvm "
         "qsnap-ab12cd34-vda-20260807T020000-9f8e7d"
-    ], f"only the successor checkpoint should be deleted, got: {checkpoint_delete_calls}"
+    ], f"only the successor checkpoint should be deleted, got: {delete_calls}"
     # The previous baseline is never mentioned in any checkpoint-delete call.
-    assert not any(baseline_checkpoint in call for call in checkpoint_delete_calls), (
-        f"previous baseline {baseline_checkpoint} must be preserved, got: {checkpoint_delete_calls}"
+    assert not any(baseline_checkpoint in call for call in delete_calls), (
+        f"previous baseline {baseline_checkpoint} must be preserved, got: {delete_calls}"
     )
 
 
@@ -1939,7 +1859,6 @@ def test_cleanup_failed_checkpoint_preserves_previous_baseline(
 def test_cleanup_failed_checkpoint_none_deletes_nothing(
     make_vm_config,
     make_target,
-    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -1948,14 +1867,11 @@ def test_cleanup_failed_checkpoint_none_deletes_nothing(
 
     Core-orchestrator scenario "Stopped-VM FULL failure deletes nothing":
     when the failed FULL created no checkpoint, the rollback issues no
-    ``virsh checkpoint-delete`` call — but FULL state cleanup via
-    ``remove_full_backup`` still happens (file cleanup is separate from
-    checkpoint cleanup).
+    ``virsh checkpoint-delete`` call.
     """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -1963,52 +1879,22 @@ def test_cleanup_failed_checkpoint_none_deletes_nothing(
         shell=mock_shell,
     )
 
-    snap = _record_snap(target, vm, mock_state)
-
-    # No "virsh checkpoint-delete" expectation on purpose: the mock shell
-    # would still record the call (as a failure) if Core wrongly issued one.
-    mock_shell.expect("rm -f").returns(_OK)
-
-    with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-        ),
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            return_value=BackupResult(
-                success=True,
-                snapshot_name="snap1",
-                source_path=Path("/tmp/snap1.qcow2"),
-                target_path=target.path / "testvm.FULL.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk="vda",
-                checkpoint=None,
-            ),
-        ),
-        patch.object(
-            mock_state,
-            "remove_full_backup",
-            wraps=mock_state.remove_full_backup,
-        ) as remove_spy,
-        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, [snap])
-
-    checkpoint_delete_calls = [
-        " ".join(c.args[0])
-        for c in shell_spy.call_args_list
-        if c.args and isinstance(c.args[0], list) and "checkpoint-delete" in " ".join(c.args[0])
-    ]
-    assert checkpoint_delete_calls == [], (
-        f"no checkpoint-delete call expected when checkpoint is None, got: "
-        f"{checkpoint_delete_calls}"
+    full_result = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed",
+        disk="vda",
+        checkpoint=None,
     )
-    assert remove_spy.called, (
-        "remove_full_backup should still be called (FULL file cleanup is separate)"
+
+    core._cleanup_failed_checkpoint(vm, target, full_result)
+
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
+    assert delete_calls == [], (
+        f"no checkpoint-delete call expected when checkpoint is None, got: {delete_calls}"
     )
 
 
@@ -2020,7 +1906,6 @@ def test_cleanup_failed_checkpoint_none_deletes_nothing(
 def test_cleanup_failed_checkpoint_delete_failure_non_fatal(
     make_vm_config,
     make_target,
-    make_global_config,
     mock_factory,
     mock_state,
     mock_shell,
@@ -2030,13 +1915,12 @@ def test_cleanup_failed_checkpoint_delete_failure_non_fatal(
 
     Core-orchestrator scenario "Checkpoint deletion failure is
     non-fatal": a failing ``virsh checkpoint-delete`` logs a WARNING and
-    the rollback continues — FULL file removal and state cleanup still
-    complete (no exception raised from ``_cleanup_failed_checkpoint``).
+    the rollback continues (no exception raised from
+    ``_cleanup_failed_checkpoint``).
     """
-    global_cfg = make_global_config(full_verify_after_create="check")
-    target = make_target(backup_retry_max=1)
+    target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    config = MockConfigFacade(vms=[vm])
     core = Core(
         config=config,
         factory=mock_factory,
@@ -2044,9 +1928,6 @@ def test_cleanup_failed_checkpoint_delete_failure_non_fatal(
         shell=mock_shell,
     )
 
-    snap = _record_snap(target, vm, mock_state)
-
-    mock_shell.expect("rm -f").returns(_OK)
     mock_shell.expect("virsh checkpoint-delete").returns(
         ShellResult(
             success=False,
@@ -2059,41 +1940,23 @@ def test_cleanup_failed_checkpoint_delete_failure_non_fatal(
 
     caplog.set_level(logging.WARNING)
 
-    with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: FULL backup has corrupt bit set — file is damaged",
-        ),
-        patch.object(
-            mock_factory._bitmap_backup_provider,
-            "create_full_backup",
-            return_value=BackupResult(
-                success=True,
-                snapshot_name="snap1",
-                source_path=Path("/tmp/snap1.qcow2"),
-                target_path=target.path / "testvm.FULL.qcow2",
-                bytes_transferred=1048576,
-                error=None,
-                disk="vda",
-                checkpoint="qsnap-deadc0de-vda-20260807T020000-111111",
-            ),
-        ),
-        patch.object(
-            mock_state,
-            "remove_full_backup",
-            wraps=mock_state.remove_full_backup,
-        ) as remove_spy,
-        pytest.raises(BackupAbortError),
-    ):
-        core._backup_target(vm, target, [snap])
+    full_result = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=Path("/tmp/snap1.qcow2"),
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed",
+        disk="vda",
+        checkpoint="qsnap-deadc0de-vda-20260807T020000-111111",
+    )
+
+    # Must not raise — deletion failure is non-fatal.
+    core._cleanup_failed_checkpoint(vm, target, full_result)
 
     # WARNING logged for the failed checkpoint deletion.
     assert "failed to delete checkpoint" in caplog.text, (
         "WARNING should be logged when checkpoint deletion fails"
-    )
-    # Rollback continued past the checkpoint-deletion failure.
-    assert remove_spy.called, (
-        "remove_full_backup should still be called after checkpoint-delete failure"
     )
 
 
@@ -2107,16 +1970,14 @@ def test_retries_exhausted_keeps_old_generations(
     mock_factory,
     mock_state,
     mock_shell,
-    caplog,
 ):
-    """All FULL backup retries exhausted — old generations preserved, CRITICAL log,
+    """All FULL backup retries exhausted — old generations preserved,
     and the VM pipeline aborts (VM-level isolation).
 
-    When every retry attempt fails to create+verify a FULL, Core emits a
-    CRITICAL log stating old generations are preserved and raises
-    ``BackupAbortError``.  The abort itself is the verify-before-delete
-    gate: retention evaluation and cleanup are never reached, so old
-    generations are never deleted.
+    When every retry attempt fails, Core raises ``BackupAbortError``.
+    The abort itself is the verify-before-delete gate: retention
+    evaluation and cleanup are never reached, so old generations are
+    never deleted.
     """
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(
@@ -2134,21 +1995,23 @@ def test_retries_exhausted_keeps_old_generations(
 
     snap = _record_snap(target, vm, mock_state)
 
-    # Pre-configure rm -f to succeed (rollback file deletion for every attempt).
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    failed = BackupResult(
+        success=False,
+        snapshot_name="",
+        source_path=snap.path,
+        target_path=target.path / "testvm.FULL.qcow2",
+        bytes_transferred=0,
+        error="verification failed: content comparison mismatch",
+        disk="vda",
     )
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-
-    caplog.set_level(logging.CRITICAL)
 
     with (
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: content comparison mismatch",
-        ),
+        patch("qsnap.core.time.sleep"),
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            return_value=failed,
+        ) as run_spy,
         patch.object(
             core,
             "_evaluate_backup_retention",
@@ -2158,12 +2021,14 @@ def test_retries_exhausted_keeps_old_generations(
     ):
         core._backup_target(vm, target, [snap])
 
+    # run_backup was retried up to backup_retry_max times.
+    assert run_spy.call_count == 2, (
+        f"run_backup should be retried up to backup_retry_max, got {run_spy.call_count}"
+    )
     # Retention was NOT evaluated (the abort precedes retention/cleanup).
     assert not retention_spy.called, (
         "Retention should NOT be evaluated when all FULL retries are exhausted"
     )
-    # CRITICAL log emitted about preserving old generations.
-    assert "old generations preserved" in caplog.text.lower()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2185,8 +2050,8 @@ def test_full_backup_creation_retried_transient(
     mock_shell,
 ):
     """FULL creation fails with transient ``"Connection refused"`` on attempt 1,
-    retried via ``_execute_with_retry``, succeeds on attempt 2.  Verification
-    passes and the FULL is recorded in state.
+    retried via ``_execute_with_retry``, succeeds on attempt 2.  The FULL is
+    recorded in state.
 
     This test verifies that ``_backup_target()`` delegates FULL creation
     retry to ``_execute_with_retry()`` with ``backup_retry_max=3``.
@@ -2220,29 +2085,30 @@ def test_full_backup_creation_retried_transient(
         if full_calls == 1:
             return BackupResult(
                 success=False,
-                snapshot_name="snap1",
+                snapshot_name="",
                 source_path=Path("/tmp/snap1.qcow2"),
                 target_path=target.path / "testvm.FULL.qcow2",
                 bytes_transferred=0,
                 error="Connection refused",
+                disk="vda",
             )
         return BackupResult(
             success=True,
-            snapshot_name="snap1",
+            snapshot_name="testvm.FULL.20250713T100000_vda_a1b2c3",
             source_path=Path("/tmp/snap1.qcow2"),
-            target_path=target.path / "testvm.FULL.qcow2",
+            target_path=target.path / "testvm.FULL.20250713T100000_vda_a1b2c3.qcow2",
             bytes_transferred=1048576,
             error=None,
+            disk="vda",
         )
 
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
+            "run_backup",
             side_effect=full_side_effect,
         ),
-        patch("qsnap.core.verify_full_backup", return_value=None),
-        patch("time.sleep"),
+        patch("qsnap.core.time.sleep"),
         patch.object(
             mock_state,
             "record_full_backup",
@@ -2252,11 +2118,10 @@ def test_full_backup_creation_retried_transient(
         core._backup_target(vm, target, [snap])
 
     assert full_calls == 2, (
-        f"create_full_backup should be called twice (retried after transient error), "
-        f"got {full_calls}"
+        f"run_backup should be called twice (retried after transient error), got {full_calls}"
     )
-    # FULL was recorded after successful retry + verification.
-    assert record_spy.called, "record_full_backup should be called after verify passes"
+    # FULL was recorded after the successful retry.
+    assert record_spy.called, "record_full_backup should be called after the retry succeeds"
 
     # Verify FULL was recorded
     fulls = mock_state.get_full_backups(str(target.path))
@@ -2285,8 +2150,6 @@ def test_full_backup_creation_not_retried_no_space(
     SUSPENDS the target (design D2) instead of raising ``BackupAbortError``:
     no FULL is recorded and the target is flagged space-limited.
     """
-    import logging
-
     global_cfg = make_global_config(full_verify_after_create="check")
     target = make_target(backup_retry_max=3, backup_retry_base="0s")
     vm = make_vm_config(name="testvm", targets=[target])
@@ -2315,11 +2178,12 @@ def test_full_backup_creation_not_retried_no_space(
         full_calls += 1
         return BackupResult(
             success=False,
-            snapshot_name="snap1",
+            snapshot_name="",
             source_path=Path("/tmp/snap1.qcow2"),
             target_path=target.path / "testvm.FULL.qcow2",
             bytes_transferred=0,
             error="No space left on device",
+            disk="vda",
         )
 
     caplog.set_level(logging.CRITICAL)
@@ -2327,10 +2191,10 @@ def test_full_backup_creation_not_retried_no_space(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
+            "run_backup",
             side_effect=full_side_effect,
         ),
-        patch("time.sleep"),
+        patch("qsnap.core.time.sleep"),
         patch.object(
             mock_state,
             "record_full_backup",
@@ -2340,9 +2204,9 @@ def test_full_backup_creation_not_retried_no_space(
         # Space errors suspend the target — they must NOT raise.
         core._backup_target(vm, target, [snap])
 
-    # create_full_backup called exactly once — no retry
+    # run_backup called exactly once — no retry
     assert full_calls == 1, (
-        f"create_full_backup should be called exactly once (non-retryable), got {full_calls}"
+        f"run_backup should be called exactly once (non-retryable), got {full_calls}"
     )
     # FULL was NOT recorded in state
     assert not record_spy.called, "record_full_backup should NOT be called when FULL fails"
@@ -2367,9 +2231,9 @@ def test_verified_full_triggers_retention(
     mock_state,
     mock_shell,
 ):
-    """FULL passes M1/M2 verification → retention evaluation + cleanup triggered.
+    """A successful run_backup FULL → retention evaluation + cleanup triggered.
 
-    After verification succeeds, Core must:
+    After run_backup succeeds (provider verified internally), Core must:
     1. Record the FULL in state via record_full_backup()
     2. Evaluate backup retention via _evaluate_backup_retention()
     3. Trigger cleanup of old generations via _cleanup_backups()
@@ -2389,7 +2253,11 @@ def test_verified_full_triggers_retention(
 
     # No prior FULLs → first backup triggers FULL creation (count-based).
     with (
-        patch("qsnap.core.verify_full_backup", return_value=None) as verify_spy,
+        patch.object(
+            mock_factory._backup_provider,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
+        ) as run_spy,
         patch.object(
             mock_state,
             "record_full_backup",
@@ -2408,13 +2276,16 @@ def test_verified_full_triggers_retention(
     ):
         core._backup_target(vm, target, [snap])
 
-    # Verification was called.
-    assert verify_spy.called, "verify_full_backup should be called"
-    # FULL was recorded after verification passed.
-    assert record_spy.called, "record_full_backup should be called after verification passes"
-    # Retention was evaluated because full_verification_failed is False.
+    # run_backup was called (provider-internal verification passed).
+    assert run_spy.called, "run_backup should be called"
+    assert run_spy.call_args.kwargs["force_full"] is True, (
+        "run_backup should be called with force_full=True on first backup"
+    )
+    # FULL was recorded after run_backup succeeded.
+    assert record_spy.called, "record_full_backup should be called after a successful FULL"
+    # Retention was evaluated because no backup failure aborted the run.
     assert retention_spy.called, (
-        "_evaluate_backup_retention should be called after successful FULL verification"
+        "_evaluate_backup_retention should be called after a successful FULL"
     )
     # Cleanup was triggered.
     assert cleanup_spy.called, "_cleanup_backups should be called after retention evaluation"

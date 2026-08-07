@@ -81,7 +81,7 @@ def parse_disk_from_snapshot_name(name: str) -> str | None:
     return None
 
 
-def parse_timestamp(name: str, filepath: Path) -> datetime:
+def parse_timestamp(name: str, filepath: Path | None = None) -> datetime:
     """Parse a timestamp from a snapshot or backup filename.
 
     Searches *name* for the unified timestamp pattern
@@ -113,7 +113,9 @@ def parse_timestamp(name: str, filepath: Path) -> datetime:
         except ValueError:
             pass
     try:
-        mtime = filepath.stat().st_mtime
-        return datetime.fromtimestamp(mtime)
+        if filepath is not None:
+            mtime = filepath.stat().st_mtime
+            return datetime.fromtimestamp(mtime)
     except (OSError, ValueError):
-        return datetime.now()
+        pass
+    return datetime.now()

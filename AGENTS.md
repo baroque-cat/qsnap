@@ -2,7 +2,7 @@
 
 ## Project
 
-**qsnap** is a QEMU/KVM snapshot and backup orchestration tool for qcow2 images on any filesystem (XFS, ext4, etc.), inspired by btrbk. It manages external disk-only snapshots via `virsh`, detects whether a VM disk has changed (`onchange`), enforces retention policies, performs incremental backups to separate storage, and maintains backing chain integrity via `blockcommit`.
+**qsnap** is a QEMU/KVM snapshot and backup orchestration tool for qcow2 images on any filesystem (XFS, ext4, etc.). It manages external disk-only snapshots via `virsh`, detects whether a VM disk has changed (`onchange`), enforces retention policies, performs incremental backups to separate storage, and maintains backing chain integrity via `blockcommit`.
 
 ---
 
@@ -91,11 +91,13 @@ Core._execute_pipeline(vm):
   2. if detector.has_changed(vm): snapshot.create(...)
   3. retention.evaluate(snapshots) → keep/remove → lifecycle.commit(...)
   4. for each target:
-       backup = factory.create_backup_provider(...)
-       _should_create_full(target, incremental_count)
-         → if incremental_count > target_chain_length: create_full_backup(...)
-       transfer missing snapshots (NBD dirty-block transfer — bitmap only)
-       recordincremental_dependency(target, incremental, full)
+       for each disk:
+         backup = factory.create_backup_provider(vm_config, target)
+         if blockjob active on this disk → defer (continue)
+         provider.run_backup(vm_config, target, disk, ...)
+           → provider decides FULL vs delta (checkpoint discovery)
+           → successor checkpoint at freeze point
+           → freeze-timestamp name: {vm}.{freeze_ts}_{disk}_{hex6}.qcow2
        retention.evaluate(backups) → keep/remove
        _cleanup_backups() → generation-based deletion:
          FULL with no dependents beyond keep_generations → delete
@@ -104,6 +106,26 @@ Core._execute_pipeline(vm):
 ```
 
 Modules never know which step they are; Core owns the sequence.
+
+### Orthogonality: Two Worlds, One Bridge
+
+The snapshot world (local `virsh snapshot-create-as`, retention, blockcommit) and the
+backup-target world (libvirt checkpoints, NBD dirty-bitmap export, target storage) are
+orthogonal — they share **no** data. Core invokes them sequentially under one lock.
+
+- **Snapshot world** — triggered by `snapshot_create = "always"|"onchange"`.  Creates
+  point-in-time crash-consistent external snapshots, enforces chain-length limits via
+  blockcommit.  State lives in `{vm}.json` under `state_dir`.
+- **Backup-target world** — triggered by `backup_create = "always"`.  For each configured
+  disk, `IBackupProvider.run_backup(vm_config, target, disk)` creates exactly ONE backup per
+  run: a FULL when no qsnap checkpoint exists for this VM+target+disk, otherwise a delta of
+  dirty blocks since the newest checkpoint.  State lives in per-target JSON files
+  (`_target_state.json`, `_full_backups.json`, `_dependencies.json`).
+
+The provider decides backup kind autonomously (no snapshot data consumed).  Backup files are
+named by their own freeze point: `{vm}.{freeze_ts}_{disk}_{hex6}.qcow2` (FULL:
+`{vm}.FULL.{freeze_ts}_{disk}_{hex6}.qcow2`).  `BackupInfo` is the model for the target world
+— no `SnapshotInfo` appears in the backup provider API.
 
 ### Immutable Config Dataclasses
 
@@ -227,7 +249,14 @@ Every module instantiation goes through the factory. This is non-negotiable — 
 | Concrete implementations | Descriptive noun | `ExternalSnapshotProvider`, `AllocationSizeDetector` |
 | Result types | `*Result` suffix | `SnapshotResult`, `CommitResult` |
 | Private Core methods | `_` prefix | `Core._execute_pipeline()` |
-| Module base classes | `*Module(Core)` | `SnapshotModule(Core)` |
+
+### Locking Contract
+- Default lockfile: `/var/lib/qsnap/qsnap.lock` (parent dir auto-created).
+- Sentinel `"off"` (`lockfile = "off"` in config or `--lockfile off` on CLI) disables locking.
+- Exclusive lock (`fcntl.flock LOCK_EX | LOCK_NB`) is acquired only for **mutating** commands: `run`, `snapshot`, `backup`, `prune`, `reconcile`, `restore`, `fork`.
+- **Read-only** commands (`list`, `stats`, `check`, `estimate`) run unlocked.
+- Lock contention on a mutating command → exit code 3, message: "Lockfile is held by another qsnap instance".
+- Lock is released on normal exit and on process termination (fd closed by kernel).
 
 ## Testing
 

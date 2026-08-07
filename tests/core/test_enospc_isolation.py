@@ -130,14 +130,14 @@ def test_enospc_suspends_only_affected_target(
     _add_full_anchor(mock_state, target_a)
     _add_full_anchor(mock_state, target_b)
 
-    def transfer_side_effect(vm_config, target, snapshots, **kwargs):
+    def transfer_side_effect(vm_config, target, disk, **kwargs):
         if target.path == target_a.path:
-            return [_failed_result(s, target) for s in snapshots]
-        return [_ok_result(s, target) for s in snapshots]
+            return _failed_result(snap, target)
+        return _ok_result(snap, target)
 
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
+        "run_backup",
         side_effect=transfer_side_effect,
     ):
         result = core.run()
@@ -193,8 +193,8 @@ def test_enospc_retention_cleanup_still_run_for_suspended_target(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[_failed_result(snap, target)],
+            "run_backup",
+            return_value=_failed_result(snap, target),
         ),
         patch.object(
             core, "_evaluate_backup_retention", wraps=core._evaluate_backup_retention
@@ -237,8 +237,8 @@ def test_non_space_failure_raises_backup_abort(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[_failed_result(snap, target, error="permission denied")],
+            "run_backup",
+            return_value=_failed_result(snap, target, error="permission denied"),
         ),
         pytest.raises(BackupAbortError),
     ):
@@ -274,22 +274,18 @@ def test_verification_failure_not_treated_as_space_error(
 
     # No FULL in state → the FULL creation path runs.
     snap = _add_snapshot(mock_state)
-    ok_full = BackupResult(
-        success=True,
-        snapshot_name=snap.name,
+    failed_full = BackupResult(
+        success=False,
+        snapshot_name="",
         source_path=snap.path,
         target_path=target.path / "testvm.FULL.verify.qcow2",
-        bytes_transferred=1048576,
-        error=None,
+        bytes_transferred=0,
+        error="verification failed: qemu-img info returned No mock configured",
         disk=snap.disk,
     )
 
     with (
-        patch.object(mock_factory._backup_provider, "create_full_backup", return_value=ok_full),
-        patch(
-            "qsnap.core.verify_full_backup",
-            return_value="verification failed: qemu-img info returned No mock configured",
-        ),
+        patch.object(mock_factory._backup_provider, "run_backup", return_value=failed_full),
         patch.object(
             mock_factory._backup_provider, "delete", wraps=mock_factory._backup_provider.delete
         ) as del_spy,
@@ -338,7 +334,7 @@ def test_enospc_leaves_only_tmp_no_deletion(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
+            "run_backup",
             return_value=_failed_result(snap, target, error=_ENOSPC),
         ),
         patch.object(
@@ -387,8 +383,8 @@ def test_space_pressure_never_triggers_deletion(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[_failed_result(snap, target, error=_EDQUOT)],
+            "run_backup",
+            return_value=_failed_result(snap, target, error=_EDQUOT),
         ),
         patch.object(
             mock_factory._backup_provider, "delete", wraps=mock_factory._backup_provider.delete
@@ -433,8 +429,8 @@ def test_next_run_resumes_interrupted_incremental(
     )
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[_failed_result(snap, target)],
+        "run_backup",
+        return_value=_failed_result(snap, target),
     ):
         result1 = core1.run()
 
@@ -450,16 +446,19 @@ def test_next_run_resumes_interrupted_incremental(
     )
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
     ) as transfer_spy:
         result2 = core2.run()
 
     assert result2.space_limited is False
     assert result2.results[0].success is True
     transferred = {a.name for a in result2.actions if a.action == "backup_transfer"}
-    assert snap.name in transferred, (
+    assert len(transferred) >= 1, (
         "the interrupted incremental must be re-transferred by the next run"
+    )
+    assert all("_vda_" in name for name in transferred), (
+        f"transfer action names should be freeze-ts backup names, got: {transferred}"
     )
 
 
@@ -475,7 +474,7 @@ def test_next_run_retries_gate_skipped_full(
 
     Run 1: the strict gate blocks the doomed FULL — nothing is created.
     Run 2: space freed — the gate passes and the FULL is created from the
-    same snapshot (enospc-fault-handling scenario 11).
+    same disk (enospc-fault-handling scenario 11).
     """
     target = make_target(path=str(tmp_path / "backup"))
     target.path.mkdir(parents=True, exist_ok=True)
@@ -495,20 +494,16 @@ def test_next_run_retries_gate_skipped_full(
     with (
         patch("qsnap.core.estimate_full_size", return_value=5000),
         patch("qsnap.core.check_free_space", return_value=insufficient),
-        patch.object(mock_factory._backup_provider, "create_full_backup") as full_spy,
-        patch.object(mock_factory._backup_provider, "transfer_missing") as transfer_spy,
+        patch.object(mock_factory._backup_provider, "run_backup") as run_spy,
     ):
         result1 = core1.run()
 
     assert result1.space_limited is True
-    full_spy.assert_not_called()
-    # The gate-suspended target hands the provider an empty transfer list.
-    transfer_spy.assert_called_once()
-    assert transfer_spy.call_args.args[2] == []
+    run_spy.assert_not_called()
     assert mock_state.get_full_backups(str(target.path)) == []
     assert len(mock_state.get_snapshots("testvm")) >= 1
 
-    # Run 2: gate passes → FULL created from the preserved snapshot.
+    # Run 2: gate passes → FULL created from the preserved disk.
     core2 = Core(
         config=MockConfigFacade(vms=[vm]),
         factory=mock_factory,
@@ -520,15 +515,17 @@ def test_next_run_retries_gate_skipped_full(
         patch("qsnap.core.check_free_space", return_value=sufficient),
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
-            wraps=mock_factory._backup_provider.create_full_backup,
-        ) as full_spy2,
-        patch("qsnap.core.verify_full_backup", return_value=None),
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
+        ) as run_spy2,
     ):
         result2 = core2.run()
 
     assert result2.space_limited is False
-    assert full_spy2.called
+    assert run_spy2.called
+    assert run_spy2.call_args.kwargs["force_full"] is True, (
+        "the retried FULL must be created with force_full=True"
+    )
     assert len(mock_state.get_full_backups(str(target.path))) == 1
 
 
@@ -570,18 +567,12 @@ def test_strict_gate_blocks_doomed_full(
                 sufficient=False, free_bytes=100, estimate=5000, required=10000
             ),
         ),
-        patch.object(mock_factory._backup_provider, "create_full_backup") as full_spy,
-        patch.object(mock_factory._backup_provider, "transfer_missing") as transfer_spy,
+        patch.object(mock_factory._backup_provider, "run_backup") as run_spy,
     ):
         result = core.run()
 
     assert result.space_limited is True
-    full_spy.assert_not_called()
-    # The suspended target transfers nothing — an empty transfer list at most.
-    transfer_spy.assert_called_once()
-    assert transfer_spy.call_args.args[2] == [], (
-        "no snapshot may be handed to the provider for a gate-suspended target"
-    )
+    run_spy.assert_not_called()
     assert any("suspending target" in r.getMessage() for r in caplog.records), (
         "strict gate must log CRITICAL naming the suspension"
     )
@@ -620,7 +611,6 @@ def test_warn_mode_proceeds(
 
     caplog.set_level(logging.WARNING)
     with (
-        patch("qsnap.core.estimate_incremental_size", return_value=5000),
         patch(
             "qsnap.core.check_free_space",
             return_value=SpaceCheckResult(
@@ -629,8 +619,8 @@ def test_warn_mode_proceeds(
         ),
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            wraps=mock_factory._backup_provider.transfer_missing,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.run()
@@ -675,8 +665,8 @@ def test_off_mode_skips_gate(
         ),
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            wraps=mock_factory._backup_provider.transfer_missing,
+            "run_backup",
+            wraps=mock_factory._backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.run()
@@ -712,14 +702,14 @@ def test_suspended_target_still_runs_retention_cleanup(
     _add_full_anchor(mock_state, target)
 
     with (
-        patch("qsnap.core.estimate_incremental_size", return_value=5000),
+        patch("qsnap.core.estimate_full_size", return_value=5000),
         patch(
             "qsnap.core.check_free_space",
             return_value=SpaceCheckResult(
                 sufficient=False, free_bytes=100, estimate=5000, required=10000
             ),
         ),
-        patch.object(mock_factory._backup_provider, "transfer_missing") as transfer_spy,
+        patch.object(mock_factory._backup_provider, "run_backup") as run_spy,
         patch.object(
             core, "_evaluate_backup_retention", wraps=core._evaluate_backup_retention
         ) as retention_spy,
@@ -728,9 +718,8 @@ def test_suspended_target_still_runs_retention_cleanup(
         result = core.run()
 
     assert result.space_limited is True
-    transfer_spy.assert_called_once()
-    assert transfer_spy.call_args.args[2] == [], (
-        "no snapshot may be handed to the provider for a gate-suspended target"
+    run_spy.assert_not_called(), (
+        "no transfer may be attempted for a gate-suspended target"
     )
     assert retention_spy.called
     assert cleanup_spy.called
@@ -763,24 +752,21 @@ def test_strict_gate_no_transfer_attempted(
     _add_full_anchor(mock_state, target)
 
     with (
-        patch("qsnap.core.estimate_incremental_size", return_value=5000),
+        patch("qsnap.core.estimate_full_size", return_value=5000),
         patch(
             "qsnap.core.check_free_space",
             return_value=SpaceCheckResult(
                 sufficient=False, free_bytes=100, estimate=5000, required=10000
             ),
         ),
-        patch.object(mock_factory._backup_provider, "transfer_missing") as transfer_spy,
-        patch.object(mock_factory._backup_provider, "create_full_backup") as full_spy,
+        patch.object(mock_factory._backup_provider, "run_backup") as run_spy,
     ):
         result = core.run()
 
     assert result.space_limited is True
-    transfer_spy.assert_called_once()
-    assert transfer_spy.call_args.args[2] == [], (
-        "no snapshot may be handed to the provider for a gate-suspended target"
+    run_spy.assert_not_called(), (
+        "no transfer may be attempted for a gate-suspended target"
     )
-    full_spy.assert_not_called()
 
 
 # ── VM-level isolation ───────────────────────────────────────────────────
@@ -814,8 +800,8 @@ def test_space_error_suspends_target_vm_continues(
 
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[_failed_result(snap, target)],
+        "run_backup",
+        return_value=_failed_result(snap, target),
     ):
         result = core.run()
 
@@ -853,7 +839,7 @@ def test_space_failure_no_backup_abort_error(
 
     with patch.object(
         mock_factory._backup_provider,
-        "create_full_backup",
+        "run_backup",
         return_value=_failed_result(snap, target, error=_ENOSPC),
     ):
         # Must NOT raise BackupAbortError.

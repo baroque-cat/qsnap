@@ -36,34 +36,32 @@ In dry-run mode, `Core._evaluate_snapshot_retention()` SHALL merge the simulated
 - **WHEN** the pipeline runs with dry-run disabled
 - **THEN** retention evaluation reads only `IStateManager` snapshots, exactly as before this change
 
-### Requirement: Backup steps evaluated with simulated snapshots
+### Requirement: Backup prediction from target-internal data
 
-In dry-run mode, `Core._execute_backup_steps()` SHALL pass the simulated snapshots to `_backup_target()` merged with the snapshots read from `IStateManager`. The per-disk FULL decision and the incremental transfer list SHALL be evaluated against this merged post-run set. In non-dry-run mode behavior SHALL be unchanged.
+In dry-run mode, `Core._backup_target()` SHALL predict the backup that a real run would create for each disk of each target, using only target-internal data: the onchange gate state, the presence of a checkpoint for the disk (`list_checkpoints`), and the FULL/delta decision (dependency count vs `target_chain_length`). When the gate is open, Core SHALL log one INFO prediction per disk: "FULL will be created" (no checkpoint or FULL due) or "delta will be created since checkpoint <name>" (checkpoint exists), with the target path and an approximate size estimate. Predictions SHALL NOT reference snapshot names and SHALL NOT predict per-snapshot transfer lists. Estimates are upper bounds and SHALL be presented as approximate.
 
-#### Scenario: First run predicts FULL sourced from simulated snapshot
-- **WHEN** `qsnap -n run` is executed for a VM with no snapshots in state and one configured target
-- **THEN** the per-disk FULL decision sees the simulated snapshot
-- **AND** a FULL prediction is emitted naming the simulated snapshot as source
+#### Scenario: Gate open with checkpoint predicts one delta per disk
 
-### Requirement: Incremental transfer prediction
-
-In dry-run mode, `Core._backup_target()` SHALL predict the incremental transfer list instead of silently skipping it. The predicted transfer list SHALL be the merged snapshots minus FULL sources created this run minus snapshots already present on the target (determined via the read-only `provider.list(target)`). For each predicted transfer, Core SHALL log an INFO line with VM, disk, snapshot name, target, and an approximate size estimate, and SHALL record a prediction entry. The size estimate SHALL be the snapshot file `actual-size` from read-only `qemu-img info --force-share` when the file exists, or the simulated allocation when it does not. Estimates are upper bounds and SHALL be presented as approximate.
-
-#### Scenario: Two untransferred snapshots produce two predictions
-- **WHEN** state holds snapshots `s1`, `s2` for disk `vda`, neither exists on the target, and no FULL is predicted
-- **THEN** dry-run logs one transfer prediction per snapshot with name, target, and approximate size
+- **WHEN** dry-run evaluates a disk with an existing checkpoint and an open gate
+- **THEN** exactly one prediction is emitted: delta since the newest checkpoint, with target and approximate size
 - **AND** no NBD export, checkpoint, or file write occurs
 
-#### Scenario: Snapshot already on target is not predicted
-- **WHEN** snapshot `s1` already exists on the target as a file
-- **THEN** no transfer prediction is emitted for `s1`
+#### Scenario: Gate closed predicts no backup
+
+- **WHEN** the onchange gate is closed for a disk
+- **THEN** no backup prediction is emitted for that disk
+
+#### Scenario: No checkpoint predicts FULL
+
+- **WHEN** no checkpoint exists for the disk and the gate is open
+- **THEN** the prediction is "FULL will be created" regardless of snapshot state
 
 ### Requirement: FULL backup prediction with size estimate
 
-In dry-run mode, when the per-disk FULL decision determines a FULL would be created, Core SHALL log an INFO prediction containing the disk target, the transfer method, the VM running state, and an estimated standalone size computed read-only as the sum of `actual-size` over the source snapshot's backing chain (`qemu-img info --force-share --backing-chain --output=json`). The chain-size estimation logic SHALL be shared with `Core.fork()` via a single helper. When the source snapshot file does not exist (a simulated snapshot), the estimate SHALL fall back to the disk's `base_image` backing chain, which exists by pre-flight validation and which a real FULL would export plus a near-zero fresh overlay. The same fallback SHALL apply to the dry-run free-space gate estimate so prediction and gate never disagree. Estimation probe failures SHALL NOT log above DEBUG. When the estimation command fails (including the fallback), the prediction SHALL still be emitted with size unknown.
+In dry-run mode, when the FULL/delta decision determines a FULL would be created, Core SHALL log an INFO prediction containing the disk target, the transfer method, the VM running state, and an estimated standalone size computed read-only from the disk's `base_image` backing chain (`qemu-img info --force-share --backing-chain --output=json`) — a real FULL exports the live disk plus a near-zero fresh overlay, so the base chain is the correct estimate source for both running and stopped VMs. The chain-size estimation logic SHALL be shared with `Core.fork()` via a single helper. The same estimate SHALL feed the dry-run free-space gate so prediction and gate never disagree. Estimation probe failures SHALL NOT log above DEBUG. When the estimation command fails, the prediction SHALL still be emitted with size unknown.
 
 #### Scenario: FULL prediction carries chain size estimate
-- **WHEN** dry-run predicts a FULL for disk `vda` sourced from a snapshot whose backing chain sums to 1 GiB of `actual-size`
+- **WHEN** dry-run predicts a FULL for disk `vda` whose `base_image` backing chain sums to 1 GiB of `actual-size`
 - **THEN** the prediction log includes the disk, method, VM state, and an approximate size of 1 GiB
 
 #### Scenario: Estimation failure degrades gracefully
@@ -71,15 +69,11 @@ In dry-run mode, when the per-disk FULL decision determines a FULL would be crea
 - **THEN** the FULL prediction is still logged, with the size marked unknown
 - **AND** the pipeline does not abort
 
-#### Scenario: First-run dry-run falls back to base_image
-- **WHEN** dry-run predicts a FULL sourced from a simulated snapshot whose file does not yet exist
-- **THEN** the estimate is computed from the disk's `base_image` backing chain
-- **AND** the prediction carries a numeric size estimate (not "size unknown") when `base_image` is readable
+#### Scenario: Estimation never uses snapshot files
 
-#### Scenario: Simulated-path probe does not log ERROR
-- **WHEN** dry-run estimates a FULL size and the source snapshot file does not exist
-- **THEN** no log record above DEBUG is emitted for the simulated-path probe
-- **AND** no "Cannot estimate FULL size" WARNING is emitted solely because the simulated file is absent
+- **WHEN** dry-run estimates a FULL size
+- **THEN** the estimate source is the disk's `base_image` backing chain
+- **AND** no snapshot file path participates in the estimation
 
 ### Requirement: Backup retention prediction includes predicted FULLs
 

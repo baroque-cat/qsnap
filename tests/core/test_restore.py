@@ -997,3 +997,229 @@ def test_restore_convert_retries_on_retryable_error(
         f"Expected 2 convert attempts, got {mock_convert.call_count}"
     )
     assert mock_sleep.called, "time.sleep should be called between retries"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Restore --at (restore-points superset selection)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _setup_restore_at_shell(mock_shell) -> None:
+    """Pre-configure the shell so a successful --at restore completes."""
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: -\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_shell.expect("qemu-img convert").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    _verify_expectations(mock_shell)
+    mock_shell.expect("rm -f").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("dumpxml").returns(
+        ShellResult(success=True, stdout=_SIMPLE_DOMAIN_XML, stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect("virsh define").returns(
+        ShellResult(
+            success=True,
+            stdout="Domain testvm defined",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _restore_points(*timestamps: datetime) -> list:
+    """Build BackupInfo restore points for the target."""
+    from qsnap.models.results import BackupInfo
+
+    points = []
+    for i, ts in enumerate(timestamps):
+        name = f"testvm.{ts.strftime('%Y%m%dT%H%M%S')}_vda_a1b2c{i:02d}"
+        points.append(
+            BackupInfo(
+                name=name,
+                path=Path(f"/mnt/backup/testvm/{name}.qcow2"),
+                timestamp=ts,
+                disk="vda",
+                is_full=(i == 0),
+            )
+        )
+    return points
+
+
+@pytest.mark.unit
+def test_restore_at_selects_first_point_above(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """restore(at=...) selects the FIRST point >= at (superset policy).
+
+    restore-command scenario "First point above the requested timestamp is
+    used": with points at 10:00 and 12:00, requesting 11:00 restores the
+    12:00 point and logs the actually-used point.
+    """
+    target = make_target(path=str(tmp_path / "backups"))
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    points = _restore_points(
+        datetime(2025, 7, 13, 10, 0, 0),
+        datetime(2025, 7, 13, 12, 0, 0),
+    )
+    _setup_restore_at_shell(mock_shell)
+
+    caplog.set_level(logging.INFO)
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=points),
+        patch("os.replace"),
+        patch("os.path.exists", return_value=True),
+    ):
+        result = core.restore(at=datetime(2025, 7, 13, 11, 0, 0))
+
+    assert result.success is True
+    assert result.snapshot_name == points[1].name, (
+        f"First point >= at should be selected, got {result.snapshot_name}"
+    )
+    assert "[restore] --at" in caplog.text, (
+        "The actually-used point must be logged"
+    )
+    assert points[1].name in caplog.text
+
+
+@pytest.mark.unit
+def test_restore_at_exact_match_selected(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """restore(at=...) selects the exact-matching point when present."""
+    target = make_target(path=str(tmp_path / "backups"))
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    requested = datetime(2025, 7, 13, 12, 0, 0)
+    points = _restore_points(
+        datetime(2025, 7, 13, 10, 0, 0),
+        requested,
+        datetime(2025, 7, 13, 14, 0, 0),
+    )
+    _setup_restore_at_shell(mock_shell)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=points),
+        patch("os.replace"),
+        patch("os.path.exists", return_value=True),
+    ):
+        result = core.restore(at=requested)
+
+    assert result.success is True
+    assert result.snapshot_name == points[1].name, (
+        "The exact-matching point should be selected"
+    )
+
+
+@pytest.mark.unit
+def test_restore_at_no_satisfying_point_lists_available(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """restore(at=...) with no point >= at fails with an informative error."""
+    target = make_target(path=str(tmp_path / "backups"))
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    points = _restore_points(datetime(2025, 7, 13, 10, 0, 0))
+
+    with patch.object(mock_factory._backup_provider, "list", return_value=points):
+        result = core.restore(at=datetime(2025, 7, 13, 11, 0, 0))
+
+    assert result.success is False
+    assert "No restore point found at or after" in (result.error or ""), (
+        f"Error should name the unsatisfiable request, got {result.error}"
+    )
+
+
+@pytest.mark.unit
+def test_restore_at_and_name_conflict(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """restore() rejects specifying both --at and a name."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.restore(name="snap1", at=datetime(2025, 7, 13, 10, 0, 0))
+
+    assert result.success is False
+    assert "either" in (result.error or "").lower() and "at" in (result.error or "").lower(), (
+        f"Error should explain the --at/name conflict, got {result.error}"
+    )
+
+
+@pytest.mark.unit
+def test_restore_at_legacy_name_shim(
+    tmp_path,
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Legacy snapshot/backup names still resolve via the name shim.
+
+    restore-command scenario "Restore --at with legacy snapshot name
+    shim": a legacy-named backup on the target (no freeze-ts pattern)
+    resolves through ``_resolve_snapshot`` → ``provider.list`` and
+    restores normally.
+    """
+    from qsnap.models.results import BackupInfo
+
+    target = make_target(path=str(tmp_path / "backups"))
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    legacy = BackupInfo(
+        name="testvm.FULL.daily.qcow2",
+        path=tmp_path / "backups" / "testvm.FULL.daily.qcow2",
+        timestamp=datetime(2025, 7, 13, 10, 0, 0),
+        disk="vda",
+        is_full=True,
+    )
+    _setup_restore_at_shell(mock_shell)
+
+    with (
+        patch.object(mock_factory._backup_provider, "list", return_value=[legacy]),
+        patch("os.replace"),
+        patch("os.path.exists", return_value=True),
+    ):
+        result = core.restore("testvm.FULL.daily.qcow2")
+
+    assert result.success is True
+    assert result.snapshot_name == "testvm.FULL.daily.qcow2"

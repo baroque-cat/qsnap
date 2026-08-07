@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import sys
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 
 from qsnap.cli.errors import EXIT_BACKUP_ABORT, EXIT_DISKFULL, EXIT_GENERIC, EXIT_SUCCESS
@@ -407,6 +408,8 @@ def handle_list(core: Core, args: Namespace) -> int:
         columns = ["vm", "disk", "name", "timestamp", "allocation"]
     elif sub == "deferred":
         return handle_list_deferred(core, args)
+    elif sub == "restore-points":
+        return handle_list_restore_points(core, args)
     else:
         return EXIT_GENERIC
 
@@ -497,7 +500,8 @@ def handle_restore(core: Core, args: Namespace) -> int:
     Calls ``Core.restore()`` and formats the ``RestoreResult`` output.
     Prompts for confirmation unless ``--yes`` is given.
     """
-    snapshot_name: str = args.snapshot_name
+    snapshot_name: str | None = getattr(args, "snapshot_name", None)
+    at_timestamp: datetime | None = getattr(args, "at", None)
     vm_filter = _get_vm_filter(args)
     dry_run: bool = getattr(args, "dry_run", False)
     skip_confirm: bool = getattr(args, "yes", False)
@@ -505,6 +509,38 @@ def handle_restore(core: Core, args: Namespace) -> int:
     # Set dry-run mode on Core if requested
     if dry_run:
         core.dry_run = True
+
+    # --at resolution: resolve the point BEFORE confirmation so the
+    # operator sees which point will be restored.
+    if at_timestamp is not None:
+        selected = core.resolve_restore_point(vm_filter, at_timestamp)
+        if selected is None:
+            # Collect all available points for a helpful error.
+            vm_points = core.list_restore_points(vm_filter)
+            if vm_points:
+                all_points: list[str] = []
+                for _vm_name, pts in vm_points:
+                    for p in pts:
+                        all_points.append(f"{p.name} ({p.timestamp.isoformat()})")
+                points_str = ", ".join(all_points[-8:])  # last 8 as sample
+                print(
+                    f"Error: No restore point found at or after "
+                    f"{at_timestamp.isoformat()}. "
+                    f"Available points (sample): {points_str}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Error: No restore point found at or after {at_timestamp.isoformat()}",
+                    file=sys.stderr,
+                )
+            core.dry_run = False
+            return EXIT_GENERIC
+        print(
+            f"[restore] --at {at_timestamp.isoformat()} selected "
+            f"{selected.name} (first point >= requested)",
+            file=sys.stderr,
+        )
 
     # Confirmation prompt (unless --yes or --dry-run)
     if not skip_confirm and not dry_run:
@@ -520,17 +556,55 @@ def handle_restore(core: Core, args: Namespace) -> int:
             print("Aborted.", file=sys.stderr)
             return EXIT_GENERIC
 
-    result = core.restore(snapshot_name, vm_filter)
+    result = core.restore(name=snapshot_name, vm_filter=vm_filter, at=at_timestamp)
 
     if result.success:
+        selected = snapshot_name if snapshot_name else f"--at {at_timestamp}"
         if dry_run:
-            print(f"[dry-run] Would restore '{snapshot_name}' to {result.restored_path}")
+            print(f"[dry-run] Would restore '{selected}' to {result.restored_path}")
         else:
-            print(f"Restored '{snapshot_name}' to {result.restored_path}")
+            print(f"Restored '{selected}' to {result.restored_path}")
         return EXIT_SUCCESS
     else:
         print(f"Error: {result.error}", file=sys.stderr)
         return EXIT_GENERIC
+
+
+def handle_list_restore_points(core: Core, args: Namespace) -> int:
+    """List backup freeze points per VM available for restore.
+
+    Calls ``Core.list_restore_points()`` and prints per-VM per-target
+    freeze points sorted by timestamp.
+    """
+    vm_filter = _get_vm_filter(args)
+    vm_points = core.list_restore_points(vm_filter)
+
+    if not vm_points:
+        print("No restore points found.")
+        return EXIT_SUCCESS
+
+    for vm_name, points in vm_points:
+        if not points:
+            print(f"VM: {vm_name} — no backup files")
+            continue
+        print(f"VM: {vm_name}")
+        # Group by target directory
+        by_target: dict[str, list] = {}
+        for p in points:
+            target_dir = str(p.path.parent)
+            by_target.setdefault(target_dir, []).append(p)
+        for target_dir, target_points in sorted(by_target.items()):
+            print(f"  Target: {target_dir}")
+            # Group by disk within target
+            by_disk: dict[str, list] = {}
+            for p in target_points:
+                by_disk.setdefault(p.disk, []).append(p)
+            for disk, disk_points in sorted(by_disk.items()):
+                print(f"    Disk: {disk}")
+                for p in sorted(disk_points, key=lambda x: x.timestamp):
+                    kind = "FULL" if p.is_full else "INCR"
+                    print(f"      {kind:4s}  {p.timestamp.strftime('%Y-%m-%d %H:%M:%S')}  {p.name}")
+    return EXIT_SUCCESS
 
 
 def handle_list_deferred(core: Core, args: Namespace) -> int:

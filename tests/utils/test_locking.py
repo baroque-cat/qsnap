@@ -1,8 +1,10 @@
 """Unit tests for LockManager and resolve_lockfile_path.
 
 Tests verify lock acquire/release semantics via ``fcntl.flock``, no-op
-mode when no lockfile is configured, and lockfile path resolution
-precedence.  No source code is modified.
+mode for the ``"off"`` sentinel, lockfile path resolution precedence
+(default ``/var/lib/qsnap/qsnap.lock`` when unconfigured), and
+automatic creation of the lockfile's parent directory.  No source code
+is modified.
 """
 
 from __future__ import annotations
@@ -72,17 +74,6 @@ def test_lockfile_path_resolution_cli_overrides_config():
     assert result == "/run/qsnap.lock"
 
 
-def test_none_lockfile_path_means_no_locking(tmp_path):
-    """LockManager(None) operates in no-op mode and creates no file."""
-    mgr = LockManager(None)
-
-    assert mgr.acquire() is True
-    # No lockfile should have been created anywhere.
-    assert mgr._lockfile is None
-
-    mgr.release()
-
-
 def test_lockfile_path_resolution_config_when_no_cli():
     """Config path is used when no CLI path is given."""
     result = resolve_lockfile_path(None, "/var/lock/qsnap.lock")
@@ -90,8 +81,45 @@ def test_lockfile_path_resolution_config_when_no_cli():
     assert result == "/var/lock/qsnap.lock"
 
 
-def test_lockfile_path_resolution_none_when_both_none():
-    """Returns None when neither CLI nor config path is provided."""
+def test_default_lockfile_used_when_unconfigured():
+    """resolve_lockfile_path(None, None) returns the default lockfile path.
+
+    Locking must never silently disappear by omission — disabling
+    requires the explicit ``"off"`` sentinel.
+    """
     result = resolve_lockfile_path(None, None)
 
-    assert result is None
+    assert result == "/var/lib/qsnap/qsnap.lock"
+
+
+def test_lockfile_parent_dir_auto_created(tmp_path):
+    """LockManager creates the lockfile's parent directory on acquire.
+
+    The default lockfile lives under ``/var/lib/qsnap/``; the parent
+    directory SHALL be created when missing.
+    """
+    lockpath = tmp_path / "nested" / "qsnap" / "qsnap.lock"
+
+    mgr = LockManager(lockpath)
+    assert mgr.acquire() is True
+    assert lockpath.parent.is_dir()
+
+    mgr.release()
+
+
+def test_off_sentinel_disables_locking(tmp_path):
+    """The ``"off"`` sentinel (CLI or config level) disables locking."""
+    # Sentinel at the CLI level.
+    assert resolve_lockfile_path("off", None) is None
+    # Sentinel at the config level.
+    assert resolve_lockfile_path(None, "off") is None
+    # CLI "off" wins over a configured path.
+    assert resolve_lockfile_path("off", "/var/lock/qsnap.lock") is None
+    # LockManager(None) operates in no-op mode and creates no file.
+    mgr = LockManager(None)
+
+    assert mgr.acquire() is True
+    assert mgr._lockfile is None
+
+    mgr.release()
+    assert not list(tmp_path.iterdir())

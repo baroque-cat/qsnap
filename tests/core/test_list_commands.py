@@ -1085,3 +1085,145 @@ def test_list_backups_flat_two_targets(
     assert target1_entry[1].name == "t1_b1"
     assert target2_entry[0] == "/mnt/backup/testvm/target2"
     assert target2_entry[1].name == "t2_b1"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# list_restore_points (restore-points-listing)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _make_restore_point(
+    name: str,
+    ts: datetime,
+    disk: str = "vda",
+    path: str = "/mnt/backup/testvm",
+    is_full: bool = False,
+):
+    """Build a BackupInfo restore point for list_restore_points tests."""
+    from qsnap.models.results import BackupInfo
+
+    return BackupInfo(
+        name=name,
+        path=Path(path) / f"{name}.qcow2",
+        timestamp=ts,
+        disk=disk,
+        is_full=is_full,
+    )
+
+
+def test_list_restore_points_shows_freeze_points_per_target(
+    make_vm_config, make_target, mock_factory, mock_state, mock_shell
+):
+    """``list_restore_points()`` enumerates freeze points per target, sorted.
+
+    restore-points-listing scenario "Listing shows freeze points per
+    target": the provider's backup files (freeze-ts named) are returned
+    sorted by timestamp, one tuple per VM.
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    base = datetime(2025, 8, 8, 1, 0, 0)
+    points = [
+        _make_restore_point("testvm.20250808T020000_vda_a1b2c3", base + timedelta(hours=2)),
+        _make_restore_point("testvm.20250808T000000_vda_a1b2c1", base),
+        _make_restore_point(
+            "testvm.FULL.20250807T220000_vda_a1b2c0", base - timedelta(hours=2), is_full=True
+        ),
+    ]
+    with patch.object(mock_factory._backup_provider, "list", return_value=points):
+        result = core.list_restore_points()
+
+    assert len(result) == 1
+    vm_name, vm_points = result[0]
+    assert vm_name == "testvm"
+    timestamps = [p.timestamp for p in vm_points]
+    assert timestamps == sorted(timestamps), "Restore points must be sorted by timestamp"
+    assert [p.name for p in vm_points] == [
+        "testvm.FULL.20250807T220000_vda_a1b2c0",
+        "testvm.20250808T000000_vda_a1b2c1",
+        "testvm.20250808T020000_vda_a1b2c3",
+    ]
+
+
+def test_list_restore_points_empty_target(
+    make_vm_config, make_target, mock_factory, mock_state, mock_shell
+):
+    """``list_restore_points()`` reports an empty list for an empty target.
+
+    restore-points-listing scenario "Empty target reports no points".
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    result = core.list_restore_points()
+
+    assert len(result) == 1
+    vm_name, vm_points = result[0]
+    assert vm_name == "testvm"
+    assert vm_points == []
+
+
+def test_list_restore_points_per_disk(
+    make_vm_config, make_target, mock_factory, mock_state, mock_shell
+):
+    """``list_restore_points()`` distinguishes restore points across disks.
+
+    restore-points-listing scenario "Multiple disks distinguished": vda
+    and vdb freeze points both appear with their own disk attribution.
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    base = datetime(2025, 8, 8, 1, 0, 0)
+    points = [
+        _make_restore_point("testvm.20250808T010000_vdb_b1c2d3", base, disk="vdb"),
+        _make_restore_point("testvm.20250808T010000_vda_a1b2c3", base, disk="vda"),
+    ]
+    with patch.object(mock_factory._backup_provider, "list", return_value=points):
+        result = core.list_restore_points()
+
+    _, vm_points = result[0]
+    disks = {p.disk for p in vm_points}
+    assert disks == {"vda", "vdb"}, f"Both disks' restore points should appear, got {disks}"
+
+
+def test_list_restore_points_ignores_snapshot_state(
+    make_vm_config, make_target, mock_factory, mock_state, mock_shell
+):
+    """``list_restore_points()`` never surfaces snapshot state.
+
+    restore-points-listing scenario "Snapshot timestamps never appear as
+    restore points": only target backup files are enumerated — the
+    snapshot world is orthogonal to restore points.
+    """
+    vm = make_vm_config(name="testvm", targets=[make_target()])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+    # Populate snapshot state heavily — it must NOT leak into restore points.
+    snap = SnapshotInfo(
+        name="testvm.20250701T000000_vda_deadbe",
+        path=Path("/var/lib/libvirt/snapshots/testvm/testvm.20250701T000000_vda_deadbe.qcow2"),
+        timestamp=datetime(2025, 7, 1, 0, 0, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    mock_state.record_snapshot("testvm", snap)
+
+    # Target only has one real freeze point.
+    point = _make_restore_point("testvm.20250808T010000_vda_a1b2c3", datetime(2025, 8, 8, 1, 0, 0))
+    with patch.object(mock_factory._backup_provider, "list", return_value=[point]):
+        result = core.list_restore_points()
+
+    _, vm_points = result[0]
+    assert len(vm_points) == 1, (
+        f"Only target restore points may appear, got {[p.name for p in vm_points]}"
+    )
+    assert vm_points[0].name == "testvm.20250808T010000_vda_a1b2c3"
+    assert all("20250701" not in p.name for p in vm_points), (
+        "Snapshot timestamps must never appear as restore points"
+    )

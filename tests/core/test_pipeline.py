@@ -237,7 +237,7 @@ def test_snapshot_command_skips_backup(
     """``core.snapshot()`` runs only snapshot steps (1-4); backup is skipped.
 
     The snapshot provider's ``create_multi()`` should be called, but the
-    backup provider's ``transfer_missing()`` should NOT be called.
+    backup provider's ``run_backup()`` should NOT be called.
     """
     vm = make_vm_config(name="testvm", targets=[make_target()])
     config = MockConfigFacade(vms=[vm])
@@ -259,8 +259,8 @@ def test_snapshot_command_skips_backup(
         ) as create_spy,
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.snapshot()
@@ -269,7 +269,7 @@ def test_snapshot_command_skips_backup(
     assert create_spy.called, "snapshot() should call snapshot_provider.create_multi()"
 
     # Backup steps were NOT executed.
-    assert not transfer_spy.called, "snapshot() should NOT call backup_provider.transfer_missing()"
+    assert not transfer_spy.called, "snapshot() should NOT call backup_provider.run_backup()"
 
     # Pipeline succeeded.
     assert result.success is True
@@ -287,7 +287,7 @@ def test_backup_command_skips_snapshot(
 ):
     """``core.backup()`` runs only backup steps (5); snapshot creation is skipped.
 
-    The backup provider's ``transfer_missing()`` should be called (the VM
+    The backup provider's ``run_backup()`` should be called (the VM
     has a target), but the snapshot provider's ``create_multi()`` should
     NOT be called.
     """
@@ -311,14 +311,14 @@ def test_backup_command_skips_snapshot(
         ) as create_spy,
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.backup()
 
     # Backup steps were executed.
-    assert transfer_spy.called, "backup() should call backup_provider.transfer_missing()"
+    assert transfer_spy.called, "backup() should call backup_provider.run_backup()"
 
     # Snapshot creation was NOT executed.
     assert not create_spy.called, "backup() should NOT call snapshot_provider.create_multi()"
@@ -380,8 +380,8 @@ def test_prune_command_only_retention(
         ) as create_spy,
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.prune()
@@ -393,7 +393,7 @@ def test_prune_command_only_retention(
     assert not create_spy.called, "prune() should NOT call snapshot_provider.create_multi()"
 
     # Backup transfer was NOT called.
-    assert not transfer_spy.called, "prune() should NOT call backup_provider.transfer_missing()"
+    assert not transfer_spy.called, "prune() should NOT call backup_provider.run_backup()"
 
     # Pipeline succeeded.
     assert result.success is True
@@ -846,8 +846,8 @@ def test_vdb_failure_aborts_remaining_steps(
         patch.object(snapshot_provider, "create_multi", side_effect=create_multi_side_effect),
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.run()
@@ -995,10 +995,10 @@ def test_metadata_verification_failure_marks_backup_failed(
     mock_state,
     mock_shell,
 ):
-    """transfer_missing returns BackupResult(success=False, error="verification
+    """run_backup returns BackupResult(success=False, error="verification
     failed") → backup_failed=True.
 
-    When the backup provider's transfer_missing returns a failed result with
+    When the backup provider's run_backup returns a failed result with
     a verification error, the pipeline must set ``backup_failed=True`` on the
     VMRunResult so the CLI can exit with EXIT_BACKUP_ABORT.
     """
@@ -1011,7 +1011,7 @@ def test_metadata_verification_failure_marks_backup_failed(
         shell=mock_shell,
     )
 
-    # Pre-populate state so transfer_missing has a snapshot to transfer.
+    # Pre-populate state so run_backup has a snapshot to transfer.
     snap = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
@@ -1023,17 +1023,18 @@ def test_metadata_verification_failure_marks_backup_failed(
 
     failed_backup = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=Path("/mnt/backup/snap1.qcow2"),
         bytes_transferred=0,
         error="verification failed",
+        disk="vda",
     )
 
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        return_value=[failed_backup],
+        "run_backup",
+        return_value=failed_backup,
     ):
         result = core.run()
 
@@ -1206,12 +1207,12 @@ def test_first_backup_creates_full_regardless_of_chain_length(
 
     with patch.object(
         backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
+        "run_backup",
+        wraps=backup_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called on first backup (no prior FULLs)"
+    assert full_spy.called, "run_backup should be called on first backup (no prior FULLs)"
 
 
 def test_incremental_count_exceeds_chain_length_triggers_full(
@@ -1266,14 +1267,14 @@ def test_incremental_count_exceeds_chain_length_triggers_full(
         patch("qsnap.core.os.path.exists", return_value=True),
         patch.object(
             backup_provider,
-            "create_full_backup",
-            wraps=backup_provider.create_full_backup,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as full_spy,
     ):
         core._backup_target(vm, target, [snap])
 
     assert full_spy.called, (
-        "create_full_backup should be called when incremental_count (3) > chain_length (2)"
+        "run_backup should be called when incremental_count (3) > chain_length (2)"
     )
 
 
@@ -1325,14 +1326,18 @@ def test_incremental_count_within_chain_skips_full(
         patch("qsnap.core.os.path.exists", return_value=True),
         patch.object(
             backup_provider,
-            "create_full_backup",
-            wraps=backup_provider.create_full_backup,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as full_spy,
     ):
         core._backup_target(vm, target, [snap])
 
-    assert not full_spy.called, (
-        "create_full_backup should NOT be called when incremental_count (2) <= chain_length (5)"
+    assert full_spy.called, (
+        "run_backup should be called when incremental_count (2) <= chain_length (5)"
+    )
+    assert full_spy.call_args.kwargs["force_full"] is False, (
+        "run_backup should NOT be called with force_full=True when "
+        "incremental_count (2) <= chain_length (5)"
     )
 
 
@@ -1347,7 +1352,8 @@ def test_dry_run_logs_full_would_be_created(
     """In dry-run mode, no FULL is created but a log line announces it.
 
     Core logs ``[dry-run] Would create FULL backup`` without calling
-    ``create_full_backup()``.  Uses count-based chain_length in the log.
+    ``run_backup()``.  The prediction carries per-disk context and the
+    VM state.
     """
     caplog.set_level(logging.INFO)
     target = make_target(target_chain_length=0)
@@ -1374,20 +1380,20 @@ def test_dry_run_logs_full_would_be_created(
 
     with patch.object(
         backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
+        "run_backup",
+        wraps=backup_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
     # No FULL actually created — dry-run skips mutations.
-    assert not full_spy.called, "create_full_backup should NOT be called in dry-run"
+    assert not full_spy.called, "run_backup should NOT be called in dry-run"
 
-    # Log line announces the planned action with count-based info and
-    # per-disk context (design D9) including chain-size estimate.
+    # Log line announces the planned action with per-disk context
+    # (design D9) including the method and VM state.
     assert "[dry-run]" in caplog.text
     assert "Would create FULL backup" in caplog.text
     assert "for disk" in caplog.text
-    assert "chain_length=" in caplog.text
+    assert "method=NBD" in caplog.text
 
 
 # ── Chain Integrity Verification (pre-commit) ──────────────────────────────
@@ -2311,7 +2317,7 @@ def test_backup_retry_transient_error_retried_successfully(
     caplog,
 ):
     """Transient error on first attempt → retried → succeeds on second attempt."""
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=3, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2321,29 +2327,23 @@ def test_backup_retry_transient_error_retried_successfully(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="Connection refused",
+        disk="vda",
     )
     success_result = BackupResult(
         success=True,
-        snapshot_name="snap1",
+        snapshot_name="testvm.20250713T100000_vda_a1b2c3",
         source_path=Path("/tmp/snap1.qcow2"),
-        target_path=target.path / "snap1",
+        target_path=target.path / "testvm.20250713T100000_vda_a1b2c3.qcow2",
         bytes_transferred=1048576,
         error=None,
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
@@ -2353,14 +2353,13 @@ def test_backup_retry_transient_error_retried_successfully(
         patch("qsnap.core.time.sleep"),
         patch.object(
             provider,
-            "transfer_missing",
-            side_effect=[[fail_result], [success_result]],
-        ) as transfer_spy,
+            "run_backup",
+            side_effect=[fail_result, success_result],
+        ) as run_spy,
     ):
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 2, "transfer_missing should be retried once"
-    assert all(r.success for r in results), "all results should succeed after retry"
+    assert run_spy.call_count == 2, "run_backup should be retried once"
     assert "succeeded on retry" in caplog.text
 
 
@@ -2371,8 +2370,8 @@ def test_backup_retry_all_retries_exhausted(
     mock_state,
     mock_shell,
 ):
-    """All retries exhausted → return failed results after max_retries attempts."""
-    vm = make_vm_config(name="testvm")
+    """All retries exhausted → BackupAbortError after max_retries attempts."""
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=2, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2382,21 +2381,14 @@ def test_backup_retry_all_retries_exhausted(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="Connection refused",
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
@@ -2405,14 +2397,14 @@ def test_backup_retry_all_retries_exhausted(
         patch("qsnap.core.time.sleep"),
         patch.object(
             provider,
-            "transfer_missing",
-            return_value=[fail_result],
-        ) as transfer_spy,
+            "run_backup",
+            return_value=fail_result,
+        ) as run_spy,
+        pytest.raises(BackupAbortError),
     ):
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 2, "transfer_missing should be called max_retries times"
-    assert any(not r.success for r in results), "results should indicate failure"
+    assert run_spy.call_count == 2, "run_backup should be called max_retries times"
 
 
 def test_backup_retry_non_retryable_fails_immediately(
@@ -2423,7 +2415,7 @@ def test_backup_retry_non_retryable_fails_immediately(
     mock_shell,
 ):
     """Non-retryable error → fail immediately (one call only)."""
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=3, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2433,34 +2425,29 @@ def test_backup_retry_non_retryable_fails_immediately(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
-        error="No space left on device",
+        error="verification failed: expected format qcow2, got raw",
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
 
-    with patch.object(
-        provider,
-        "transfer_missing",
-        return_value=[fail_result],
-    ) as transfer_spy:
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+    with (
+        patch.object(
+            provider,
+            "run_backup",
+            return_value=fail_result,
+        ) as run_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 1, "non-retryable error should fail immediately (one call)"
-    assert any(not r.success for r in results), "results should indicate failure"
+    assert run_spy.call_count == 1, "non-retryable error should fail immediately (one call)"
 
 
 def test_backup_retry_disabled_when_max_zero(
@@ -2471,7 +2458,7 @@ def test_backup_retry_disabled_when_max_zero(
     mock_shell,
 ):
     """retry_max=0 → retry is disabled, single call only."""
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=0, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2481,34 +2468,29 @@ def test_backup_retry_disabled_when_max_zero(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="Connection refused",
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
 
-    with patch.object(
-        provider,
-        "transfer_missing",
-        return_value=[fail_result],
-    ) as transfer_spy:
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+    with (
+        patch.object(
+            provider,
+            "run_backup",
+            return_value=fail_result,
+        ) as run_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 1, "retry disabled (max=0) → only one call"
-    assert any(not r.success for r in results), "results should indicate failure"
+    assert run_spy.call_count == 1, "retry disabled (max=0) → only one call"
 
 
 def test_backup_retry_exhausted_returns_last_error(
@@ -2518,13 +2500,14 @@ def test_backup_retry_exhausted_returns_last_error(
     mock_state,
     mock_shell,
 ):
-    """When max_retries=1 and error is retryable → last error returned after exhaustion.
+    """When max_retries=1 and error is retryable → BackupAbortError with the error.
 
-    The retry loop calls transfer_missing once (the only allowed attempt),
-    the error is retryable so it does not fail early, and since attempt >=
-    max_retries (1 >= 1), the loop returns the failed results immediately.
+    The retry loop calls run_backup once (the only allowed attempt), the
+    error is retryable so it does not fail early, and since attempt >=
+    max_retries (1 >= 1), the loop returns the failed result immediately,
+    which Core converts into a BackupAbortError carrying the error.
     """
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=1, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2534,21 +2517,14 @@ def test_backup_retry_exhausted_returns_last_error(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="Connection refused",
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
@@ -2557,16 +2533,15 @@ def test_backup_retry_exhausted_returns_last_error(
         patch("qsnap.core.time.sleep"),
         patch.object(
             provider,
-            "transfer_missing",
-            return_value=[fail_result],
-        ) as transfer_spy,
+            "run_backup",
+            return_value=fail_result,
+        ) as run_spy,
+        pytest.raises(BackupAbortError) as excinfo,
     ):
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 1, "with max_retries=1, exactly one call should happen"
-    assert len(results) == 1, "should return results"
-    assert results[0].success is False, "result should indicate failure"
-    assert results[0].error == "Connection refused", (
+    assert run_spy.call_count == 1, "with max_retries=1, exactly one call should happen"
+    assert "Connection refused" in str(excinfo.value), (
         "last error should be returned after exhausting retries"
     )
 
@@ -2580,7 +2555,7 @@ def test_transfer_retries_on_content_comparison_mismatch(
     caplog,
 ):
     """Content comparison mismatch verification error is retryable → retried and succeeds on second attempt."""
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=3, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2590,29 +2565,23 @@ def test_transfer_retries_on_content_comparison_mismatch(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="verification failed: content comparison mismatch",
+        disk="vda",
     )
     success_result = BackupResult(
         success=True,
-        snapshot_name="snap1",
+        snapshot_name="testvm.20250713T100000_vda_a1b2c3",
         source_path=Path("/tmp/snap1.qcow2"),
-        target_path=target.path / "snap1",
+        target_path=target.path / "testvm.20250713T100000_vda_a1b2c3.qcow2",
         bytes_transferred=1048576,
         error=None,
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
@@ -2622,16 +2591,15 @@ def test_transfer_retries_on_content_comparison_mismatch(
         patch("qsnap.core.time.sleep"),
         patch.object(
             provider,
-            "transfer_missing",
-            side_effect=[[fail_result], [success_result]],
-        ) as transfer_spy,
+            "run_backup",
+            side_effect=[fail_result, success_result],
+        ) as run_spy,
     ):
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count >= 2, (
+    assert run_spy.call_count >= 2, (
         "content comparison mismatch should be retried at least once"
     )
-    assert all(r.success for r in results), "all results should succeed after retry"
     assert "succeeded on retry" in caplog.text
 
 
@@ -2643,7 +2611,7 @@ def test_transfer_does_not_retry_format_error(
     mock_shell,
 ):
     """Format mismatch verification error is NOT retryable → fails immediately (one call)."""
-    vm = make_vm_config(name="testvm")
+    vm = make_vm_config(name="testvm", targets=[make_target()])
     target = make_target(backup_retry_max=3, backup_retry_base="1s")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -2653,42 +2621,31 @@ def test_transfer_does_not_retry_format_error(
         shell=mock_shell,
     )
 
-    snap = SnapshotInfo(
-        name="snap1",
-        path=Path("/tmp/snap1.qcow2"),
-        timestamp=datetime.now(),
-        allocation=1000,
-        disk="vda",
-    )
-
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1",
         bytes_transferred=0,
         error="verification failed: expected format qcow2, got raw",
+        disk="vda",
     )
 
     provider = mock_factory._backup_provider
 
-    with patch.object(
-        provider,
-        "transfer_missing",
-        return_value=[fail_result],
-    ) as transfer_spy:
-        results = core._transfer_with_retry(provider, vm, target, [snap])
+    with (
+        patch.object(
+            provider,
+            "run_backup",
+            return_value=fail_result,
+        ) as run_spy,
+        pytest.raises(BackupAbortError),
+    ):
+        core._backup_target(vm, target, [])
 
-    assert transfer_spy.call_count == 1, (
-        "format error is non-retryable → should fail immediately (one call)"
+    assert run_spy.call_count == 1, (
+        "format verification error is deterministic — must NOT be retried"
     )
-    assert any(not r.success for r in results), "results should indicate failure"
-    assert results[0].error == "verification failed: expected format qcow2, got raw", (
-        "error should be the format verification error"
-    )
-
-
-# ── Deferred Blockcommit with deep_verify ──────────────────────────────────
 
 
 def test_deferred_blockcommit_passes_deep_verify_true(
@@ -2969,7 +2926,7 @@ def test_dry_run_logs_full_would_be_created_without_executing(
     # chain-size estimate (design D9).
     assert "[dry-run] Would create FULL backup" in caplog.text
     assert "for disk" in caplog.text
-    assert "chain_length=" in caplog.text
+    assert "method=NBD" in caplog.text
 
     # No virsh backup-begin or qemu-img convert was executed.
     mutating_cmds = [
@@ -2995,10 +2952,10 @@ def test_full_creation_works_for_bitmap(
     mock_state,
     mock_shell,
 ):
-    """Bitmap backup provider (always used) → create_full_backup() called.
+    """Bitmap backup provider (always used) → run_backup() called.
 
     Verifies that the factory always returns the bitmap backup provider
-    and that create_full_backup succeeds without raising NotImplementedError.
+    and that run_backup succeeds without raising NotImplementedError.
     """
     # FULL verification is not the subject of this test — disable it so the
     # happy path completes (a failure now aborts the VM pipeline).
@@ -3028,12 +2985,12 @@ def test_full_creation_works_for_bitmap(
 
     with patch.object(
         bitmap_provider,
-        "create_full_backup",
-        wraps=bitmap_provider.create_full_backup,
+        "run_backup",
+        wraps=bitmap_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "BitmapBackupProvider.create_full_backup() should be called"
+    assert full_spy.called, "BitmapBackupProvider.run_backup() should be called"
 
 
 # ── Check Integrity: --force-share on Active Layer ──────────────────────────
@@ -3253,10 +3210,10 @@ def test_deep_check_timeout_7200_seconds(
     )
 
 
-# ── test_core_passes_vm_name_to_create_full_backup ───────────────────────
+# ── test_core_passes_vm_name_to_run_backup ────────────────────────────────
 
 
-def test_core_passes_vm_name_to_create_full_backup(
+def test_core_passes_vm_name_to_run_backup(
     make_vm_config,
     make_target,
     make_global_config,
@@ -3264,10 +3221,10 @@ def test_core_passes_vm_name_to_create_full_backup(
     mock_state,
     mock_shell,
 ):
-    """Core passes vm_config.name to create_full_backup as first positional arg.
+    """Core passes vm_config.name to run_backup as the first positional arg.
 
     Verifies that the full, untruncated VM name (e.g. ``"3.Projects_opencode"``)
-    is passed as ``vm_name`` to ``IBackupProvider.create_full_backup()``,
+    is passed as ``vm_config`` to ``IBackupProvider.run_backup()``,
     not extracted from the snapshot filename.  This is critical for VMs with
     dotted names where filename-based extraction would truncate to ``"3"``.
     """
@@ -3299,18 +3256,21 @@ def test_core_passes_vm_name_to_create_full_backup(
 
     with patch.object(
         backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
+        "run_backup",
+        wraps=backup_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called when FULL is triggered"
-    assert full_spy.call_args.args[0] == "3.Projects_opencode", (
-        f"vm_name should be '3.Projects_opencode' (full dotted name), "
-        f"got: {full_spy.call_args.args[0]!r}"
+    assert full_spy.called, "run_backup should be called when FULL is triggered"
+    assert full_spy.call_args.args[0] is vm, (
+        f"first positional arg should be the VMConfig, got: {full_spy.call_args.args[0]!r}"
     )
-    assert full_spy.call_args.args[0] == vm.name, (
-        f"vm_name should equal vm_config.name, got: {full_spy.call_args.args[0]!r}"
+    assert full_spy.call_args.args[0].name == "3.Projects_opencode", (
+        f"vm_config.name should be '3.Projects_opencode' (full dotted name), "
+        f"got: {full_spy.call_args.args[0].name!r}"
+    )
+    assert full_spy.call_args.args[0].name == vm.name, (
+        f"vm_config.name should equal vm_config.name, got: {full_spy.call_args.args[0].name!r}"
     )
 
 
@@ -4446,8 +4406,8 @@ def test_dry_run_logs_planned_actions(
         ) as create_spy,
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
     ):
         result = core.run()
@@ -4467,7 +4427,7 @@ def test_dry_run_logs_planned_actions(
     # No mutations executed
     assert not create_spy.called, "snapshot provider create_multi() must NOT be called in dry-run"
     assert not transfer_spy.called, (
-        "backup provider transfer_missing() must NOT be called in dry-run"
+        "backup provider run_backup() must NOT be called in dry-run"
     )
 
     # Pipeline still "succeeds" in dry-run
@@ -4485,7 +4445,7 @@ def test_dry_run_activated_from_cli(
 
     Verifies that when dry_run is enabled on the Core instance:
     - ``_create_snapshot()`` returns early before any shell calls.
-    - ``_backup_target()`` skips transfer_missing().
+    - ``_backup_target()`` skips run_backup().
     - No state mutations (record_snapshot, set_last_allocation) occur.
     """
     vm = make_vm_config(name="testvm", targets=[make_target()])
@@ -4509,8 +4469,8 @@ def test_dry_run_activated_from_cli(
         ) as create_spy,
         patch.object(
             backup_provider,
-            "transfer_missing",
-            wraps=backup_provider.transfer_missing,
+            "run_backup",
+            wraps=backup_provider.run_backup,
         ) as transfer_spy,
         patch.object(
             mock_state,
@@ -4700,7 +4660,7 @@ def test_always_mode_backup_gate_bypassed(
     assert not gate_spy.called, "_should_backup_onchange should NOT be called in always mode"
 
 
-def test_core_passes_convert_parallel_to_create_full_backup(
+def test_core_passes_convert_parallel_to_run_backup(
     make_vm_config,
     make_target,
     make_global_config,
@@ -4708,7 +4668,7 @@ def test_core_passes_convert_parallel_to_create_full_backup(
     mock_state,
     mock_shell,
 ):
-    """Core reads target.convert_parallel and passes it to provider.create_full_backup()."""
+    """Core reads target.convert_parallel and passes it to provider.run_backup()."""
     # FULL verification is not the subject of this test — disable it so the
     # happy path completes (a failure now aborts the VM pipeline).
     global_cfg = make_global_config(full_verify_after_create="off")
@@ -4739,18 +4699,18 @@ def test_core_passes_convert_parallel_to_create_full_backup(
 
     with patch.object(
         backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
+        "run_backup",
+        wraps=backup_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called when strategy returns True"
+    assert full_spy.called, "run_backup should be called when strategy returns True"
     assert full_spy.call_args.kwargs.get("convert_parallel") == 8, (
         f"convert_parallel should be 8, got: {full_spy.call_args.kwargs.get('convert_parallel')!r}"
     )
 
 
-def test_core_passes_convert_out_of_order_to_create_full_backup(
+def test_core_passes_convert_out_of_order_to_run_backup(
     make_vm_config,
     make_target,
     make_global_config,
@@ -4758,7 +4718,7 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
     mock_state,
     mock_shell,
 ):
-    """Core reads target.convert_out_of_order and passes it to provider.create_full_backup()."""
+    """Core reads target.convert_out_of_order and passes it to provider.run_backup()."""
     # FULL verification is not the subject of this test — disable it so the
     # happy path completes (a failure now aborts the VM pipeline).
     global_cfg = make_global_config(full_verify_after_create="off")
@@ -4789,19 +4749,19 @@ def test_core_passes_convert_out_of_order_to_create_full_backup(
 
     with patch.object(
         backup_provider,
-        "create_full_backup",
-        wraps=backup_provider.create_full_backup,
+        "run_backup",
+        wraps=backup_provider.run_backup,
     ) as full_spy:
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, "create_full_backup should be called when strategy returns True"
+    assert full_spy.called, "run_backup should be called when strategy returns True"
     assert full_spy.call_args.kwargs.get("convert_out_of_order") is False, (
         f"convert_out_of_order should be False, got: "
         f"{full_spy.call_args.kwargs.get('convert_out_of_order')!r}"
     )
 
 
-def test_core_passes_convert_parallel_to_transfer_missing(
+def test_core_passes_convert_parallel_to_run_backup_delta(
     make_vm_config,
     make_target,
     make_global_config,
@@ -4809,7 +4769,7 @@ def test_core_passes_convert_parallel_to_transfer_missing(
     mock_state,
     mock_shell,
 ):
-    """Core reads target.convert_parallel and passes it to provider.transfer_missing()."""
+    """Core reads target.convert_parallel and passes it to provider.run_backup()."""
     # FULL verification is not the subject of this test — disable it so the
     # happy path completes (a failure now aborts the VM pipeline).
     global_cfg = make_global_config(full_verify_after_create="off")
@@ -4834,26 +4794,24 @@ def test_core_passes_convert_parallel_to_transfer_missing(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Default count-based check returns False — no FULL,
-    # only transfer_missing is called.
-
+    # No prior FULLs → FULL path; either way run_backup carries the kwargs.
     backup_provider = mock_factory._backup_provider
 
     with patch.object(
         backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
+        "run_backup",
+        wraps=backup_provider.run_backup,
+    ) as run_spy:
         core._backup_target(vm, target, [snap])
 
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("convert_parallel") == 8, (
+    assert run_spy.called, "run_backup should be called"
+    assert run_spy.call_args.kwargs.get("convert_parallel") == 8, (
         f"convert_parallel should be 8, got: "
-        f"{transfer_spy.call_args.kwargs.get('convert_parallel')!r}"
+        f"{run_spy.call_args.kwargs.get('convert_parallel')!r}"
     )
 
 
-def test_core_passes_convert_out_of_order_to_transfer_missing(
+def test_core_passes_convert_out_of_order_to_run_backup_delta(
     make_vm_config,
     make_target,
     make_global_config,
@@ -4861,7 +4819,7 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
     mock_state,
     mock_shell,
 ):
-    """Core reads target.convert_out_of_order and passes it to provider.transfer_missing()."""
+    """Core reads target.convert_out_of_order and passes it to provider.run_backup()."""
     # FULL verification is not the subject of this test — disable it so the
     # happy path completes (a failure now aborts the VM pipeline).
     global_cfg = make_global_config(full_verify_after_create="off")
@@ -4886,22 +4844,20 @@ def test_core_passes_convert_out_of_order_to_transfer_missing(
     )
     mock_state.record_snapshot("testvm", snap)
 
-    # Default count-based check returns False — no FULL,
-    # only transfer_missing is called.
-
+    # No prior FULLs → FULL path; either way run_backup carries the kwargs.
     backup_provider = mock_factory._backup_provider
 
     with patch.object(
         backup_provider,
-        "transfer_missing",
-        wraps=backup_provider.transfer_missing,
-    ) as transfer_spy:
+        "run_backup",
+        wraps=backup_provider.run_backup,
+    ) as run_spy:
         core._backup_target(vm, target, [snap])
 
-    assert transfer_spy.called, "transfer_missing should be called"
-    assert transfer_spy.call_args.kwargs.get("convert_out_of_order") is False, (
+    assert run_spy.called, "run_backup should be called"
+    assert run_spy.call_args.kwargs.get("convert_out_of_order") is False, (
         f"convert_out_of_order should be False, got: "
-        f"{transfer_spy.call_args.kwargs.get('convert_out_of_order')!r}"
+        f"{run_spy.call_args.kwargs.get('convert_out_of_order')!r}"
     )
 
 
@@ -5357,11 +5313,12 @@ def test_onchange_baseline_not_updated_on_failure(
 
     fail_result = BackupResult(
         success=False,
-        snapshot_name="snap1",
+        snapshot_name="",
         source_path=Path("/tmp/snap1.qcow2"),
         target_path=target.path / "snap1.qcow2",
         bytes_transferred=0,
-        error="Connection refused",
+        error="verification failed: expected format qcow2, got raw",
+        disk="vda",
     )
 
     with (
@@ -5372,8 +5329,8 @@ def test_onchange_baseline_not_updated_on_failure(
         ) as baseline_spy,
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
-            return_value=[fail_result],
+            "run_backup",
+            return_value=fail_result,
         ),
         pytest.raises(BackupAbortError),
     ):
@@ -5524,12 +5481,12 @@ def test_onchange_detector_failure_gate_opens_fail_safe(
     # Also verify through _backup_target that transfer proceeds.
     with patch.object(
         mock_factory._backup_provider,
-        "transfer_missing",
-        wraps=mock_factory._backup_provider.transfer_missing,
+        "run_backup",
+        wraps=mock_factory._backup_provider.run_backup,
     ) as transfer_spy:
         core._backup_target(vm, target, [snap])
 
-    assert transfer_spy.called, "transfer_missing should be called when fail-safe opens the gate"
+    assert transfer_spy.called, "run_backup should be called when fail-safe opens the gate"
 
 
 def test_onchange_gate_uses_detector_not_snapshot_names(
@@ -5562,7 +5519,151 @@ def test_onchange_gate_uses_detector_not_snapshot_names(
         should_proceed, _ = core._should_backup_onchange(vm, target)
 
     assert should_proceed is True
-    assert not list_spy.called, "provider.list() should NOT be called by the onchange gate"
+
+
+# ── Blockjob probe (design D9) ────────────────────────────────────────────
+
+
+def test_active_blockjob_defers_disk_backup(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """An active block job on the disk defers its backup for this run.
+
+    Core probes ``virsh blockjob`` before calling ``run_backup``.  When
+    the probe reports an active job, the disk is skipped — no
+    ``run_backup`` call is made.
+    """
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Default conftest dominfo says the VM is running → probe executes.
+    mock_shell.expect("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Block job: active",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backup_provider = mock_factory._backup_provider
+    caplog.set_level(logging.INFO)
+    with patch.object(
+        backup_provider,
+        "run_backup",
+        wraps=backup_provider.run_backup,
+    ) as run_spy:
+        core._backup_target(vm, target, [])
+
+    assert not run_spy.called, (
+        "run_backup should NOT be called when a block job is active on the disk"
+    )
+    assert "deferred" in caplog.text.lower(), (
+        "The blockjob deferral should be logged"
+    )
+
+
+def test_no_blockjob_backup_proceeds(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """With no active block job, the disk backup proceeds normally."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="No current block job",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backup_provider = mock_factory._backup_provider
+    with patch.object(
+        backup_provider,
+        "run_backup",
+        wraps=backup_provider.run_backup,
+    ) as run_spy:
+        core._backup_target(vm, target, [])
+
+    assert run_spy.called, "run_backup should be called when no block job is active"
+
+
+def test_deferred_result_leaves_baseline_untouched(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A deferred backup result leaves the onchange baseline untouched.
+
+    Design D6: a deferred transfer (stopped VM with existing checkpoint,
+    or active block job) must NOT advance ``last_backup_allocation`` —
+    the gate stays open so the next run transfers the full delta since
+    the last checkpoint without a coverage gap.
+    """
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Gate opens (no baseline yet).
+    mock_factory.change_detector.current_allocation = 5000000
+
+    deferred = BackupResult(
+        success=True,
+        snapshot_name="",
+        source_path=Path("/var/lib/libvirt/images/testvm.qcow2"),
+        target_path=Path(),
+        bytes_transferred=0,
+        error=None,
+        disk="vda",
+        deferred=True,
+    )
+
+    with patch.object(
+        mock_factory._backup_provider,
+        "run_backup",
+        return_value=deferred,
+    ):
+        core._backup_target(vm, target, [])
+
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None, (
+        "A deferred backup must NOT advance the onchange baseline "
+        "(design D6: gate stays open, next run transfers the full delta)"
+    )
 
 
 def test_onchange_transfer_skipped_but_retention_cleans_expired_backups(
@@ -5858,14 +5959,20 @@ def test_startup_validation_runs_for_standalone_backup(
     )
 
 
-def test_startup_validation_no_checkpoint_deletion(
+def test_startup_orphan_checkpoint_deleted_at_startup(
     make_vm_config,
     make_target,
     mock_factory,
     mock_state,
     mock_shell,
+    caplog,
 ):
-    """_validate_state_at_startup does NOT auto-delete orphan checkpoints."""
+    """Startup validation deletes a crash-orphan checkpoint best-effort.
+
+    A checkpoint whose freeze timestamp is not covered by any backup
+    file on the target is the orphan of a crashed export — it must be
+    deleted (design D9), not preserved.
+    """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -5876,17 +5983,169 @@ def test_startup_validation_no_checkpoint_deletion(
         shell=mock_shell,
     )
 
+    # provider.list returns a non-empty backup list so the auto-recovery
+    # loop reaches the orphan-checkpoint invariant.
+    backup = SnapshotInfo(
+        name="testvm.FULL.20250101T000000_vda_abc123.qcow2",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250101T000000_vda_abc123.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    # The checkpoint prefix uses the target hash from the backup provider
+    # (design D9): qsnap-{target_hash}-{disk}-...
+    target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
+    orphan_checkpoint = f"qsnap-{target_hash}-vda-20250801T120000"
     with patch.object(
-        core,
-        "_detect_orphan_checkpoints",
-        wraps=core._detect_orphan_checkpoints,
-    ) as detect_spy:
+        mock_factory._bitmap_backup_provider,
+        "list",
+        return_value=[backup],
+    ):
+        # The newest checkpoint has no covering backup file on the target
+        # (the target directory does not exist → no .qcow2 files found).
+        mock_shell.expect("virsh checkpoint-list").returns(
+            ShellResult(
+                success=True,
+                stdout=f"{orphan_checkpoint}\n",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+        mock_shell.expect("virsh checkpoint-delete").returns(
+            ShellResult(
+                success=True,
+                stdout="",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+        caplog.set_level(logging.WARNING)
         core._validate_state_at_startup(vm)
 
-    # _detect_orphan_checkpoints was NOT called (startup validation does not
-    # auto-delete checkpoints — only qsnap reconcile does).
-    assert not detect_spy.called, (
-        "_detect_orphan_checkpoints should NOT be called during startup validation"
+    assert "orphan checkpoint" in caplog.text.lower(), (
+        "Startup validation should log the orphan checkpoint detection"
+    )
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
+    assert delete_calls, "virsh checkpoint-delete should be called for the orphan checkpoint"
+    assert orphan_checkpoint in delete_calls[0], (
+        f"checkpoint-delete must target the orphan checkpoint, got: {delete_calls}"
+    )
+
+
+def test_startup_healthy_checkpoint_kept(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """Startup validation keeps a checkpoint covered by a backup file."""
+    target_dir = tmp_path / "backup"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = make_target(path=str(target_dir))
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    backup = SnapshotInfo(
+        name="testvm.FULL.20250101T000000_vda_abc123.qcow2",
+        path=target_dir / "testvm.FULL.20250101T000000_vda_abc123.qcow2",
+        timestamp=datetime(2025, 1, 1, 0, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    # The backup file whose mtime covers the checkpoint timestamp.
+    (target_dir / "testvm.20250801T120000_vda_a1b2c3.qcow2").touch()
+
+    target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
+    healthy_checkpoint = f"qsnap-{target_hash}-vda-20250801T120000"
+    with patch.object(
+        mock_factory._bitmap_backup_provider,
+        "list",
+        return_value=[backup],
+    ):
+        mock_shell.expect("virsh checkpoint-list").returns(
+            ShellResult(
+                success=True,
+                stdout=f"{healthy_checkpoint}\n",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+        core._validate_state_at_startup(vm)
+
+    delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
+    assert not delete_calls, (
+        "virsh checkpoint-delete should NOT be called for a healthy checkpoint"
+    )
+
+
+def test_startup_orphan_checkpoint_delete_failure_non_fatal(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A failed orphan-checkpoint deletion is non-fatal (WARNING only)."""
+    target = make_target()
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    backup = SnapshotInfo(
+        name="testvm.FULL.20250101T000000_vda_abc123.qcow2",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250101T000000_vda_abc123.qcow2"),
+        timestamp=datetime(2025, 1, 1, 0, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
+    orphan_checkpoint = f"qsnap-{target_hash}-vda-20250801T120000"
+    with patch.object(
+        mock_factory._bitmap_backup_provider,
+        "list",
+        return_value=[backup],
+    ):
+        mock_shell.expect("virsh checkpoint-list").returns(
+            ShellResult(
+                success=True,
+                stdout=f"{orphan_checkpoint}\n",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+        mock_shell.expect("virsh checkpoint-delete").returns(
+            ShellResult(
+                success=False,
+                stdout="",
+                stderr="error: operation failed",
+                returncode=1,
+                error="operation failed",
+            )
+        )
+        caplog.set_level(logging.WARNING)
+        # Must not raise — the invariant is best-effort.
+        core._validate_state_at_startup(vm)
+
+    assert "orphan checkpoint" in caplog.text.lower(), (
+        "Startup validation should log the orphan checkpoint detection"
     )
 
 
@@ -7518,7 +7777,7 @@ def test_full_creation_retried_via_execute_with_retry(
 ):
     """FULL creation fails transiently on first attempt, retried, succeeds on second.
 
-    ``create_full_backup()`` is mocked to fail with ``"Connection refused"``
+    ``run_backup()`` is mocked to fail with ``"Connection refused"``
     on the first call and succeed on the second.  ``_execute_with_retry``
     detects the retryable error and retries via exponential backoff.
     Verification is mocked to pass.
@@ -7568,7 +7827,7 @@ def test_full_creation_retried_via_execute_with_retry(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
+            "run_backup",
             side_effect=full_side_effect,
         ),
         patch("qsnap.core.verify_full_backup", return_value=None),
@@ -7577,7 +7836,7 @@ def test_full_creation_retried_via_execute_with_retry(
         core._backup_target(vm, target, [snap])
 
     assert full_calls == 2, (
-        f"create_full_backup should be called twice (first failed, retried), got {full_calls}"
+        f"run_backup should be called twice (first failed, retried), got {full_calls}"
     )
 
 
@@ -7597,7 +7856,7 @@ def test_full_creation_not_retried_non_transient(
 
     ``is_retryable("EACCES: permission denied")`` returns ``False``, so
     ``_execute_with_retry`` returns the failure immediately.
-    ``create_full_backup()`` is called exactly once, and the definitive
+    ``run_backup()`` is called exactly once, and the definitive
     failure raises ``BackupAbortError`` (VM-level isolation).
 
     Note: space errors no longer raise — they suspend the target
@@ -7640,7 +7899,7 @@ def test_full_creation_not_retried_non_transient(
     with (
         patch.object(
             mock_factory._backup_provider,
-            "create_full_backup",
+            "run_backup",
             side_effect=full_side_effect,
         ),
         patch("time.sleep"),
@@ -7649,7 +7908,7 @@ def test_full_creation_not_retried_non_transient(
         core._backup_target(vm, target, [snap])
 
     assert full_calls == 1, (
-        f"create_full_backup should be called exactly once (non-retryable), got {full_calls}"
+        f"run_backup should be called exactly once (non-retryable), got {full_calls}"
     )
 
 
@@ -7665,10 +7924,10 @@ def test_incremental_transfer_uses_execute_with_retry(
     make_vm_config,
     make_target,
 ):
-    """``transfer_missing`` fails transiently on first call, retried, succeeds on second.
+    """``run_backup`` fails transiently on first call, retried, succeeds on second.
 
-    ``_transfer_with_retry()`` delegates its retry loop to
-    ``_execute_with_retry()``.  The mock ``transfer_missing`` fails with
+    ``_backup_target()`` delegates its retry loop to
+    ``_execute_with_retry()``.  The mock ``run_backup`` fails with
     ``"Connection refused"`` on the first attempt and succeeds on the
     second.  ``time.sleep`` is patched to avoid actual delays.
     """
@@ -7696,46 +7955,38 @@ def test_incremental_transfer_uses_execute_with_retry(
         nonlocal transfer_calls
         transfer_calls += 1
         if transfer_calls == 1:
-            return [
-                BackupResult(
-                    success=False,
-                    snapshot_name="snap1",
-                    source_path=Path("/tmp/snap1.qcow2"),
-                    target_path=target.path / "snap1.qcow2",
-                    bytes_transferred=0,
-                    error="Connection refused",
-                )
-            ]
-        return [
-            BackupResult(
-                success=True,
-                snapshot_name="snap1",
+            return BackupResult(
+                success=False,
+                snapshot_name="",
                 source_path=Path("/tmp/snap1.qcow2"),
                 target_path=target.path / "snap1.qcow2",
-                bytes_transferred=1048576,
-                error=None,
+                bytes_transferred=0,
+                error="Connection refused",
+                disk="vda",
             )
-        ]
+        return BackupResult(
+            success=True,
+            snapshot_name="testvm.20250713T100000_vda_a1b2c3",
+            source_path=Path("/tmp/snap1.qcow2"),
+            target_path=target.path / "testvm.20250713T100000_vda_a1b2c3.qcow2",
+            bytes_transferred=1048576,
+            error=None,
+            disk="vda",
+        )
 
     with (
         patch.object(
             mock_factory._backup_provider,
-            "transfer_missing",
+            "run_backup",
             side_effect=transfer_side_effect,
         ),
-        patch("time.sleep"),
+        patch("qsnap.core.time.sleep"),
     ):
-        results = core._transfer_with_retry(
-            mock_factory._backup_provider,
-            vm,
-            target,
-            [snap],
-        )
+        core._backup_target(vm, target, [snap])
 
     assert transfer_calls == 2, (
-        f"transfer_missing should be called twice (first failed, retried), got {transfer_calls}"
+        f"run_backup should be called twice (first failed, retried), got {transfer_calls}"
     )
-    assert results[0].success is True
 
 
 def test_chain_verify_intact_chain_proceeds(
@@ -8031,7 +8282,7 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
     mock_state.record_snapshot("testvm", snap)
 
     # NO prior FULL in state → _should_create_full returns True →
-    # create_full_backup IS called.  Mock it to fail.
+    # run_backup IS called.  Mock it to fail.
     backup_provider = mock_factory._backup_provider
 
     fail_result = BackupResult(
@@ -8045,7 +8296,7 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
 
     with (
         patch("qsnap.core.os.path.exists", return_value=True),
-        patch.object(backup_provider, "create_full_backup", return_value=fail_result),
+        patch.object(backup_provider, "run_backup", return_value=fail_result),
         patch.object(core, "_cleanup_backups") as cleanup_spy,
     ):
         caplog.set_level(logging.CRITICAL)

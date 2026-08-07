@@ -677,6 +677,124 @@ def test_duplicate_dependency_not_recorded(tmp_path: Path) -> None:
     assert deps == ["incr-001"]
 
 
+# ── mixed-generation dependency key formats (state-management spec) ─────
+
+
+def test_mixed_generation_dependencies_counted_together(tmp_path: Path) -> None:
+    """Legacy snapshot-name keys and backup-name (freeze-ts) keys count together.
+
+    Spec (state-management): ``record_incremental_dependency`` accepts
+    incremental names in both legacy snapshot format (``vm.20260807T152956
+    _vda_ec1148``) and backup-name format (``vm.20260808T031542_vda_a1b2c3``),
+    and ``get_incremental_dependencies`` returns ALL of them for a FULL so
+    the chain-length decision sees the total count without inspecting key
+    formats.  No migration pass is required — mixed generations coexist.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/testvm"
+
+    full_name = "vm.FULL.20260801T030000_vda_a1b2c3"
+
+    # 3 legacy snapshot-keyed incrementals (named after snapshots).
+    legacy_keys = [
+        "vm.20260802T010000_vda_b2c3d4",
+        "vm.20260802T020000_vda_c3d4e5",
+        "vm.20260802T030000_vda_d4e5f6",
+    ]
+    # 2 backup-name (freeze-ts) incrementals (named after freeze points).
+    backup_name_keys = [
+        "vm.20260808T031542_vda_a1b2c3",
+        "vm.20260808T041542_vda_b2c3d4",
+    ]
+
+    for incremental in legacy_keys + backup_name_keys:
+        manager.record_incremental_dependency(target, incremental, full_name)
+
+    deps = manager.get_incremental_dependencies(target, full_name)
+
+    # Both formats are returned — the chain-length decision sees count 5.
+    assert len(deps) == 5, f"Expected 5 mixed-format deps, got {deps}"
+    for incremental in legacy_keys + backup_name_keys:
+        assert incremental in deps
+
+    # Lookup via the .qcow2 form of the FULL name finds the same 5 entries
+    # (full_name normalization is orthogonal to incremental key formats).
+    deps_qcow2 = manager.get_incremental_dependencies(target, f"{full_name}.qcow2")
+    assert len(deps_qcow2) == 5
+
+    # No migration rewrite happens: the stored keys are the given formats.
+    with open(tmp_path / "_dependencies.json", encoding="utf-8") as fh:
+        stored = json.load(fh)[target]
+    assert sorted(stored) == [full_name]
+
+
+def test_dependency_keys_accepted_in_both_formats(tmp_path: Path) -> None:
+    """record/get accept legacy snapshot-name and backup-name FULL keys.
+
+    The FULL anchor itself may be stored under either a legacy-style key
+    (stem, no disk segment, e.g. ``vm.FULL.20260727``) or a new freeze-ts
+    key with a disk segment (``vm.FULL.20260808T030000_vda_abc123``).
+    ``record_incremental_dependency`` and ``get_incremental_dependencies``
+    must handle both without error.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/testvm"
+
+    legacy_full = "vm.FULL.20260727"
+    freeze_ts_full = "vm.FULL.20260808T030000_vda_abc123"
+
+    # Legacy-style anchor key, incremental named in backup-name format.
+    manager.record_incremental_dependency(target, "vm.20260808T031542_vda_a1b2c3", legacy_full)
+    # Freeze-ts anchor key (with .qcow2 extension, as on disk), legacy
+    # snapshot-name incremental.
+    manager.record_incremental_dependency(target, "vm.20260807T152956_vda_ec1148", freeze_ts_full)
+
+    # Both lookups resolve regardless of anchor key format.
+    assert manager.get_incremental_dependencies(target, legacy_full) == [
+        "vm.20260808T031542_vda_a1b2c3"
+    ]
+    assert manager.get_incremental_dependencies(target, freeze_ts_full) == [
+        "vm.20260807T152956_vda_ec1148"
+    ]
+    # The .qcow2 form of the freeze-ts anchor resolves too (stem-normalized).
+    assert manager.get_incremental_dependencies(target, f"{freeze_ts_full}.qcow2") == [
+        "vm.20260807T152956_vda_ec1148"
+    ]
+
+
+@pytest.mark.mock
+def test_inmemory_mixed_generation_dependencies_counted_together() -> None:
+    """InMemoryStateManager: mixed-format dependency keys counted together.
+
+    Mock parity for ``test_mixed_generation_dependencies_counted_together``
+    (TESTING.md: mocks mirror the production hierarchy).
+    """
+    manager = InMemoryStateManager()
+    target = "/mnt/backup/testvm"
+
+    full_name = "vm.FULL.20260801T030000_vda_a1b2c3"
+    legacy_keys = [
+        "vm.20260802T010000_vda_b2c3d4",
+        "vm.20260802T020000_vda_c3d4e5",
+        "vm.20260802T030000_vda_d4e5f6",
+    ]
+    backup_name_keys = [
+        "vm.20260808T031542_vda_a1b2c3",
+        "vm.20260808T041542_vda_b2c3d4",
+    ]
+
+    for incremental in legacy_keys + backup_name_keys:
+        manager.record_incremental_dependency(target, incremental, full_name)
+
+    deps = manager.get_incremental_dependencies(target, full_name)
+    assert len(deps) == 5
+    for incremental in legacy_keys + backup_name_keys:
+        assert incremental in deps
+
+    # .qcow2 lookup of the FULL name finds the same entries.
+    assert len(manager.get_incremental_dependencies(target, f"{full_name}.qcow2")) == 5
+
+
 # ── full_name normalization tests (design D3) ─────────────────────────
 
 
@@ -2257,6 +2375,81 @@ def test_reset_target_disk_state_removes_deps_of_legacy_full_names(
     # ── backup allocation cleared for vda, preserved for vdb ─────────
     assert manager.get_last_backup_allocation(target, "vda") is None
     assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+
+# ── reset_target_disk_state with backup-name keys (freeze-ts format) ─────
+
+
+def test_reset_target_disk_state_backup_name_keys(tmp_path: Path) -> None:
+    """reset_target_disk_state handles freeze-ts (backup-name) keys.
+
+    FULL backups recorded under the new freeze-ts names — as written to
+    disk: ``{vm}.FULL.{freeze_ts}_{disk}_{hex6}.qcow2`` — plus their
+    stem-form dependency keys must be removed for the restored (vm, disk)
+    only.  Other disks and other VMs on the same target are preserved
+    (restore-command: "Restore resets only the restored disk's state").
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    target = "/mnt/backup/shared"
+
+    ts_vda = datetime(2026, 8, 8, 3, 0, 0)
+    ts_vdb = datetime(2026, 8, 8, 3, 30, 0)
+
+    # New-format freeze-ts FULL names with the .qcow2 extension on disk.
+    full_vda = "myvm.FULL.20260808T030000_vda_abc123.qcow2"
+    full_vdb = "myvm.FULL.20260808T033000_vdb_d4e5f6.qcow2"
+
+    manager.record_full_backup(target, full_vda, ts_vda, "vda")
+    manager.record_full_backup(target, full_vdb, ts_vdb, "vdb")
+
+    # Deltas recorded under freeze-ts delta names; dependency keys are
+    # stored stem-form by record_incremental_dependency.
+    manager.record_incremental_dependency(target, "myvm.20260808T031542_vda_a1b2c3", full_vda)
+    manager.record_incremental_dependency(target, "myvm.20260808T040000_vdb_b2c3d4", full_vdb)
+
+    manager.set_last_backup_allocation(target, "vda", 1000)
+    manager.set_last_backup_allocation(target, "vdb", 2000)
+
+    # ── pre-assertions ───────────────────────────────────────────────
+    assert len(manager.get_full_backups(target)) == 2
+    assert manager.get_incremental_dependencies(target, full_vda) == [
+        "myvm.20260808T031542_vda_a1b2c3"
+    ]
+    assert manager.get_incremental_dependencies(target, full_vdb) == [
+        "myvm.20260808T040000_vdb_b2c3d4"
+    ]
+    assert manager.get_last_backup_allocation(target, "vda") == 1000
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+    # ── reset (myvm, vda) ────────────────────────────────────────────
+    manager.reset_target_disk_state(target, "myvm", "vda")
+
+    # ── only the restored disk's state is reset ──────────────────────
+    backups = manager.get_full_backups(target)
+    backup_names = {b.name for b in backups}
+    assert full_vda not in backup_names, "restored-disk FULL must be removed"
+    assert full_vdb in backup_names, "other-disk FULL must be preserved"
+    assert len(backups) == 1
+
+    # Deps of the removed FULL are gone; other-disk deps survive.  The
+    # stem-form dep key matches the normalized map built from the .qcow2
+    # FULL record name.
+    assert manager.get_incremental_dependencies(target, full_vda) == [], (
+        "restored-disk deps must be removed"
+    )
+    assert manager.get_incremental_dependencies(target, full_vdb) == [
+        "myvm.20260808T040000_vdb_b2c3d4"
+    ], "other-disk deps must be preserved"
+
+    # Backup allocation cleared for vda, preserved for vdb.
+    assert manager.get_last_backup_allocation(target, "vda") is None
+    assert manager.get_last_backup_allocation(target, "vdb") == 2000
+
+    # Dependency keys on disk: only the vdb stem key remains.
+    with open(tmp_path / "_dependencies.json", encoding="utf-8") as fh:
+        stored = json.load(fh)[target]
+    assert "myvm.FULL.20260808T030000_vda_abc123" not in stored
+    assert "myvm.FULL.20260808T033000_vdb_d4e5f6" in stored
 
 
 # ── State migration: legacy records without disk field ─────────────────

@@ -1,7 +1,7 @@
 """BitmapBackupProvider — NBD pull-model incremental backup via libvirt.
 
 Implements ``IBackupProvider``.  Does NOT inherit from Core (design D1).
-Dependencies: ``IShell``, optional ``IStateManager``, and ``INbdClient``
+Dependencies: ``IShell`` and ``INbdClient``
 (third constructor parameter — the dirty-block transfer transport).
 
 Uses ``virsh backup-begin`` with a pull-model NBD Unix socket to export
@@ -97,12 +97,10 @@ from typing import cast
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.interfaces.nbd import INbdClient
 from qsnap.interfaces.shell import IShell
-from qsnap.interfaces.state import IStateManager
-from qsnap.models.config import TargetConfig, VMConfig
-from qsnap.models.results import BackupResult, NbdExtent, ShellResult, SnapshotInfo
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+from qsnap.models.results import BackupInfo, BackupResult, NbdExtent, ShellResult
 from qsnap.utils.extents import overlap_with_allocation, unify_extents
 from qsnap.utils.nbd import (
-    get_disk_targets,
     is_vm_running,
     write_backup_xml,
     write_checkpoint_xml,
@@ -137,7 +135,6 @@ class BitmapBackupProvider(IBackupProvider):
     def __init__(
         self,
         shell: IShell,
-        state: IStateManager | None = None,
         nbd: INbdClient | None = None,
     ) -> None:
         """Create the provider.
@@ -151,7 +148,6 @@ class BitmapBackupProvider(IBackupProvider):
         ``None``.
         """
         self._shell = shell
-        self._state = state
         self._nbd = nbd
 
     # ── IBackupProvider implementation ────────────────────────────────
@@ -203,152 +199,122 @@ class BitmapBackupProvider(IBackupProvider):
                 exc,
             )
 
-    def transfer_missing(
+    # ── run_backup (orthogonal) ─────────────────────────────────────
+
+    def run_backup(
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        snapshots: list[SnapshotInfo],
+        disk: DiskConfig,
         *,
+        force_full: bool = False,
         compression_type: str = "zstd",
         stall_timeout: int = 1800,
         convert_parallel: int = 4,
         convert_out_of_order: bool = True,
-    ) -> list[BackupResult]:
-        """Transfer missing snapshots via NBD pull-model.
+    ) -> BackupResult:
+        """Create exactly one backup for *disk* on *target*.
 
-        See module docstring for the NBD backup lifecycle.
-
-        ``compression_type`` selects the compression algorithm for the
-        full-pull transfer (``"zstd"`` default, ``"zlib"``
-        alternative) and only takes effect when ``target.compress`` is
-        ``True`` and a **full** export is pulled (no prior checkpoint).
-        FULL backups use ``qemu-img convert -c`` for compression.
-        Bitmap incrementals are written uncompressed via random-access
-        ``pwrite`` (design D6 — qcow2 compressed clusters can only be
-        produced by ``qemu-img convert``, not by the ``pread``/``pwrite``
-        loop).
-
-        ``stall_timeout`` is the stall-detection timeout in seconds.
-        It drives the in-process progress watchdog (abort with
-        ``"Stall detected: no progress for {N}s"`` when no chunk
-        completes for N seconds).  When ``0``, stall detection is
-        disabled.
+        See :meth:`IBackupProvider.run_backup` for the interface contract.
         """
-        existing = self.list(target)
-        existing_names = {s.name for s in existing}
-
         target_hash = self.target_hash(str(target.path))
+        disk_target = disk.target
 
-        results: list[BackupResult] = []
-        compress_notice_logged = False
+        # 1. Discover the newest checkpoint for this VM+target+disk.
+        candidates = self._list_checkpoints_for_target(vm_config.name, target_hash, disk_target)
+        prior = self._select_newest(candidates, target_hash, disk_target, vm_config.name)
 
-        for snapshot in snapshots:
-            if snapshot.name in existing_names:
-                continue
+        # 2. VM power state.
+        running = is_vm_running(self._shell, vm_config.name)
 
-            # Stale-state detection: if the source snapshot file
-            # doesn't exist on disk, skip it and clean up the stale
-            # state entry (self-healing — design D3).
-            exists = self._shell.run(["test", "-f", str(snapshot.path)], timeout=10, check=True)
-            if not exists.success:
-                logger.warning(
-                    "Source snapshot %s no longer exists on disk — "
-                    "skipping and removing stale state entry",
-                    snapshot.path,
-                )
-                if self._state is not None:
-                    self._state.remove_snapshot(vm_config.name, snapshot.name)
-                continue
-
-            target_file = target.path / f"{snapshot.name}.qcow2"
-            tmp_file = Path(f"{target_file}.tmp")
-            # Socket/pid paths are scoped per disk so concurrent exports
-            # of different disks never share a socket (multi-disk).
-            socket_path = f"/tmp/qsnap-backup-{os.getpid()}-{snapshot.disk}.sock"
-            write_socket = f"/tmp/qsnap-write-{os.getpid()}-{snapshot.disk}.sock"
-            pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}-{snapshot.disk}.pid")
-
-            # Determine the prior checkpoint for an incremental export
-            # (design D3: newest-wins discovery via ``virsh
-            # checkpoint-list``, re-evaluated per snapshot so the
-            # successor created earlier in this loop becomes the
-            # baseline for the next export).  Checkpoints are scoped per
-            # disk (multi-disk refactor) so a disk with no prior
-            # checkpoint correctly falls back to a full export.  When no
-            # prior checkpoint exists, a full NBD export is performed —
-            # with an atomic successor checkpoint, so the FULL run
-            # leaves a valid baseline by construction.  The same listing
-            # also feeds successor-name uniqueness (design D2).
-            candidates = self._list_checkpoints_for_target(
-                vm_config.name, target_hash, snapshot.disk
+        # 3. Stopped-VM defer (design D6): stopped + checkpoint exists →
+        #    no data transferred, no baseline update.
+        if prior is not None and not running:
+            logger.info(
+                "VM %s stopped — backup deferred for disk %s",
+                vm_config.name,
+                disk_target,
             )
-            prior = self._select_newest(candidates, target_hash, snapshot.disk, vm_config.name)
+            return BackupResult(
+                success=True,
+                snapshot_name="",
+                source_path=disk.base_image,
+                target_path=Path(),
+                bytes_transferred=0,
+                error=None,
+                disk=disk_target,
+                deferred=True,
+            )
 
-            # Temporal cross-check (design D5): if the prior
-            # checkpoint's timestamp is newer than the snapshot being
-            # backed up, the dirty-bitmap baseline is ahead of the
-            # snapshot — the incremental export would miss changes
-            # between the snapshot and the checkpoint.  Fail this
-            # snapshot with a clear error rather than producing an
-            # incomplete backup.
-            if prior is not None:
-                prior_ts = self._parse_checkpoint_timestamp(prior, target_hash, snapshot.disk)
-                if (
-                    prior_ts is not None
-                    and snapshot.timestamp is not None
-                    and prior_ts > snapshot.timestamp
-                ):
-                    logger.warning(
-                        "[backup] %s: temporal mismatch — checkpoint %s "
-                        "(ts=%s) is newer than snapshot %s (ts=%s); "
-                        "skipping to avoid incomplete incremental",
-                        vm_config.name,
-                        prior,
-                        prior_ts,
-                        snapshot.name,
-                        snapshot.timestamp,
-                    )
-                    results.append(
-                        BackupResult(
-                            success=False,
-                            snapshot_name=snapshot.name,
-                            source_path=snapshot.path,
-                            target_path=target_file,
-                            bytes_transferred=0,
-                            error=(
-                                f"temporal mismatch: checkpoint {prior} "
-                                f"(ts={prior_ts}) is newer than snapshot "
-                                f"{snapshot.name} (ts={snapshot.timestamp}) "
-                                "— incremental export would be incomplete"
-                            ),
-                            disk=snapshot.disk,
-                        )
-                    )
-                    break
+        # 4. Blockjob probe (design D9): when an active blockjob is
+        #    present on the disk, defer the backup for this run.
+        if running:
+            blockjob_cmd = [
+                "virsh",
+                "blockjob",
+                "--domain",
+                vm_config.name,
+                "--path",
+                str(disk.base_image),
+            ]
+            blockjob_result = self._shell.run(blockjob_cmd, timeout=30, check=True)
+            if blockjob_result.success and "No current block job" not in blockjob_result.stdout:
+                logger.info(
+                    "[backup] %s: blockjob active on disk %s — backup deferred for this run",
+                    vm_config.name,
+                    disk_target,
+                )
+                return BackupResult(
+                    success=True,
+                    snapshot_name="",
+                    source_path=disk.base_image,
+                    target_path=Path(),
+                    bytes_transferred=0,
+                    error=None,
+                    disk=disk_target,
+                    deferred=True,
+                )
 
-            # The successor checkpoint is created atomically with this
-            # export's backup-begin (design D1/D2): its dirty-bitmap
-            # baseline coincides with the export's freeze point.
-            successor = self._new_checkpoint_name(target_hash, snapshot.disk, taken=set(candidates))
+        # 5. Determine backup kind: FULL when no checkpoint or forced.
+        is_full = prior is None or force_full
 
-            # Step 1: Remove stale socket.
-            self._shell.run(["rm", "-f", socket_path], timeout=10)
+        # 6. Freeze-timestamp naming (design D3).
+        freeze_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        hex_suffix = secrets.token_hex(3)
+        if is_full:
+            backup_name = f"{vm_config.name}.FULL.{freeze_ts}_{disk_target}_{hex_suffix}"
+        else:
+            backup_name = f"{vm_config.name}.{freeze_ts}_{disk_target}_{hex_suffix}"
 
-            # Step 2: Build and write backup XML + checkpoint XML.  The
-            # incremental checkpoint is passed via the <incremental> XML
-            # element, NOT via a --incremental CLI flag (the flag does
-            # not exist in any version of virsh backup-begin).  The export
-            # is restricted to this snapshot's disk (multi-disk refactor).
-            backup_xml_path = write_backup_xml(socket_path, incremental=prior, disk=snapshot.disk)
-            checkpoint_xml_path = write_checkpoint_xml(successor)
+        target_file = target.path / f"{backup_name}.qcow2"
+        tmp_file = Path(f"{target_file}.tmp")
 
-            try:
-                # Step 3: Start NBD export via virsh backup-begin.  The
-                # checkpoint XML is the third positional argument —
-                # libvirt creates the successor checkpoint atomically at
-                # the export's freeze point (design D1).  No --incremental
-                # CLI flag is passed — it does not exist in any version
-                # of virsh backup-begin.
+        # 7. Successor checkpoint name (created atomically with
+        #    backup-begin on the running-VM path).
+        successor = self._new_checkpoint_name(target_hash, disk_target, taken=set(candidates))
+
+        # Reported checkpoint — None unless backup-begin succeeds on
+        # a running VM (Core's rollback deletes exactly this checkpoint
+        # on failure).
+        reported_checkpoint: str | None = None
+
+        start_time = time.monotonic()
+
+        try:
+            if running:
+                # ── Running VM: NBD export ──────────────────────────
+                socket_path = f"/tmp/qsnap-backup-{os.getpid()}-{disk_target}.sock"
+                self._shell.run(["rm", "-f", socket_path], timeout=10)
+
+                backup_xml_path = write_backup_xml(
+                    socket_path,
+                    incremental=prior if not is_full else None,
+                    disk=disk_target,
+                )
+                checkpoint_xml_path = write_checkpoint_xml(successor)
+
+                # backup-begin (checkpoint XML is third positional arg
+                # → atomically created at freeze point).
                 backup_cmd = [
                     "virsh",
                     "backup-begin",
@@ -357,38 +323,52 @@ class BitmapBackupProvider(IBackupProvider):
                     str(backup_xml_path),
                     str(checkpoint_xml_path),
                 ]
-
                 backup_result = self._shell.run(backup_cmd, timeout=120, check=True)
                 if not backup_result.success:
-                    # Collision recovery (design D6): "Bitmap already
-                    # exists" means a stale checkpoint+bitmap from a
-                    # crashed prior run blocks the new checkpoint name.
-                    # Force-cleanup all qsnap checkpoints for this
-                    # VM+target, then retry with a fresh successor.
+                    # Collision recovery (design D6).
                     if self._is_collision_error(backup_result.error):
                         logger.warning(
-                            "[backup] %s: checkpoint/bitmap collision detected "
-                            "(%s) — force-cleaning stale checkpoints and retrying",
+                            "[backup] %s: checkpoint/bitmap collision "
+                            "detected (%s) — force-cleaning stale "
+                            "checkpoints and retrying",
                             vm_config.name,
                             backup_result.error,
                         )
-                        self._force_cleanup_checkpoints(vm_config.name, target_hash, snapshot.disk)
-                        # Re-list candidates after cleanup and generate
-                        # a fresh successor name.
+                        self._force_cleanup_checkpoints(vm_config.name, target_hash, disk_target)
                         candidates = self._list_checkpoints_for_target(
-                            vm_config.name,
-                            target_hash,
-                            snapshot.disk,
+                            vm_config.name, target_hash, disk_target
                         )
+                        # Re-determine prior after cleanup: all
+                        # checkpoints for this target+disk were wiped,
+                        # so prior will be None → this becomes a FULL.
+                        # The old backup XML (with incremental=prior)
+                        # is invalid now — rewrite it for the new kind.
+                        was_incremental = not is_full
                         prior = self._select_newest(
                             candidates,
                             target_hash,
-                            snapshot.disk,
+                            disk_target,
                             vm_config.name,
                         )
+                        is_full = prior is None or force_full
+                        if was_incremental and is_full:
+                            with contextlib.suppress(OSError):
+                                backup_xml_path.unlink(missing_ok=True)
+                            backup_xml_path = write_backup_xml(
+                                socket_path,
+                                disk=disk_target,
+                            )
+                        elif not is_full and prior is not None:
+                            with contextlib.suppress(OSError):
+                                backup_xml_path.unlink(missing_ok=True)
+                            backup_xml_path = write_backup_xml(
+                                socket_path,
+                                incremental=prior,
+                                disk=disk_target,
+                            )
                         successor = self._new_checkpoint_name(
                             target_hash,
-                            snapshot.disk,
+                            disk_target,
                             taken=set(candidates),
                         )
                         checkpoint_xml_path = write_checkpoint_xml(successor)
@@ -400,48 +380,26 @@ class BitmapBackupProvider(IBackupProvider):
                             str(backup_xml_path),
                             str(checkpoint_xml_path),
                         ]
-                        backup_result = self._shell.run(
-                            backup_cmd,
-                            timeout=120,
-                            check=True,
-                        )
+                        backup_result = self._shell.run(backup_cmd, timeout=120, check=True)
                     if not backup_result.success:
-                        # backup-begin is atomic: the successor checkpoint
-                        # was NOT created — the prior checkpoint remains the
-                        # newest valid baseline.  No rollback needed.
-                        results.append(
-                            BackupResult(
-                                success=False,
-                                snapshot_name=snapshot.name,
-                                source_path=snapshot.path,
-                                target_path=target_file,
-                                bytes_transferred=0,
-                                error=backup_result.error,
-                                disk=snapshot.disk,
-                            )
+                        for xml_path in (backup_xml_path, checkpoint_xml_path):
+                            with contextlib.suppress(OSError):
+                                xml_path.unlink(missing_ok=True)
+                        self._shell.run(["rm", "-f", socket_path], timeout=10)
+                        return BackupResult(
+                            success=False,
+                            snapshot_name=backup_name,
+                            source_path=disk.base_image,
+                            target_path=target_file,
+                            bytes_transferred=0,
+                            error=backup_result.error,
+                            disk=disk_target,
                         )
-                        break
 
-                # Step 4: Pull the export.
-                # libvirt's NBD server exports each disk under its
-                # target device name (e.g., "vda"); the export name is
-                # needed both for the convert URI and for the dirty
-                # bitmap meta-context name.  Multi-disk (refactor): the
-                # export is restricted to this snapshot's disk, so the
-                # export name is the snapshot's disk target.
-                disk_target = snapshot.disk
-                start_time = time.monotonic()
-                dirty_bytes = 0
-                previous_path: Path | None = None
-                if prior is None:
-                    # Full export (no baseline checkpoint): pull the
-                    # entire frozen view into a standalone qcow2 via
-                    # qemu-img convert (design D1/D5).  Compression
-                    # applies here (and in create_full_backup) only —
-                    # bitmap incrementals are uncompressed (design D6).
-                    # The shared _full_pull_lifecycle helper handles
-                    # qemu-img convert via run_with_stall_detection,
-                    # mv .tmp → final, and finally cleanup (design D7).
+                reported_checkpoint = successor
+
+                # Transfer.
+                if is_full:
                     transfer_error, dirty_bytes = self._full_pull_lifecycle(
                         vm_name=vm_config.name,
                         tmp_file=tmp_file,
@@ -457,17 +415,11 @@ class BitmapBackupProvider(IBackupProvider):
                         convert_parallel=convert_parallel,
                         convert_out_of_order=convert_out_of_order,
                     )
+                    previous_path: Path | None = None
                 else:
-                    # Incremental export: in-process dirty-block copy
-                    # loop via the unified NBD engine (design D2) with
-                    # zero_skip=False — copies only dirty∩allocated
-                    # extents into a backing-chained qcow2 delta.
-                    if target.compress and not compress_notice_logged:
-                        logger.info(
-                            "bitmap incrementals are uncompressed — "
-                            "target.compress applies to FULL backups only (design D6)"
-                        )
-                        compress_notice_logged = True
+                    write_socket = f"/tmp/qsnap-write-{os.getpid()}-{disk_target}.sock"
+                    pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}-{disk_target}.pid")
+
                     copy = self._copy_dirty_blocks(
                         vm_config.name,
                         target,
@@ -481,100 +433,54 @@ class BitmapBackupProvider(IBackupProvider):
                     transfer_error = copy.error
                     dirty_bytes = copy.dirty_bytes
                     previous_path = copy.previous_path
-                    # Size sanity check (design D5): if the dirty bytes
-                    # transferred exceeds 10× the snapshot's allocation,
-                    # the bitmap may be tracking an unexpectedly large
-                    # amount of changes (stale bitmap, misconfigured
-                    # baseline, or genuine large write burst).  Log a
-                    # WARNING but do not fail — the data is real.
-                    if snapshot.allocation > 0 and dirty_bytes > snapshot.allocation * 10:
-                        logger.warning(
-                            "[backup] %s: dirty bytes (%d) exceeds 10× "
-                            "snapshot allocation (%d) for %s — possible "
-                            "stale bitmap or large write burst",
-                            vm_config.name,
-                            dirty_bytes,
-                            snapshot.allocation,
-                            snapshot.name,
-                        )
-                elapsed = time.monotonic() - start_time
+
                 if transfer_error is not None:
-                    # Export failed: preserve the prior checkpoint for
-                    # retry, delete the just-created successor checkpoint
-                    # best-effort (it must not become the newest baseline
-                    # of a failed export), and delete the partial target
-                    # file so retention cleanup does not find it and log
-                    # a misleading ``[delete] removed backup`` message
-                    # (design D3).  The ``.tmp`` file is removed by the
-                    # ``finally`` block.
                     self._cleanup_partial_file(target_file)
                     self._delete_checkpoint_best_effort(vm_config.name, successor)
-                    results.append(
-                        BackupResult(
-                            success=False,
-                            snapshot_name=snapshot.name,
-                            source_path=snapshot.path,
-                            target_path=target_file,
-                            bytes_transferred=0,
-                            error=transfer_error,
-                            disk=snapshot.disk,
-                        )
+                    return BackupResult(
+                        success=False,
+                        snapshot_name=backup_name,
+                        source_path=disk.base_image,
+                        target_path=target_file,
+                        bytes_transferred=0,
+                        error=transfer_error,
+                        disk=disk_target,
+                        checkpoint=reported_checkpoint,
                     )
-                    break
 
-                # Step 5: Verification (if enabled).  Incrementals use
-                # the bitmap-specific verifier (backing-filename check +
-                # dirty-size regression barrier); full pulls produce a
-                # standalone qcow2 and are verified with the FULL
-                # verifier.  ``target.verify == "compare"`` means
-                # chain-traversing ``qemu-img compare`` (same semantics
-                # as verify_bitmap_incremental).
-                if prior is None:
+                # Verify (if enabled).
+                if is_full:
                     verify_error = verify_full_backup(
                         self._shell,
                         target_file,
                         target.verify,
-                        source_path=snapshot.path,
                     )
                 else:
                     verify_error = verify_bitmap_incremental(
                         self._shell,
-                        str(snapshot.path),
+                        str(disk.base_image),
                         str(target_file),
                         str(previous_path),
                         dirty_bytes,
                         target.verify,
                     )
                 if verify_error is not None:
-                    # Same failure handling as the convert-failure path:
-                    # preserve prior, delete successor best-effort,
-                    # delete the partially-transferred file (design D3).
                     self._cleanup_partial_file(target_file)
                     self._delete_checkpoint_best_effort(vm_config.name, successor)
-                    results.append(
-                        BackupResult(
-                            success=False,
-                            snapshot_name=snapshot.name,
-                            source_path=snapshot.path,
-                            target_path=target_file,
-                            bytes_transferred=0,
-                            error=verify_error,
-                            disk=snapshot.disk,
-                        )
+                    return BackupResult(
+                        success=False,
+                        snapshot_name=backup_name,
+                        source_path=disk.base_image,
+                        target_path=target_file,
+                        bytes_transferred=0,
+                        error=verify_error,
+                        disk=disk_target,
+                        checkpoint=reported_checkpoint,
                     )
-                    break
 
-                # Step 5b: Post-transfer validation for incrementals
-                # (design D5).  Verify chain-to-FULL traversability and
-                # checkpoint existence.  If either fails, log CRITICAL,
-                # clean up, and return failure — Core will NOT call
-                # record_incremental_dependency().
-                if prior is not None:
-                    # Chain-to-FULL traversability: qemu-img info
-                    # --backing-chain follows the entire backing
-                    # chain.  If any file is missing, the command
-                    # fails.  A successful parse with at least one
-                    # element confirms the chain is traversable.
+                # Post-transfer validation for incrementals.
+                if not is_full:
+                    # Chain-to-FULL traversability.
                     chain_cmd = [
                         "qemu-img",
                         "info",
@@ -583,11 +489,7 @@ class BitmapBackupProvider(IBackupProvider):
                         "--output=json",
                         str(target_file),
                     ]
-                    chain_result = self._shell.run(
-                        chain_cmd,
-                        timeout=60,
-                        check=True,
-                    )
+                    chain_result = self._shell.run(chain_cmd, timeout=60, check=True)
                     chain_ok = False
                     if chain_result.success:
                         try:
@@ -602,30 +504,20 @@ class BitmapBackupProvider(IBackupProvider):
                             target_file,
                         )
                         self._cleanup_partial_file(target_file)
-                        self._delete_checkpoint_best_effort(
-                            vm_config.name,
-                            successor,
+                        self._delete_checkpoint_best_effort(vm_config.name, successor)
+                        return BackupResult(
+                            success=False,
+                            snapshot_name=backup_name,
+                            source_path=disk.base_image,
+                            target_path=target_file,
+                            bytes_transferred=0,
+                            error="chain-to-FULL not traversable",
+                            disk=disk_target,
                         )
-                        results.append(
-                            BackupResult(
-                                success=False,
-                                snapshot_name=snapshot.name,
-                                source_path=snapshot.path,
-                                target_path=target_file,
-                                bytes_transferred=0,
-                                error="chain-to-FULL not traversable",
-                                disk=snapshot.disk,
-                            )
-                        )
-                        break
 
-                    # Checkpoint existence: verify at least one
-                    # qsnap- checkpoint exists for this VM+target
-                    # (dirty-bitmap baseline for next incremental).
+                    # Checkpoint existence.
                     checkpoints = self._list_checkpoints_for_target(
-                        vm_config.name,
-                        target_hash,
-                        snapshot.disk,
+                        vm_config.name, target_hash, disk_target
                     )
                     if not checkpoints:
                         logger.critical(
@@ -633,91 +525,96 @@ class BitmapBackupProvider(IBackupProvider):
                             vm_config.name,
                         )
                         self._cleanup_partial_file(target_file)
-                        self._delete_checkpoint_best_effort(
-                            vm_config.name,
-                            successor,
+                        self._delete_checkpoint_best_effort(vm_config.name, successor)
+                        return BackupResult(
+                            success=False,
+                            snapshot_name=backup_name,
+                            source_path=disk.base_image,
+                            target_path=target_file,
+                            bytes_transferred=0,
+                            error="checkpoint missing — next incremental impossible",
+                            disk=disk_target,
                         )
-                        results.append(
-                            BackupResult(
-                                success=False,
-                                snapshot_name=snapshot.name,
-                                source_path=snapshot.path,
-                                target_path=target_file,
-                                bytes_transferred=0,
-                                error="checkpoint missing — next incremental impossible",
-                                disk=snapshot.disk,
-                            )
-                        )
-                        break
 
-                # Step 6: Checkpoint rotation (design D3): only after a
-                # successful AND verified export, delete all superseded
-                # (older) qsnap checkpoints for this VM+target.  The
-                # successor checkpoint already exists (created atomically
-                # in step 3), so deletion never opens a zero-checkpoint
-                # window.  Delete failures are WARNING, never fatal.
+                # Checkpoint rotation.
                 self._delete_superseded_checkpoints(
-                    vm_config.name, target_hash, snapshot.disk, successor
+                    vm_config.name, target_hash, disk_target, successor
                 )
 
-                # Get file size for bytes_transferred.
-                try:
-                    bytes_transferred = target_file.stat().st_size
-                except OSError:
-                    bytes_transferred = 0
-
-                results.append(
-                    BackupResult(
-                        success=True,
-                        snapshot_name=snapshot.name,
-                        source_path=snapshot.path,
+            else:
+                # ── Stopped VM: offline FULL ──────────────────────────
+                # Stopped VM with no checkpoint → offline FULL via
+                # qemu-img convert from the source disk file.
+                # No checkpoint is created for offline FULLs.
+                source_path = disk.base_image
+                transfer_error, dirty_bytes = self._full_pull_lifecycle(
+                    vm_name=vm_config.name,
+                    tmp_file=tmp_file,
+                    final_file=target_file,
+                    socket_path=None,
+                    source_path=source_path,
+                    compress=target.compress,
+                    compression_type=compression_type,
+                    stall_timeout=stall_timeout,
+                    backup_xml_path=None,
+                    checkpoint_xml_path=None,
+                    convert_parallel=convert_parallel,
+                    convert_out_of_order=convert_out_of_order,
+                )
+                if transfer_error is not None:
+                    return BackupResult(
+                        success=False,
+                        snapshot_name=backup_name,
+                        source_path=disk.base_image,
                         target_path=target_file,
-                        bytes_transferred=bytes_transferred,
-                        error=None,
-                        duration=elapsed,
-                        disk=snapshot.disk,
+                        bytes_transferred=0,
+                        error=transfer_error,
+                        disk=disk_target,
                     )
-                )
 
-            finally:
-                # Step 8: write-side + NBD job abort + socket + XML temp
-                # file cleanup (always, even on failure — design D2,
-                # spec: write-side lifecycle is crash-safe).
-                #
-                # Terminate the forked qemu-nbd serving the .tmp delta
-                # via its pidfile (best-effort — the process may never
-                # have started on early failures; on success it was
-                # already terminated before the atomic rename).
+            # Get final file size.
+            try:
+                bytes_transferred = target_file.stat().st_size
+            except OSError:
+                bytes_transferred = 0
+
+            elapsed = time.monotonic() - start_time
+            return BackupResult(
+                success=True,
+                snapshot_name=backup_name,
+                source_path=disk.base_image,
+                target_path=target_file,
+                bytes_transferred=bytes_transferred,
+                error=None,
+                duration=elapsed,
+                disk=disk_target,
+                checkpoint=reported_checkpoint,
+            )
+
+        finally:
+            if running:
+                # Terminate forked qemu-nbd (delta path).
+                pid_file = Path(f"/tmp/qsnap-qemu-nbd-{os.getpid()}-{disk_target}.pid")
                 self._terminate_qemu_nbd(pid_file)
-                # Write socket + pidfile removal.
+                write_socket = f"/tmp/qsnap-write-{os.getpid()}-{disk_target}.sock"
                 self._shell.run(["rm", "-f", write_socket, str(pid_file)], timeout=10)
-                # Partial .tmp removal — a no-op on success (the .tmp
-                # was renamed to the final file), removes the partial
-                # delta on every failure/exception path.
+                # Partial .tmp removal.
                 self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
-                # Abort the virsh
-                # backup-begin job to release the VM state change lock
-                # (design D2).  domjobabort is idempotent — safe to
-                # call when no job is running.  On failure, log a
-                # WARNING but do NOT propagate the error — the socket
-                # cleanup is the critical path and must still proceed.
-                abort_cmd = [
-                    "virsh",
-                    "domjobabort",
-                    "--domain",
-                    vm_config.name,
-                ]
-                abort_result = self._shell.run(abort_cmd, timeout=30, check=True)
+                # Abort backup-begin job.
+                abort_result = self._shell.run(
+                    ["virsh", "domjobabort", "--domain", vm_config.name],
+                    timeout=30,
+                    check=True,
+                )
                 if not abort_result.success:
                     logger.warning(
                         "virsh domjobabort failed for VM %s (job may have already terminated): %s",
                         vm_config.name,
                         abort_result.error,
                     )
-                # Source (libvirt) socket cleanup.
+                socket_path = f"/tmp/qsnap-backup-{os.getpid()}-{disk_target}.sock"
                 self._shell.run(["rm", "-f", socket_path], timeout=10)
-                # Temp XML cleanup (local filesystem, not shell — keeps
-                # the files out of the IShell command stream).
+                # Temp XML cleanup.
                 for xml_path in (backup_xml_path, checkpoint_xml_path):
                     try:
                         xml_path.unlink(missing_ok=True)
@@ -727,8 +624,9 @@ class BitmapBackupProvider(IBackupProvider):
                             xml_path,
                             exc,
                         )
-
-        return results
+            else:
+                # Stopped VM: just clean up .tmp.
+                self._shell.run(["rm", "-f", str(tmp_file)], timeout=10)
 
     # ── shared FULL-pull lifecycle (design D7) ────────────────────────
 
@@ -1235,7 +1133,7 @@ class BitmapBackupProvider(IBackupProvider):
         backups = self.list(target)
         if disk_target is not None:
             backups = [b for b in backups if b.disk == disk_target]
-        previous: SnapshotInfo | None = None
+        previous: BackupInfo | None = None
         for backup in reversed(backups):
             # Check file existence (race guard — retention may have
             # deleted between list() and now).
@@ -1243,7 +1141,7 @@ class BitmapBackupProvider(IBackupProvider):
             if not exists.success:
                 continue
             # FULLs are standalone — always valid.
-            if ".FULL." not in backup.name and not self._validate_backing_chain(backup.path):
+            if not backup.is_full and not self._validate_backing_chain(backup.path):
                 logger.warning(
                     "[backup] %s: backup %s has broken backing chain — skipping as previous",
                     vm_name,
@@ -1373,292 +1271,7 @@ class BitmapBackupProvider(IBackupProvider):
                 kill_result.error,
             )
 
-    def create_full_backup(
-        self,
-        vm_name: str,
-        source_snapshot: SnapshotInfo,
-        target: TargetConfig,
-        compress: bool = False,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-    ) -> BackupResult:
-        """Create a standalone FULL backup via ``qemu-img convert``.
-
-        ``vm_name`` is the full, untruncated VM name (e.g.
-        ``"3.Projects_opencode"``), passed from Core's
-        ``vm_config.name``.  It is used directly for
-        ``virsh backup-begin`` and ``full_name`` generation — the method
-        SHALL NOT extract the VM name from the snapshot filename.
-
-        Detects VM state via :func:`is_vm_running` before choosing the
-        transfer path (design D2):
-
-        - **Running VM**: ``virsh backup-begin`` (with checkpoint XML)
-          starts the NBD export, then ``qemu-img convert
-          nbd:unix:<socket> <target>.tmp`` transfers the data.  A
-          checkpoint named ``qsnap-{target_hash}-{yyyymmddTHHMMSS}-{6_hex}`` is
-          created **atomically** with the FULL's ``backup-begin``
-          (design D1/D2).
-        - **Stopped VM**: direct ``qemu-img convert <source_path>
-          <target>.tmp`` from the source qcow2 file (no
-          ``virsh backup-begin``, no NBD socket).  The source path is
-          resolved for the snapshot's disk via :func:`get_disk_targets`.
-
-        Uses an atomic pattern: transfer to a ``.tmp`` file, then rename
-        on success.  On failure, the ``.tmp`` file is removed.
-
-        When ``compress=True``, the ``qemu-img convert`` command includes
-        ``-c -O qcow2 -o compression_type=<type>`` (design D5).
-
-        This method SHALL NOT call ``self._state.record_full_backup()``
-        — state recording is Core's responsibility after post-create
-        verification passes.
-        """
-        # Generate full backup name:
-        # vm.FULL.YYYYMMDDTHHMMSS_{disk}_{6hex}.qcow2 (multi-disk).
-        date_str = source_snapshot.timestamp.strftime("%Y%m%dT%H%M%S")
-        hex_suffix = secrets.token_hex(3)
-        full_name = f"{vm_name}.FULL.{date_str}_{source_snapshot.disk}_{hex_suffix}"
-        target_file = target.path / f"{full_name}.qcow2"
-        tmp_file = target.path / f"{full_name}.qcow2.tmp"
-
-        target_hash = self.target_hash(str(target.path))
-        checkpoint_name = self._new_checkpoint_name(target_hash, source_snapshot.disk)
-        # Reported checkpoint name propagated through BackupResult;
-        # None for stopped VMs where no checkpoint is created (design D1).
-        reported_checkpoint: str | None = None
-
-        # Detect VM state to choose the transfer path (design D2).
-        running = is_vm_running(self._shell, vm_name)
-
-        if running:
-            # Running VM: virsh backup-begin + qemu-img convert nbd:unix:<socket>.
-            socket_path = f"/tmp/qsnap-backup-{os.getpid()}.sock"
-            # Remove stale socket.
-            self._shell.run(["rm", "-f", socket_path], timeout=10)
-
-            # Write backup XML (full, no <incremental>, restricted to this
-            # snapshot's disk) + checkpoint XML.
-            backup_xml_path = write_backup_xml(socket_path, disk=source_snapshot.disk)
-            checkpoint_xml_path = write_checkpoint_xml(checkpoint_name)
-
-            # Start NBD export via virsh backup-begin (no <incremental> —
-            # full export).  The checkpoint XML is the third positional
-            # argument; libvirt creates the checkpoint atomically at the
-            # export's freeze point.
-            backup_cmd = [
-                "virsh",
-                "backup-begin",
-                "--domain",
-                vm_name,
-                str(backup_xml_path),
-                str(checkpoint_xml_path),
-            ]
-            backup_result = self._shell.run(backup_cmd, timeout=120, check=True)
-            if not backup_result.success:
-                # backup-begin is atomic: the successor checkpoint was
-                # NOT created, so there is nothing to roll back.
-                # Clean up XML temp files and stale socket.
-                for xml_path in (backup_xml_path, checkpoint_xml_path):
-                    with contextlib.suppress(OSError):
-                        xml_path.unlink(missing_ok=True)
-                self._shell.run(["rm", "-f", socket_path], timeout=10)
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=backup_result.error,
-                    disk=source_snapshot.disk,
-                )
-
-            # backup-begin succeeded — the checkpoint now exists.
-            # Populate reported_checkpoint so Core's rollback can
-            # delete exactly this checkpoint on failure (design D1).
-            reported_checkpoint = checkpoint_name
-
-            # Full-pull lifecycle via the shared helper (design D7).
-            # qemu-img convert reads from nbd:unix:<socket>:exportname=<disk_target>.
-            # Multi-disk (refactor): the export is restricted to this
-            # snapshot's disk, so the export name is the snapshot's disk.
-            disk_target = source_snapshot.disk
-            transfer_error, _ = self._full_pull_lifecycle(
-                vm_name=vm_name,
-                tmp_file=tmp_file,
-                final_file=target_file,
-                socket_path=socket_path,
-                source_path=None,
-                compress=compress,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-                backup_xml_path=backup_xml_path,
-                checkpoint_xml_path=checkpoint_xml_path,
-                disk_target=disk_target,
-                convert_parallel=convert_parallel,
-                convert_out_of_order=convert_out_of_order,
-            )
-
-            if transfer_error is not None:
-                # Export failed: delete the just-created checkpoint
-                # best-effort so it cannot become the newest baseline
-                # of a failed export (design D3).
-                self._delete_checkpoint_best_effort(vm_name, checkpoint_name)
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=transfer_error,
-                    disk=source_snapshot.disk,
-                    checkpoint=reported_checkpoint,
-                )
-        else:
-            # Stopped VM: direct qemu-img convert from source qcow2.
-            # No virsh backup-begin, no NBD socket, no checkpoint.
-            # Multi-disk (refactor): resolve this snapshot's disk path.
-            source_path_str = next(
-                (
-                    path
-                    for tgt, path in get_disk_targets(self._shell, vm_name)
-                    if tgt == source_snapshot.disk
-                ),
-                "",
-            )
-            if not source_path_str:
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=(
-                        f"cannot determine source disk path for stopped VM "
-                        f"{vm_name} via virsh domblklist — required for "
-                        f"direct qemu-img convert"
-                    ),
-                    disk=source_snapshot.disk,
-                )
-            source_path = Path(source_path_str)
-
-            # Full-pull lifecycle via the shared helper (design D7).
-            # qemu-img convert reads directly from the source qcow2.
-            transfer_error, _ = self._full_pull_lifecycle(
-                vm_name=vm_name,
-                tmp_file=tmp_file,
-                final_file=target_file,
-                socket_path=None,
-                source_path=source_path,
-                compress=compress,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-                backup_xml_path=None,
-                checkpoint_xml_path=None,
-                convert_parallel=convert_parallel,
-                convert_out_of_order=convert_out_of_order,
-            )
-
-            if transfer_error is not None:
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error=transfer_error,
-                    disk=source_snapshot.disk,
-                )
-
-        # Clean up superseded checkpoints after successful transfer
-        # (design D3).  Only for running VMs — stopped VMs don't
-        # create checkpoints, so there's no successor to compare.
-        if running:
-            self._delete_superseded_checkpoints(
-                vm_name, target_hash, source_snapshot.disk, checkpoint_name
-            )
-
-        # Post-creation FULL backup validation (design D5).
-        # (a) No backing file: FULL must be standalone (no
-        #     backing-filename in qemu-img info).
-        # (b) Checkpoint existence: for running VMs, a qsnap- checkpoint
-        #     must exist (baseline for future incrementals).
-        full_info_cmd = [
-            "qemu-img",
-            "info",
-            "--force-share",
-            "--output=json",
-            str(target_file),
-        ]
-        full_info_result = self._shell.run(full_info_cmd, timeout=60, check=True)
-        if full_info_result.success:
-            try:
-                full_info = json.loads(full_info_result.stdout)
-                if "backing-filename" in full_info:
-                    logger.critical(
-                        "FULL backup %s has unexpected backing file: %s",
-                        target_file,
-                        full_info.get("backing-filename"),
-                    )
-                    return BackupResult(
-                        success=False,
-                        snapshot_name=source_snapshot.name,
-                        source_path=source_snapshot.path,
-                        target_path=target_file,
-                        bytes_transferred=0,
-                        error="FULL backup has unexpected backing file",
-                        disk=source_snapshot.disk,
-                        checkpoint=reported_checkpoint,
-                    )
-            except json.JSONDecodeError:
-                pass  # Non-fatal — cannot parse metadata
-
-        if running:
-            checkpoints = self._list_checkpoints_for_target(
-                vm_name,
-                target_hash,
-                source_snapshot.disk,
-            )
-            if not checkpoints:
-                logger.critical(
-                    "no checkpoint found after FULL backup creation for VM %s",
-                    vm_name,
-                )
-                return BackupResult(
-                    success=False,
-                    snapshot_name=source_snapshot.name,
-                    source_path=source_snapshot.path,
-                    target_path=target_file,
-                    bytes_transferred=0,
-                    error="checkpoint missing — next incremental impossible",
-                    disk=source_snapshot.disk,
-                    checkpoint=reported_checkpoint,
-                )
-
-        # Get file size
-        try:
-            bytes_transferred = target_file.stat().st_size
-        except OSError:
-            bytes_transferred = 0
-
-        # State recording is Core's responsibility after post-create
-        # verification passes (design D4).  The provider SHALL NOT call
-        # self._state.record_full_backup() here.
-
-        return BackupResult(
-            success=True,
-            snapshot_name=source_snapshot.name,
-            source_path=source_snapshot.path,
-            target_path=target_file,
-            bytes_transferred=bytes_transferred,
-            error=None,
-            disk=source_snapshot.disk,
-            checkpoint=reported_checkpoint,
-        )
-
-    def list(self, target: TargetConfig) -> list[SnapshotInfo]:
+    def list(self, target: TargetConfig) -> list[BackupInfo]:
         """List existing backups at *target*.
 
         Scans ``target.path`` for ``*.qcow2`` files and obtains metadata
@@ -1668,7 +1281,7 @@ class BitmapBackupProvider(IBackupProvider):
         if not target.path.exists():
             return []
 
-        snapshots: list[SnapshotInfo] = []
+        backups: list[BackupInfo] = []
         for file in target.path.glob("*.qcow2"):
             info_cmd = [
                 "qemu-img",
@@ -1680,33 +1293,28 @@ class BitmapBackupProvider(IBackupProvider):
             if not info_result.success:
                 continue
 
-            try:
-                info = json.loads(info_result.stdout)
-            except json.JSONDecodeError:
-                continue
-
             name = file.stem
-            actual_size = int(info.get("actual-size", 0))
             timestamp = parse_timestamp(name, file)
             # Disk target is encoded in the backup name (both FULL and
             # incremental): ``{vm}[.FULL].{ts}_{disk}_{6hex}``.  Empty
             # string when the name cannot be parsed (foreign/legacy file).
             disk = parse_disk_from_snapshot_name(name) or ""
+            is_full = ".FULL." in name
 
-            snapshots.append(
-                SnapshotInfo(
+            backups.append(
+                BackupInfo(
                     name=name,
                     path=file,
                     timestamp=timestamp,
-                    allocation=actual_size,
                     disk=disk,
+                    is_full=is_full,
                 )
             )
 
-        snapshots.sort(key=lambda s: s.timestamp)
-        return snapshots
+        backups.sort(key=lambda s: s.timestamp)
+        return backups
 
-    def delete(self, backup: SnapshotInfo) -> ShellResult:
+    def delete(self, backup: BackupInfo) -> ShellResult:
         """Delete a backup file via ``rm -f``."""
         cmd = ["rm", "-f", str(backup.path)]
         return self._shell.run(cmd, timeout=30)
@@ -1838,8 +1446,8 @@ class BitmapBackupProvider(IBackupProvider):
         """Return the newest qsnap checkpoint for this VM+target+disk.
 
         Thin wrapper over :meth:`_select_newest` that fetches the
-        candidate list via ``virsh checkpoint-list --name`` —
-        ``IStateManager`` is never consulted for checkpoint selection.
+        candidate list via ``virsh checkpoint-list --name``.  No
+        snapshot state is consulted for checkpoint selection.
         """
         return self._select_newest(
             self._list_checkpoints_for_target(vm_name, target_hash, disk),

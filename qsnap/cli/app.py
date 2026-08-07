@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime
 
 from qsnap.cli import commands
 from qsnap.cli.errors import (
@@ -150,6 +151,8 @@ def build_argparser() -> argparse.ArgumentParser:
         )
 
     # list subcommand with sub-subcommands
+
+    # restore-points subcommand — enumerate freeze points per VM
     list_parser = subparsers.add_parser("list", help="List snapshots, backups, config, or latest")
     list_subparsers = list_parser.add_subparsers(dest="list_subcommand", required=True)
     snap_sub = list_subparsers.add_parser("snapshots")
@@ -171,6 +174,8 @@ def build_argparser() -> argparse.ArgumentParser:
     list_subparsers.add_parser("config")
     deferred_sub = list_subparsers.add_parser("deferred")
     deferred_sub.add_argument("vm", nargs="*", help="VM name(s) to filter")
+    rp_sub = list_subparsers.add_parser("restore-points")
+    rp_sub.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
 
     # stats subcommand
     stats_parser = subparsers.add_parser("stats", help="Show snapshot/backup counts and sizes")
@@ -214,7 +219,16 @@ def build_argparser() -> argparse.ArgumentParser:
     restore_parser = subparsers.add_parser(
         "restore", help="Replace a stopped VM's disk with a flattened standalone qcow2"
     )
-    restore_parser.add_argument("snapshot_name", help="Snapshot or backup name to restore from")
+    restore_parser.add_argument(
+        "snapshot_name", nargs="?", default=None,
+        help="Snapshot or backup name to restore from",
+    )
+    restore_parser.add_argument(
+        "--at",
+        type=datetime.fromisoformat,
+        default=None,
+        help="Restore from the first backup point ≥ this ISO-8601 timestamp",
+    )
     restore_parser.add_argument("vm", nargs="*", default=[], help="VM name filter (optional)")
     # ``default=argparse.SUPPRESS`` (same pattern as fork/reconcile): when
     # the flag is absent the subparser does NOT overwrite the global
@@ -330,14 +344,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.preserve_backups:
         core.preserve_backups = True
 
-    # Resolve lockfile: --lockfile → GlobalConfig.lockfile → None (no locking)
+    # Mutating commands that require exclusive lock.
+    _MUTATING = {"run", "snapshot", "backup", "prune", "reconcile", "restore", "fork"}
+
+    # Resolve lockfile: --lockfile → GlobalConfig.lockfile →
+    # default /var/lib/qsnap/qsnap.lock.  Sentinel "off" disables.
     lockfile = resolve_lockfile_path(args.lockfile, config.get_global().lockfile)
     lock_manager: LockManager | None = None
-    if lockfile:
+    if args.command in _MUTATING and lockfile is not None:
         lock_manager = LockManager(lockfile)
         if not lock_manager.acquire():
             print(
-                f"Error: another qsnap instance is running (lockfile: {lockfile})",
+                f"Error: Lockfile is held by another qsnap instance (lockfile: {lockfile})",
                 file=sys.stderr,
             )
             return EXIT_LOCKFILE

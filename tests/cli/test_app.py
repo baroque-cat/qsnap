@@ -17,6 +17,7 @@ from qsnap.cli.errors import (
     EXIT_SUCCESS,
 )
 from qsnap.core import PipelineResult, VMRunResult
+from qsnap.models.config import GlobalConfig
 from tests.mocks import MockConfigFacade
 
 # ── Argument parsing tests ──────────────────────────────────────────────
@@ -93,6 +94,13 @@ def test_lockfile_flag_overrides_config_lockfile_path():
     assert ns.lockfile == "/run/qsnap.lock"
 
 
+def test_lockfile_off_sentinel_parses():
+    """``--lockfile off`` parses and disables locking (no lockfile path)."""
+    parser = build_argparser()
+    ns = parser.parse_args(["--lockfile", "off", "run"])
+    assert ns.lockfile == "off"
+
+
 def test_loglevel_flag_sets_explicit_level():
     parser = build_argparser()
     ns = parser.parse_args(["-l", "warn", "run"])
@@ -133,7 +141,7 @@ def test_success_returns_exit_code_zero(
     mock_core.run.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_SUCCESS
 
 
@@ -146,6 +154,7 @@ def test_lockfile_held_returns_exit_code_three(
     mock_config_cls,
     mock_shell_cls,
     mock_factory_cls,
+    capsys,
 ):
     mock_config = MockConfigFacade(vms=[])
     mock_config_cls.return_value = mock_config
@@ -156,6 +165,96 @@ def test_lockfile_held_returns_exit_code_three(
 
     code = main(["--lockfile", "/tmp/test.lock", "run"])
     assert code == EXIT_LOCKFILE
+    # Spec (locking): the process exits with code 3 and prints
+    # "Lockfile is held by another qsnap instance".
+    captured = capsys.readouterr()
+    assert "Lockfile is held by another qsnap instance" in captured.err
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_read_only_commands_skip_lock(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """Read-only commands (list/check/stats/estimate) run without acquiring
+    the lockfile — even while another instance holds it (spec: locking
+    "Read-only command runs while lock is held")."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.list_snapshots.return_value = {}
+    mock_core.list_backups.return_value = {}
+    mock_core.check.return_value = {}
+    mock_core_cls.return_value = mock_core
+
+    for argv in (
+        ["list", "snapshots"],
+        ["check"],
+        ["stats"],
+        ["estimate"],
+    ):
+        code = main(argv)
+        assert code == EXIT_SUCCESS
+    # LockManager must never be instantiated for read-only commands.
+    mock_lock_cls.assert_not_called()
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_off_sentinel_cli_disables_locking(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """``--lockfile off`` on the CLI disables locking for mutating commands."""
+    mock_config = MockConfigFacade(vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
+    mock_core_cls.return_value = mock_core
+
+    code = main(["--lockfile", "off", "run"])
+    assert code == EXIT_SUCCESS
+    mock_lock_cls.assert_not_called()
+
+
+@patch("qsnap.cli.app.Core")
+@patch("qsnap.cli.app.DefaultFactory")
+@patch("qsnap.cli.app.SubprocessShell")
+@patch("qsnap.cli.app.ConfigFacade")
+@patch("qsnap.cli.app.LockManager")
+def test_off_sentinel_config_disables_locking(
+    mock_lock_cls,
+    mock_config_cls,
+    mock_shell_cls,
+    mock_factory_cls,
+    mock_core_cls,
+):
+    """``lockfile = "off"`` in the config (no CLI flag) disables locking."""
+    mock_config = MockConfigFacade(global_config=GlobalConfig(lockfile="off"), vms=[])
+    mock_config_cls.return_value = mock_config
+
+    mock_core = Mock()
+    mock_core.run.return_value = PipelineResult(results=[VMRunResult(vm_name="vm1", success=True)])
+    mock_core_cls.return_value = mock_core
+
+    code = main(["run"])
+    assert code == EXIT_SUCCESS
+    mock_lock_cls.assert_not_called()
 
 
 def test_unknown_subcommand_returns_parse_error_exit_code_2():
@@ -189,7 +288,7 @@ def test_diskfull_run_exit_code_four(
     )
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_DISKFULL
 
 
@@ -218,7 +317,7 @@ def test_diskfull_precedence_over_generic(
     )
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_DISKFULL
 
 
@@ -257,7 +356,7 @@ def test_non_space_backup_abort_exits_ten(
     )
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_BACKUP_ABORT
 
 
@@ -286,7 +385,7 @@ def test_no_space_error_exits_one(
     )
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_GENERIC
 
 
@@ -320,7 +419,7 @@ def test_backup_abort_still_exits_ten(
     )
     mock_core_cls.return_value = mock_core
 
-    code = main(["run"])
+    code = main(["--lockfile", "off", "run"])
     assert code == EXIT_BACKUP_ABORT
 
 
@@ -482,6 +581,20 @@ def test_list_deferred_sub_subcommand(cli_app):
 def test_list_deferred_with_vm_arg(cli_app):
     """'list deferred myvm' sets vm to ['myvm']."""
     ns = cli_app.parse_args(["list", "deferred", "myvm"])
+    assert ns.vm == ["myvm"]
+
+
+def test_list_restore_points_sub_subcommand(cli_app):
+    """'list restore-points' sets list_subcommand to 'restore-points'."""
+    ns = cli_app.parse_args(["list", "restore-points"])
+    assert ns.list_subcommand == "restore-points"
+    assert ns.vm == []
+
+
+def test_list_restore_points_with_vm_arg(cli_app):
+    """'list restore-points myvm' sets vm to ['myvm']."""
+    ns = cli_app.parse_args(["list", "restore-points", "myvm"])
+    assert ns.list_subcommand == "restore-points"
     assert ns.vm == ["myvm"]
 
 

@@ -33,6 +33,7 @@ from qsnap.interfaces.state import IStateManager
 from qsnap.models.config import DiskConfig, RetentionPolicy, TargetConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
+    BackupInfo,
     BackupResult,
     ChainVerifyResult,
     ChangeResult,
@@ -60,10 +61,8 @@ from qsnap.utils.parsing import (
 )
 from qsnap.utils.retry import compute_backoff, is_retryable, is_space_error, parse_retry_duration
 from qsnap.utils.space import (
-    SpaceCheckResult,
     check_free_space,
     estimate_full_size,
-    estimate_incremental_size,
 )
 from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.transaction import TransactionWriter
@@ -83,6 +82,8 @@ class VMRunResult:
     success: bool
     error: str | None = None
     backup_failed: bool = False
+    failed_target: str | None = None
+    failed_disks: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +160,21 @@ class BackupAbortError(RuntimeError):
     transfer).  ``_run_pipeline`` distinguishes it from other pipeline
     errors so the failed VM is reported with ``backup_failed=True``,
     which maps to exit code ``EXIT_BACKUP_ABORT`` (10).
+
+    Attributes:
+        target: The target path where the failure occurred, if known.
+        disks: The disk(s) that failed, if known.
     """
+
+    def __init__(
+        self,
+        msg: str,
+        target: str | None = None,
+        disks: tuple[str, ...] | None = None,
+    ) -> None:
+        super().__init__(msg)
+        self.target = target
+        self.disks = disks
 
 
 def _same_file(path: Path, other: str | None) -> bool:
@@ -291,22 +306,22 @@ class Core:
         self,
         vm_filter: str | None = None,
         tree: Literal[False] = False,
-    ) -> dict[str, list[tuple[str, SnapshotInfo]]]: ...
+    ) -> dict[str, list[tuple[str, BackupInfo]]]: ...
 
     @overload
     def list_backups(
         self,
         vm_filter: str | None = None,
         tree: Literal[True] = ...,
-    ) -> dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]]: ...
+    ) -> dict[str, list[tuple[str, dict[str, list[BackupInfo]]]]]: ...
 
     def list_backups(
         self,
         vm_filter: str | None = None,
         tree: bool = False,
     ) -> (
-        dict[str, list[tuple[str, SnapshotInfo]]]
-        | dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]]
+        dict[str, list[tuple[str, BackupInfo]]]
+        | dict[str, list[tuple[str, dict[str, list[BackupInfo]]]]]
     ):
         """Return all backups per VM (across all targets), sorted ascending.
 
@@ -323,9 +338,9 @@ class Core:
         """
         vms = self._filter_vms(vm_filter)
         if not tree:
-            results: dict[str, list[tuple[str, SnapshotInfo]]] = {}
+            results: dict[str, list[tuple[str, BackupInfo]]] = {}
             for vm in vms:
-                all_backups: list[tuple[str, SnapshotInfo]] = []
+                all_backups: list[tuple[str, BackupInfo]] = []
                 for target in vm.targets:
                     provider = self._factory.create_backup_provider(vm, target)
                     for backup in provider.list(target):
@@ -334,9 +349,9 @@ class Core:
             return results
 
         # Tree mode: group by FULL anchor per target
-        tree_results: dict[str, list[tuple[str, dict[str, list[SnapshotInfo]]]]] = {}
+        tree_results: dict[str, list[tuple[str, dict[str, list[BackupInfo]]]]] = {}
         for vm in vms:
-            target_chains: list[tuple[str, dict[str, list[SnapshotInfo]]]] = []
+            target_chains: list[tuple[str, dict[str, list[BackupInfo]]]] = []
             for target in vm.targets:
                 provider = self._factory.create_backup_provider(vm, target)
                 backups = provider.list(target)
@@ -932,7 +947,7 @@ class Core:
         vm: VMConfig,
         target: TargetConfig,
         provider: IBackupProvider,
-        backups: list[SnapshotInfo],
+        backups: list[BackupInfo],
         broken: list[str],
     ) -> None:
         """Triple-source verification for backup targets.
@@ -1071,7 +1086,7 @@ class Core:
         self,
         snapshot_name: str,
         vm_filter: str | None = None,
-    ) -> tuple[SnapshotInfo, VMConfig]:
+    ) -> tuple[SnapshotInfo | BackupInfo, VMConfig]:
         """Locate a snapshot/backup by name across all sources.
 
         Searches ``IStateManager`` across all configured VMs (filtered by
@@ -1109,10 +1124,34 @@ class Core:
 
         raise FileNotFoundError(f"Snapshot not found: {snapshot_name}")
 
+    def resolve_restore_point(
+        self,
+        vm_filter: str | None,
+        at: datetime,
+    ) -> BackupInfo | None:
+        """Resolve --at to a concrete restore point without executing.
+
+        Searches all targets for the earliest ``BackupInfo`` with
+        ``timestamp >= at`` (superset policy).  Returns ``None`` when
+        no qualifying point is found.  Does NOT mutate any state.
+        """
+        vms = self._filter_vms(vm_filter)
+        candidates: list[BackupInfo] = []
+        for vm_cfg in vms:
+            for target in vm_cfg.targets:
+                provider = self._factory.create_backup_provider(vm_cfg, target)
+                candidates.extend(provider.list(target))
+        qualifying = sorted(
+            [b for b in candidates if b.timestamp >= at],
+            key=lambda b: b.timestamp,
+        )
+        return qualifying[0] if qualifying else None
+
     def restore(
         self,
-        name: str,
+        name: str | None = None,
         vm_filter: str | None = None,
+        at: datetime | None = None,
     ) -> RestoreResult:
         """Replace a stopped VM's disk with a flattened standalone qcow2.
 
@@ -1130,6 +1169,62 @@ class Core:
 
         Returns a ``RestoreResult``; never raises for expected failures.
         """
+        # --at resolution: select the first restore point >= at
+        # (superset policy).  The actually used point is always logged.
+        if at is not None:
+            if name is not None:
+                return RestoreResult(
+                    success=False,
+                    snapshot_name="",
+                    restored_path=Path(),
+                    chain_files=[],
+                    error="Specify either --at or a snapshot name, not both",
+                )
+            vms = self._filter_vms(vm_filter)
+            candidates: list[BackupInfo] = []
+            for vm_cfg in vms:
+                for target in vm_cfg.targets:
+                    provider = self._factory.create_backup_provider(vm_cfg, target)
+                    candidates.extend(provider.list(target))
+            # Select the EARLIEST point >= at (superset policy).
+            qualifying = sorted(
+                [b for b in candidates if b.timestamp >= at],
+                key=lambda b: b.timestamp,
+            )
+            if not qualifying:
+                available = sorted(candidates, key=lambda b: b.timestamp)
+                points_str = (
+                    ", ".join(f"{b.name} ({b.timestamp.isoformat()})" for b in available[-5:])
+                    if available
+                    else "none"
+                )
+                return RestoreResult(
+                    success=False,
+                    snapshot_name="",
+                    restored_path=Path(),
+                    chain_files=[],
+                    error=(
+                        f"No restore point found at or after {at.isoformat()}. "
+                        f"Available points: {points_str}"
+                    ),
+                )
+            selected = qualifying[0]
+            logger.info(
+                "[restore] --at %s selected %s (first point >= requested)",
+                at.isoformat(),
+                selected.name,
+            )
+            name = selected.name
+
+        if name is None:
+            return RestoreResult(
+                success=False,
+                snapshot_name="",
+                restored_path=Path(),
+                chain_files=[],
+                error="Specify a snapshot name or --at timestamp",
+            )
+
         # Step 1: Resolve the snapshot/backup
         try:
             snapshot_info, vm_config = self._resolve_snapshot(name, vm_filter)
@@ -1882,6 +1977,29 @@ class Core:
                     )
         return orphans
 
+    def list_restore_points(
+        self,
+        vm_filter: str | None = None,
+    ) -> list[tuple[str, list[BackupInfo]]]:
+        """Enumerate backup freeze points across all targets.
+
+        For each VM, queries every target's backup provider for
+        ``BackupInfo`` objects sorted by timestamp.  Returns
+        ``(vm_name, [BackupInfo, ...])`` tuples.
+
+        Read-only — no locking, no mutation.
+        """
+        vms = self._filter_vms(vm_filter)
+        results: list[tuple[str, list[BackupInfo]]] = []
+        for vm_cfg in vms:
+            points: list[BackupInfo] = []
+            for target in vm_cfg.targets:
+                provider = self._factory.create_backup_provider(vm_cfg, target)
+                points.extend(provider.list(target))
+            points.sort(key=lambda b: b.timestamp)
+            results.append((vm_cfg.name, points))
+        return results
+
     def reconcile(
         self,
         vm_filter: str | None = None,
@@ -2421,6 +2539,14 @@ class Core:
                 )
             except Exception as exc:
                 logger.error("Pipeline failed for VM %s: %s", vm.name, exc)
+                if isinstance(exc, BackupAbortError):
+                    err_target = exc.target
+                    err_disks = exc.disks
+                    err_disk = ", ".join(err_disks) if err_disks else None
+                else:
+                    err_target = None
+                    err_disks = None
+                    err_disk = None
                 self._actions.append(
                     ActionRecord(
                         action="error",
@@ -2428,7 +2554,8 @@ class Core:
                         name=vm.name,
                         path=Path(),
                         error=str(exc),
-                        disk=None,
+                        disk=err_disk,
+                        target=err_target,
                     )
                 )
                 # VM-level isolation: the failed VM is marked unsuccessful;
@@ -2440,6 +2567,8 @@ class Core:
                         success=False,
                         error=str(exc),
                         backup_failed=isinstance(exc, BackupAbortError),
+                        failed_target=err_target,
+                        failed_disks=err_disks,
                     )
                 )
 
@@ -3124,6 +3253,135 @@ class Core:
                         vm_config.name,
                         target.path,
                     )
+
+            # ── Orphan-checkpoint invariant (design D9) ──
+            # For each configured disk, if the newest checkpoint has no
+            # backup file with mtime >= checkpoint timestamp, it is an
+            # orphan of a crashed export and must be deleted best-effort.
+            # Non-fatal — the next run transfers a delta from the previous
+            # checkpoint, closing the gap.
+            try:
+                provider = self._factory.create_backup_provider(vm_config, target)
+                target_hash = provider.target_hash(str(target.path))
+                for disk_cfg in vm_config.disks:
+                    self._check_orphan_checkpoint(
+                        vm_config.name, str(target.path), target_hash, disk_cfg.target
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[startup] %s: failed to check orphan checkpoints for target %s: %s",
+                    vm_config.name,
+                    target.path,
+                    exc,
+                )
+            # ── end per-target startup cleanup ──
+
+    def _check_orphan_checkpoint(
+        self,
+        vm_name: str,
+        target_path_str: str,
+        target_hash: str,
+        disk: str,
+    ) -> None:
+        """Check and clean an orphan checkpoint at startup (design D9).
+
+        The newest qsnap checkpoint for (target, disk) must have at
+        least one backup file covering it on the target.  For
+        freeze-timestamp names (Phase 2 naming), the file's embedded
+        timestamp must match the checkpoint timestamp exactly.  For
+        legacy names with no parseable timestamp, an mtime >=
+        checkpoint ts check is used as fallback.  If no such file
+        exists, the checkpoint is an orphan of a crashed export — it
+        is deleted best-effort with a WARNING.  Non-fatal in all cases.
+        """
+        target_path = Path(target_path_str)
+        try:
+            candidates = self._shell.run(
+                [
+                    "virsh",
+                    "checkpoint-list",
+                    "--domain",
+                    vm_name,
+                    "--name",
+                ],
+                timeout=30,
+                check=True,
+            )
+            if not candidates.success:
+                return
+            prefix = f"qsnap-{target_hash}-{disk}-"
+            matching = [
+                name.strip()
+                for name in candidates.stdout.splitlines()
+                if name.strip().startswith(prefix)
+            ]
+            if not matching:
+                return
+
+            # Newest-wins: sort by timestamp embedded in the name.
+            def _ckpt_ts(name: str) -> float:
+                parsed = parse_timestamp(name)
+                return parsed.timestamp() if parsed else 0.0
+
+            newest = max(matching, key=_ckpt_ts)
+            checkpoint_ts = _ckpt_ts(newest)
+            if checkpoint_ts <= 0:
+                return
+
+            # Check if any backup file at the target covers this checkpoint.
+            # Prefer exact timestamp equality (freeze-ts naming) over mtime
+            # (legacy fallback).
+            target_files = list(target_path.glob("*.qcow2"))
+            found = False
+            for f in target_files:
+                try:
+                    # Try freeze-ts equality first (new-format names):
+                    # parse the timestamp from the file stem and compare
+                    # with a 1s tolerance (second-resolution timestamps).
+                    file_ts = parse_timestamp(f.stem, f)
+                    if file_ts is not None:
+                        delta = abs(file_ts.timestamp() - checkpoint_ts)
+                        if delta <= 1.0:
+                            found = True
+                            break
+                    # Legacy fallback: mtime-based check.
+                    if f.stat().st_mtime >= checkpoint_ts:
+                        found = True
+                        break
+                except OSError:
+                    continue
+            if found:
+                return  # Healthy
+
+            # Orphan: no backup file covers this checkpoint.
+            logger.warning(
+                "[startup] %s: orphan checkpoint detected — %s (disk %s, "
+                "target %s, ts=%s) — deleting best-effort",
+                vm_name,
+                newest,
+                disk,
+                target_path_str,
+                datetime.fromtimestamp(checkpoint_ts).isoformat(),
+            )
+            del_cmd = [
+                "virsh",
+                "checkpoint-delete",
+                "--domain",
+                vm_name,
+                newest,
+            ]
+            result = self._shell.run(del_cmd, timeout=30, check=True)
+            if not result.success:
+                # Fallback: --metadata
+                del_cmd.append("--metadata")
+                self._shell.run(del_cmd, timeout=30, check=True)
+        except Exception as exc:
+            logger.warning(
+                "[startup] %s: failed to check/clean orphan checkpoint for disk %s: %s",
+                vm_name,
+                disk,
+                exc,
+            )
 
     def _execute_pipeline(self, vm_config: VMConfig) -> bool:
         """Execute the full pipeline for a single VM.
@@ -4488,7 +4746,7 @@ class Core:
         if extra_snapshots:
             snapshots = [*snapshots, *extra_snapshots]
         for target in vm_config.targets:
-            self._backup_target(vm_config, target, snapshots)
+            self._backup_target(vm_config, target)
         return False
 
     def _execute_with_retry(
@@ -4558,53 +4816,6 @@ class Core:
             time.sleep(backoff)
 
         return result
-
-    def _transfer_with_retry(
-        self,
-        provider: IBackupProvider,
-        vm_config: VMConfig,
-        target: TargetConfig,
-        snapshots: list[SnapshotInfo],
-        *,
-        compression_type: str = "zstd",
-        stall_timeout: int = 1800,
-        convert_parallel: int = 4,
-        convert_out_of_order: bool = True,
-    ) -> list[BackupResult]:
-        """Transfer missing snapshots with exponential backoff retry.
-
-        Delegates the retry loop to :meth:`_execute_with_retry`.  Only
-        retries on transient errors (determined by ``is_retryable()``).
-        Non-retryable errors fail immediately.
-
-        ``compression_type`` and ``stall_timeout`` are threaded from
-        ``TargetConfig`` to the provider's ``transfer_missing()``.
-
-        Returns the list of ``BackupResult`` objects from the last
-        attempt.
-        """
-
-        def operation() -> _RetryResult:
-            results = provider.transfer_missing(
-                vm_config,
-                target,
-                snapshots,
-                compression_type=compression_type,
-                stall_timeout=stall_timeout,
-                convert_parallel=convert_parallel,
-                convert_out_of_order=convert_out_of_order,
-            )
-            failed = [r for r in results if not r.success]
-            if not failed:
-                return _RetryResult(success=True, error=None, payload=results)
-            # Combine all failure errors — if any is non-retryable,
-            # the combined string will contain a non-retryable pattern
-            # and _execute_with_retry will short-circuit.
-            combined_error = "; ".join(r.error or "" for r in failed)
-            return _RetryResult(success=False, error=combined_error, payload=results)
-
-        result = self._execute_with_retry(operation, target)
-        return cast(_RetryResult, result).payload  # type: ignore[return-value]
 
     def _should_backup_onchange(
         self,
@@ -4684,19 +4895,25 @@ class Core:
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        snapshots: list[SnapshotInfo],
+        snapshots: list[SnapshotInfo] | None = None,
     ) -> bool:
-        """Transfer missing snapshots to *target*, run retention, cleanup.
+        """Backup each disk to *target*, run retention, cleanup.
 
-        VM-level isolation: a definitive backup failure (FULL creation or
-        incremental transfer, after retries) raises ``BackupAbortError``
-        to abort the remaining pipeline steps of this VM.  Returns
-        ``False`` on completion (kept for the step-function signature).
+        Each disk receives exactly one ``provider.run_backup()`` call
+        that decides FULL vs delta autonomously based on checkpoint
+        presence.  The backup phase does NOT consume snapshot data —
+        it operates solely on target files, libvirt checkpoints, and
+        target-scoped state.
+
+        *snapshots* is accepted for backward compatibility but ignored
+        — the backup phase no longer consumes snapshot data.
+
+        VM-level isolation: a definitive backup failure raises
+        ``BackupAbortError`` after all disks were attempted.  Returns
+        ``False`` on completion.
         """
-        # Per-target onchange gate: skip transfer when the source disk
-        # has not changed since the last backup to this target (spec:
-        # independent-target-onchange).  Retention + cleanup still run
-        # even when transfer is skipped.
+        _ = snapshots  # accepted for compatibility, ignored
+        # Per-target onchange gate (unchanged).
         skip_transfer = False
         change_results: dict[str, ChangeResult] | None = None
         if target.backup_create == "onchange":
@@ -4706,151 +4923,106 @@ class Core:
 
         provider = self._factory.create_backup_provider(vm_config, target)
 
-        # Parse stall_timeout from target config (duration string → seconds).
-        # "0s" disables stall detection → stall_timeout=0 → providers fall
-        # back to fixed-timeout shell.run().
         stall_timeout = parse_stall_timeout(target.backup_stall_timeout)
 
-        # Names of snapshots consumed as FULL sources in this run.  Their
-        # data is fully contained in the new FULL anchors, so they are
-        # excluded from the incremental transfer below (see transfer_list).
-        full_source_names: set[str] = set()
-        # Dry-run only: disks for which a new FULL was predicted.  Threaded
-        # into backup retention/cleanup so predictions simulate the new
-        # chains (design D6 of fix-dry-run-predictions).
+        # Per-disk FULLs predicted in dry-run (threaded into retention).
         predicted_full_disks: list[str] = []
-        # Per-target suspension flag: set when a space error prevents
-        # transfers to this target.  Remaining disks are skipped, but
-        # retention + cleanup still run for the suspended target
-        # (deletion frees space — self-heal; design D2).
         target_suspended = False
+
         if not skip_transfer:
-            # Count-based FULL backup decision (design D2).
-            # The decision is a simple count check: create a new
-            # FULL when the incremental count in the newest chain
-            # exceeds target_chain_length, or when no FULLs exist
-            # (first backup to target).
-            if snapshots:
-                all_fulls = self._state.get_full_backups(str(target.path))
-                # Filter out phantom FULLs — entries in state whose files
-                # no longer exist (deleted externally, disk failure, etc.).
-                filtered_fulls: list[FullBackupInfo] = []
-                for full in all_fulls:
-                    if os.path.exists(str(full.path)):
-                        filtered_fulls.append(full)
-                    elif self._dry_run:
-                        # Zero-mutation invariant: keep the in-memory
-                        # filtering (it drives the FULL decision below)
-                        # but predict the state cleanup instead of
-                        # writing it.
-                        key = f"phantom:{target.path}:{full.name}"
+            # Phantom FULL cleanup (unchanged).
+            all_fulls = self._state.get_full_backups(str(target.path))
+            filtered_fulls: list[FullBackupInfo] = []
+            for full in all_fulls:
+                if os.path.exists(str(full.path)):
+                    filtered_fulls.append(full)
+                elif self._dry_run:
+                    key = f"phantom:{target.path}:{full.name}"
+                    if key not in self._healing_logged:
+                        self._healing_logged.add(key)
+                        cascade = len(
+                            self._state.get_incremental_dependencies(str(target.path), full.name)
+                        )
+                        logger.warning(
+                            "[dry-run] Would remove phantom FULL %s from state "
+                            "(cascade: %d deps would be cleaned)",
+                            full.name,
+                            cascade,
+                        )
+                else:
+                    self._state.remove_full_backup(str(target.path), full.name)
+                    removed = self._state.remove_all_incremental_dependencies(
+                        str(target.path), full.name
+                    )
+                    logger.warning(
+                        "Phantom FULL entry: %s file not found — removed from state "
+                        "(cascade: %d dependency record(s) cleaned)",
+                        full.name,
+                        removed,
+                    )
+            if not filtered_fulls and all_fulls:
+                if self._dry_run:
+                    for disk in vm_config.disks:
+                        key = f"baseline:{target.path}:{disk.target}"
                         if key not in self._healing_logged:
                             self._healing_logged.add(key)
-                            cascade = len(
-                                self._state.get_incremental_dependencies(
-                                    str(target.path), full.name
-                                )
+                            logger.info(
+                                "[dry-run] Would clear last_backup_allocation "
+                                "for target %s disk %s (no FULLs would remain)",
+                                target.path,
+                                disk.target,
                             )
-                            logger.warning(
-                                "[dry-run] Would remove phantom FULL %s from state "
-                                "(cascade: %d deps would be cleaned)",
-                                full.name,
-                                cascade,
-                            )
-                    else:
-                        # Cascade cleanup: remove FULL + all linked
-                        # dependencies (phantom cascade).
-                        self._state.remove_full_backup(str(target.path), full.name)
-                        removed = self._state.remove_all_incremental_dependencies(
-                            str(target.path), full.name
-                        )
-                        logger.warning(
-                            "Phantom FULL entry: %s file not found — removed from state "
-                            "(cascade: %d dependency record(s) cleaned)",
-                            full.name,
-                            removed,
-                        )
-                # Clear per-disk last_backup_allocation if no FULLs remain
-                if not filtered_fulls and all_fulls:
-                    if self._dry_run:
-                        # Zero-mutation invariant: predict baseline cleanup.
-                        for disk in vm_config.disks:
-                            key = f"baseline:{target.path}:{disk.target}"
-                            if key not in self._healing_logged:
-                                self._healing_logged.add(key)
-                                logger.info(
-                                    "[dry-run] Would clear last_backup_allocation "
-                                    "for target %s disk %s (no FULLs would remain)",
-                                    target.path,
-                                    disk.target,
-                                )
-                    else:
-                        for disk in vm_config.disks:
-                            self._state.clear_last_backup_allocation(str(target.path), disk.target)
-                        logger.info(
-                            "Cleared last_backup_allocation for target %s — no FULLs remain",
-                            target.path,
-                        )
-                all_fulls = filtered_fulls
-
-                # Determine per-disk whether a new FULL is needed and
-                # create one per disk (multi-disk refactor).  Each disk
-                # owns its own FULL anchor and incremental chain, so the
-                # count-based FULL decision and the FULL creation both
-                # run independently for every configured disk.
-                force_full = str(target.path) in self._force_full_targets
-                if force_full:
-                    self._force_full_targets.discard(str(target.path))
+                else:
+                    for disk in vm_config.disks:
+                        self._state.clear_last_backup_allocation(str(target.path), disk.target)
                     logger.info(
-                        "[backup] %s: force-full flag active for target %s — "
-                        "creating FULL unconditionally for every disk",
-                        vm_config.name,
+                        "Cleared last_backup_allocation for target %s — no FULLs remain",
                         target.path,
                     )
-                global_cfg = self._config.get_global()
-                free_space_check = vm_config.free_space_check or global_cfg.free_space_check
-                free_space_reserve = (
-                    vm_config.free_space_reserve
-                    if vm_config.free_space_reserve is not None
-                    else global_cfg.free_space_reserve
-                )
-                free_space_factor = (
-                    vm_config.free_space_factor
-                    if vm_config.free_space_factor is not None
-                    else global_cfg.free_space_factor
+            all_fulls = filtered_fulls
+
+            # Force-full flag applies to every disk.
+            force_full = str(target.path) in self._force_full_targets
+            if force_full:
+                self._force_full_targets.discard(str(target.path))
+                logger.info(
+                    "[backup] %s: force-full flag active for target %s — "
+                    "creating FULL unconditionally for every disk",
+                    vm_config.name,
+                    target.path,
                 )
 
-                def _apply_free_space_gate(
-                    estimate: int | None,
-                    context: str,
-                ) -> bool:
-                    """Check free space before a transfer; return True to suspend."""
-                    if free_space_check == "off":
-                        return False
-                    result = check_free_space(
-                        Path(target.path),
-                        estimate,
-                        reserve=free_space_reserve,
-                        factor=free_space_factor,
-                    )
-                    if result.sufficient:
-                        return False
-                    if free_space_check == "warn":
-                        logger.warning(
-                            "[backup] %s target %s: %s estimated %s, "
-                            "free %s, required %s — WARNING, proceeding anyway",
-                            vm_config.name,
-                            target.path,
-                            context,
-                            self._format_bytes(estimate or 0),
-                            self._format_bytes(result.free_bytes),
-                            self._format_bytes(result.required or 0),
-                        )
-                        return False
-                    # Strict mode: gate blocks the transfer.
-                    logger.critical(
+            global_cfg = self._config.get_global()
+            free_space_check = vm_config.free_space_check or global_cfg.free_space_check
+            free_space_reserve = (
+                vm_config.free_space_reserve
+                if vm_config.free_space_reserve is not None
+                else global_cfg.free_space_reserve
+            )
+            free_space_factor = (
+                vm_config.free_space_factor
+                if vm_config.free_space_factor is not None
+                else global_cfg.free_space_factor
+            )
+
+            def _apply_free_space_gate(
+                estimate: int | None,
+                context: str,
+            ) -> bool:
+                if free_space_check == "off":
+                    return False
+                result = check_free_space(
+                    Path(target.path),
+                    estimate,
+                    reserve=free_space_reserve,
+                    factor=free_space_factor,
+                )
+                if result.sufficient:
+                    return False
+                if free_space_check == "warn":
+                    logger.warning(
                         "[backup] %s target %s: %s estimated %s, "
-                        "free %s, required %s — suspending target (strict)",
+                        "free %s, required %s — WARNING, proceeding anyway",
                         vm_config.name,
                         target.path,
                         context,
@@ -4858,421 +5030,266 @@ class Core:
                         self._format_bytes(result.free_bytes),
                         self._format_bytes(result.required or 0),
                     )
-                    self._space_limited_targets.add(str(target.path))
-                    return True
+                    return False
+                logger.critical(
+                    "[backup] %s target %s: %s estimated %s, "
+                    "free %s, required %s — suspending target (strict)",
+                    vm_config.name,
+                    target.path,
+                    context,
+                    self._format_bytes(estimate or 0),
+                    self._format_bytes(result.free_bytes),
+                    self._format_bytes(result.required or 0),
+                )
+                self._space_limited_targets.add(str(target.path))
+                return True
 
-                for disk_cfg in vm_config.disks:
-                    # Skip remaining disks when the target is suspended
-                    # due to a space error (design D2).
-                    if target_suspended:
-                        logger.debug(
-                            "[backup] %s target %s disk %s: target suspended — skipping",
-                            vm_config.name,
-                            target.path,
-                            disk_cfg.target,
-                        )
-                        continue
-                    disk_target = disk_cfg.target
-                    disk_fulls = [f for f in all_fulls if f.disk == disk_target]
-                    if force_full:
-                        needs_full = True
-                    elif not disk_fulls:
-                        # First backup of this disk — always create a FULL.
-                        needs_full = True
-                    else:
-                        # Count incrementals in this disk's newest chain.
-                        newest_full = max(disk_fulls, key=lambda f: f.timestamp)
-                        deps = self._state.get_incremental_dependencies(
-                            str(target.path), newest_full.name
-                        )
-                        chain_length = target.target_chain_length
-                        needs_full = chain_length is not None and len(deps) > chain_length
-                    if not needs_full:
-                        continue
+            # ── Per-disk backup loop ──────────────────────────────────
+            failed_disks: list[BackupResult] = []
+            full_failed_disks: list[BackupResult] = []
+            successful_disks: list[BackupResult] = []
+            deferred_disk_targets: set[str] = set()
 
-                    # This disk's most recent snapshot is the FULL source.
-                    disk_snaps = [s for s in snapshots if s.disk == disk_target]
-                    if not disk_snaps:
-                        logger.info(
-                            "[backup] %s: disk %s needs a FULL but has no snapshots — skipping",
-                            vm_config.name,
-                            disk_target,
-                        )
-                        continue
-                    most_recent = max(disk_snaps, key=lambda s: s.timestamp)
+            for disk_cfg in vm_config.disks:
+                if target_suspended:
+                    logger.debug(
+                        "[backup] %s target %s disk %s: target suspended — skipping",
+                        vm_config.name,
+                        target.path,
+                        disk_cfg.target,
+                    )
+                    continue
+                disk_target = disk_cfg.target
 
-                    # Proactive free-space gate before FULL transfer.
-                    # Full estimate = sum of actual-size over backing
-                    # chain (worst-case standalone copy size, design D5).
-                    # In dry-run, gating is a prediction entry only.
-                    if self._dry_run:
-                        full_estimate = self._estimate_full_size_for_disk(
-                            vm_config, disk_cfg, most_recent
-                        )
-                        if free_space_check == "strict":
-                            result = check_free_space(
-                                Path(target.path),
-                                full_estimate,
-                                reserve=free_space_reserve,
-                                factor=free_space_factor,
-                            )
-                            self._predictions.append(
-                                ActionRecord(
-                                    action="free_space_gate",
-                                    vm_name=vm_config.name,
-                                    name=str(target.path),
-                                    path=target.path,
-                                    size=full_estimate or 0,
-                                    error=(
-                                        None
-                                        if result.sufficient
-                                        else "insufficient space (would suspend target)"
-                                    ),
-                                )
-                            )
-                    elif not self._dry_run and _apply_free_space_gate(
-                        estimate_full_size(self._shell, most_recent.path),
-                        f"FULL backup for disk {disk_target}",
+                # Blockjob probe (design D9).
+                if not self._dry_run and is_vm_running(self._shell, vm_config.name):
+                    blockjob_cmd = [
+                        "virsh",
+                        "blockjob",
+                        "--domain",
+                        vm_config.name,
+                        "--path",
+                        str(disk_cfg.base_image),
+                    ]
+                    blockjob_result = self._shell.run(blockjob_cmd, timeout=30, check=True)
+                    if (
+                        blockjob_result.success
+                        and "No current block job" not in blockjob_result.stdout
                     ):
-                        target_suspended = True
-                        break
-
-                    if self._dry_run:
-                        # Log FULL-would-be-created without executing and
-                        # record a backup_full prediction (design D5 of
-                        # fix-dry-run-predictions).  The chain-size
-                        # estimate is read-only; on failure the prediction
-                        # degrades to "size unknown" but is still emitted.
-                        vm_state = (
-                            "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
-                        )
-                        chain_length = target.target_chain_length or 0
-                        chain_size = self._estimate_full_size_for_disk(
-                            vm_config, disk_cfg, most_recent
-                        )
-                        size_str = (
-                            f"~{self._format_bytes(chain_size)}"
-                            if chain_size is not None
-                            else "size unknown"
-                        )
                         logger.info(
-                            "[dry-run] Would create FULL backup for disk %s "
-                            "(%s, chain_length=%d, method=NBD, VM=%s)",
+                            "[backup] %s: blockjob active on disk %s — "
+                            "backup deferred for this run",
+                            vm_config.name,
                             disk_target,
-                            size_str,
-                            chain_length,
-                            vm_state,
                         )
-                        # Illustrative FULL name (same naming convention as
-                        # the provider; a real run would use its own hex).
-                        full_name = (
-                            f"{vm_config.name}.FULL."
-                            f"{most_recent.timestamp.strftime('%Y%m%dT%H%M%S')}"
-                            f"_{disk_target}_{secrets.token_hex(3)}"
+                        deferred_disk_targets.add(disk_target)
+                        continue
+
+                # Determine whether a FULL is due.
+                disk_fulls = [f for f in all_fulls if f.disk == disk_target]
+                if force_full or not disk_fulls:
+                    needs_full = True
+                else:
+                    newest_full = max(disk_fulls, key=lambda f: f.timestamp)
+                    deps = self._state.get_incremental_dependencies(
+                        str(target.path), newest_full.name
+                    )
+                    chain_length = target.target_chain_length
+                    needs_full = chain_length is not None and len(deps) > chain_length
+
+                # Free-space gate before backup.
+                full_estimate = estimate_full_size(self._shell, disk_cfg.base_image)
+                if self._dry_run:
+                    if free_space_check == "strict":
+                        result = check_free_space(
+                            Path(target.path),
+                            full_estimate,
+                            reserve=free_space_reserve,
+                            factor=free_space_factor,
                         )
                         self._predictions.append(
                             ActionRecord(
-                                action="backup_full",
+                                action="free_space_gate",
                                 vm_name=vm_config.name,
-                                name=full_name,
-                                path=target.path / f"{full_name}.qcow2",
-                                size=chain_size or 0,
-                                disk=disk_target,
+                                name=str(target.path),
+                                path=target.path,
+                                size=full_estimate or 0,
+                                error=(
+                                    None
+                                    if result.sufficient
+                                    else "insufficient space (would suspend target)"
+                                ),
                             )
                         )
-                        predicted_full_disks.append(disk_target)
-                        continue
+                elif _apply_free_space_gate(
+                    full_estimate,
+                    f"backup for disk {disk_target}",
+                ):
+                    target_suspended = True
+                    break
 
-                    def _create_full_operation(
-                        mr: SnapshotInfo = most_recent,
-                    ) -> BackupResult:
-                        """Create FULL backup, verify, record — or rollback on failure."""
-                        full_result = provider.create_full_backup(
-                            vm_config.name,
-                            mr,
-                            target,
-                            compress=target.compress,
-                            compression_type=target.compression_type,
-                            stall_timeout=stall_timeout,
-                            convert_parallel=target.convert_parallel,
-                            convert_out_of_order=target.convert_out_of_order,
-                        )
-                        if not full_result.success:
-                            return full_result
-
-                        # ── Post-create FULL backup verification ────
-                        # (verify-before-delete gate — design D3).
-                        verify_error = verify_full_backup(
-                            self._shell,
-                            full_result.target_path,
-                            global_cfg.full_verify_after_create,
-                            source_path=mr.path,
-                        )
-                        if verify_error is not None:
-                            # Rollback: delete FULL file + checkpoint +
-                            # state records (design D4).
-                            self._shell.run(
-                                ["rm", "-f", str(full_result.target_path)],
-                                timeout=10,
-                            )
-                            self._cleanup_failed_checkpoint(vm_config, target, full_result)
-                            full_name = full_result.target_path.stem
-                            self._state.remove_full_backup(str(target.path), f"{full_name}.qcow2")
-                            logger.warning(
-                                "FULL backup verification failed for VM %s "
-                                "target %s — rolled back: %s",
-                                vm_config.name,
-                                target.path,
-                                verify_error,
-                            )
-                            return BackupResult(
-                                success=False,
-                                snapshot_name=full_result.snapshot_name,
-                                source_path=full_result.source_path,
-                                target_path=full_result.target_path,
-                                bytes_transferred=full_result.bytes_transferred,
-                                error="[verify-failure] " + verify_error,
-                                duration=full_result.duration,
-                                disk=full_result.disk,
-                                checkpoint=full_result.checkpoint,
-                            )
-
-                        # Verification passed — record + log.
-                        full_name = full_result.target_path.stem
-                        self._state.record_full_backup(
-                            str(target.path),
-                            f"{full_name}.qcow2",
-                            mr.timestamp,
-                            mr.disk,
-                        )
-                        self._actions.append(
-                            ActionRecord(
-                                action="backup_full",
-                                vm_name=vm_config.name,
-                                name=full_name,
-                                path=full_result.target_path,
-                                size=full_result.bytes_transferred,
-                                disk=mr.disk,
-                            )
-                        )
-                        logger.info(
-                            "[backup] %s: created FULL %s for disk %s (%d B)",
-                            vm_config.name,
-                            full_name,
-                            mr.disk,
-                            full_result.bytes_transferred,
-                        )
-                        return full_result
-
-                    full_result = self._execute_with_retry(_create_full_operation, target)
-                    if not full_result.success:
-                        # Space errors suspend only this target — remaining
-                        # disks are skipped, but retention + cleanup still
-                        # run (deletion frees space, design D2).  The
-                        # verify-before-delete gate is not weakened:
-                        # verification failures are never space-classified.
-                        if is_space_error(full_result.error):
-                            logger.critical(
-                                "[backup] %s target %s disk %s: FULL backup failed "
-                                "due to disk-full — suspending target: %s",
-                                vm_config.name,
-                                target.path,
-                                disk_target,
-                                full_result.error,
-                            )
-                            self._space_limited_targets.add(str(target.path))
-                            target_suspended = True
-                            break
-                        # All retries exhausted or non-retryable failure.
-                        # VM-level isolation: abort the remaining steps of
-                        # this VM.  Old generations stay untouched — the
-                        # abort itself is the verify-before-delete gate:
-                        # nothing is deleted after this point.
-                        msg = (
-                            f"FULL backup creation failed for VM {vm_config.name} "
-                            f"target {target.path} disk {disk_target} — "
-                            f"old generations preserved"
-                        )
-                        logger.critical(msg)
-                        raise BackupAbortError(msg)
-                    else:
-                        # The FULL anchor already contains this snapshot's
-                        # data; exclude it from the incremental transfer.
-                        full_source_names.add(most_recent.name)
-
-            # Transfer missing snapshots (with retry when configured).
-            # Snapshots already consumed as FULL sources this run are
-            # excluded: the FULL anchor fully contains their data, and
-            # re-transferring them as incrementals against the checkpoint
-            # the FULL export itself created trips the design-D5 temporal
-            # cross-check whenever the checkpoint's second-granularity
-            # timestamp rolls past the snapshot's microsecond timestamp
-            # (a spurious "backup failed" on an otherwise healthy FULL).
-            if not self._dry_run:
-                # Proactive free-space gate before incremental transfers.
-                # Estimate the active-layer size per disk of snapshots
-                # pending transfer (upper bound for a dirty-block delta,
-                # design D5).
-                if not target_suspended:
-                    candidate_list = [s for s in snapshots if s.name not in full_source_names]
-                    for disk_cfg in vm_config.disks:
-                        disk_transfers = [s for s in candidate_list if s.disk == disk_cfg.target]
-                        if not disk_transfers:
-                            continue
-                        most_recent_pending = max(disk_transfers, key=lambda s: s.timestamp)
-                        if _apply_free_space_gate(
-                            estimate_incremental_size(self._shell, most_recent_pending.path),
-                            f"incremental transfer for disk {disk_cfg.target}",
-                        ):
-                            target_suspended = True
-                            break
-
-                transfer_list = [s for s in snapshots if s.name not in full_source_names]
-                if target_suspended:
-                    logger.debug(
-                        "[backup] %s target %s: target suspended — skipping incremental transfers",
-                        vm_config.name,
-                        target.path,
+                # Dry-run: predict backup kind from checkpoint state.
+                if self._dry_run:
+                    vm_state = (
+                        "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
                     )
-                    transfer_list = []  # skip all transfers
-                results = self._transfer_with_retry(
-                    provider,
-                    vm_config,
-                    target,
-                    transfer_list,
-                    compression_type=target.compression_type,
-                    stall_timeout=stall_timeout,
-                    convert_parallel=target.convert_parallel,
-                    convert_out_of_order=target.convert_out_of_order,
-                )
-                failed = [r for r in results if not r.success]
-                if failed:
-                    failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
-                    logger.warning(
-                        "Backup transfer failed for VM %s target %s: %d snapshot(s) failed — %s",
-                        vm_config.name,
-                        target.path,
-                        len(failed),
-                        failure_details,
+                    kind = "FULL" if needs_full else "delta"
+                    size_str = (
+                        f"~{self._format_bytes(full_estimate)}"
+                        if full_estimate is not None
+                        else "size unknown"
                     )
-
-                # Audit trail + btrbk-style INFO log for successful transfers
-                # (design D4, D5).
-                for r in results:
-                    if r.success:
-                        speed = (
-                            r.bytes_transferred / (1024 * 1024) / r.duration
-                            if r.duration > 0
-                            else 0.0
-                        )
-                        self._actions.append(
-                            ActionRecord(
-                                action="backup_transfer",
-                                vm_name=vm_config.name,
-                                name=r.snapshot_name,
-                                path=r.target_path,
-                                size=r.bytes_transferred,
-                                duration=r.duration,
-                                disk=r.disk,
-                            )
-                        )
-                        logger.info(
-                            "[backup] %s: transferred %s → %s (%d B in %.1fs, %.1f MiB/s)",
-                            vm_config.name,
-                            r.snapshot_name,
-                            target.path,
-                            r.bytes_transferred,
-                            r.duration,
-                            speed,
-                        )
-
-                # Record incremental→FULL dependency for bitmap transfers
-                # (spec: Core records dependency; design D4 — state
-                # recording is Core's responsibility).  Bitmap incrementals
-                # are backing-chained deltas; the provider verified them,
-                # and Core now registers each as a dependent of its chain's
-                # FULL anchor so retention cascade-deletion and ``check``
-                # see the whole chain.  Failed transfers record nothing;
-                # standalone full pulls (no backing file) have no anchor
-                # and are skipped.
-                for r in results:
-                    if not r.success:
-                        continue
-                    anchor = self._resolve_chain_full_anchor(r.target_path)
-                    if anchor is not None:
-                        self._state.record_incremental_dependency(
-                            str(target.path),
-                            r.snapshot_name,
-                            anchor,
-                        )
-
-                # VM-level isolation: successful transfers of this batch
-                # were audited above.  Space errors suspend only this
-                # target (design D2); non-space failures still abort the
-                # VM via BackupAbortError.
-                if failed:
-                    # If ALL failures are space errors, suspend the target
-                    # instead of aborting the VM.
-                    all_space = all(is_space_error(r.error) for r in failed)
-                    if all_space:
-                        failure_details = "; ".join(f"{r.snapshot_name}: {r.error}" for r in failed)
-                        logger.critical(
-                            "[backup] %s target %s: incremental transfers failed "
-                            "due to disk-full — suspending target: %s",
-                            vm_config.name,
-                            target.path,
-                            failure_details,
-                        )
-                        self._space_limited_targets.add(str(target.path))
-                        target_suspended = True
-                        # Skip remaining disks of this suspended target
-                        # (break out of try-except scope below, then
-                        # continue to retention + cleanup).
-                    else:
-                        msg = (
-                            f"Backup transfer failed for VM {vm_config.name} "
-                            f"target {target.path}: {len(failed)} snapshot(s) failed"
-                        )
-                        raise BackupAbortError(msg)
-            else:
-                # Dry-run: predict incremental transfers read-only
-                # (design D4 of fix-dry-run-predictions).  Predicted
-                # list = merged snapshots minus FULL sources minus
-                # backups already present on the target.  Sizes are
-                # upper-bound estimates: the source file's actual-size
-                # when it exists, else the simulated allocation.
-                existing_names = {b.name for b in provider.list(target)}
-                for snap in snapshots:
-                    if snap.name in full_source_names or snap.name in existing_names:
-                        continue
-                    actual = self._estimate_file_actual_size(snap.path)
-                    approx = actual if actual is not None else snap.allocation
                     logger.info(
-                        "[dry-run] Would transfer %s/%s → %s (~%s)",
-                        vm_config.name,
-                        snap.name,
-                        target.path,
-                        self._format_bytes(approx),
+                        "[dry-run] Would create %s backup for disk %s (%s, method=NBD, VM=%s)",
+                        kind,
+                        disk_target,
+                        size_str,
+                        vm_state,
                     )
                     self._predictions.append(
                         ActionRecord(
-                            action="backup_transfer",
+                            action="backup_full" if needs_full else "backup_transfer",
                             vm_name=vm_config.name,
-                            name=snap.name,
-                            path=target.path / f"{snap.name}.qcow2",
-                            size=approx,
-                            disk=snap.disk,
+                            name=f"{vm_config.name}.{'FULL.' if needs_full else ''}"
+                            f"{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+                            f"_{disk_target}_{secrets.token_hex(3)}",
+                            path=target.path,
+                            size=full_estimate or 0,
+                            disk=disk_target,
                         )
                     )
+                    if needs_full:
+                        predicted_full_disks.append(disk_target)
+                    continue
 
-        # Update per-target per-disk baselines after successful backup
-        # (onchange mode).  Each disk's baseline is its current_allocation
-        # at the time of the last successful backup.  Failures never reach
-        # this point (BackupAbortError aborts earlier — fail-safe: next
-        # run retries).  Not updated when the gate skipped transfer
-        # (baseline already current), in dry-run (no actual transfer
-        # occurred), or when the target was suspended due to space error
-        # (dirty data not transferred — next run auto-resumes, design D7).
+                # Real run: execute run_backup.
+                result = self._execute_with_retry(
+                    lambda d=disk_cfg, nf=needs_full: provider.run_backup(
+                        vm_config,
+                        target,
+                        d,
+                        force_full=nf,
+                        compression_type=target.compression_type,
+                        stall_timeout=stall_timeout,
+                        convert_parallel=target.convert_parallel,
+                        convert_out_of_order=target.convert_out_of_order,
+                    ),
+                    target,
+                )
+                if not result.success:
+                    if is_space_error(result.error):
+                        logger.critical(
+                            "[backup] %s target %s disk %s: backup failed "
+                            "due to disk-full — suspending target: %s",
+                            vm_config.name,
+                            target.path,
+                            disk_target,
+                            result.error,
+                        )
+                        self._space_limited_targets.add(str(target.path))
+                        target_suspended = True
+                        break
+                    failed_disks.append(result)
+                    if needs_full:
+                        full_failed_disks.append(result)
+                    continue
+
+                if result.deferred:
+                    logger.info(
+                        "[backup] %s: backup deferred for disk %s",
+                        vm_config.name,
+                        disk_target,
+                    )
+                    deferred_disk_targets.add(disk_target)
+                    continue
+
+                # Audit successful backup.
+                speed = (
+                    result.bytes_transferred / (1024 * 1024) / result.duration
+                    if result.duration > 0
+                    else 0.0
+                )
+                action = "backup_full" if needs_full else "backup_transfer"
+                self._actions.append(
+                    ActionRecord(
+                        action=action,
+                        vm_name=vm_config.name,
+                        name=result.snapshot_name,
+                        path=result.target_path,
+                        size=result.bytes_transferred,
+                        duration=result.duration,
+                        disk=result.disk,
+                        target=str(target.path),
+                    )
+                )
+                logger.info(
+                    "[backup] %s: %s %s → %s (%d B in %.1fs, %.1f MiB/s)",
+                    vm_config.name,
+                    "created FULL" if needs_full else "transferred",
+                    result.snapshot_name,
+                    target.path,
+                    result.bytes_transferred,
+                    result.duration,
+                    speed,
+                )
+                successful_disks.append(result)
+
+                # Record FULL in state.
+                if needs_full:
+                    self._state.record_full_backup(
+                        str(target.path),
+                        result.snapshot_name,
+                        datetime.now(),
+                        result.disk or disk_target,
+                    )
+
+                # Record incremental dependency.
+                if not needs_full and result.success and not result.deferred:
+                    anchor = self._resolve_chain_full_anchor(result.target_path)
+                    if anchor is not None:
+                        self._state.record_incremental_dependency(
+                            str(target.path),
+                            result.snapshot_name,
+                            anchor,
+                        )
+
+            # ── Aggregate per-disk results ────────────────────────────
+            if failed_disks:
+                # Check if all are space errors → suspend target.
+                all_space = all(is_space_error(r.error) for r in failed_disks)
+                if all_space:
+                    failure_details = "; ".join(f"disk {r.disk}: {r.error}" for r in failed_disks)
+                    logger.critical(
+                        "[backup] %s target %s: backups failed "
+                        "due to disk-full — suspending target: %s",
+                        vm_config.name,
+                        target.path,
+                        failure_details,
+                    )
+                    self._space_limited_targets.add(str(target.path))
+                    target_suspended = True
+                else:
+                    failure_details = "; ".join(f"disk {r.disk}: {r.error}" for r in failed_disks)
+                    if full_failed_disks:
+                        logger.critical(
+                            "[backup] %s target %s: FULL backup failed after retries "
+                            "for disk(s) %s — old generations preserved",
+                            vm_config.name,
+                            target.path,
+                            ", ".join(r.disk or "?" for r in full_failed_disks),
+                        )
+                    msg = (
+                        f"Backup to target {target.path} failed for VM {vm_config.name}: "
+                        f"{failure_details}"
+                    )
+                    logger.warning(msg)
+                    raise BackupAbortError(
+                        msg,
+                        target=str(target.path),
+                        disks=tuple(r.disk or "?" for r in failed_disks),
+                    )
+
+        # ── Post-backup baseline update ─────────────────────────────────
         if (
             change_results is not None
             and not skip_transfer
@@ -5280,15 +5297,13 @@ class Core:
             and not target_suspended
         ):
             for disk_target, cr in change_results.items():
+                if disk_target in deferred_disk_targets:
+                    continue
                 self._state.set_last_backup_allocation(
                     str(target.path), disk_target, cr.current_allocation
                 )
 
-        # Backup retention + cleanup.  A failed FULL creation never
-        # reaches this point (BackupAbortError above is the
-        # verify-before-delete gate: old generations are never deleted
-        # after a failure).  When transfer is skipped, retention +
-        # cleanup still runs to clean expired backups.
+        # Backup retention + cleanup.
         backups, retention_result = self._evaluate_backup_retention(
             vm_config, target, predicted_full_disks=predicted_full_disks or None
         )
@@ -5407,8 +5422,8 @@ class Core:
 
     def _group_backups_by_chain(
         self,
-        backups: list[SnapshotInfo],
-    ) -> dict[str, list[SnapshotInfo]]:
+        backups: list[BackupInfo],
+    ) -> dict[str, list[BackupInfo]]:
         """Group backups by their FULL anchor chain.
 
         Returns ``{chain_id: [backups in chain]}``.
@@ -5421,7 +5436,7 @@ class Core:
           under ``"__orphan__"`` and placed in the remove list for
           auto-recovery cleanup (spec: per-chain-retention).
         """
-        chains: dict[str, list[SnapshotInfo]] = {}
+        chains: dict[str, list[BackupInfo]] = {}
         for backup in backups:
             if ".FULL." in backup.name:
                 chain_id = backup.name
@@ -5437,7 +5452,7 @@ class Core:
         vm_config: VMConfig,
         target: TargetConfig,
         predicted_full_disks: list[str] | None = None,
-    ) -> tuple[list[SnapshotInfo], RetentionResult | None]:
+    ) -> tuple[list[BackupInfo], RetentionResult | None]:
         """List backups on *target* and evaluate per-chain retention.
 
         Groups backups by chain (FULL anchor), creates one
@@ -5474,18 +5489,18 @@ class Core:
                 chain_id = f"__predicted_full__{disk_target}__"
                 predicted_chain_ids.add(chain_id)
                 chains[chain_id] = [
-                    SnapshotInfo(
+                    BackupInfo(
                         name=f"{vm_config.name}.FULL.<predicted>_{disk_target}",
                         path=target.path,
                         timestamp=now,
-                        allocation=0,
                         disk=disk_target,
+                        is_full=True,
                     )
                 ]
 
         # Build chain-level retention items (one per chain, FULL's timestamp).
         chain_items: list[RetentionItem] = []
-        chain_map: dict[str, list[SnapshotInfo]] = {}
+        chain_map: dict[str, list[BackupInfo]] = {}
         for chain_id, chain_backups in chains.items():
             chain_map[chain_id] = chain_backups
             full_backup = next((b for b in chain_backups if ".FULL." in b.name), None)
@@ -5526,7 +5541,7 @@ class Core:
         self,
         vm_config: VMConfig,
         target: TargetConfig,
-        backups: list[SnapshotInfo],
+        backups: list[BackupInfo],
         retention_result: RetentionResult | None,
         predicted_full_disks: list[str] | None = None,
     ) -> None:
@@ -5685,7 +5700,7 @@ class Core:
 
     def _verify_keep_set_chains(
         self,
-        backups: list[SnapshotInfo],
+        backups: list[BackupInfo],
         keep_set: set[str],
         target: TargetConfig,
     ) -> None:

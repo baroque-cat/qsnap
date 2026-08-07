@@ -22,8 +22,12 @@
 # Directory for persistent state files (per-VM JSON).
 state_dir = "/var/lib/qsnap/state"
 
-# Lockfile path.  When set, qsnap acquires an exclusive flock before
-# running.  Set to a path or leave unset to disable locking.
+# Lockfile path.  Defaults to "/var/lib/qsnap/qsnap.lock" when not
+# configured — an exclusive flock is acquired before every mutating
+# command (run, snapshot, backup, prune, reconcile, restore, fork).
+# Read-only commands (list, stats, check, estimate) run without lock.
+# Set to a custom path to override, or "off" to disable locking
+# entirely.
 # lockfile = "/run/qsnap.lock"
 
 # Default snapshot chain length for all VMs (applies unless overridden

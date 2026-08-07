@@ -125,10 +125,11 @@ def test_bitmap_incremental_registers_dependency(
     """Bitmap backup transfer → Core records incremental→FULL dependency.
 
     Drives ``Core._backup_target()`` with a bitmap-mode target and a
-    single snapshot.  The provider's ``transfer_missing`` returns one
-    successful ``BackupResult``.  The backing chain walk resolves a
+    single disk.  The provider's ``run_backup`` returns one successful
+    freeze-ts-named ``BackupResult``.  The backing chain walk resolves a
     ``.FULL.`` anchor, and Core calls
-    ``state.record_incremental_dependency()`` with the correct arguments.
+    ``state.record_incremental_dependency()`` with the correct arguments
+    (dependency keys are freeze-ts backup names — design D3/D4).
     """
     target_dir = tmp_path / "backup"
     target_dir.mkdir()
@@ -137,18 +138,31 @@ def test_bitmap_incremental_registers_dependency(
     snap = _make_incremental_snapshot("vm.20250101T000000")
 
     # Pre-record a FULL (with a real file) so this run performs an
-    # incremental transfer instead of creating a new FULL (FULL creation
-    # would fail verification on this minimal shell and abort the VM).
+    # incremental transfer instead of creating a new FULL.
     full_name = "vm.FULL.20250101.qcow2"
     (target_dir / full_name).touch()
     mock_state.record_full_backup(str(target_dir), full_name, datetime(2025, 1, 1, 0, 0, 0), "vda")
+
+    # Provider returns a deterministic freeze-ts delta for this disk.
+    inc_name = "testvm.20250101T000000_vda_a1b2c3"
+    inc_path = target_dir / f"{inc_name}.qcow2"
+    inc_path.touch()
+    delta_result = BackupResult(
+        success=True,
+        snapshot_name=inc_name,
+        source_path=vm.disks[0].base_image,
+        target_path=inc_path,
+        bytes_transferred=1048576,
+        error=None,
+        disk="vda",
+    )
 
     # Create a fresh shell with only our expectations (no conftest noise).
     shell = MockShell()
     _setup_chain_walk_shell(
         shell,
         str(target_dir),
-        inc_name="vm.20250101T000000",
+        inc_name=inc_name,
         full_stem="vm.FULL.20250101",
     )
 
@@ -158,19 +172,26 @@ def test_bitmap_incremental_registers_dependency(
     )
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=shell)
 
-    with patch.object(
-        mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
-    ) as spy:
+    with (
+        patch.object(
+            mock_factory._bitmap_backup_provider,
+            "run_backup",
+            return_value=delta_result,
+        ),
+        patch.object(
+            mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
+        ) as spy,
+    ):
         core._backup_target(vm, target, [snap])
 
     # ── assert dependency was recorded ──────────────────────────────
     spy.assert_called_once_with(
         str(target_dir),
-        "vm.20250101T000000",
+        inc_name,
         "vm.FULL.20250101",
     )
     deps = mock_state.get_incremental_dependencies(str(target_dir), "vm.FULL.20250101")
-    assert "vm.20250101T000000" in deps
+    assert inc_name in deps
 
 
 # ── test_failed_transfer_records_no_dependency ─────────────────────────
@@ -185,7 +206,7 @@ def test_failed_transfer_records_no_dependency(
 ) -> None:
     """Failed bitmap transfer → no dependency recorded, no qemu-img info calls.
 
-    When ``transfer_missing`` returns a ``BackupResult(success=False)``,
+    When ``run_backup`` returns a ``BackupResult(success=False)``,
     Core must skip the chain walk entirely and never call
     ``record_incremental_dependency``.
     """
@@ -204,29 +225,28 @@ def test_failed_transfer_records_no_dependency(
     # Replace the bitmap provider with one that always fails.
     failing_provider = MockBitmapBackupProvider()
 
-    def _failing_transfer(
+    def _failing_run_backup(
         vm_config,
         target,
-        snapshots,
+        disk,
         *,
+        force_full=False,
         compression_type="zstd",
         stall_timeout=1800,
         convert_parallel=4,
         convert_out_of_order=True,
     ):
-        return [
-            BackupResult(
-                success=False,
-                snapshot_name=s.name,
-                source_path=s.path,
-                target_path=target.path / f"{s.name}.qcow2",
-                bytes_transferred=0,
-                error="simulated transfer failure",
-            )
-            for s in snapshots
-        ]
+        return BackupResult(
+            success=False,
+            snapshot_name="",
+            source_path=disk.base_image,
+            target_path=target.path / f"{disk.target}.qcow2",
+            bytes_transferred=0,
+            error="simulated transfer failure",
+            disk=disk.target,
+        )
 
-    failing_provider.transfer_missing = _failing_transfer  # type: ignore[method-assign]
+    failing_provider.run_backup = _failing_run_backup  # type: ignore[method-assign]
     mock_factory._bitmap_backup_provider = failing_provider
 
     shell = MockShell()
@@ -257,7 +277,7 @@ def test_failed_transfer_records_no_dependency(
     # that the shell was never asked a qemu-img info command (the mock
     # would return an error for any unmatched command):
     result = shell.run(
-        ["qemu-img", "info", "--output=json", str(target_dir / "vm.failed.20250101T000000.qcow2")],
+        ["qemu-img", "info", "--output=json", str(target_dir / "vda.qcow2")],
         timeout=60,
     )
     assert "No mock configured" in (result.error or ""), (

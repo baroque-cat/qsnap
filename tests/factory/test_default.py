@@ -133,9 +133,8 @@ def test_factory_always_returns_bitmap_backup_provider(
     There is no mode-select logic — BitmapBackupProvider is the sole
     backup provider.  Verifies that the factory gates construction on
     ``is_libvirt_new_enough`` and ``is_libnbd_available`` before
-    returning BitmapBackupProvider, and that the factory injects its
-    ``_state`` reference into the provider so the provider can persist
-    cross-run data.
+    returning BitmapBackupProvider, and that the factory wires a
+    ``LibnbdClient`` (not an ``IStateManager``) into the provider.
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -162,7 +161,8 @@ def test_factory_always_returns_bitmap_backup_provider(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
-    assert provider._state is mock_state
+    assert isinstance(provider._nbd, LibnbdClient)
+    assert not hasattr(provider, "_state")
     mock_check.assert_called_once_with(mock_shell)
 
 
@@ -229,7 +229,8 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
 
     When both ``is_libvirt_new_enough`` and ``is_libnbd_available``
     return True, the factory constructs a ``BitmapBackupProvider`` and
-    injects the factory's ``_state`` reference into the provider.
+    wires a ``LibnbdClient`` (not an ``IStateManager``) into the
+    provider.
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target()
@@ -247,23 +248,25 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
-    assert provider._state is mock_state
+    assert isinstance(provider._nbd, LibnbdClient)
+    assert not hasattr(provider, "_state")
     mock_check.assert_called_once_with(mock_shell)
 
 
-def test_factory_passes_state_to_bitmap_provider(
+def test_factory_constructs_bitmap_with_nbd_without_state(
     mock_shell,
     mock_state,
     make_vm_config,
     make_target,
 ):
-    """DefaultFactory.create_backup_provider() injects its ``_state`` into
-    BitmapBackupProvider so the provider can persist cross-run data.
+    """DefaultFactory.create_backup_provider() wires a LibnbdClient into
+    BitmapBackupProvider and does NOT inject an IStateManager.
 
-    This test isolates the state-injection concern: it patches
-    ``is_libvirt_new_enough`` to return True and then verifies the
-    returned provider holds a reference to the factory's state manager
-    and has a LibnbdClient wired in.
+    The provider is target-world only (design D2): state recording is
+    Core's responsibility after verification.  This test isolates the
+    construction concern: it patches ``is_libvirt_new_enough`` and
+    ``is_libnbd_available`` and then verifies the returned provider
+    holds a LibnbdClient and carries no ``_state`` reference.
     """
     factory = DefaultFactory(shell=mock_shell, state=mock_state)
     target = make_target()
@@ -281,11 +284,11 @@ def test_factory_passes_state_to_bitmap_provider(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
-    assert provider._state is mock_state, (
-        "Factory must inject its IStateManager into BitmapBackupProvider"
-    )
     assert isinstance(provider._nbd, LibnbdClient), (
         "Factory must wire a LibnbdClient into BitmapBackupProvider"
+    )
+    assert not hasattr(provider, "_state"), (
+        "Factory must NOT inject IStateManager into BitmapBackupProvider"
     )
 
 
@@ -302,7 +305,8 @@ def test_factory_libvirt_7_2_returns_bitmap(
 
     7.2 is the exact minimum for the atomic checkpoint API.  The factory
     must construct a BitmapBackupProvider directly (no fallback WARNING)
-    and inject the factory's ``_state`` reference into the provider.
+    and wire a ``LibnbdClient`` (not an ``IStateManager``) into the
+    provider.
     """
     mock_shell.expect("virsh --version").returns(
         ShellResult(
@@ -323,7 +327,8 @@ def test_factory_libvirt_7_2_returns_bitmap(
         provider = factory.create_backup_provider(make_vm_config(), target)
 
     assert isinstance(provider, BitmapBackupProvider)
-    assert provider._state is mock_state
+    assert isinstance(provider._nbd, LibnbdClient)
+    assert not hasattr(provider, "_state")
 
 
 def test_factory_old_libvirt_raises_runtime_error(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
+from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import SnapshotResult, SnapshotSpec
-from tests.mocks.mock_modules import MockSnapshotProvider
+from tests.mocks.mock_modules import MockBitmapBackupProvider, MockSnapshotProvider
 
 
 def test_mock_shell_implements_full_interface():
@@ -70,3 +72,31 @@ def test_mock_create_multi_validity_empty_specs():
     results = provider.create_multi(_make_vm_config(), [], quiesce=False)
     assert results is not None
     assert results == []
+
+
+def test_mock_backup_provider_api_carries_no_snapshotinfo():
+    """MockBitmapBackupProvider's public API never references SnapshotInfo.
+
+    The backup world is target-world only (design D2 of
+    orthogonalize-snapshots-and-backups): no public method signature or
+    return annotation may mention ``SnapshotInfo``.  All backup data is
+    modeled via ``BackupResult``/``BackupInfo``.
+    """
+    provider = MockBitmapBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    public_methods = [
+        name
+        for name in dir(provider)
+        if not name.startswith("_") and callable(getattr(provider, name))
+    ]
+    assert public_methods, "expected at least one public method on the mock"
+
+    for name in public_methods:
+        signature = inspect.signature(getattr(provider, name))
+        assert "SnapshotInfo" not in str(signature), (
+            f"MockBitmapBackupProvider.{name}{signature} references SnapshotInfo"
+        )
+        assert "SnapshotInfo" not in (
+            getattr(signature.return_annotation, "__name__", repr(signature.return_annotation))
+        ), f"MockBitmapBackupProvider.{name} return annotation references SnapshotInfo"

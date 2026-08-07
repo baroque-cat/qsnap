@@ -631,6 +631,40 @@ def test_summary_vm_level_error_no_prefix():
     assert "[disk]" not in output
 
 
+def test_summary_backup_failure_error_carries_disk_and_target():
+    """Backup-failure error lines SHALL be disk-scoped: `!!! [vda] backup to
+    target <path> failed — <reason>`, attributed to the target and disk and
+    never framed as a snapshot failure (spec: backup-summary, “Backup failure
+    error line carries disk and target”)."""
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=False, backup_failed=True),
+        ],
+        actions=[
+            _make_action(
+                "error",
+                vm_name="vm-test",
+                name="backup to target /backup/vm/testvm failed",
+                path=Path("/backup/vm/testvm"),
+                error="permission denied",
+                disk="vda",
+            ),
+        ],
+        dry_run=False,
+    )
+    output = format_summary(result)
+
+    assert "vm-test:" in output
+    # The error line carries the disk prefix after the !!! symbol.
+    assert "!!! [vda]" in output
+    # The message names the target path, not a snapshot.
+    assert "backup to target /backup/vm/testvm failed" in output
+    assert "permission denied" in output
+    # The backup-failure line must not mention snapshots.
+    error_line = next(line for line in output.split("\n") if "!!!" in line)
+    assert "snapshot" not in error_line.lower()
+
+
 # ---------------------------------------------------------------------------
 # test_summary_multi_disk_distinguishes_disks (17)
 # ---------------------------------------------------------------------------

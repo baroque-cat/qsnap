@@ -402,3 +402,64 @@ def test_backup_tree_output_chain_without_full(capsys):
     # Backups at 2-space indent (fallback branch)
     assert "  testvm.20250702T120000_def456.qcow2" in output
     assert "  testvm.20250703T120000_ghi789.qcow2" in output
+
+
+def test_backup_tree_output_mixed_freeze_ts_and_legacy_names(capsys):
+    """``list backups --tree`` displays freeze-ts backups and legacy
+    snapshot-named backups in one chain under the same FULL anchor.
+
+    Legacy backup files remain first-class members of the chain: they are
+    listed as incrementals beneath the FULL anchor, exactly like freeze-ts
+    incrementals (backup-target-orthogonality "Legacy backup files remain
+    first-class").
+    """
+    full1 = SnapshotInfo(
+        name="testvm.FULL.20250701T120000_abc123",
+        path=Path("/mnt/backup/testvm/testvm.FULL.20250701T120000_abc123.qcow2"),
+        timestamp=datetime(2025, 7, 1, 12, 0),
+        allocation=5000,
+        disk="vda",
+    )
+    inc_freezets = SnapshotInfo(
+        name="testvm.20250702T120000_def456",
+        path=Path("/mnt/backup/testvm/testvm.20250702T120000_def456.qcow2"),
+        timestamp=datetime(2025, 7, 2, 12, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    legacy = SnapshotInfo(
+        name="testvm.snap1",
+        path=Path("/mnt/backup/testvm/testvm.snap1.qcow2"),
+        timestamp=datetime(2025, 7, 3, 12, 0),
+        allocation=1000,
+        disk="vda",
+    )
+
+    chains = {"testvm.FULL.20250701T120000_abc123": [full1, inc_freezets, legacy]}
+    data = _make_backup_tree_data(chains=chains)
+
+    mock_core = Mock()
+    mock_core.list_backups.return_value = data
+    mock_core.list_config.return_value = [_make_vm_config()]
+
+    args = _make_list_args(list_subcommand="backups", tree=True)
+
+    result = handle_list(mock_core, args)
+
+    assert result == EXIT_SUCCESS
+    captured = capsys.readouterr()
+    output = captured.out
+
+    assert "=== testvm ===" in output
+    assert "Target: /mnt/backup/testvm" in output
+    # FULL anchor at the top of the chain
+    assert "  testvm.FULL.20250701T120000_abc123.qcow2" in output
+    # Freeze-ts incremental under the anchor
+    assert "    testvm.20250702T120000_def456.qcow2" in output
+    # Legacy snapshot-named backup in the SAME chain under the anchor
+    assert "    testvm.snap1.qcow2" in output
+    # Both incrementals are children of the FULL anchor
+    lines = output.strip().split("\n")
+    full_idx = next(i for i, line in enumerate(lines) if "FULL.20250701T120000" in line)
+    legacy_idx = next(i for i, line in enumerate(lines) if "testvm.snap1.qcow2" in line)
+    assert full_idx < legacy_idx
