@@ -54,6 +54,17 @@ def e2e_vm():
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pre-cleanup: destroy and undefine any stale domain left behind by a
+    # previous test run that crashed before its teardown (finally block) ran.
+    # Without this, ``virsh define`` fails with "domain already exists" and
+    # the fixture skips — the stale VM is never cleaned up, perpetuating the
+    # problem across all subsequent runs.  Checkpoints must be deleted first
+    # because ``virsh undefine`` refuses to remove a domain that still has
+    # checkpoint metadata (the backup stage creates checkpoints).
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    _cleanup_checkpoints(shell, vm_name)
+    shell.run(["virsh", "undefine", vm_name], timeout=30)
+
     create_result = shell.run(
         ["qemu-img", "create", "-f", "qcow2", str(base_image), "256M"],
         timeout=30,
@@ -91,9 +102,13 @@ def e2e_vm():
         pytest.skip(f"virsh define failed (libvirt daemon not available?): {define_result.error}")
 
     # Write a minimal qsnap TOML config referencing the test VM.
+    # ``lockfile = "off"``: e2e tests run as non-root and cannot create
+    # the default lockfile directory ``/var/lib/qsnap`` (PermissionError).
+    # The sentinel disables locking for the duration of the tests.
     config_path.write_text(
         f"[global]\n"
         f'state_dir = "{tmpdir / "state"}"\n'
+        f'lockfile = "off"\n'
         f"\n"
         f"[[vm]]\n"
         f'name = "{vm_name}"\n'
@@ -118,6 +133,31 @@ def e2e_vm():
             "tmpdir": tmpdir,
         }
     finally:
+        # Teardown: destroy the VM, delete checkpoints (the backup stage
+        # creates them and ``virsh undefine`` refuses to remove a domain
+        # with checkpoint metadata), undefine, and remove all temp files.
         shell.run(["virsh", "destroy", vm_name], timeout=30)
+        _cleanup_checkpoints(shell, vm_name)
         shell.run(["virsh", "undefine", vm_name], timeout=30)
         shutil.rmtree(str(tmpdir), ignore_errors=True)
+
+
+def _cleanup_checkpoints(shell, vm_name: str) -> None:
+    """Delete all checkpoints for *vm_name* so ``virsh undefine`` can succeed.
+
+    The backup stage creates libvirt checkpoints for dirty-bitmap NBD
+    exports.  ``virsh undefine`` refuses to remove an inactive domain
+    that still has checkpoint metadata, so they must be deleted first.
+    """
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if result.success:
+        for line in result.stdout.strip().splitlines():
+            cp = line.strip()
+            if cp:
+                shell.run(
+                    ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
+                    timeout=30,
+                )

@@ -113,6 +113,12 @@ def _build_core(
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
+                # Keep both FULL generations so the count-based FULL
+                # decision — not retention pruning — is what the tests
+                # exercise.  With the default keep_generations=1 the
+                # post-transfer cleanup can delete a same-second FULL
+                # chain, making the assertions order-dependent.
+                target_keep_generations=2,
             )
         ],
     )
@@ -179,7 +185,11 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
     snap = _snapshot_create(shell, vm_name, f"{vm_name}.cbfull-s1", base_image, snapshot_dir)
     state.record_snapshot(vm_name, snap)
 
-    # Create a FULL backup directly to set up state.
+    # Create a FULL backup directly to set up state.  Phase 2 replaced
+    # create_full_backup(vm_name, source_snapshot, target, ...) with the
+    # orthogonal run_backup(vm_config, target, disk, ...) — the disk is
+    # taken from the VM config for the snapshot's disk.  The SnapshotInfo
+    # below is retained only as the anchor metadata recorded in state.
     provider = BitmapBackupProvider(shell)
     source_snap = SnapshotInfo(
         name=f"{vm_name}.cbfull-anchor",
@@ -188,11 +198,12 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
         allocation=0,
         disk="vda",
     )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    anchor_disk = vm_config.get_disk(source_snap.disk)
+    assert anchor_disk is not None, f"Disk {source_snap.disk} must be configured"
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        anchor_disk,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
@@ -287,7 +298,9 @@ def test_full_not_created_when_incrementals_within_chain_length(test_vm, caplog)
 
     target = vm_config.targets[0]
 
-    # Step 1: Create FULL backup (first backup to target).
+    # Step 1: Create FULL backup (first backup to target).  Phase 2:
+    # the orthogonal run_backup(vm_config, target, disk) replaces
+    # create_full_backup(vm_name, source_snapshot, target, ...).
     provider = BitmapBackupProvider(shell)
     source_snap = SnapshotInfo(
         name=f"{vm_name}.cbfull-nofull-anchor",
@@ -296,11 +309,12 @@ def test_full_not_created_when_incrementals_within_chain_length(test_vm, caplog)
         allocation=0,
         disk="vda",
     )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    anchor_disk = vm_config.get_disk(source_snap.disk)
+    assert anchor_disk is not None, f"Disk {source_snap.disk} must be configured"
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        anchor_disk,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
@@ -486,15 +500,19 @@ def test_dry_run_does_not_create_full(test_vm, caplog):
         f"Logs: {[r.message for r in caplog.records if 'FULL' in r.message]}"
     )
 
-    # Verify log message includes chain_length.
-    chain_length_logs = [
+    # Verify the dry-run log carries the transfer detail.  Phase 2's
+    # message no longer prints chain_length= — the planned FULL decision
+    # is logged with kind + disk + method instead.
+    full_predict_logs = [
         r.message
         for r in caplog.records
-        if "chain_length=" in r.message and "Would create FULL" in r.message
+        if "Would create FULL backup" in r.message
+        and "method=NBD" in r.message
+        and "disk vda" in r.message
     ]
-    assert len(chain_length_logs) >= 1, (
-        f"Expected chain_length in dry-run log. "
-        f"Logs: {[r.message for r in caplog.records if 'chain_length' in r.message]}"
+    assert len(full_predict_logs) >= 1, (
+        f"Expected 'Would create FULL backup' with method/disk detail in dry-run logs. "
+        f"Logs: {[r.message for r in caplog.records if 'Would create' in r.message]}"
     )
 
     # ---- dry-run PipelineResult predictions assertions ----

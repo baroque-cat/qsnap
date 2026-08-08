@@ -489,7 +489,10 @@ def test_backup_both_disks(test_vm_multi_disk):
     when either is unavailable.
 
     1. Start VM, create snapshot on vda and vdb.
-    2. Use ``BitmapBackupProvider`` to create FULL backups of each disk.
+    2. Use ``BitmapBackupProvider.run_backup()`` to create FULL backups
+       of each disk (Phase 2 API — the provider decides FULL vs delta
+       autonomously; a fresh target has no checkpoint, so both runs are
+       FULLs).
     3. Verify backup file names contain ``_vda_`` and ``_vdb_`` segments.
     4. Verify both backup files exist on target.
     """
@@ -518,28 +521,24 @@ def test_backup_both_disks(test_vm_multi_disk):
 
     import secrets
 
-    from qsnap.models.config import TargetConfig
     from qsnap.modules.backup.bitmap import BitmapBackupProvider
 
-    # Create snapshot on vda
-    hex_vda = secrets.token_hex(3)
-    snap_name_vda = f"{vm_name}.20250801T300000_vda_{hex_vda}"
-    snap_vda = snapshot_create(
+    # Create a snapshot on vda and vdb — the active layers the FULLs
+    # will export.  Phase 2: backups no longer consume snapshot state,
+    # but the overlays keep the exports on the same backing-chain path
+    # a real deployment uses.
+    snapshot_create(
         shell,
         vm_name,
-        snap_name_vda,
+        f"{vm_name}.20250801T300000_vda_{secrets.token_hex(3)}",
         "vda",
         snapshot_dirs["vda"],
         base_images["vda"],
     )
-
-    # Create snapshot on vdb
-    hex_vdb = secrets.token_hex(3)
-    snap_name_vdb = f"{vm_name}.20250801T300001_vdb_{hex_vdb}"
-    snap_vdb = snapshot_create(
+    snapshot_create(
         shell,
         vm_name,
-        snap_name_vdb,
+        f"{vm_name}.20250801T300001_vdb_{secrets.token_hex(3)}",
         "vdb",
         snapshot_dirs["vdb"],
         base_images["vdb"],
@@ -547,9 +546,22 @@ def test_backup_both_disks(test_vm_multi_disk):
 
     target = TargetConfig(path=target_dir, compress=False, verify="off")
     provider = BitmapBackupProvider(shell)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[
+            DiskConfig(
+                target="vda", base_image=base_images["vda"], snapshot_dir=snapshot_dirs["vda"]
+            ),
+            DiskConfig(
+                target="vdb", base_image=base_images["vdb"], snapshot_dir=snapshot_dirs["vdb"]
+            ),
+        ],
+        targets=[target],
+    )
 
-    # Backup vda
-    full_vda = provider.create_full_backup(vm_name, snap_vda, target, compress=False)
+    # Backup vda (no checkpoint for this VM+target+disk → provider
+    # autonomously creates a FULL).
+    full_vda = provider.run_backup(vm_config, target, vm_config.disks[0], force_full=True)
     if not full_vda.success:
         # Some environments may not support bitmap checkpoint creation.
         # Skip instead of failing — this is optional coverage.
@@ -572,8 +584,9 @@ def test_backup_both_disks(test_vm_multi_disk):
         f"vda checkpoint must carry the vda disk segment, got {full_vda.checkpoint!r}"
     )
 
-    # Backup vdb
-    full_vdb = provider.create_full_backup(vm_name, snap_vdb, target, compress=False)
+    # Backup vdb (vda's checkpoint is scoped per disk — vdb has none, so
+    # this is also a FULL).
+    full_vdb = provider.run_backup(vm_config, target, vm_config.disks[1], force_full=True)
     if not full_vdb.success:
         pytest.skip(f"FULL backup of vdb failed: {full_vdb.error}")
 
@@ -617,13 +630,14 @@ def test_failed_full_rollback_deletes_only_failed_disk_checkpoint(test_vm_multi_
     1. Seed prior baseline checkpoints via successful FULLs of vda and vdb
        (one ``core.run`` — each disk gets its own FULL + checkpoint).
     2. Create fresh snapshots on both disks; force a new FULL run.
-    3. Patch ``verify_full_backup`` so ONLY the vda attempt fails; capture
-       the checkpoint list at the moment of failure (the successor still
-       exists).
-    4. Assert: the vda prior baseline and the vdb baseline remain listed,
-       and the failed attempt's successor checkpoint is gone — the set
-       difference between the checkpoints observed during the attempt and
-       the post-rollback list is exactly the failed attempt's name.
+    3. Patch ``verify_full_backup`` (in the provider's namespace) so ONLY
+       the vda attempt fails; capture the checkpoint list at the moment of
+       failure (the successor still exists).
+    4. Assert: the vda prior baseline survives (preserved for retry) and
+       the vdb baseline/successor remain listed, and the failed attempt's
+       successor checkpoint is gone — the set difference between the
+       checkpoints observed during the attempt and the pre-run baseline
+       list + post-rollback list is exactly the failed attempt's name.
     """
     ctx = test_vm_multi_disk
     shell: SubprocessShell = ctx["shell"]
@@ -705,17 +719,24 @@ def test_failed_full_rollback_deletes_only_failed_disk_checkpoint(test_vm_multi_
     # will transfer successfully but its post-create verification will
     # be forced to fail — triggering the rollback path.
     #
-    # NOTE: create_full_backup calls _delete_superseded_checkpoints after
-    # a successful transfer (before Core's verification).  The old vda
-    # and vdb baselines are therefore legitimately deleted by the
-    # provider — NOT by the rollback.  The assertions below verify that
-    # the rollback (Core._cleanup_failed_checkpoint) deletes exactly the
-    # successor checkpoint and does NOT touch the vdb successor.
+    # Phase 2 (orthogonal backups): the rollback lives INSIDE
+    # ``run_backup`` — on a verification failure the provider deletes
+    # exactly the successor checkpoint it created via
+    # ``_delete_checkpoint_best_effort`` and returns a failed
+    # ``BackupResult``.  Core's ``_cleanup_failed_checkpoint`` helper is
+    # no longer invoked.  The old vdb baseline is legitimately deleted by
+    # the provider's ``_delete_superseded_checkpoints`` during the
+    # successful vdb FULL — NOT by the rollback.  The assertions below
+    # verify that the rollback deletes exactly the failed vda successor
+    # and does NOT touch the vdb successor.
     core._force_full_targets.add(str(target_dir))
 
     # Step 3: The patched verifier fails ONLY the vda attempt.  At the
     # moment of the failure the successor checkpoint still exists — capture
     # the checkpoint list so we can prove the rollback deleted exactly it.
+    # The patch must target the provider's namespace
+    # (``qsnap.modules.backup.bitmap.verify_full_backup``): ``run_backup``
+    # calls the function imported into ``bitmap.py``, not Core's copy.
     observed_during_attempt: set[str] = set()
 
     def _failing_verify(
@@ -742,36 +763,53 @@ def test_failed_full_rollback_deletes_only_failed_disk_checkpoint(test_vm_multi_
     caplog.clear()
     with (
         caplog.at_level(logging.INFO),
-        patch("qsnap.core.verify_full_backup", side_effect=_failing_verify),
+        patch(
+            "qsnap.modules.backup.bitmap.verify_full_backup",
+            side_effect=_failing_verify,
+        ),
     ):
         failed_result = core.backup(vm_name)
 
     assert not failed_result.results[0].success, "Expected the vda FULL attempt to fail"
     assert failed_result.results[0].backup_failed, "Backup-stage abort must set backup_failed=True"
-    all_logs = " ".join(r.message for r in caplog.records)
-    assert "rolled back" in all_logs.lower(), f"Expected rollback log. Logs: {all_logs[:500]}"
+    assert "forced failure for vda FULL" in failed_result.results[0].error, (
+        f"Expected the forced verification failure in the result error, "
+        f"got: {failed_result.results[0].error}"
+    )
 
     cps_after = _list_checkpoints(shell, vm_name)
 
     # Step 4a: The vdb successor (from the successful vdb FULL) survives
     # the vda rollback — proving multi-disk isolation.  The old baselines
     # were legitimately deleted by _delete_superseded_checkpoints inside
-    # the provider during FULL creation (not by rollback).
+    # the provider during the successful vdb FULL (not by rollback).
     assert any("-vdb-" in cp for cp in cps_after), (
         f"vdb must retain a checkpoint after the vda rollback, got {cps_after}"
     )
-    assert not any("-vda-" in cp for cp in cps_after), (
-        f"vda must have zero checkpoints after cleanup (baseline deleted by "
-        f"_delete_superseded_checkpoints + successor deleted by rollback), got {cps_after}"
+    # The vda prior baseline (from the seed run) is preserved for retry:
+    # on failure the provider deletes only the successor checkpoint it
+    # created during the failed attempt.
+    vda_baseline = next((cp for cp in baselines if "-vda-" in cp), None)
+    assert vda_baseline is not None, (
+        f"Seed run must have created a vda baseline, got {baselines}"
+    )
+    assert vda_baseline in cps_after, (
+        f"vda prior baseline must be preserved for retry, got {cps_after}"
+    )
+    assert not any("-vda-" in cp for cp in cps_after if cp != vda_baseline), (
+        f"vda successor must be deleted by the rollback, got {cps_after}"
     )
 
     # Step 4b: The failed attempt's successor checkpoint is gone.  The
-    # checkpoints that appeared during the attempt differ from the
-    # post-rollback list by exactly the successor name.
-    successor = observed_during_attempt - cps_after
+    # checkpoints that appeared during the attempt but are in neither the
+    # pre-run baseline list nor the post-rollback list is exactly the
+    # failed attempt's successor (the vdb baseline difference is the
+    # legitimate supersede cleanup of the successful vdb FULL).
+    successor = observed_during_attempt - baselines - cps_after
     assert len(successor) == 1, (
         f"Expected exactly one deleted successor checkpoint, got {successor}. "
-        f"(observed during attempt: {observed_during_attempt}, after: {cps_after})"
+        f"(observed during attempt: {observed_during_attempt}, "
+        f"baselines: {baselines}, after: {cps_after})"
     )
     deleted = successor.pop()
     assert deleted not in cps_after, f"Successor checkpoint {deleted} must be deleted"

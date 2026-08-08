@@ -137,28 +137,25 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
     state.record_snapshot(vm_name, snap)
 
     # Step 2: Create a FULL backup manually and record in state.
+    # Phase 2: the backup world is orthogonal to snapshots — the
+    # provider no longer accepts a SnapshotInfo source.  run_backup()
+    # takes a VMConfig + DiskConfig and decides FULL vs delta from
+    # checkpoint state.
     provider = BitmapBackupProvider(shell)
     target = TargetConfig(path=target_dir, compress=False, verify="off")
-    source_snap = SnapshotInfo(
-        name=f"{vm_name}.vbd-gen1",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    backup_vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
     )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
-        target,
-        compress=False,
-    )
+    full_result = provider.run_backup(backup_vm_config, target, backup_vm_config.disks[0])
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
 
     full_path = full_result.target_path
     full_name = full_path.stem
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
     )
     assert full_path.exists(), "FULL backup file must exist"
 
@@ -297,26 +294,19 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
     # Step 2: Create a valid FULL backup (generation 1).
     provider = BitmapBackupProvider(shell)
     target = TargetConfig(path=target_dir, compress=False, verify="off")
-    source_snap = SnapshotInfo(
-        name=f"{vm_name}.vbd-gen1-pass",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    backup_vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
     )
-    full_result1 = provider.create_full_backup(
-        vm_name,
-        source_snap,
-        target,
-        compress=False,
-    )
+    full_result1 = provider.run_backup(backup_vm_config, target, backup_vm_config.disks[0])
     if not full_result1.success:
         pytest.skip(f"FULL backup failed: {full_result1.error}")
 
     gen1_path = full_result1.target_path
     gen1_name = gen1_path.stem
     state.record_full_backup(
-        str(target_dir), f"{gen1_name}.qcow2", source_snap.timestamp, disk="vda"
+        str(target_dir), f"{gen1_name}.qcow2", datetime.now(), disk="vda"
     )
     assert gen1_path.exists(), "Generation 1 FULL must exist"
 
@@ -382,13 +372,13 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
 
 
 def _fake_full_backup_factory(error: str):
-    """Return a ``create_full_backup`` replacement failing with *error*."""
+    """Return a ``run_backup`` replacement failing with *error*."""
 
     def _fake_full(
-        vm_name,
-        source_snapshot,
+        vm_config,
         target,
-        compress=False,
+        disk,
+        force_full=False,
         compression_type="zstd",
         stall_timeout=1800,
         convert_parallel=4,
@@ -398,13 +388,13 @@ def _fake_full_backup_factory(error: str):
 
         return BackupResult(
             success=False,
-            snapshot_name=source_snapshot.name,
-            source_path=source_snapshot.path,
+            snapshot_name="",
+            source_path=disk.base_image,
             target_path=target.path / "fake-full.qcow2",
             bytes_transferred=0,
             error=error,
             duration=0.0,
-            disk=source_snapshot.disk,
+            disk=disk.target,
         )
 
     return _fake_full
@@ -441,6 +431,7 @@ def _build_vbd_core(
                 compress=False,
                 verify="off",
                 target_keep_generations=1,
+                backup_retry_max=1,  # one attempt — no retry backoff delay
             )
         ],
     )
@@ -495,7 +486,7 @@ def test_verification_failure_still_aborts_old_generation_preserved(test_vm, cap
     core._force_full_targets.add(str(target_dir))
 
     with patch(
-        "qsnap.modules.backup.bitmap.BitmapBackupProvider.create_full_backup",
+        "qsnap.modules.backup.bitmap.BitmapBackupProvider.run_backup",
         side_effect=_fake_full_backup_factory(
             "verification failed: content comparison mismatch at offset 0x1000"
         ),
@@ -508,8 +499,12 @@ def test_verification_failure_still_aborts_old_generation_preserved(test_vm, cap
     assert vm_result.backup_failed is True, (
         "Verification failure must map to backup_failed (exit 10)"
     )
-    assert "old generations preserved" in (vm_result.error or ""), (
-        f"Abort message must state old generations preserved: {vm_result.error}"
+    # Phase 2: the "old generations preserved" message is logged at
+    # CRITICAL by Core (the BackupAbortError itself carries the target +
+    # disk failure details).  Assert the gate message via the log.
+    all_logs = " ".join(r.message for r in caplog.records)
+    assert "old generations preserved" in all_logs, (
+        f"Abort must log that old generations are preserved: {all_logs[:500]}"
     )
 
     # Old generation NOT deleted (verify-before-delete gate holds).
@@ -554,7 +549,7 @@ def test_space_error_suspends_target_no_abort_old_generation_preserved(test_vm, 
     core._force_full_targets.add(str(target_dir))
 
     with patch(
-        "qsnap.modules.backup.bitmap.BitmapBackupProvider.create_full_backup",
+        "qsnap.modules.backup.bitmap.BitmapBackupProvider.run_backup",
         side_effect=_fake_full_backup_factory(
             "qemu-img: error while writing to output file: No space left on device"
         ),

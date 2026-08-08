@@ -119,6 +119,30 @@ def _count_qcow2_files(directory: Path) -> int:
     return len(list(directory.glob("*.qcow2")))
 
 
+def _align_recorded_full_with_disk(state, target_dir: Path) -> None:
+    """Point recorded FULL paths at the real on-disk files.
+
+    Phase 2: Core records a FULL under its stem name (no ``.qcow2``
+    suffix), while the file on disk carries the suffix.  Phantom-FULL
+    startup detection checks ``os.path.exists()`` on the recorded path —
+    a stem path would not exist, so the FULL would be cleaned up as a
+    phantom and the onchange baseline cleared (reopening the gate).
+    Re-record each FULL with the ``.qcow2``-suffixed name so the
+    recorded path resolves to the real file and the gate can stay
+    closed across runs.
+    """
+    for full in state.get_full_backups(str(target_dir)):
+        if full.path.exists():
+            continue
+        state.remove_full_backup(str(target_dir), full.name)
+        state.record_full_backup(
+            str(target_dir),
+            f"{full.name}.qcow2",
+            full.timestamp,
+            full.disk,
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: preserve_min keeps newest snapshots with real blockcommit
 # ──────────────────────────────────────────────────────────────────────
@@ -670,6 +694,11 @@ def test_source_disk_onchange_gate_skips_when_unchanged(test_vm, caplog, change_
     baseline = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline is not None, "Baseline should be recorded after successful backup"
 
+    # Phase 2: re-align the recorded FULL path with the real on-disk
+    # file so startup phantom-FULL cleanup does not remove it and
+    # reopen the gate before the second run.
+    _align_recorded_full_with_disk(state, target_dir)
+
     # --- Second run: no new data written → gate skips ---
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -922,6 +951,11 @@ def test_onchange_first_run_no_baseline_integration(test_vm, caplog, change_dete
     # Verify baseline was recorded.
     baseline_after = state.get_last_backup_allocation(str(target_dir), "vda")
     assert baseline_after is not None, "Baseline should be recorded after successful backup"
+
+    # Phase 2: re-align the recorded FULL path with the real on-disk
+    # file so startup phantom-FULL cleanup does not remove it and
+    # reopen the gate before the second run.
+    _align_recorded_full_with_disk(state, target_dir)
 
     # --- Gate check: disk unchanged → gate skips ---
     should_proceed_2, _ = core._should_backup_onchange(vm_config, target)

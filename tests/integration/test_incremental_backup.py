@@ -10,7 +10,7 @@ applied to incrementals — it applies to FULL backups only.
 
 Coverage:
 - FULL → incremental flow: create FULL, write dirty data, take
-  external snapshot, transfer missing — verify sizes
+  external snapshot, run the incremental backup — verify sizes
 - Compression not applied to incrementals (design D6 check)
 - Dirty bytes are proportional to data written, not full disk
 
@@ -225,6 +225,24 @@ def _get_snapshot_disk_path(shell: SubprocessShell, vm_name: str) -> Path | None
     return None
 
 
+def _vm_active_disk_is_base(
+    shell: SubprocessShell,
+    vm_name: str,
+    base_image: Path,
+) -> bool:
+    """Return True when the VM's active vda disk is *base_image*.
+
+    The ``test_vm`` fixture defines a fresh domain whose vda source IS
+    *base_image* before any snapshot is taken.  When a concurrent test
+    process redefines the shared VM with its own disk (the integration
+    fixture is not name-scoped), ``virsh start`` reports "already
+    active" and the transfers below would silently run against a
+    foreign disk.  Callers skip instead of asserting on the wrong data.
+    """
+    active = _get_snapshot_disk_path(shell, vm_name)
+    return active is not None and active == base_image
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: FULL → incremental — verify sizes and backing chain
 # ──────────────────────────────────────────────────────────────────────
@@ -236,10 +254,10 @@ def test_incremental_after_full(test_vm):
     """Verify incremental-after-FULL backup via bitmap + libnbd.
 
     1. Write ~500 MB of initial data (VM stopped), then start VM.
-    2. Create FULL backup via ``create_full_backup()``.
+    2. Create FULL backup via ``run_backup()`` (no checkpoint yet → FULL).
     3. Write 10 MB of new data to the running VM.
     4. Create an external disk-only snapshot to freeze the dirty state.
-    5. Call ``transfer_missing()`` — must produce an incremental delta
+    5. Call ``run_backup()`` again — must produce an incremental delta
        (because a checkpoint from the FULL already exists).
     6. Assert incremental ``actual-size`` < FULL ``actual-size``.
     7. Assert incremental has a backing file pointing to the FULL.
@@ -275,6 +293,8 @@ def test_incremental_after_full(test_vm):
     time.sleep(2)
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
@@ -285,26 +305,31 @@ def test_incremental_after_full(test_vm):
     time.sleep(2)
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
 
-    # Step 2: FULL backup — also creates an atomic checkpoint.
+    # Step 2: FULL backup — ``run_backup`` creates exactly one backup per
+    # disk and decides the kind autonomously: no checkpoint exists yet for
+    # this VM+target+disk, so it pulls a FULL and creates an atomic
+    # checkpoint at the export's freeze point (the dirty-bitmap baseline
+    # for the next incremental).
     provider_full = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.full-base",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
+    disk = vm_config.disks[0]
 
-    result_full = provider_full.create_full_backup(
-        vm_name,
-        source,
+    result_full = provider_full.run_backup(
+        vm_config,
         target,
-        compress=False,
+        disk,
+        stall_timeout=300,
     )
     assert result_full.success, f"FULL backup failed: {result_full.error}"
     full_actual = _get_actual_size(shell, result_full.target_path)
@@ -329,8 +354,11 @@ def test_incremental_after_full(test_vm):
     time.sleep(2)
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not restart after incremental data write")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
-    # Step 4: External disk-only snapshot.
+    # Step 4: External disk-only snapshot — freezes the source disk so
+    # the dirty-bitmap checkpoint from the FULL is a stable baseline.
     snap_name = f"{vm_name}.incr-test"
     snap_result = shell.run(
         [
@@ -351,50 +379,20 @@ def test_incremental_after_full(test_vm):
     if not snap_result.success:
         pytest.skip(f"Snapshot creation failed: {snap_result.error}")
 
-    overlay_path = _get_snapshot_disk_path(shell, vm_name)
-    if overlay_path is None:
-        # Fallback: parse snapshot XML.
-        xml_result = shell.run(
-            ["virsh", "snapshot-dumpxml", "--domain", vm_name, snap_name],
-            timeout=30,
-        )
-        if xml_result.success:
-            import re as _re
-
-            m = _re.search(r'<source file="([^"]+)"', xml_result.stdout)
-            if m:
-                overlay_path = Path(m.group(1))
-        if overlay_path is None:
-            pytest.skip("Could not determine overlay path after external snapshot")
-
-    snapshot_info = SnapshotInfo(
-        name=snap_name,
-        path=overlay_path,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
-    # Step 5: Incremental transfer via libnbd.
+    # Step 5: Incremental backup via libnbd — ``run_backup`` discovers
+    # the checkpoint created by the FULL and transfers only the dirty
+    # blocks since that checkpoint (delta).
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-    )
 
-    results = provider_inc.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snapshot_info],
+    inc_result = provider_inc.run_backup(
+        vm_config,
+        target,
+        disk,
         stall_timeout=300,
     )
-    assert len(results) > 0, "transfer_missing must return at least one result"
-
-    inc_result = results[0]
     assert inc_result.success, (
         f"Incremental backup failed: {inc_result.error}. "
-        f"Check that transfer_missing detected the checkpoint from create_full_backup."
+        f"Check that run_backup detected the checkpoint created by the FULL."
     )
 
     # Step 6: Size assertions.
@@ -443,11 +441,11 @@ def test_incremental_compression_not_applied(test_vm, caplog):
 
     1. Create a zstd-compressed FULL backup (compression-type: "zstd").
     2. Write new data, create external snapshot.
-    3. Call ``transfer_missing()`` with ``target.compress=True``.
-    4. Verify the log message "bitmap incrementals are uncompressed".
-    5. Verify the incremental qcow2 has ``compression-type: "zlib"``
+    3. Call ``run_backup()`` with ``target.compress=True`` — the provider
+       must still pull an uncompressed delta.
+    4. Verify the incremental qcow2 has ``compression-type: "zlib"``
        (default), NOT "zstd" — proving compression was not applied.
-    6. Verify no ``qemu-nbd --image-opts driver=compress`` in logs.
+    5. Verify no ``qemu-nbd --image-opts driver=compress`` in logs.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -467,26 +465,34 @@ def test_incremental_compression_not_applied(test_vm, caplog):
     _write_data(shell, base_image, 500)
     shell.run(["virsh", "start", vm_name], timeout=30)
     time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        # The running-VM NBD path is required: with a stopped VM the
+        # provider would take the offline FULL path and the
+        # incremental-compression assertions below would be meaningless.
+        pytest.skip("VM did not reach running state")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
     _cleanup_checkpoints(shell, vm_name)
 
-    # Step 1: Zstd-compressed FULL backup.
+    # Step 1: Zstd-compressed FULL backup.  ``run_backup`` decides FULL
+    # autonomously (no checkpoint yet) and compresses it because
+    # ``target.compress=True``.
     provider = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.full-zstd",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
     target = TargetConfig(path=target_dir, compress=True, verify="off")
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
+    disk = vm_config.disks[0]
 
-    r_full = provider.create_full_backup(
-        vm_name,
-        source,
+    r_full = provider.run_backup(
+        vm_config,
         target,
-        compress=True,
+        disk,
         compression_type="zstd",
+        stall_timeout=300,
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
     ct_full = _get_compression_type(shell, r_full.target_path)
@@ -511,53 +517,28 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         timeout=60,
         check=True,
     )
-    overlay = _get_snapshot_disk_path(shell, vm_name)
-    if overlay is None:
-        pytest.skip("Could not determine overlay path")
 
-    snapshot_info = SnapshotInfo(
-        name=snap_name,
-        path=overlay,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
-    # Step 3: transfer_missing with compress=True target.
+    # Step 3: Incremental ``run_backup`` with a compress=True target.
+    # The provider must NOT apply compression to the delta (design D6).
     import logging
 
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-    )
 
     with caplog.at_level(logging.INFO):
-        results = provider_inc.transfer_missing(
-            vm_config=vm_config,
-            target=target,
-            snapshots=[snapshot_info],
+        inc_result = provider_inc.run_backup(
+            vm_config,
+            target,
+            disk,
             stall_timeout=300,
         )
-    assert len(results) > 0, "transfer_missing must return results"
-
-    inc_result = results[0]
     # If not successful, report but don't fail — environment may differ.
     if inc_result.success:
         inc_path = inc_result.target_path
 
-        # Step 4: Log message about uncompressed incrementals.
-        incr_logs = [
-            r.message
-            for r in caplog.records
-            if "incremental" in r.message.lower() and "uncompressed" in r.message.lower()
-        ]
-        assert len(incr_logs) > 0, (
-            "Expected log message 'bitmap incrementals are uncompressed', but not found in caplog."
-        )
-
-        # Step 5: Compression-type must be "zlib" (default), NOT "zstd".
+        # Step 4: Compression-type must be "zlib" (default), NOT "zstd"
+        # — proving the delta was written uncompressed (design D6).  The
+        # new provider no longer emits a dedicated log notice; the qcow2
+        # metadata is the authoritative check.
         ct_incr = _get_compression_type(shell, inc_path)
         assert ct_incr != "zstd", (
             f"Incremental must NOT have zstd compression, got {ct_incr!r}. "
@@ -567,7 +548,7 @@ def test_incremental_compression_not_applied(test_vm, caplog):
             f"Incremental expected default compression-type 'zlib', got {ct_incr!r}"
         )
 
-        # Step 6: No qemu-nbd compress driver.
+        # Step 5: No qemu-nbd compress driver.
         compress_drv = [
             r.message
             for r in caplog.records
@@ -602,7 +583,7 @@ def test_vm_level_stall_timeout_reaches_incremental(test_vm, caplog):
     2. Parse with ``ConfigFacade`` and assert ``target.backup_stall_timeout
        == "2m"`` and ``target.verify == "check"``.
     3. Follow the FULL-zstd → write dirty data → external snapshot →
-       ``transfer_missing`` flow of ``test_incremental_compression_not_applied``,
+       ``run_backup`` flow of ``test_incremental_compression_not_applied``,
        routing every provider through a ``_StallRecordingShell``.
     4. Assert the stall-detected transfer (the qemu-img convert of the
        FULL) received ``stall_timeout == 120`` — ``parse_stall_timeout("2m")``
@@ -668,6 +649,14 @@ path = "{target_dir}"
     _write_data(shell, base_image, 64)
     shell.run(["virsh", "start", vm_name], timeout=30)
     time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        # The running-VM NBD path is required: the stall-detection probe
+        # (qemu-img convert of the FULL) and the D6 uncompressed-delta
+        # assertions depend on the export path that only runs with a
+        # started VM.
+        pytest.skip("VM did not reach running state")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
@@ -676,19 +665,12 @@ path = "{target_dir}"
     # qemu-img convert must observe the VM-inherited stall timeout (120 s).
     rec_shell = _StallRecordingShell(shell)
     provider = BitmapBackupProvider(rec_shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.full-vm-stall",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
+    disk = vm.disks[0]
 
-    r_full = provider.create_full_backup(
-        vm_name,
-        source,
+    r_full = provider.run_backup(
+        vm,
         target,
-        compress=True,
+        disk,
         compression_type="zstd",
         stall_timeout=stall_seconds,
     )
@@ -715,37 +697,18 @@ path = "{target_dir}"
         timeout=60,
         check=True,
     )
-    overlay = _get_snapshot_disk_path(shell, vm_name)
-    if overlay is None:
-        pytest.skip("Could not determine overlay path")
 
-    snapshot_info = SnapshotInfo(
-        name=snap_name,
-        path=overlay,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
-    # Step 3c: Incremental transfer — same recording shell, same stall
+    # Step 3c: Incremental backup — same recording shell, same stall
     # timeout as Core would pass (parse_stall_timeout(target.backup_stall_timeout)).
     provider_inc = BitmapBackupProvider(rec_shell, nbd=LibnbdClient())
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-    )
 
     with caplog.at_level(logging.INFO):
-        results = provider_inc.transfer_missing(
-            vm_config=vm_config,
-            target=target,
-            snapshots=[snapshot_info],
+        inc_result = provider_inc.run_backup(
+            vm,
+            target,
+            disk,
             stall_timeout=stall_seconds,
         )
-    assert len(results) > 0, "transfer_missing must return results"
-
-    inc_result = results[0]
     # If not successful, report but don't fail — environment may differ.
     if inc_result.success:
         inc_path = inc_result.target_path
@@ -793,7 +756,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
 
     1. Create FULL backup with known data size.
     2. Write an exact, small amount of new data (5 MB).
-    3. External snapshot → transfer_missing() → incremental.
+    3. External snapshot → ``run_backup()`` → incremental.
     4. Assert ``bytes_transferred`` is in the 5-50 MB range
        (5 MB × 10x overhead), NOT in the full-disk range.
     """
@@ -819,22 +782,22 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
 
-    # Step 1: FULL backup.
+    # Step 1: FULL backup — ``run_backup`` decides FULL autonomously (no
+    # checkpoint yet) and creates the dirty-bitmap baseline checkpoint.
     provider = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.full-dirty",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+    )
+    disk = vm_config.disks[0]
 
-    r_full = provider.create_full_backup(
-        vm_name,
-        source,
+    r_full = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        disk,
+        stall_timeout=300,
     )
     assert r_full.success, f"FULL failed: {r_full.error}"
     full_actual = _get_actual_size(shell, r_full.target_path)
@@ -842,7 +805,8 @@ def test_incremental_dirty_bytes_proportional(test_vm):
     # Step 2: Write exactly 5 MB.
     _write_data_running(shell, base_image, 5, offset_mb=500)
 
-    # Step 3: External snapshot.
+    # Step 3: External snapshot — freezes the source disk so the
+    # checkpoint from the FULL is a stable dirty-bitmap baseline.
     snap_name = f"{vm_name}.dirty-proportional"
     shell.run(
         [
@@ -860,34 +824,17 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         timeout=60,
         check=True,
     )
-    overlay = _get_snapshot_disk_path(shell, vm_name)
-    if overlay is None:
-        pytest.skip("Could not determine overlay path")
 
-    snapshot_info = SnapshotInfo(
-        name=snap_name,
-        path=overlay,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
-    # Step 4: transfer_missing.
+    # Step 4: Incremental ``run_backup`` — transfers only the dirty
+    # blocks since the FULL's checkpoint (delta).
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-    )
 
-    results = provider_inc.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snapshot_info],
+    inc_result = provider_inc.run_backup(
+        vm_config,
+        target,
+        disk,
         stall_timeout=300,
     )
-    assert len(results) > 0
-    inc_result = results[0]
     assert inc_result.success, f"Incremental failed: {inc_result.error}"
 
     # Step 5: Size assertions.
@@ -953,29 +900,39 @@ def test_free_space_gate_strict_blocks_incremental_before_transfer(test_vm, capl
     time.sleep(2)
     if not is_vm_running(shell, vm_name):
         pytest.skip("VM did not reach running state")
+    if not _vm_active_disk_is_base(shell, vm_name, base_image):
+        pytest.skip("VM disk source is not this test's base image — concurrent test interference")
 
     _cleanup_checkpoints(shell, vm_name)
     _cleanup_snapshots(shell, vm_name)
 
     # Step 2: FULL backup → checkpoint baseline; record in state so Core
-    # sees a FULL anchor (next backup becomes an incremental).
+    # sees a FULL anchor (next backup becomes an incremental).  The
+    # strict-gate VM config is built up front — ``run_backup`` ignores
+    # the free-space fields (the gate lives in Core only).
     provider = BitmapBackupProvider(shell)
     target = TargetConfig(path=target_dir, compress=False, verify="off")
-    full_source = SnapshotInfo(
-        name=f"{vm_name}.gate-full",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        free_space_check="strict",
+        free_space_reserve=10**18,
+        targets=[target],
     )
-    full_result = provider.create_full_backup(vm_name, full_source, target, compress=False)
+    full_result = provider.run_backup(
+        vm_config,
+        target,
+        vm_config.disks[0],
+        stall_timeout=300,
+    )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
     full_name = full_result.target_path.stem
 
     state = InMemoryStateManager()
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", full_source.timestamp, disk="vda"
+        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
     )
 
     # Step 3: external snapshot (the pending incremental).
@@ -1014,14 +971,6 @@ def test_free_space_gate_strict_blocks_incremental_before_transfer(test_vm, capl
 
     # Step 4: strict gate with an impossible reserve → the incremental
     # transfer must be blocked BEFORE any dirty-block transfer.
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-        free_space_check="strict",
-        free_space_reserve=10**18,
-        targets=[target],
-    )
     config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "gate_incr.toml")
     core = Core(
         config=config,

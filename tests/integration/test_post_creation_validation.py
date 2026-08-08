@@ -10,9 +10,9 @@ Coverage:
 - ``ExternalSnapshotProvider.create()`` post-creation validation:
   file existence (test -f), qcow2 format, corrupt-bit check,
   backing-filename match, libvirt pivot (domblklist).
-- ``BitmapBackupProvider.transfer_missing()`` post-transfer validation
+- ``BitmapBackupProvider.run_backup()`` post-transfer validation
   for incrementals: chain-to-FULL traversability, checkpoint existence.
-- ``BitmapBackupProvider.create_full_backup()`` post-creation validation:
+- ``BitmapBackupProvider.run_backup()`` post-creation validation:
   no backing file, checkpoint existence.
 
 Design D4 (ExternalSnapshotProvider) and D5 (BitmapBackupProvider).
@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -41,7 +40,7 @@ except ImportError:
     _HAS_LIBNBD = False
 
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
-from qsnap.models.results import SnapshotInfo, SnapshotResult
+from qsnap.models.results import SnapshotResult
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -331,12 +330,12 @@ def test_snapshot_post_creation_validation_failure(test_vm):
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
 def test_incremental_post_transfer_validation(test_vm):
-    """Verify ``transfer_missing()`` post-transfer validation for incrementals.
+    """Verify ``run_backup()`` post-transfer validation for incrementals.
 
     1. Start the VM.
     2. Create a FULL backup (which atomically creates a checkpoint).
     3. Create an external snapshot.
-    4. Call ``transfer_missing()`` — must produce an incremental delta
+    4. Call ``run_backup()`` again — must produce an incremental delta
        (a prior checkpoint from the FULL already exists).
     5. Verify ``qemu-img info --backing-chain`` on the incremental file
        shows a traversable chain to the FULL anchor.
@@ -361,22 +360,17 @@ def test_incremental_post_transfer_validation(test_vm):
         pytest.skip("VM did not reach running state after retries")
 
     # Step 1: Create a FULL backup (also creates an atomic checkpoint).
+    # Phase 2: run_backup() takes a VMConfig + DiskConfig — no
+    # SnapshotInfo source; the backup world is orthogonal to snapshots.
     provider = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.incr-val-base",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
-    result_full = provider.create_full_backup(
-        vm_name,
-        source,
-        target,
-        compress=False,
-    )
+    result_full = provider.run_backup(vm_config, target, vm_config.disks[0])
     assert result_full.success, f"FULL backup failed: {result_full.error}"
 
     # Step 2: Create an external snapshot.
@@ -421,33 +415,14 @@ def test_incremental_post_transfer_validation(test_vm):
         _cleanup_snapshots(shell, vm_name)
         pytest.skip("Could not determine overlay path after external snapshot")
 
-    snapshot_info = SnapshotInfo(
-        name=snap_name,
-        path=overlay_path,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
-    # Step 3: transfer_missing — must produce an incremental.
+    # Step 3: run_backup — must produce an incremental delta (a prior
+    # checkpoint from the FULL already exists).
     provider_inc = BitmapBackupProvider(shell, nbd=LibnbdClient())
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=base_image)],
-        snapshot_dir=snapshot_dir,
-    )
 
-    results = provider_inc.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[snapshot_info],
-        stall_timeout=300,
-    )
-    assert len(results) > 0, "transfer_missing must return at least one result"
-    inc_result = results[0]
+    inc_result = provider_inc.run_backup(vm_config, target, vm_config.disks[0])
     assert inc_result.success, (
         f"Incremental transfer failed: {inc_result.error}. "
-        f"Check that transfer_missing detected the checkpoint from create_full_backup."
+        f"Check that run_backup detected the checkpoint from the FULL."
     )
 
     inc_path = inc_result.target_path
@@ -499,10 +474,10 @@ def test_incremental_post_transfer_validation(test_vm):
 
 @pytest.mark.integration
 def test_full_post_creation_validation(test_vm):
-    """Verify ``create_full_backup()`` post-creation validation.
+    """Verify ``run_backup()`` post-creation validation.
 
     1. Start the VM.
-    2. Call ``create_full_backup()`` — must succeed (post-creation
+    2. Call ``run_backup()`` — must succeed (post-creation
        validation passes internally).
     3. Verify ``qemu-img info`` reports no ``backing-filename``
        (standalone — the FULL check).
@@ -510,7 +485,7 @@ def test_full_post_creation_validation(test_vm):
        checkpoint exists.
 
     The post-creation validation is performed internally by
-    ``BitmapBackupProvider.create_full_backup()`` (design D5).  This
+    ``BitmapBackupProvider.run_backup()`` (design D5).  This
     test runs the same checks independently to confirm they would detect
     issues.
     """
@@ -529,16 +504,13 @@ def test_full_post_creation_validation(test_vm):
 
     # Create FULL backup — post-creation validation runs internally.
     provider = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.full-val",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
-    result = provider.create_full_backup(vm_name, source, target, compress=False)
+    result = provider.run_backup(vm_config, target, vm_config.disks[0])
     assert result.success, (
         f"FULL backup must succeed — post-creation validation failed: {result.error}"
     )

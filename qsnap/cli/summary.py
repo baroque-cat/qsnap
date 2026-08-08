@@ -113,6 +113,8 @@ def _format_prediction(action: ActionRecord) -> str:
     because nothing actually ran.  A size of 0 renders as
     ``size unknown`` (estimation failed or not applicable).
     """
+    if action.action == "free_space_gate":
+        return ""  # internal prediction, not a user-facing backup action
     symbol = _SYMBOLS.get(action.action, "???")
     indent = "    "  # 4 spaces for table rows
     lead = f"{symbol} [{action.disk}] " if action.disk is not None else f"{symbol}  "

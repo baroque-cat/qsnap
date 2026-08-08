@@ -38,7 +38,7 @@ from pathlib import Path
 import pytest
 
 from qsnap.config.facade import ConfigFacade
-from qsnap.models.config import TargetConfig
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
@@ -196,19 +196,22 @@ def test_full_backup_compression_modes(test_vm):
 
     _cleanup_checkpoints(shell, vm_name)
 
+    # Phase 2: the backup world is orthogonal to snapshots — the
+    # provider no longer accepts a SnapshotInfo source.  run_backup()
+    # takes a VMConfig + DiskConfig and decides FULL vs delta from
+    # checkpoint state; compression is driven by TargetConfig.compress
+    # (not a call kwarg).
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+    )
+
     # Step 3: No compression.
     provider = BitmapBackupProvider(shell)
-    result_none = provider.create_full_backup(
-        vm_name,
-        SnapshotInfo(
-            name=f"{vm_name}.none",
-            path=base_image,
-            timestamp=datetime.now(),
-            allocation=0,
-            disk="vda",
-        ),
+    result_none = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=False, verify="off"),
-        compress=False,
+        vm_config.disks[0],
     )
     assert result_none.success, f"Uncompressed FULL failed: {result_none.error}"
     _assert_standalone_qcow2(shell, result_none.target_path)
@@ -221,17 +224,10 @@ def test_full_backup_compression_modes(test_vm):
     # Step 4: zstd compression.
     _cleanup_checkpoints(shell, vm_name)
     time.sleep(1.1)  # Ensure timestamp differs from previous checkpoint
-    result_zstd = provider.create_full_backup(
-        vm_name,
-        SnapshotInfo(
-            name=f"{vm_name}.zstd",
-            path=base_image,
-            timestamp=datetime.now(),
-            allocation=0,
-            disk="vda",
-        ),
+    result_zstd = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=True, verify="off"),
-        compress=True,
+        vm_config.disks[0],
         compression_type="zstd",
     )
     assert result_zstd.success, f"zstd FULL failed: {result_zstd.error}"
@@ -243,17 +239,10 @@ def test_full_backup_compression_modes(test_vm):
     # Step 5: zlib compression.
     _cleanup_checkpoints(shell, vm_name)
     time.sleep(1.1)
-    result_zlib = provider.create_full_backup(
-        vm_name,
-        SnapshotInfo(
-            name=f"{vm_name}.zlib",
-            path=base_image,
-            timestamp=datetime.now(),
-            allocation=0,
-            disk="vda",
-        ),
+    result_zlib = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=True, verify="off"),
-        compress=True,
+        vm_config.disks[0],
         compression_type="zlib",
     )
     assert result_zlib.success, f"zlib FULL failed: {result_zlib.error}"
@@ -289,11 +278,12 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     """Verify FULL backup of a stopped VM via direct ``qemu-img convert``.
 
     1. Ensure the VM is stopped (fixture default).
-    2. Call ``create_full_backup()`` — must succeed via direct convert.
+    2. Call ``run_backup()`` — must succeed via direct convert.
     3. Verify ``qemu-img convert`` was used (log check).
     4. Verify NO ``nbd:unix:`` in command logs (direct path, no NBD).
     5. Verify NO ``virsh backup-begin`` in logs.
-    6. Verify ``domblklist --details`` was called (get_first_disk_path).
+    6. Verify the convert source is the configured base image
+       (the orthogonal API takes the disk path from ``DiskConfig``).
     7. Verify the result is a standalone qcow2.
     """
     shell: SubprocessShell = test_vm["shell"]
@@ -310,19 +300,19 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     if not is_libvirt_new_enough(shell):
         pytest.skip("libvirt < 7.2 — domblklist --details may not be available")
 
+    # The orthogonal API derives the source from DiskConfig.base_image —
+    # no SnapshotInfo source is involved in the backup world anymore.
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+    )
+
     provider = BitmapBackupProvider(shell)
     caplog.set_level(logging.DEBUG)
-    result = provider.create_full_backup(
-        vm_name,
-        SnapshotInfo(
-            name=f"{vm_name}.stopped",
-            path=base_image,
-            timestamp=datetime.now(),
-            allocation=0,
-            disk="vda",
-        ),
+    result = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=False, verify="off"),
-        compress=False,
+        vm_config.disks[0],
     )
 
     assert result.success, f"Stopped-VM FULL must succeed, got: {result.error}"
@@ -348,11 +338,15 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     bb_calls = [r.message for r in caplog.records if "backup-begin" in r.message]
     assert len(bb_calls) == 0, f"virsh backup-begin must not be called for stopped VM: {bb_calls}"
 
-    # domblklist --details must have been called.
-    domblk_calls = [
-        r.message for r in caplog.records if "domblklist" in r.message and "--details" in r.message
+    # The offline convert must read from the configured base image
+    # (Phase 2: the source path comes from DiskConfig.base_image — no
+    # virsh domblklist discovery happens in the backup world).
+    base_source_calls = [
+        r.message for r in caplog.records if "convert" in r.message and str(base_image) in r.message
     ]
-    assert len(domblk_calls) > 0, "domblklist --details must be called for stopped-VM FULL"
+    assert len(base_source_calls) > 0, (
+        f"qemu-img convert must read from the configured base image {base_image}"
+    )
 
     _assert_standalone_qcow2(shell, result.target_path)
 
@@ -367,7 +361,7 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     """Verify FULL backup of a running VM via NBD + ``qemu-img convert``.
 
     1. Start the VM.
-    2. Call ``create_full_backup()`` — must succeed via NBD convert.
+    2. Call ``run_backup()`` — must succeed via NBD convert.
     3. Verify ``qemu-img convert`` was used (log check).
     4. Verify ``nbd:unix:<socket>`` appears in convert command (NBD path).
     5. Verify ``virsh backup-begin`` was called.
@@ -391,21 +385,17 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
 
     _cleanup_checkpoints(shell, vm_name)
 
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.active-nbd",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
     )
 
     provider = BitmapBackupProvider(shell)
     caplog.set_level(logging.DEBUG)
-    result = provider.create_full_backup(
-        vm_name,
-        snapshot,
+    result = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=False, verify="off"),
-        compress=False,
+        vm_config.disks[0],
     )
 
     assert result.success, f"Running-VM NBD FULL must succeed, got: {result.error}"
@@ -426,8 +416,11 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     bb_calls = [r.message for r in caplog.records if "backup-begin" in r.message]
     assert len(bb_calls) > 0, "virsh backup-begin must be called for running-VM NBD FULL"
 
-    # No write-side qemu-nbd.
-    qemu_nbd = [r.message for r in caplog.records if "qemu-nbd" in r.message]
+    # No write-side qemu-nbd server may be STARTED for a FULL (that is
+    # the delta path's mechanism).  Phase 2's finally-block hygiene
+    # `rm` mentions the pid filename, so match actual qemu-nbd command
+    # invocations instead of any log line containing the string.
+    qemu_nbd = [r.message for r in caplog.records if "cmd=['qemu-nbd'" in r.message]
     assert len(qemu_nbd) == 0, "Write-side qemu-nbd must NOT be started for NBD FULL"
 
     # Checkpoint must exist.
@@ -453,10 +446,12 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
         f"virsh checkpoint-list output: {qsnap_cps}"
     )
 
-    # Atomic rename: no .tmp.
-    date_str = snapshot.timestamp.strftime("%Y%m%d")
-    tmp_file = target_dir / f"{vm_name}.FULL.{date_str}.qcow2.tmp"
-    assert not tmp_file.exists(), f"Temporary file {tmp_file} must have been renamed"
+    # Atomic rename: no .tmp file may be left behind.  Freeze-timestamp
+    # naming makes the exact name unpredictable, so check the pattern.
+    tmp_files = list(target_dir.glob("*.tmp"))
+    assert tmp_files == [], (
+        f"Temporary files must have been renamed, got: {[p.name for p in tmp_files]}"
+    )
 
     _assert_standalone_qcow2(shell, result.target_path)
     _cleanup_checkpoints(shell, vm_name)
@@ -482,7 +477,7 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
     """Verify FULL backup with default engine (qemu-img-convert).
 
     1. Start the VM.
-    2. Call ``create_full_backup()`` (no engine param — defaults to qemu-img-convert).
+    2. Call ``run_backup()`` (no engine param — defaults to qemu-img-convert).
     3. Verify ``qemu-img convert`` was used (log check for both ``qemu-img`` and
        ``convert`` in the same message, and ``nbd:unix:`` presence for the NBD path).
     4. Verify a checkpoint was created atomically.
@@ -503,21 +498,17 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
 
     _cleanup_checkpoints(shell, vm_name)
 
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.qemu-img-convert",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
     )
 
     provider = BitmapBackupProvider(shell)
     caplog.set_level(logging.DEBUG)
-    result = provider.create_full_backup(
-        vm_name,
-        snapshot,
+    result = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=False, verify="off"),
-        compress=False,
+        vm_config.disks[0],
     )
 
     assert result.success, f"qemu-img-convert FULL must succeed, got: {result.error}"
@@ -743,7 +734,7 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
     """Verify FULL backup with custom ``-m`` and in-order writes.
 
     1. Start the VM.
-    2. Call ``create_full_backup()`` with ``convert_parallel=2``, ``convert_out_of_order=False``.
+    2. Call ``run_backup()`` with ``convert_parallel=2``, ``convert_out_of_order=False``.
     3. Verify the convert command includes ``-m 2`` (parallel coroutines).
     4. Verify the convert command does NOT include ``-W`` (out-of-order writes
        disabled).
@@ -764,21 +755,17 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
 
     _cleanup_checkpoints(shell, vm_name)
 
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.custom-flags",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
     )
 
     provider = BitmapBackupProvider(shell)
     caplog.set_level(logging.DEBUG)
-    result = provider.create_full_backup(
-        vm_name,
-        snapshot,
+    result = provider.run_backup(
+        vm_config,
         TargetConfig(path=target_dir, compress=False, verify="off"),
-        compress=False,
+        vm_config.disks[0],
         convert_parallel=2,
         convert_out_of_order=False,
     )
@@ -837,8 +824,8 @@ def test_vm_level_engine_options_reach_convert_command(test_vm, caplog):
        target inherits every option from the VM.
     2. Parse with ``ConfigFacade`` and assert the target resolved the
        VM values (not the global ones).
-    3. Start the VM and run ``create_full_backup()`` passing the parsed
-       target fields (exactly like Core does).
+    3. Start the VM and run ``run_backup()`` passing the parsed VM
+       config, target, and disk (exactly like Core does).
     4. Assert at DEBUG level that the ``qemu-img convert`` argv contains
        ``-m 8`` and ``-o compression_type=zstd`` and does NOT contain
        ``-W`` (VM-level ``convert_out_of_order=false``).
@@ -910,7 +897,7 @@ path = "{target_dir}"
     )
 
     # Step 3: Start the VM and run the FULL backup with the parsed
-    # target fields (Core threads exactly these into create_full_backup).
+    # config objects (Core threads exactly these into run_backup).
     shell.run(["virsh", "start", vm_name], timeout=30)
     time.sleep(1)
     if not is_vm_running(shell, vm_name):
@@ -920,21 +907,12 @@ path = "{target_dir}"
 
     _cleanup_checkpoints(shell, vm_name)
 
-    snapshot = SnapshotInfo(
-        name=f"{vm_name}.vm-level-options",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-
     provider = BitmapBackupProvider(shell)
     caplog.set_level(logging.DEBUG)
-    result = provider.create_full_backup(
-        vm_name,
-        snapshot,
+    result = provider.run_backup(
+        vm,
         target,
-        compress=target.compress,
+        vm.disks[0],
         compression_type=target.compression_type,
         stall_timeout=parse_stall_timeout(target.backup_stall_timeout),
         convert_parallel=target.convert_parallel,

@@ -37,7 +37,7 @@ import pytest
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import BackupResult, SnapshotInfo
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
@@ -124,7 +124,10 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     ensures exactly one call.
 
     Because this test can run without a running VM (we mock the FULL
-    backup call), we don't require a started VM.
+    backup call), we don't require a started VM.  ``core.backup()`` is
+    used instead of ``core.run()`` so the pipeline exercises exactly
+    the retried backup-transfer path without any source-side snapshot
+    creation.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -142,7 +145,9 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     )
 
     # Record a snapshot and a FULL backup so the pipeline has something
-    # to work with (transfer_missing is called).
+    # to work with.  The FULL file is not created on disk, so Core's
+    # startup validation removes it as a phantom entry (non-fatal); the
+    # transfer for the disk then runs as a FULL — which the spy mocks.
     snap = SnapshotInfo(
         name=f"{vm_name}.retry-zero-snap",
         path=base_image,
@@ -152,8 +157,6 @@ def test_backup_retry_max_zero_calls_once(test_vm):
     )
     state.record_snapshot(vm_name, snap)
 
-    # Pre-populate a FULL backup in state so the pipeline enters
-    # the transfer_missing path (not the first-backup-is-FULL path).
     state.record_full_backup(
         str(target_dir),
         f"{vm_name}.retry-zero-full.qcow2",
@@ -161,24 +164,31 @@ def test_backup_retry_max_zero_calls_once(test_vm):
         disk="vda",
     )
 
-    # Spy on _execute_with_retry.
+    # Spy on _execute_with_retry.  The Phase-2 ``run_backup`` API returns
+    # a single BackupResult (not a list), so the stub must carry every
+    # field Core reads after a successful transfer (success, deferred,
+    # bytes_transferred, duration, snapshot_name, target_path, disk).
     call_count = 0
 
     def _spy_execute_with_retry(operation, target_config, **kwargs):
         nonlocal call_count
         call_count += 1
-        # Return a mock result indicating success so the pipeline
+        # Return a stub BackupResult indicating success so the pipeline
         # doesn't actually run real transfers.
-        return _RetryResultStub(success=True, error=None, payload=[])
-
-    class _RetryResultStub:
-        def __init__(self, success, error, payload):
-            self.success = success
-            self.error = error
-            self.payload = payload
+        return BackupResult(
+            success=True,
+            snapshot_name=f"{vm_name}.retry-zero-stub",
+            source_path=base_image,
+            target_path=target_dir / "retry-zero-stub.qcow2",
+            bytes_transferred=0,
+            error=None,
+            duration=0.0,
+            disk="vda",
+            deferred=False,
+        )
 
     with patch.object(core, "_execute_with_retry", wraps=_spy_execute_with_retry):
-        core.run(vm_name)
+        core.backup(vm_name)
 
     # Verify _execute_with_retry was called at least once (the transfer
     # path is exercised).  With backup_retry_max=0, the internal guard
@@ -246,10 +256,22 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
         nonlocal call_count, received_max_retries
         call_count += 1
         received_max_retries = target_config.backup_retry_max
-        return type("_Stub", (), {"success": True, "error": None, "payload": []})()
+        # Stub BackupResult — same shape as the Phase-2 ``run_backup``
+        # return value so the pipeline continues without real transfers.
+        return BackupResult(
+            success=True,
+            snapshot_name=f"{vm_name}.retry-two-stub",
+            source_path=base_image,
+            target_path=target_dir / "retry-two-stub.qcow2",
+            bytes_transferred=0,
+            error=None,
+            duration=0.0,
+            disk="vda",
+            deferred=False,
+        )
 
     with patch.object(core, "_execute_with_retry", wraps=_spy_execute_with_retry):
-        core.run(vm_name)
+        core.backup(vm_name)
 
     assert call_count >= 1, (
         f"Expected _execute_with_retry to be called at least once, got {call_count}"

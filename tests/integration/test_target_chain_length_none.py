@@ -123,6 +123,10 @@ def _build_core(
                 compress=False,
                 verify="off",
                 target_chain_length=target_chain_length,
+                # Keep 2 FULL generations so a newly created FULL (and
+                # its state record) is still observable after the backup
+                # retention/cleanup pass of the same run.
+                target_keep_generations=2,
             )
         ],
     )
@@ -183,20 +187,16 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
 
     target = vm_config.targets[0]
 
-    # Step 1: Create a FULL backup (first backup to target).
+    # Step 1: Create a FULL backup (first backup to target).  ``run_backup``
+    # decides the kind autonomously — no checkpoint exists yet → FULL —
+    # and records the state anchor manually below (Core's job in real runs).
     provider = BitmapBackupProvider(shell)
-    source_snap = SnapshotInfo(
-        name=f"{vm_name}.tcl-none-anchor",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    disk = vm_config.disks[0]
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        disk,
+        stall_timeout=300,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
@@ -204,7 +204,7 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
     full_path = full_result.target_path
     full_name = full_path.stem
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
     )
 
     # Step 2: Record 8 incrementals — well beyond any typical chain_length.
@@ -283,20 +283,14 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
 
     target = vm_config.targets[0]
 
-    # Step 1: Create a FULL backup.
+    # Step 1: Create a FULL backup (first backup to target).
     provider = BitmapBackupProvider(shell)
-    source_snap = SnapshotInfo(
-        name=f"{vm_name}.tcl-three-anchor",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    disk = vm_config.disks[0]
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        disk,
+        stall_timeout=300,
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
@@ -304,7 +298,7 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
     full_path = full_result.target_path
     full_name = full_path.stem
     state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", source_snap.timestamp, disk="vda"
+        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
     )
 
     # Step 2: Record 4 incrementals (exceeds chain_length=3).

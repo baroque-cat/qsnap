@@ -41,7 +41,7 @@ try:
 except ImportError:
     _HAS_LIBNBD = False
 
-from tests.mocks import InMemoryStateManager
+from tests.mocks import InMemoryStateManager, MockConfigFacade
 
 
 def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
@@ -61,6 +61,20 @@ def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
             )
 
 
+class _FrozenDateTime(datetime):
+    """Frozen ``datetime`` for deterministic FULL freeze-timestamp naming.
+
+    ``run_backup`` (Phase 2 API) names FULLs with ``datetime.now()``:
+    ``{vm}.FULL.{freeze_ts}_{disk}_{6hex}``.  Subclassing the real class
+    keeps ``strptime``/``min``/``timedelta`` arithmetic available for
+    checkpoint-name parsing inside the provider.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2025, 7, 30, 12, 0, 0)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: Socket and .tmp cleanup after crash simulation
 # ──────────────────────────────────────────────────────────────────────
@@ -69,23 +83,28 @@ def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
 @pytest.mark.integration
 @pytest.mark.timeout(1800)
 def test_socket_and_tmp_cleanup(test_vm):
-    """Verify source NBD socket and .tmp cleanup after ``create_full_backup()``.
+    """Verify source NBD socket and .tmp cleanup after ``run_backup()``.
 
     1. Create a stale NBD socket and a .tmp file (simulating a crashed run).
     2. Start the test VM.
-    3. Call ``create_full_backup()`` — uses ``qemu-img convert`` for the
-       FULL path (design D1/D5), no write-side ``qemu-nbd``.
+    3. Call ``run_backup()`` — the FULL path uses ``qemu-img convert``
+       (design D1/D5), no write-side ``qemu-nbd``.  The provider's socket
+       is disk-scoped (``/tmp/qsnap-backup-{pid}-{disk}.sock``), so the
+       stale socket carries the ``vda`` suffix.
     4. Verify the source NBD socket is removed (finally-block cleanup).
     5. Verify the .tmp file is renamed on success (atomic rename) or
-       removed on failure.
+       removed on failure.  The datetime + token_hex patches force the
+       actual FULL to adopt the stale .tmp's freeze-timestamp name, so a
+       successful run renames (adopts) the stale file.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     # Step 1: Create stale artifacts.
-    socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}.sock")
+    socket_path = Path(f"/tmp/qsnap-backup-{os.getpid()}-vda.sock")
     # Freeze the timestamp so the stale .tmp and actual backup share the
     # same timestamp prefix.  Mock token_hex to get the same hex suffix.
     # Multi-disk naming: FULL files are {vm}.FULL.{ts}_{disk}_{6hex}, so
@@ -110,23 +129,20 @@ def test_socket_and_tmp_cleanup(test_vm):
 
     if vm_running and nbd_available:
         provider = BitmapBackupProvider(shell)
-        source = SnapshotInfo(
-            name=f"{vm_name}.cleanup",
-            path=base_image,
-            timestamp=frozen_ts,  # must match stale .tmp timestamp
-            allocation=0,
-            disk="vda",
-        )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
+        vm_config = VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+            targets=[target],
+        )
 
         _cleanup_checkpoints(shell, vm_name)
-        with patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"):
-            result = provider.create_full_backup(
-                vm_name,
-                source,
-                target,
-                compress=False,
-            )
+        with (
+            patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"),
+            patch("qsnap.modules.backup.bitmap.datetime", _FrozenDateTime),
+        ):
+            result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
         # Source NBD socket must be gone.
         assert not socket_path.exists(), f"Source socket {socket_path} was not cleaned up"
@@ -138,26 +154,22 @@ def test_socket_and_tmp_cleanup(test_vm):
     else:
         # Stopped-VM path: direct convert, no NBD socket.
         provider = BitmapBackupProvider(shell)
-        source = SnapshotInfo(
-            name=f"{vm_name}.cleanup-stopped",
-            path=base_image,
-            timestamp=datetime.now(),
-            allocation=0,
-            disk="vda",
-        )
         target = TargetConfig(path=target_dir, compress=False, verify="off")
-
-        result = provider.create_full_backup(
-            vm_name,
-            source,
-            target,
-            compress=False,
+        vm_config = VMConfig(
+            name=vm_name,
+            disks=[DiskConfig(target="vda", base_image=base_image)],
+            snapshot_dir=snapshot_dir,
+            targets=[target],
         )
+
+        with (
+            patch("qsnap.modules.backup.bitmap.secrets.token_hex", return_value="deadbe"),
+            patch("qsnap.modules.backup.bitmap.datetime", _FrozenDateTime),
+        ):
+            result = provider.run_backup(vm_config, target, vm_config.disks[0])
         assert result.success or result.error is not None, f"Stopped-VM path failed: {result.error}"
-        # The stale .tmp was created with hex "deadbe" — the actual
-        # FULL uses a different random hex, so the stale .tmp is NOT
-        # cleaned up by create_full_backup.  Just verify no NEW .tmp
-        # files remain for this VM.
+        # The stale .tmp is adopted by the FULL (same frozen timestamp +
+        # "deadbe" hex), so it is renamed — no .tmp files remain.
         remaining_tmps = list(target_dir.glob(f"{vm_name}.FULL.*.qcow2.tmp"))
         assert len(remaining_tmps) == 0, f"Tmp files not cleaned up: {remaining_tmps}"
 
@@ -176,13 +188,14 @@ def test_domjobabort_after_backup(test_vm):
     """Verify ``virsh domjobabort`` is called and no active block job remains.
 
     1. Start the test VM.
-    2. Run ``create_full_backup()`` via NBD.
+    2. Run ``run_backup()`` via NBD.
     3. Check ``virsh domjobinfo`` — should report no active block job.
     4. Verify the VM is still running and healthy.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     # Start VM.
@@ -196,21 +209,15 @@ def test_domjobabort_after_backup(test_vm):
         pytest.skip("python3-libnbd not installed")
 
     provider = BitmapBackupProvider(shell)
-    source = SnapshotInfo(
-        name=f"{vm_name}.domjobabort",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
-
-    result = provider.create_full_backup(
-        vm_name,
-        source,
-        target,
-        compress=False,
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        targets=[target],
     )
+
+    result = provider.run_backup(vm_config, target, vm_config.disks[0])
     assert result.success, f"FULL backup failed: {result.error}"
 
     # After backup, domjobabort should have been called in the finally block.
@@ -299,31 +306,34 @@ def test_stall_detection_slow_progress_survives(tmp_path: Path, monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 4: Stale state self-healing
+# Test 4: Stale state self-healing (snapshot world)
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 def test_stale_state_self_healing(test_vm):
-    """Verify stale state entry is removed during ``transfer_missing()``.
+    """Stale snapshot records are healed by the snapshot world, not the provider.
+
+    Phase 2 decoupled the backup world from snapshot state:
+    ``BitmapBackupProvider`` no longer accepts a ``state=`` dependency
+    and no longer performs stale-state healing (``transfer_missing`` was
+    removed — the replacement ``run_backup()`` never consults snapshot
+    state).  Stale snapshot records — entries whose snapshot file is
+    missing on disk — are now the snapshot world's responsibility and
+    are removed by ``Core.reconcile()``.
 
     1. Register a snapshot in ``InMemoryStateManager`` pointing to a
        non-existent file path.
-    2. Create a sentinel file in the target dir so the "empty target →
-       create FULL" short-circuit is not triggered.
-    3. Call ``transfer_missing()`` with the stale snapshot.
-    4. Verify the stale entry was removed from state.
-    5. Verify no backup was produced for the stale entry.
+    2. Run ``Core.reconcile()`` — the snapshot world detects the phantom
+       snapshot (file missing) and removes it from state.
+    3. Verify the stale entry was removed and reported as a phantom.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
     snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
-
-    # Ensure target is not empty (avoids "empty → FULL" short-circuit).
-    sentinel = target_dir / "_keep_nonempty.qcow2"
-    sentinel.write_bytes(b"\x00" * 1024)
+    tmpdir: Path = test_vm["tmpdir"]
 
     # Register a stale snapshot pointing to a non-existent path.
     state = InMemoryStateManager()
@@ -337,30 +347,50 @@ def test_stale_state_self_healing(test_vm):
     state.record_snapshot(vm_name, stale)
     assert len(state.get_snapshots(vm_name)) == 1, "Stale snapshot must be recorded"
 
-    # Run transfer_missing.
-    provider = BitmapBackupProvider(shell, state=state)
-    target = TargetConfig(path=target_dir, verify="off")
+    # Build a Core with the real factory so reconcile uses the real
+    # shell (virsh dumpxml) and the injected state.
+    from qsnap.core import Core
+    from qsnap.factory.default import DefaultFactory
+
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
         snapshot_dir=snapshot_dir,
+        targets=[TargetConfig(path=target_dir, verify="off")],
+    )
+    config = MockConfigFacade(
+        vms=[vm_config],
+        config_path=tmpdir / "stale_heal.toml",
+    )
+    core = Core(
+        config=config,
+        factory=DefaultFactory(shell=shell, state=state),
+        state=state,
+        shell=shell,
     )
 
-    results = provider.transfer_missing(
-        vm_config=vm_config,
-        target=target,
-        snapshots=[stale],
-    )
+    # The snapshot world removes the stale entry (reconcile step 1:
+    # phantom snapshots whose file is missing and whose path is not
+    # referenced by the domain XML).
+    result = core.reconcile(vm_name)
 
-    # Stale entry removed.
+    healed = result[vm_name]
+    assert healed.phantom_snapshots_removed == 1, (
+        f"Expected the stale snapshot to be removed, got {healed}"
+    )
     remaining = state.get_snapshots(vm_name)
     assert len(remaining) == 0, (
-        f"Stale entry must be removed. Remaining: {[s.name for s in remaining]}"
+        f"Stale entry must be removed by the snapshot world. "
+        f"Remaining: {[s.name for s in remaining]}"
     )
 
-    # No backup for stale snapshot.
-    stale_results = [r for r in results if r.snapshot_name == stale.name]
-    assert len(stale_results) == 0, "No backup must be attempted for stale snapshot"
+    # The backup provider is fully decoupled: it constructs without
+    # ``state=`` and its target listing is unaffected by snapshot
+    # records.
+    provider = BitmapBackupProvider(shell)
+    assert provider.list(TargetConfig(path=target_dir, verify="off")) == [], (
+        "Backup listing must not be affected by snapshot state"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -423,13 +453,15 @@ def test_state_save_oserror_surfaces_runtime_error(tmp_path: Path, caplog):
 
 @pytest.mark.integration
 def test_stale_state_self_healing_save_failure_surfaces_runtime_error(tmp_path: Path, caplog):
-    """Stale-state self-healing surfaces RuntimeError when the save fails.
+    """Snapshot-world stale-state healing surfaces RuntimeError when the save fails.
 
-    The self-healing path (``transfer_missing`` → ``state.remove_snapshot``
-    → ``JsonStateManager._save``) now raises ``RuntimeError`` on OSError
-    instead of swallowing it — the per-VM pipeline handler contains it.
+    Phase 2: stale snapshots are healed by the snapshot world via
+    ``IStateManager.remove_snapshot`` (the backup provider no longer
+    performs healing).  ``JsonStateManager.remove_snapshot`` →
+    ``JsonStateManager._save`` raises ``RuntimeError`` on OSError instead
+    of swallowing it — the per-VM pipeline handler contains it.  The
+    stale entry is never silently dropped.
     """
-    from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
     from qsnap.models.results import SnapshotInfo
     from qsnap.state.json_manager import JsonStateManager
 
@@ -447,29 +479,16 @@ def test_stale_state_self_healing_save_failure_surfaces_runtime_error(tmp_path: 
     manager.record_snapshot(vm_name, stale)
     assert len(manager.get_snapshots(vm_name)) == 1, "Stale snapshot must be recorded"
 
-    target = TargetConfig(path=tmp_path / "target", verify="off")
-    (tmp_path / "target").mkdir(exist_ok=True)
-    (tmp_path / "target" / "_keep_nonempty.qcow2").write_bytes(b"\x00" * 1024)
-    vm_config = VMConfig(
-        name=vm_name,
-        disks=[DiskConfig(target="vda", base_image=tmp_path / "base.qcow2")],
-        snapshot_dir=tmp_path / "snapshots",
-    )
-
-    provider = BitmapBackupProvider(shell=SubprocessShell(), state=manager)
-
-    with patch(
-        "qsnap.state.json_manager.os.replace",
-        side_effect=OSError(28, "No space left on device"),
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ),
+        pytest.raises(RuntimeError, match="State write failed"),
     ):
         # remove_snapshot → _save fails → RuntimeError surfaces (the
         # stale entry is NOT silently dropped).
-        with pytest.raises(RuntimeError, match="State write failed"):
-            provider.transfer_missing(
-                vm_config=vm_config,
-                target=target,
-                snapshots=[stale],
-            )
+        manager.remove_snapshot(vm_name, stale.name)
 
     critical_msgs = [
         r.message

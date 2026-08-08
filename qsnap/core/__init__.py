@@ -63,6 +63,7 @@ from qsnap.utils.retry import compute_backoff, is_retryable, is_space_error, par
 from qsnap.utils.space import (
     check_free_space,
     estimate_full_size,
+    estimate_incremental_size,
 )
 from qsnap.utils.time import parse_duration, parse_stall_timeout
 from qsnap.utils.transaction import TransactionWriter
@@ -5097,13 +5098,23 @@ class Core:
                     chain_length = target.target_chain_length
                     needs_full = chain_length is not None and len(deps) > chain_length
 
+                # Size estimate: chain-sum for FULL, active-layer actual-size for delta.
+                if needs_full:
+                    size_estimate = estimate_full_size(self._shell, disk_cfg.base_image)
+                else:
+                    active_path = self._detect_active_layer_path(vm_config, disk_target)
+                    size_estimate = (
+                        estimate_incremental_size(self._shell, Path(active_path))
+                        if active_path
+                        else None
+                    )
+
                 # Free-space gate before backup.
-                full_estimate = estimate_full_size(self._shell, disk_cfg.base_image)
                 if self._dry_run:
                     if free_space_check == "strict":
                         result = check_free_space(
                             Path(target.path),
-                            full_estimate,
+                            size_estimate,
                             reserve=free_space_reserve,
                             factor=free_space_factor,
                         )
@@ -5113,7 +5124,7 @@ class Core:
                                 vm_name=vm_config.name,
                                 name=str(target.path),
                                 path=target.path,
-                                size=full_estimate or 0,
+                                size=size_estimate or 0,
                                 error=(
                                     None
                                     if result.sufficient
@@ -5122,7 +5133,7 @@ class Core:
                             )
                         )
                 elif _apply_free_space_gate(
-                    full_estimate,
+                    size_estimate,
                     f"backup for disk {disk_target}",
                 ):
                     target_suspended = True
@@ -5135,13 +5146,25 @@ class Core:
                     )
                     kind = "FULL" if needs_full else "delta"
                     size_str = (
-                        f"~{self._format_bytes(full_estimate)}"
-                        if full_estimate is not None
+                        f"~{self._format_bytes(size_estimate)}"
+                        if size_estimate is not None
                         else "size unknown"
                     )
+                    checkpoint_hint = ""
+                    if not needs_full:
+                        tgt_hash = provider.target_hash(str(target.path))
+                        prefix = f"qsnap-{tgt_hash}-{disk_target}-"
+                        disk_cks = [
+                            n for n in provider.list_checkpoints(vm_config.name)
+                            if n.startswith(prefix)
+                        ]
+                        if disk_cks:
+                            newest_ck = sorted(disk_cks)[-1]
+                            checkpoint_hint = f" since checkpoint {newest_ck}"
                     logger.info(
-                        "[dry-run] Would create %s backup for disk %s (%s, method=NBD, VM=%s)",
+                        "[dry-run] Would create %s backup%s for disk %s (%s, method=NBD, VM=%s)",
                         kind,
+                        checkpoint_hint,
                         disk_target,
                         size_str,
                         vm_state,
@@ -5154,7 +5177,7 @@ class Core:
                             f"{datetime.now().strftime('%Y%m%dT%H%M%S')}"
                             f"_{disk_target}_{secrets.token_hex(3)}",
                             path=target.path,
-                            size=full_estimate or 0,
+                            size=size_estimate or 0,
                             disk=disk_target,
                         )
                     )

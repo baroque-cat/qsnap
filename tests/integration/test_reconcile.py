@@ -186,9 +186,13 @@ def test_reconcile_command(test_vm, caplog):
         f"No *.FULL.*.qcow2 files found in {target_dir}; contents: {list(target_dir.iterdir())}"
     )
 
-    # Record the full name for later verification.
+    # Record the full name for later verification.  Phase 2 naming:
+    # backups use freeze-timestamp names ({vm}.FULL.{freeze_ts}_{disk}_{hex}).
+    # Core records the FULL in state by stem (no .qcow2), and the state
+    # manager derives the file path from that stem — so the state record
+    # matches the disk file by its stem, not by the file name.
     full_path = full_files[0]
-    full_name = full_path.name
+    full_name = full_path.stem
 
     # Verify this FULL is tracked in state.
     tracked_names = {full.name for full in fulls_before if full.path.name == full_name}

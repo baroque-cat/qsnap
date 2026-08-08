@@ -22,12 +22,14 @@ from qsnap.core import Core, PipelineResult
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
+    BackupInfo,
     FullBackupInfo,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import (
     InMemoryStateManager,
+    MockBitmapBackupProvider,
     MockConfigFacade,
     MockRetentionEngine,
     MockShell,
@@ -1571,3 +1573,119 @@ def test_dry_run_space_limited_false(
     assert result2.space_limited is False
     gate_preds = [p for p in result2.predictions if p.action == "free_space_gate"]
     assert len(gate_preds) >= 1, "gate-blocked dry-run should still predict the gate"
+
+
+# ── Test: delta prediction uses incremental size estimate ──────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_delta_prediction_uses_incremental_size_estimate(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Delta prediction uses active-layer actual-size, not the
+    backing-chain sum meant for FULL predictions.
+
+    When a FULL already exists and chain length is not exceeded, the
+    dry-run predicts a delta.  The size estimate MUST be the
+    active-layer ``actual-size`` (~5 MiB) — NOT the backing-chain sum
+    (~100 MiB) that ``estimate_full_size`` would return.
+    """
+    import hashlib
+
+    from qsnap.models.results import BackupInfo
+
+    target_dir = tmp_path / "backup"
+    target_dir.mkdir()
+    vm = _make_vm(name="testvm", targets=[TargetConfig(path=target_dir)])
+    disk_target = "vda"
+    active_path = f"/var/lib/libvirt/snapshots/{vm.name}/active.qcow2"
+
+    # ── State: one FULL vda, no deps → needs_full=False ─────────────
+    target_path = str(vm.targets[0].path)
+
+    full_name = f"{vm.name}.FULL.20250101T000000_vda_a1b2c3"
+    # Create the FULL file on disk so phantom detection does not
+    # remove it.  (Phantom detection uses os.path.exists, not the
+    # provider.list method — see Core._detect_phantom_fulls.)
+    full_path = target_dir / full_name  # state stores path without .qcow2 suffix
+    full_path.touch()
+
+    # Record it in state.
+    mock_state.record_full_backup(
+        target_path,
+        full_name,
+        datetime(2025, 1, 1, 0, 0, 0),
+        disk_target,
+    )
+
+    tgt_hash = hashlib.md5(target_path.encode()).hexdigest()[:8]  # noqa: S324
+
+    # Return a checkpoint so the delta prediction log shows its name.
+    ck_name = f"qsnap-{tgt_hash}-vda-20250101T000000-aa11bb"
+    mock_factory._bitmap_backup_provider.list_checkpoints = (  # type: ignore[method-assign]
+        lambda vm_name: [ck_name]
+    )
+
+    # ── Shell mocks ─────────────────────────────────────────────────
+    # domblklist → active layer path
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=f"Target   Source\n--------------------------------\nvda   {active_path}\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Incremental estimator: qemu-img info <active_path> (single file, no --backing-chain).
+    # Returns 5 MiB actual-size.
+    mock_shell.expect_first(
+        r"qemu-img info --force-share --output=json .*active\.qcow2"
+    ).returns(
+        ShellResult(
+            success=True,
+            stdout='{"actual-size": 5242880}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    caplog.set_level(logging.INFO)
+
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+    result = core.run()
+
+    # ── Assertions ──────────────────────────────────────────────
+    delta_predictions = [
+        p for p in result.predictions if p.action == "backup_transfer"
+    ]
+    assert len(delta_predictions) >= 1, (
+        f"Expected at least one backup_transfer prediction (delta), got {len(delta_predictions)}"
+    )
+
+    for p in delta_predictions:
+        assert p.disk == disk_target, f"disk must be {disk_target}, got {p.disk}"
+        assert p.size == 5_242_880, (
+            f"Delta prediction size should be 5 MiB (incremental), "
+            f"got {p.size} ({p.size / 2**20:.1f} MiB) — chain-sum leak?"
+        )
+
+    # The delta prediction log should mention the checkpoint.
+    delta_logs = [
+        r.getMessage()
+        for r in caplog.records
+        if "Would create delta backup" in r.getMessage()
+    ]
+    assert len(delta_logs) >= 1, "Delta prediction must be logged"
+    assert "since checkpoint" in delta_logs[0], (
+        f"Delta log should name the checkpoint, got: {delta_logs[0]}"
+    )

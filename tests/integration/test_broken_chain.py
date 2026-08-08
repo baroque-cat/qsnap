@@ -209,7 +209,7 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
     and skips any with a broken backing chain, falling back to the last
     valid one (the FULL).
 
-    1. Start VM, create FULL backup via ``create_full_backup()``.
+    1. Start VM, create FULL backup via ``run_backup()``.
     2. Create two backing-chained incrementals on target: incr1 chained to
        FULL, incr2 chained to incr1.
     3. Delete incr1 from disk, leaving incr2 with a broken backing chain.
@@ -258,19 +258,18 @@ def test_broken_chain_recovery_skips_and_chains_to_valid(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     assert full_path.exists(), f"FULL backup not found: {full_path}"
     full_name = full_path.stem
 
     # Record FULL in state (done by _backup_target after verification;
-    # we must do it manually here since we're calling create_full_backup directly).
+    # we must do it manually here since we're calling run_backup directly).
     state.record_full_backup(
         str(target_dir),
         f"{full_name}.qcow2",
@@ -425,7 +424,7 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
     if not _HAS_LIBNBD:
         pytest.skip("python3-libnbd not installed")
 
-    # Start VM (needed for create_full_backup via backup-begin NBD).
+    # Start VM (needed for run_backup via backup-begin NBD).
     start = shell.run(["virsh", "start", vm_name], timeout=30)
     if not start.success:
         pytest.skip(f"virsh start failed: {start.error}")
@@ -448,13 +447,12 @@ def test_ghost_retention_incrementals_real_pipeline(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
     state.record_full_backup(
@@ -641,13 +639,12 @@ def test_check_state_detects_broken_chains(test_vm):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
     state.record_full_backup(

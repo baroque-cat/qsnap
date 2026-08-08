@@ -222,7 +222,7 @@ def _create_manual_incremental(
 def test_auto_recovery_broken_backup_chain(test_vm, caplog):
     """Broken-chain backups are auto-deleted at startup with WARNING logs.
 
-    1. Start VM, create a FULL backup via ``create_full_backup()``.
+    1. Start VM, create a FULL backup via ``run_backup()``.
     2. Create two backing-chained incrementals: incr1 → FULL, incr2 → incr1.
     3. Record all in state.
     4. Delete incr1, breaking incr2's backing chain.
@@ -253,7 +253,7 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
 
     core, vm_config, state = _build_core(shell, vm_name, base_image, snapshot_dir, target_dir)
 
-    # ── Step 1: Create FULL backup directly ──────────────────────────
+    # ── Step 1: Create FULL backup directly (Phase 2: run_backup) ───
     provider = BitmapBackupProvider(shell)
     source_snap = SnapshotInfo(
         name=f"{vm_name}.ar-full-src",
@@ -263,13 +263,12 @@ def test_auto_recovery_broken_backup_chain(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
@@ -390,13 +389,12 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
@@ -452,7 +450,7 @@ def test_auto_recovery_no_broken_chains_noop(test_vm, caplog):
 def test_auto_recovery_no_full_remains(test_vm, caplog):
     """Force-full flag set when no valid FULL remains after recovery.
 
-    1. Start VM, create a FULL backup via ``create_full_backup()``.
+    1. Start VM, create a FULL backup via ``run_backup()``.
     2. Create supporting incrementals, record in state.
     3. Delete the FULL file (simulating a lost FULL).
     4. Run ``core._validate_state_at_startup(vm_config)``.
@@ -493,13 +491,12 @@ def test_auto_recovery_no_full_remains(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
@@ -622,11 +619,14 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             allocation=0,
             disk="vda",
         )
-        full_result = provider.create_full_backup(
-            vm_name,
-            source_snap,
+        # force_full=True: each chain needs its OWN FULL — a subsequent
+        # run_backup() would otherwise discover the prior checkpoint and
+        # produce an incremental instead (Phase 2 checkpoint-driven kind).
+        full_result = provider.run_backup(
+            vm_config,
             target,
-            compress=False,
+            vm_config.disks[0],
+            force_full=True,
         )
         assert full_result.success, f"FULL chain {suffix} failed: {full_result.error}"
         full_path = full_result.target_path
@@ -719,6 +719,7 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
     base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
     target_dir: Path = test_vm["target_dir"]
 
     if not is_libvirt_new_enough(shell):
@@ -751,23 +752,19 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
 
     # ── Step 1: First FULL backup → creates CP1 ─────────────────────
     provider = BitmapBackupProvider(shell)
-    snapshot1 = SnapshotInfo(
-        name=f"{vm_name}.cp-collision-src1",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
+    # Build a minimal VMConfig so the Phase 2 ``run_backup()`` API can
+    # be used (checkpoint discovery replaces the removed
+    # ``create_full_backup(vm_name, source_snapshot, target, ...)``).
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
     )
     target = TargetConfig(path=target_dir, compress=False, verify="off")
 
     caplog.clear()
     caplog.set_level(logging.DEBUG)
-    result1 = provider.create_full_backup(
-        vm_name,
-        snapshot1,
-        target,
-        compress=False,
-    )
+    result1 = provider.run_backup(vm_config, target, vm_config.disks[0])
     assert result1.success, f"First FULL backup failed: {result1.error}"
 
     cps_after_first = _get_qsnap_checkpoints()
@@ -785,21 +782,18 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
         _cleanup_checkpoints(shell, vm_name)
         _cleanup_snapshots(shell, vm_name)
         pytest.skip("VM did not stay running between backup attempts")
-    snapshot2 = SnapshotInfo(
-        name=f"{vm_name}.cp-collision-src2",
-        path=base_image,
-        timestamp=datetime.now(),
-        allocation=0,
-        disk="vda",
-    )
 
     caplog.clear()
     caplog.set_level(logging.DEBUG)
-    result2 = provider.create_full_backup(
-        vm_name,
-        snapshot2,
+    # force_full=True: the second backup must be a FULL even though the
+    # first FULL left a checkpoint behind (Phase 2 checkpoint-driven
+    # kind).  A fresh successor name is generated, so the old checkpoint
+    # is rotated away — no "Bitmap already exists" collision.
+    result2 = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
+        force_full=True,
     )
     assert result2.success, (
         f"Second FULL backup should succeed without collision. Error: {result2.error}"
@@ -816,16 +810,13 @@ def test_checkpoint_full_delete_prevents_collision(test_vm, caplog):
     )
 
     # ── Step 4: Verify checkpoints exist but no collision ──────────
-    # NOTE: There is a known source bug — ``create_full_backup()`` has
-    # its own code path separate from ``transfer_missing()`` and does
-    # NOT call ``_delete_superseded_checkpoints()`` to clean up old
-    # checkpoints.  Consequently, both CP1 and CP2 may persist after
-    # two consecutive FULL backups.  The important thing is that the
-    # second backup succeeded without a "Bitmap already exists"
+    # The provider rotates superseded checkpoints after each successful
+    # AND verified export (``_delete_superseded_checkpoints``), so the
+    # first FULL's checkpoint CP1 is deleted by the second FULL — only
+    # the newest successor checkpoint remains.  The important thing is
+    # that the second backup succeeded without a "Bitmap already exists"
     # collision — the ``_new_checkpoint_name()`` random suffix prevents
-    # name collisions regardless.  Old checkpoints are cleaned up when
-    # ``transfer_missing()`` is used (e.g., via the Core pipeline's
-    # ``_backup_target()`` path).
+    # name collisions regardless.
     cps_after_second = _get_qsnap_checkpoints()
     assert len(cps_after_second) >= 1, (
         f"Expected at least 1 checkpoint after second backup, got: {cps_after_second}"
@@ -889,13 +880,12 @@ def test_production_incident_reproduction(test_vm, caplog):
         disk="vda",
     )
     target = vm_config.targets[0]
-    full_result = provider.create_full_backup(
-        vm_name,
-        source_snap,
+    full_result = provider.run_backup(
+        vm_config,
         target,
-        compress=False,
+        vm_config.disks[0],
     )
-    assert full_result.success, f"create_full_backup failed: {full_result.error}"
+    assert full_result.success, f"run_backup failed: {full_result.error}"
     full_path = full_result.target_path
     full_name = full_path.stem
 
