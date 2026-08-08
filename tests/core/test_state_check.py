@@ -41,7 +41,7 @@ def test_check_state_all_snapshots_exist_clean(
             disk="vda",
         ),
     )
-    full_name = "full.FULL.monthly"
+    full_name = "full.FULL.monthly.qcow2"
     full_path = backup_dir / full_name
     full_path.touch()
     mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "vda")
@@ -119,7 +119,7 @@ def test_check_state_orphaned_dependency_detected(
     backup_dir.mkdir()
     target = make_target(path=str(backup_dir))
     vm = make_vm_config(name="testvm", snapshot_dir=str(tmp_path / "snapshots"), targets=[target])
-    full_name = "full.FULL.monthly"
+    full_name = "full.FULL.monthly.qcow2"
     full_path = backup_dir / full_name
     full_path.touch()
     mock_state.record_full_backup(str(backup_dir), full_name, datetime(2025, 7, 13, 10, 0), "vda")

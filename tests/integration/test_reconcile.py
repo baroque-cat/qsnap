@@ -188,17 +188,19 @@ def test_reconcile_command(test_vm, caplog):
 
     # Record the full name for later verification.  Phase 2 naming:
     # backups use freeze-timestamp names ({vm}.FULL.{freeze_ts}_{disk}_{hex}).
-    # Core records the FULL in state by stem (no .qcow2), and the state
-    # manager derives the file path from that stem — so the state record
-    # matches the disk file by its stem, not by the file name.
+    # After the fix, Core records the FULL in state with the .qcow2
+    # extension, so the state record's name matches the disk file name
+    # (full_path.name), not the stem.
     full_path = full_files[0]
     full_name = full_path.stem
 
-    # Verify this FULL is tracked in state.
-    tracked_names = {full.name for full in fulls_before if full.path.name == full_name}
-    assert len(tracked_names) > 0, (
+    # Verify this FULL is tracked in state by its extended file name
+    # (the recorded name carries .qcow2 and path resolves to the disk).
+    tracked = [full for full in fulls_before if full.name == full_path.name]
+    assert len(tracked) > 0, (
         f"FULL {full_name} not found in state; tracked: {[f.path.name for f in fulls_before]}"
     )
+    assert tracked[0].path.exists(), f"FULL state entry path must exist on disk: {tracked[0].path}"
 
     # --- Manually delete the FULL backup file (simulate disk failure / user error) ---
     os.unlink(str(full_path))
@@ -222,7 +224,7 @@ def test_reconcile_command(test_vm, caplog):
     fulls_after = state.get_full_backups(str(target_dir))
     after_names = {full.name for full in fulls_after}
     for fb in fulls_before:
-        if fb.path.name == full_name:
+        if fb.name == full_path.name:
             assert fb.name not in after_names, (
                 f"FULL {fb.name} should have been removed from state by reconcile"
             )

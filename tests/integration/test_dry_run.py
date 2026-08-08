@@ -624,16 +624,17 @@ def test_dry_run_incremental_predictions_approximate(test_vm):
     full_files = sorted(target_dir.glob("*.FULL.*.qcow2"))
     assert len(full_files) >= 1, f"Expected at least one FULL backup file, got {len(full_files)}"
 
-    # Phase 2 quirk: Core records FULL backup names without the .qcow2
-    # extension, so the state-manager-derived file path misses the anchor
-    # on disk and the dry-run's phantom filter would drop it (predicting
-    # a FULL instead of a delta).  Re-record the anchor with the
-    # extension so the dry-run can see it and predict the incremental.
-    for full in state1.get_full_backups(str(target_dir)):
-        if full.name.endswith(".qcow2"):
-            continue
-        state1.remove_full_backup(str(target_dir), full.name)
-        state1.record_full_backup(str(target_dir), f"{full.name}.qcow2", full.timestamp, full.disk)
+    # Corrected behavior: the recorded FULL name carries the ``.qcow2``
+    # extension, so the dry-run's phantom filter sees the anchor and
+    # predicts a delta — no re-recording needed.
+    recorded_fulls = state1.get_full_backups(str(target_dir))
+    assert recorded_fulls, "Expected at least one recorded FULL backup"
+    assert recorded_fulls[0].name.endswith(".qcow2"), (
+        f"Recorded FULL name must carry the .qcow2 extension, got {recorded_fulls[0].name}"
+    )
+    assert recorded_fulls[0].path.exists(), (
+        f"Recorded FULL path must exist: {recorded_fulls[0].path}"
+    )
 
     # Create S2 (a new snapshot that needs incremental transfer)
     time.sleep(1.1)

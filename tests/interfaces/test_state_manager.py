@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+
 import pytest
 
 from qsnap.interfaces.state import IStateManager
 from qsnap.state.json_manager import JsonStateManager
 from tests.mocks.mock_state import InMemoryStateManager
+
+
+def _make_state_manager(mgr_cls, tmp_path) -> IStateManager:
+    """Construct the manager under test.
+
+    ``JsonStateManager`` needs a state directory; ``InMemoryStateManager``
+    is constructed without arguments.
+    """
+    if mgr_cls is JsonStateManager:
+        return mgr_cls(state_dir=tmp_path)
+    return mgr_cls()
 
 
 def test_istate_manager_is_abstract():
@@ -654,3 +668,177 @@ def test_json_add_deferred_blockcommit_accepts_enospc_reason(tmp_path):
     assert entry.disk == "vda"
     assert entry.snapshots == ["snap1.qcow2"]
     assert entry.last_warned_at is None
+
+
+# ── FULL backup .qcow2 name-invariant contract ──────────────────────────
+# fix-full-backup-state-extension: every concrete IStateManager must
+# normalize FULL backup names to extended form (.qcow2) on record, derive
+# the stored path from the normalized name, and accept both stem and
+# extended lookup names on remove.  Parametrized over BOTH implementations
+# so mock/production divergence fails CI (design D4 — the gap that let
+# the regression escape).
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_record_full_backup_normalizes_stem(mgr_cls, tmp_path):
+    """record_full_backup with a stem name stores the extended name.
+
+    Recording ``"vm.FULL.20260701T000000_vda_a1b2c3"`` (no extension) must
+    persist the name with ``.qcow2`` appended, so the stored record always
+    carries the extension invariant.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    stem = "vm.FULL.20260701T000000_vda_a1b2c3"
+
+    mgr.record_full_backup(target, stem, datetime(2026, 7, 1, 0, 0, 0), "vda")
+
+    backups = mgr.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == stem + ".qcow2"
+    assert backups[0].name.endswith(".qcow2")
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_record_full_backup_extended_no_double_append(mgr_cls, tmp_path):
+    """Recording an already-extended name never double-appends.
+
+    Passing ``"....qcow2"`` twice must store exactly that name — never
+    ``"....qcow2.qcow2"``.  Note: JsonStateManager's load-time dedup may
+    collapse identical duplicate records to one; only the name invariant
+    is asserted, never the count.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    extended = "vm.FULL.20260701T000000_vda_a1b2c3.qcow2"
+
+    mgr.record_full_backup(target, extended, datetime(2026, 7, 1, 0, 0, 0), "vda")
+    mgr.record_full_backup(target, extended, datetime(2026, 7, 1, 0, 0, 0), "vda")
+
+    backups = mgr.get_full_backups(target)
+    assert len(backups) >= 1
+    for backup in backups:
+        assert backup.name == extended
+        assert ".qcow2.qcow2" not in backup.name
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_record_full_backup_derives_path_from_extended_name(mgr_cls, tmp_path):
+    """record_full_backup derives the stored path from the normalized name.
+
+    Recording a stem name must yield a ``FullBackupInfo.path`` of
+    ``Path(target_path) / "<normalized>.qcow2"`` so existence-based
+    consumers resolve the physical backup file on the target.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    stem = "vm.FULL.20260701T000000_vda_a1b2c3"
+
+    mgr.record_full_backup(target, stem, datetime(2026, 7, 1, 0, 0, 0), "vda")
+
+    backups = mgr.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == stem + ".qcow2"
+    assert backups[0].path == Path(target) / (stem + ".qcow2")
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_get_full_backups_returns_per_disk_fulls(mgr_cls, tmp_path):
+    """get_full_backups returns every recorded FULL, per disk.
+
+    Two FULLs recorded for the same target but different disks (``vda``,
+    ``vdb``) must both be returned, each with its own ``disk`` value.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+
+    mgr.record_full_backup(
+        target, "vm.FULL.20260701T000000_vda_a1b2c3", datetime(2026, 7, 1, 0, 0, 0), "vda"
+    )
+    mgr.record_full_backup(
+        target, "vm.FULL.20260701T000000_vdb_c4d5e6", datetime(2026, 7, 1, 0, 0, 0), "vdb"
+    )
+
+    backups = mgr.get_full_backups(target)
+    assert len(backups) == 2
+    assert {b.disk for b in backups} == {"vda", "vdb"}
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_set_last_full_backup_roundtrip_with_disk(mgr_cls, tmp_path):
+    """set_last_full_backup round-trips name, timestamp, and disk.
+
+    After ``set_last_full_backup``, ``get_last_full_backup`` returns a
+    ``FullBackupInfo`` whose ``name``, ``timestamp``, and ``disk`` match
+    the recorded values and whose ``path`` resolves to the extended name.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    extended = "vm.FULL.20260701T000000_vda_a1b2c3.qcow2"
+    ts = datetime(2026, 7, 1, 0, 0, 0)
+
+    mgr.set_last_full_backup(target, extended, ts, "vda")
+
+    info = mgr.get_last_full_backup(target)
+    assert info is not None
+    assert info.name == extended
+    assert info.timestamp == ts
+    assert info.disk == "vda"
+    assert info.path == Path(target) / extended
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_get_last_full_backup_empty_returns_none(mgr_cls, tmp_path):
+    """get_last_full_backup returns None when nothing is recorded."""
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+
+    assert mgr.get_last_full_backup("/mnt/backup/nonexistent") is None
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_remove_full_backup_stem_lookup(mgr_cls, tmp_path):
+    """remove_full_backup with a stem name removes the extended record.
+
+    ``Core._cleanup_backups`` passes ``BackupInfo.name`` from
+    ``provider.list()`` — always a stem.  The tolerant lookup must still
+    remove the stored extended record and return True.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    stem = "vm.FULL.20260701T000000_vda_a1b2c3"
+    extended = stem + ".qcow2"
+
+    mgr.record_full_backup(target, extended, datetime(2026, 7, 1, 0, 0, 0), "vda")
+
+    assert mgr.remove_full_backup(target, stem) is True
+    assert mgr.get_full_backups(target) == []
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_remove_full_backup_extended_lookup(mgr_cls, tmp_path):
+    """remove_full_backup with the extended name removes the record.
+
+    Extended callers (which pass state-derived ``full.name``) must remove
+    the same record and return True.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+    extended = "vm.FULL.20260701T000000_vda_a1b2c3.qcow2"
+
+    mgr.record_full_backup(target, extended, datetime(2026, 7, 1, 0, 0, 0), "vda")
+
+    assert mgr.remove_full_backup(target, extended) is True
+    assert mgr.get_full_backups(target) == []
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_remove_full_backup_non_matching_returns_false(mgr_cls, tmp_path):
+    """remove_full_backup for a non-matching name returns False.
+
+    A lookup that matches no stored entry must leave state untouched and
+    return False.
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+    target = "/mnt/backup/testvm"
+
+    assert mgr.remove_full_backup(target, "nonexistent.qcow2") is False

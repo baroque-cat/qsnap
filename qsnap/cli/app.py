@@ -220,7 +220,9 @@ def build_argparser() -> argparse.ArgumentParser:
         "restore", help="Replace a stopped VM's disk with a flattened standalone qcow2"
     )
     restore_parser.add_argument(
-        "snapshot_name", nargs="?", default=None,
+        "snapshot_name",
+        nargs="?",
+        default=None,
         help="Snapshot or backup name to restore from",
     )
     restore_parser.add_argument(

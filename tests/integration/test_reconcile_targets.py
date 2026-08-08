@@ -764,7 +764,12 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     assert len(fulls) >= 1, "Expected at least one FULL backup"
 
     full_path = fulls[0].path
-    full_stem = fulls[0].name
+    # Recorded FULL names carry the .qcow2 extension
+    # (fix-full-backup-state-extension).
+    assert fulls[0].name.endswith(".qcow2"), (
+        f"FULL state entry must carry .qcow2 extension, got {fulls[0].name!r}"
+    )
+    full_name = fulls[0].name
 
     # ── Step 2: Create a second snapshot for incremental ─────────────
     snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.fullgone-snap2", snapshot_dir, base_image)
@@ -783,8 +788,8 @@ def test_reconcile_full_deleted_from_disk_and_state_inc_remains(test_vm, caplog)
     # ── Step 3: Delete FULL from disk AND from state ─────────────────
     os.unlink(str(full_path))
     assert not full_path.exists(), "FULL file should be deleted from disk"
-    state.remove_full_backup(str(target_dir), full_stem)
-    state.remove_all_incremental_dependencies(str(target_dir), full_stem)
+    state.remove_full_backup(str(target_dir), full_name)
+    state.remove_all_incremental_dependencies(str(target_dir), full_name)
 
     fulls_after_delete = state.get_full_backups(str(target_dir))
     assert len(fulls_after_delete) == 0, "FULL should be removed from state after deletion"

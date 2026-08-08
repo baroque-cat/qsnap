@@ -22,14 +22,12 @@ from qsnap.core import Core, PipelineResult
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
-    BackupInfo,
     FullBackupInfo,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import (
     InMemoryStateManager,
-    MockBitmapBackupProvider,
     MockConfigFacade,
     MockRetentionEngine,
     MockShell,
@@ -1597,8 +1595,6 @@ def test_delta_prediction_uses_incremental_size_estimate(
     """
     import hashlib
 
-    from qsnap.models.results import BackupInfo
-
     target_dir = tmp_path / "backup"
     target_dir.mkdir()
     vm = _make_vm(name="testvm", targets=[TargetConfig(path=target_dir)])
@@ -1610,9 +1606,11 @@ def test_delta_prediction_uses_incremental_size_estimate(
 
     full_name = f"{vm.name}.FULL.20250101T000000_vda_a1b2c3"
     # Create the FULL file on disk so phantom detection does not
-    # remove it.  (Phantom detection uses os.path.exists, not the
-    # provider.list method — see Core._detect_phantom_fulls.)
-    full_path = target_dir / full_name  # state stores path without .qcow2 suffix
+    # remove it.  The state record is normalized to the extended
+    # ``.qcow2`` name (fix-full-backup-state-extension), so the file
+    # must be touched at the EXTENDED path — the derived
+    # ``FullBackupInfo.path`` resolves to ``{stem}.qcow2``.
+    full_path = target_dir / f"{full_name}.qcow2"
     full_path.touch()
 
     # Record it in state.
@@ -1645,9 +1643,7 @@ def test_delta_prediction_uses_incremental_size_estimate(
 
     # Incremental estimator: qemu-img info <active_path> (single file, no --backing-chain).
     # Returns 5 MiB actual-size.
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --output=json .*active\.qcow2"
-    ).returns(
+    mock_shell.expect_first(r"qemu-img info --force-share --output=json .*active\.qcow2").returns(
         ShellResult(
             success=True,
             stdout='{"actual-size": 5242880}',
@@ -1665,9 +1661,7 @@ def test_delta_prediction_uses_incremental_size_estimate(
     result = core.run()
 
     # ── Assertions ──────────────────────────────────────────────
-    delta_predictions = [
-        p for p in result.predictions if p.action == "backup_transfer"
-    ]
+    delta_predictions = [p for p in result.predictions if p.action == "backup_transfer"]
     assert len(delta_predictions) >= 1, (
         f"Expected at least one backup_transfer prediction (delta), got {len(delta_predictions)}"
     )
@@ -1681,9 +1675,7 @@ def test_delta_prediction_uses_incremental_size_estimate(
 
     # The delta prediction log should mention the checkpoint.
     delta_logs = [
-        r.getMessage()
-        for r in caplog.records
-        if "Would create delta backup" in r.getMessage()
+        r.getMessage() for r in caplog.records if "Would create delta backup" in r.getMessage()
     ]
     assert len(delta_logs) >= 1, "Delta prediction must be logged"
     assert "since checkpoint" in delta_logs[0], (

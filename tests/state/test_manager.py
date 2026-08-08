@@ -536,12 +536,17 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
 # ── full backup tracking tests ───────────────────────────────────────────
 
 
-def test_set_and_get_last_full_backup(tmp_path: Path) -> None:
-    """set_last_full_backup then get_last_full_backup round-trips the values."""
+def test_set_last_full_backup_roundtrips_with_disk(tmp_path: Path) -> None:
+    """set_last_full_backup then get_last_full_backup round-trips name, timestamp, disk.
+
+    The recorded name carries the ``.qcow2`` extension and the derived
+    path resolves to the backup file (spec scenario "Full backup state
+    saved and retrieved with disk").
+    """
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    name = "full-2024-01-01"
+    name = "full-2024-01-01.qcow2"
     ts = datetime(2024, 1, 1, 12, 0, 0)
 
     manager.set_last_full_backup(target, name, ts, "vda")
@@ -552,13 +557,14 @@ def test_set_and_get_last_full_backup(tmp_path: Path) -> None:
     assert isinstance(result, FullBackupInfo)
     assert result.name == name
     assert result.timestamp == ts
+    assert result.disk == "vda"
     assert result.path == Path(target) / name
 
 
 def test_full_backup_state_saved_and_retrieved(tmp_path: Path) -> None:
     """Full backup state survives across JsonStateManager instances (disk reload)."""
     target = "/mnt/backup/testvm"
-    name = "full-2024-06-01"
+    name = "full-2024-06-01.qcow2"
     ts = datetime(2024, 6, 1, 9, 30, 0)
 
     manager1 = JsonStateManager(state_dir=tmp_path)
@@ -572,6 +578,7 @@ def test_full_backup_state_saved_and_retrieved(tmp_path: Path) -> None:
     assert isinstance(result, FullBackupInfo)
     assert result.name == name
     assert result.timestamp == ts
+    assert result.disk == "vda"
     assert result.path == Path(target) / name
 
 
@@ -592,7 +599,7 @@ def test_record_and_get_full_backups(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    name = "full-2024-01-01"
+    name = "full-2024-01-01.qcow2"
     ts = datetime(2024, 1, 1, 12, 0, 0)
 
     manager.record_full_backup(target, name, ts, "vda")
@@ -615,16 +622,368 @@ def test_multiple_fulls_tracked_per_target(tmp_path: Path) -> None:
     ts2 = datetime(2024, 2, 1, 12, 0, 0)
     ts3 = datetime(2024, 3, 1, 12, 0, 0)
 
-    manager.record_full_backup(target, "full-2024-01-01", ts1, "vda")
-    manager.record_full_backup(target, "full-2024-02-01", ts2, "vda")
-    manager.record_full_backup(target, "full-2024-03-01", ts3, "vda")
+    manager.record_full_backup(target, "full-2024-01-01.qcow2", ts1, "vda")
+    manager.record_full_backup(target, "full-2024-02-01.qcow2", ts2, "vda")
+    manager.record_full_backup(target, "full-2024-03-01.qcow2", ts3, "vda")
 
     backups = manager.get_full_backups(target)
 
     assert len(backups) == 3
-    assert backups[0].name == "full-2024-01-01"
-    assert backups[1].name == "full-2024-02-01"
-    assert backups[2].name == "full-2024-03-01"
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[1].name == "full-2024-02-01.qcow2"
+    assert backups[2].name == "full-2024-03-01.qcow2"
+
+
+# ── FULL name-extension invariant tests (design D1/D2/D3) ────────────
+
+
+def test_record_full_backup_extends_name_and_derives_path(tmp_path: Path) -> None:
+    """Recorded FULL names carry the .qcow2 extension; path derives from the name.
+
+    Spec: "Recorded name carries the .qcow2 extension and path resolves
+    to the file".  Recording an already-extended name must not
+    double-append.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    ts = datetime(2024, 1, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, "full-2024-01-01.qcow2", ts, "vda")
+
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[0].path == Path(target) / "full-2024-01-01.qcow2"
+
+    # The persisted entry stores the same extended name and derived path.
+    with open(tmp_path / "_full_backups.json", encoding="utf-8") as fh:
+        stored = json.load(fh)[target]
+    assert stored[0]["name"] == "full-2024-01-01.qcow2"
+    assert stored[0]["path"] == str(Path(target) / "full-2024-01-01.qcow2")
+
+
+def test_record_full_backup_normalizes_stem_defensively(tmp_path: Path) -> None:
+    """A stem name passed to record_full_backup is normalized defensively.
+
+    The state manager enforces the .qcow2 invariant caller-independently
+    (design D1): even a stem name from a future call site cannot regress
+    the storage format.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    ts = datetime(2024, 1, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, "full-2024-01-01", ts, "vda")
+
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[0].path == Path(target) / "full-2024-01-01.qcow2"
+    assert backups[0].timestamp == ts
+    assert backups[0].disk == "vda"
+
+
+def test_record_full_backup_idempotent_no_double_append(tmp_path: Path) -> None:
+    """Recording the same extended name twice never produces .qcow2.qcow2.
+
+    The per-field guard checks ``endswith(".qcow2")`` before appending, so
+    the persisted name is always the exact extended form.  On read, the
+    load-time dedup (design D4) collapses the two identical records into
+    one.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 2, 12, 0, 0), "vda"
+    )
+
+    # Both persisted records carry the exact extended name — never a
+    # double-append (.qcow2.qcow2).
+    with open(tmp_path / "_full_backups.json", encoding="utf-8") as fh:
+        stored = json.load(fh)[target]
+    assert len(stored) == 2
+    assert [e["name"] for e in stored] == [
+        "full-2024-01-01.qcow2",
+        "full-2024-01-01.qcow2",
+    ]
+
+    # On read, load-time dedup collapses the identical records to one.
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert not backups[0].name.endswith(".qcow2.qcow2")
+
+
+def test_get_full_backups_returns_all_per_disk_fulls(tmp_path: Path) -> None:
+    """get_full_backups returns every FULL recorded per disk for a target.
+
+    FULLs are tracked per (target, disk): records for different disks of
+    the same VM are all returned, oldest first (spec scenario
+    "get_full_backups returns all per-disk FULLs").
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    ts1 = datetime(2024, 1, 1, 12, 0, 0)
+    ts2 = datetime(2024, 2, 1, 12, 0, 0)
+    ts3 = datetime(2024, 3, 1, 12, 0, 0)
+
+    manager.record_full_backup(target, "testvm.FULL.20240101T120000_vda_a1b2c3.qcow2", ts1, "vda")
+    manager.record_full_backup(target, "testvm.FULL.20240201T120000_vda_d3e4f5.qcow2", ts2, "vda")
+    manager.record_full_backup(target, "testvm.FULL.20240301T120000_vdb_b2c3d4.qcow2", ts3, "vdb")
+
+    backups = manager.get_full_backups(target)
+
+    assert len(backups) == 3
+    assert [b.disk for b in backups] == ["vda", "vda", "vdb"]
+    assert [b.name for b in backups] == [
+        "testvm.FULL.20240101T120000_vda_a1b2c3.qcow2",
+        "testvm.FULL.20240201T120000_vda_d3e4f5.qcow2",
+        "testvm.FULL.20240301T120000_vdb_b2c3d4.qcow2",
+    ]
+
+
+def test_load_normalizes_stem_entry_on_load(tmp_path: Path) -> None:
+    """A stem entry written by the buggy version is repaired on load.
+
+    The load-time migration (design D2) normalizes the name to extended
+    form, rebuilds the path from the target, AND persists the repaired
+    state back to disk so the fix is one-time.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = "/mnt/backup/testvm"
+
+    stem_data = {
+        target: [
+            {
+                "name": "full-2024-01-01",
+                "path": f"{target}/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "disk": "vda",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(stem_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups(target)
+
+    # The loaded record is fully extended.
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[0].path == Path(target) / "full-2024-01-01.qcow2"
+
+    # The repaired state is persisted back to disk (one-time migration).
+    with open(full_backups_file, encoding="utf-8") as fh:
+        stored = json.load(fh)[target]
+    assert stored[0]["name"] == "full-2024-01-01.qcow2"
+    assert stored[0]["path"] == str(Path(target) / "full-2024-01-01.qcow2")
+
+
+def test_load_mixed_stem_extended_twins_deduplicate_to_one(tmp_path: Path) -> None:
+    """A stem entry and its extended twin collapse into one record on load.
+
+    Normalization runs BEFORE dedup (design D2): the stem twin is
+    extended first, then the duplicate (name, target_path) tuple is
+    removed.  Exactly one extended record survives.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = "/mnt/backup/testvm"
+
+    mixed_data = {
+        target: [
+            {
+                "name": "full-2024-01-01",
+                "path": f"{target}/full-2024-01-01",
+                "timestamp": "2024-01-01T12:00:00",
+                "disk": "vda",
+            },
+            {
+                "name": "full-2024-01-01.qcow2",
+                "path": f"{target}/full-2024-01-01.qcow2",
+                "timestamp": "2024-01-01T12:00:00",
+                "disk": "vda",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(mixed_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups(target)
+
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[0].path == Path(target) / "full-2024-01-01.qcow2"
+
+
+def test_load_already_extended_entries_unchanged_no_rewrite(tmp_path: Path) -> None:
+    """Already-extended entries load unchanged; the file is not rewritten.
+
+    Pre-regression production state passes through with zero migration
+    cost: loading twice leaves the file byte-identical (design D2).
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = "/mnt/backup/testvm"
+
+    extended_data = {
+        target: [
+            {
+                "name": "full-2024-01-01.qcow2",
+                "path": f"{target}/full-2024-01-01.qcow2",
+                "timestamp": "2024-01-01T12:00:00",
+                "disk": "vda",
+            },
+            {
+                "name": "full-2024-03-01.qcow2",
+                "path": f"{target}/full-2024-03-01.qcow2",
+                "timestamp": "2024-03-01T12:00:00",
+                "disk": "vda",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(extended_data), encoding="utf-8")
+
+    with open(full_backups_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 2
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[1].name == "full-2024-03-01.qcow2"
+
+    # Load again through a second instance — still no rewrite.
+    JsonStateManager(state_dir=state_dir).get_full_backups(target)
+
+    with open(full_backups_file, encoding="utf-8") as fh:
+        after_raw = fh.read()
+    assert after_raw == original_raw, "already-extended file must not be rewritten"
+
+
+def test_load_repairs_asymmetric_entry_field_by_field(tmp_path: Path) -> None:
+    """name and path are repaired independently (per-field guard).
+
+    Covers both asymmetry directions: (1) stem name + extended path —
+    only the name is fixed; (2) extended name + stem path — the path is
+    rebuilt from the (unchanged) extended name.
+    """
+    state_dir = tmp_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = "/mnt/backup/testvm"
+
+    asymmetric_data = {
+        target: [
+            # Direction 1: stem name, extended path.
+            {
+                "name": "full-2024-01-01",
+                "path": f"{target}/full-2024-01-01.qcow2",
+                "timestamp": "2024-01-01T12:00:00",
+                "disk": "vda",
+            },
+            # Direction 2: extended name, stem path.
+            {
+                "name": "full-2024-02-01.qcow2",
+                "path": f"{target}/full-2024-02-01",
+                "timestamp": "2024-02-01T12:00:00",
+                "disk": "vda",
+            },
+        ],
+    }
+    full_backups_file = state_dir / "_full_backups.json"
+    full_backups_file.write_text(json.dumps(asymmetric_data), encoding="utf-8")
+
+    manager = JsonStateManager(state_dir=state_dir)
+    backups = manager.get_full_backups(target)
+
+    assert len(backups) == 2
+    # Direction 1: name extended, path untouched.
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[0].path == Path(target) / "full-2024-01-01.qcow2"
+    # Direction 2: name untouched, path rebuilt from the extended name.
+    assert backups[1].name == "full-2024-02-01.qcow2"
+    assert backups[1].path == Path(target) / "full-2024-02-01.qcow2"
+
+
+def test_remove_full_backup_stem_lookup_removes_extended_record(tmp_path: Path) -> None:
+    """remove_full_backup with a stem name removes the extended record.
+
+    Design D3: stem callers (e.g. ``Core._cleanup_backups`` passing
+    ``BackupInfo.name``) and extended callers remove the same record.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
+
+    assert manager.remove_full_backup(target, "full-2024-01-01") is True
+    assert manager.get_full_backups(target) == []
+
+
+def test_remove_full_backup_extended_lookup_removes_record(tmp_path: Path) -> None:
+    """remove_full_backup with the extended name removes the same record."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
+
+    assert manager.remove_full_backup(target, "full-2024-01-01.qcow2") is True
+    assert manager.get_full_backups(target) == []
+
+
+def test_remove_full_backup_non_matching_returns_false(tmp_path: Path) -> None:
+    """A non-matching name leaves state untouched and returns False."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
+
+    # Neither the stem nor the extended form matches the stored name.
+    assert manager.remove_full_backup(target, "full-2024-03-01") is False
+    assert manager.remove_full_backup(target, "full-2024-03-01.qcow2") is False
+
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+
+
+def test_remove_full_backup_after_set_last_full_backup_delegation(
+    tmp_path: Path,
+) -> None:
+    """The set_last_full_backup delegation path inherits name normalization.
+
+    ``set_last_full_backup`` delegates to ``record_full_backup`` (design
+    D1), so a stem passed through the legacy setter is stored extended —
+    and the tolerant remove path then finds it via the stem form.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    target = "/mnt/backup/testvm"
+    manager.set_last_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0), "vda")
+
+    backups = manager.get_full_backups(target)
+    assert len(backups) == 1
+    assert backups[0].name == "full-2024-01-01.qcow2"
+
+    assert manager.remove_full_backup(target, "full-2024-01-01") is True
+    assert manager.get_full_backups(target) == []
 
 
 # ── incremental-to-FULL dependency tracking tests ──────────────────
@@ -1014,8 +1373,15 @@ def test_inmemory_record_qcow2_key_finds_stem_stored() -> None:
 
 
 def test_full_backups_json_old_format_auto_migrated(tmp_path: Path) -> None:
-    """Old-format _full_backups.json (dict values) is auto-migrated to list on load."""
-    # Write old format: {target_path: {name, path, timestamp}} (dict, not list)
+    """Old-format _full_backups.json (dict values + stem entries) is auto-migrated on load.
+
+    Two migrations apply together: dict→list (old single-dict format) AND
+    stem→extended (name-extension normalization, design D2).  The loaded
+    record carries a normalized ``.qcow2`` name and the path derived from
+    it.
+    """
+    # Write old format: {target_path: {name, path, timestamp}} (dict, not
+    # list), with stem-format name/path as written by the buggy version.
     old_data = {
         "/mnt/backup/testvm": {
             "name": "full-2024-01-01",
@@ -1030,32 +1396,38 @@ def test_full_backups_json_old_format_auto_migrated(tmp_path: Path) -> None:
 
     manager = JsonStateManager(state_dir=state_dir)
 
-    # get_full_backups should auto-migrate the dict to a list.
+    # get_full_backups should auto-migrate the dict to a list and the
+    # stem name/path to the extended form.
     backups = manager.get_full_backups("/mnt/backup/testvm")
     assert len(backups) == 1
-    assert backups[0].name == "full-2024-01-01"
+    assert backups[0].name == "full-2024-01-01.qcow2"
     assert backups[0].timestamp == datetime(2024, 1, 1, 12, 0, 0)
-    assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01")
+    assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01.qcow2")
 
     # get_last_full_backup should also work (returns last from list).
     last = manager.get_last_full_backup("/mnt/backup/testvm")
     assert last is not None
-    assert last.name == "full-2024-01-01"
+    assert last.name == "full-2024-01-01.qcow2"
 
 
 def test_full_backups_json_new_format_loaded_as_is(tmp_path: Path) -> None:
-    """New-format _full_backups.json (list values) is loaded as-is."""
+    """New-format _full_backups.json (list values, extended names) is loaded as-is.
+
+    The deprecated ``bucket_level`` field is silently ignored, and the
+    already-extended entries trigger no migration rewrite — the file on
+    disk stays byte-identical (design D2).
+    """
     new_data = {
         "/mnt/backup/testvm": [
             {
-                "name": "full-2024-01-01",
-                "path": "/mnt/backup/testvm/full-2024-01-01",
+                "name": "full-2024-01-01.qcow2",
+                "path": "/mnt/backup/testvm/full-2024-01-01.qcow2",
                 "timestamp": "2024-01-01T12:00:00",
                 "bucket_level": "monthly",
             },
             {
-                "name": "full-2024-03-01",
-                "path": "/mnt/backup/testvm/full-2024-03-01",
+                "name": "full-2024-03-01.qcow2",
+                "path": "/mnt/backup/testvm/full-2024-03-01.qcow2",
                 "timestamp": "2024-03-01T12:00:00",
                 "bucket_level": "weekly",
             },
@@ -1066,12 +1438,23 @@ def test_full_backups_json_new_format_loaded_as_is(tmp_path: Path) -> None:
     full_backups_file = state_dir / "_full_backups.json"
     full_backups_file.write_text(json.dumps(new_data), encoding="utf-8")
 
+    with open(full_backups_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
     manager = JsonStateManager(state_dir=state_dir)
 
     backups = manager.get_full_backups("/mnt/backup/testvm")
     assert len(backups) == 2
-    assert backups[0].name == "full-2024-01-01"
-    assert backups[1].name == "full-2024-03-01"
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[1].name == "full-2024-03-01.qcow2"
+    assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01.qcow2")
+
+    # No migration rewrite: the file is byte-identical after load.
+    with open(full_backups_file, encoding="utf-8") as fh:
+        after_raw = fh.read()
+    assert after_raw == original_raw, (
+        "Already-extended _full_backups.json must not be rewritten (idempotent)"
+    )
 
 
 # ── Fault tolerance & safety: state file corruption and rotation ──────────
@@ -1281,15 +1664,14 @@ def test_deduplicate_duplicate_full_entries(
 ) -> None:
     """Duplicate (name, target_path) tuples are removed on load, keeping the first.
 
-    Create a _full_backups.json with duplicate entries (same name
-    appearing twice for the same target).  Load via JsonStateManager.
-    Assert: only ONE entry remains; an INFO log was emitted for each
-    removed duplicate.
+    Normalization runs BEFORE dedup (design D2): the duplicate stem
+    entries are first extended to ``.qcow2`` form, then the twin is
+    removed.  The surviving entries carry the extended name.
     """
     state_dir = tmp_path
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write a state file with duplicate entries.
+    # Write a state file with duplicate stem-format entries.
     full_backups_data = {
         "/mnt/backup/testvm": [
             {
@@ -1321,14 +1703,16 @@ def test_deduplicate_duplicate_full_entries(
     manager = JsonStateManager(state_dir=state_dir)
     backups = manager.get_full_backups("/mnt/backup/testvm")
 
-    # Only the first occurrence should remain (the duplicate removed).
+    # Only the first occurrence should remain (the duplicate removed),
+    # and names/paths carry the .qcow2 extension.
     assert len(backups) == 2
-    assert backups[0].name == "full-2024-01-01"
-    assert backups[1].name == "full-2024-02-01"
+    assert backups[0].name == "full-2024-01-01.qcow2"
+    assert backups[1].name == "full-2024-02-01.qcow2"
+    assert backups[0].path == Path("/mnt/backup/testvm/full-2024-01-01.qcow2")
 
-    # Deduplication log should have been emitted.
+    # Deduplication log should have been emitted with the normalized name.
     assert (
-        "Deduplicated FULL backup entry: full-2024-01-01 for target /mnt/backup/testvm"
+        "Deduplicated FULL backup entry: full-2024-01-01.qcow2 for target /mnt/backup/testvm"
         in caplog.text
     )
 
@@ -1336,14 +1720,14 @@ def test_deduplicate_duplicate_full_entries(
 def test_deduplicate_no_duplicates_noop(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """No duplicate entries → all preserved, no deduplication log.
 
-    Create a _full_backups.json where all (name, target_path) tuples are
-    unique.  Load via JsonStateManager.  Assert all entries are preserved
-    and no deduplication INFO log was emitted.
+    Load-time normalization still applies to the stem fixtures, so the
+    returned entries (and the persisted state) carry the extended
+    ``.qcow2`` name.
     """
     state_dir = tmp_path
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write a state file with only unique entries.
+    # Write a state file with only unique stem-format entries.
     full_backups_data = {
         "/mnt/backup/testvm": [
             {
@@ -1374,10 +1758,14 @@ def test_deduplicate_no_duplicates_noop(tmp_path: Path, caplog: pytest.LogCaptur
     manager = JsonStateManager(state_dir=state_dir)
     backups = manager.get_full_backups("/mnt/backup/testvm")
 
-    # All entries should be preserved.
+    # All entries should be preserved, with extended names.
     assert len(backups) == 3
     names = [b.name for b in backups]
-    assert names == ["full-2024-01-01", "full-2024-02-01", "full-2024-03-01"]
+    assert names == [
+        "full-2024-01-01.qcow2",
+        "full-2024-02-01.qcow2",
+        "full-2024-03-01.qcow2",
+    ]
 
     # No deduplication log should have been emitted.
     assert "Deduplicated FULL backup entry:" not in caplog.text
@@ -1386,16 +1774,15 @@ def test_deduplicate_no_duplicates_noop(tmp_path: Path, caplog: pytest.LogCaptur
 def test_deduplicate_is_idempotent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Second load after deduplication is a no-op (idempotent).
 
-    Create a _full_backups.json with duplicates.  Load it once
-    (deduplication occurs and state is rewritten).  Then load it again.
-    Assert: the second load does NOT emit a deduplication log and the
-    state file has been rewritten with the deduplicated list.
+    After the first load, the persisted state carries the normalized
+    extended names — so the second load finds neither an extension fix
+    nor duplicates to remove.
     """
 
     state_dir = tmp_path
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write a state file with duplicate entries.
+    # Write a state file with duplicate stem-format entries.
     full_backups_data = {
         "/mnt/backup/testvm": [
             {
@@ -1424,31 +1811,32 @@ def test_deduplicate_is_idempotent(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
     caplog.set_level(logging.INFO)
 
-    # First load — deduplication should occur.
+    # First load — deduplication should occur and names normalize.
     manager1 = JsonStateManager(state_dir=state_dir)
     backups1 = manager1.get_full_backups("/mnt/backup/testvm")
     assert len(backups1) == 2
     assert (
-        "Deduplicated FULL backup entry: full-2024-01-01 for target /mnt/backup/testvm"
+        "Deduplicated FULL backup entry: full-2024-01-01.qcow2 for target /mnt/backup/testvm"
         in caplog.text
     )
 
-    # The state file should have been rewritten with the deduplicated list.
+    # The state file should have been rewritten with the deduplicated
+    # list carrying extended names.
     with open(full_backups_file, encoding="utf-8") as fh:
         rewritten_data = json.load(fh)
     assert len(rewritten_data["/mnt/backup/testvm"]) == 2
     names_on_disk = [e["name"] for e in rewritten_data["/mnt/backup/testvm"]]
-    assert names_on_disk == ["full-2024-01-01", "full-2024-02-01"]
+    assert names_on_disk == ["full-2024-01-01.qcow2", "full-2024-02-01.qcow2"]
 
     # Clear caplog before second load.
     caplog.clear()
 
-    # Second load — should be a no-op (already deduplicated).
+    # Second load — should be a no-op (already deduplicated + extended).
     manager2 = JsonStateManager(state_dir=state_dir)
     backups2 = manager2.get_full_backups("/mnt/backup/testvm")
     assert len(backups2) == 2
-    assert backups2[0].name == "full-2024-01-01"
-    assert backups2[1].name == "full-2024-02-01"
+    assert backups2[0].name == "full-2024-01-01.qcow2"
+    assert backups2[1].name == "full-2024-02-01.qcow2"
 
     # No deduplication log on the second load.
     assert "Deduplicated FULL backup entry:" not in caplog.text
@@ -1766,8 +2154,12 @@ def test_reset_target_state_removes_from_full_backups(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0), "vda")
-    manager.record_full_backup(target, "full-2024-02-01", datetime(2024, 2, 1, 12, 0, 0), "vda")
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
+    manager.record_full_backup(
+        target, "full-2024-02-01.qcow2", datetime(2024, 2, 1, 12, 0, 0), "vda"
+    )
 
     assert len(manager.get_full_backups(target)) == 2
 
@@ -1823,7 +2215,9 @@ def test_reset_target_state_saves_atomically(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     target = "/mnt/backup/testvm"
-    manager.record_full_backup(target, "full-2024-01-01", datetime(2024, 1, 1, 12, 0, 0), "vda")
+    manager.record_full_backup(
+        target, "full-2024-01-01.qcow2", datetime(2024, 1, 1, 12, 0, 0), "vda"
+    )
     manager.record_incremental_dependency(target, "incr-001", "full-2024-01-01")
     manager.set_last_backup_allocation(target, "vda", 12345)
 
@@ -2110,9 +2504,9 @@ def test_reset_target_disk_state_clears_only_given_vm_disk(
     ts_vdb = datetime(2025, 2, 1, 12, 0, 0)
     ts_other = datetime(2025, 3, 1, 12, 0, 0)
 
-    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3"
-    full_vdb = "myvm.FULL.20250201T120000_vdb_d3e4f5"
-    full_other = "othervm.FULL.20250301T120000_vda_111111"
+    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3.qcow2"
+    full_vdb = "myvm.FULL.20250201T120000_vdb_d3e4f5.qcow2"
+    full_other = "othervm.FULL.20250301T120000_vda_111111.qcow2"
 
     manager.record_full_backup(target, full_vda, ts_vda, "vda")
     manager.record_full_backup(target, full_vdb, ts_vdb, "vdb")
@@ -2221,7 +2615,7 @@ def test_reset_target_disk_state_atomic(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
     target = "/mnt/backup/shared"
 
-    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3"
+    full_vda = "myvm.FULL.20250101T120000_vda_a1b2c3.qcow2"
     ts_vda = datetime(2025, 1, 1, 12, 0, 0)
 
     manager.record_full_backup(target, full_vda, ts_vda, "vda")

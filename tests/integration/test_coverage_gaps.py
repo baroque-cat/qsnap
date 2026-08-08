@@ -202,16 +202,16 @@ def test_pipeline_continues_after_broken_chain_auto_recovery(test_vm, caplog):
         pytest.skip("No FULL backup created on run 1")
     assert len(fulls) >= 1, "Expected at least one FULL backup"
 
-    # Phase 2 quirk: Core records the FULL under its stem name, so
-    # ``FullBackupInfo.path`` lacks the ``.qcow2`` extension and
-    # ``os.path.exists()`` would treat the real file as a phantom.
-    # Re-record with the real filename so startup validation in run 2
-    # sees the on-disk file (and does NOT cascade-clean its deps).
+    # Corrected behavior: the recorded FULL name carries the ``.qcow2``
+    # extension and its path resolves to the real on-disk file, so
+    # startup validation in run 2 sees the anchor (and does NOT
+    # cascade-clean its deps).
     full_name = fulls[0].name
-    full_path = target_dir / f"{full_name}.qcow2"
-    assert full_path.exists(), f"FULL backup file not found on disk: {full_path}"
-    state.remove_full_backup(str(target_dir), full_name)
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", fulls[0].timestamp, "vda")
+    assert full_name.endswith(".qcow2"), (
+        f"Recorded FULL name must carry the .qcow2 extension, got {full_name}"
+    )
+    full_path = fulls[0].path
+    assert full_path.exists(), f"Recorded FULL path must exist: {full_path}"
 
     # ── Step 2: Create inc1 (backing to FULL) ───────────────────────
     inc1_name = f"{vm_name}.cov-gap-inc1"
@@ -342,17 +342,11 @@ def test_reconcile_detects_and_removes_stale_incremental_dep(test_vm, caplog):
 
     full_name = fulls[0].name
 
-    # Phase 2 quirk: Core records the FULL under its stem name, so
-    # ``FullBackupInfo.path`` lacks the ``.qcow2`` extension and
-    # ``os.path.exists()`` would treat the real file as a phantom.
-    # Re-record with the real filename so check_state()/reconcile()
-    # operate on the actual file — otherwise the phantom-FULL cascade
-    # would pre-clean inc1's dependency record before the stale-dep
-    # reconciliation step runs.
-    full_path = target_dir / f"{full_name}.qcow2"
-    assert full_path.exists(), f"FULL backup file not found on disk: {full_path}"
-    state.remove_full_backup(str(target_dir), full_name)
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", fulls[0].timestamp, "vda")
+    # Corrected behavior: the recorded FULL path resolves to the real
+    # on-disk file, so check_state()/reconcile() operate on the actual
+    # file — no re-recording needed before the manual incremental.
+    full_path = fulls[0].path
+    assert full_path.exists(), f"Recorded FULL path must exist: {full_path}"
 
     # ── Step 2: Create inc1 (backing to FULL) ───────────────────────
     inc1_name = f"{vm_name}.stale-inc1"
@@ -488,15 +482,11 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
 
     full_name = fulls[0].name
 
-    # Phase 2 quirk: Core records the FULL under its stem name, so
-    # ``FullBackupInfo.path`` lacks the ``.qcow2`` extension and
-    # ``os.path.exists()`` would treat the real file as a phantom.
-    # Re-record with the real filename so startup validation in run 2
-    # sees the (corrupt, but existing) file and does NOT remove it.
-    full_path = target_dir / f"{full_name}.qcow2"
-    assert full_path.exists(), f"FULL backup file not found on disk: {full_path}"
-    state.remove_full_backup(str(target_dir), full_name)
-    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", fulls[0].timestamp, "vda")
+    # Corrected behavior: the recorded FULL path resolves to the real
+    # on-disk file, so startup validation in run 2 sees the (corrupt,
+    # but existing) file and does NOT remove it — no re-recording needed.
+    full_path = fulls[0].path
+    assert full_path.exists(), f"Recorded FULL path must exist: {full_path}"
 
     # ── Step 2: Corrupt the FULL (truncate to 64KB — header intact) ─
     header_size = 65536
@@ -524,7 +514,7 @@ def test_startup_validation_preserves_corrupt_full_for_verify_gate(test_vm, capl
     # 4b. Corrupt FULL still in state (startup validation did NOT remove it).
     fulls_after = state.get_full_backups(str(target_dir))
     full_names_after = [f.name for f in fulls_after]
-    assert f"{full_name}.qcow2" in full_names_after, (
+    assert full_name in full_names_after, (
         f"Corrupt FULL should still be in state after startup validation. "
         f"FULLs in state: {full_names_after}"
     )

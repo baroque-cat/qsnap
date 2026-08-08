@@ -97,24 +97,6 @@ def _vm_is_running(shell: SubprocessShell, vm_name: str) -> bool:
     return result.success and "running" in result.stdout.strip().lower()
 
 
-def _normalize_full_state(state, target_dir: Path) -> None:
-    """Re-record FULL backups in state with the ``.qcow2`` extension.
-
-    Phase 2 quirk: Core records FULL backup names without the ``.qcow2``
-    extension, so the state-manager-derived file path misses the anchor
-    on disk.  The startup phantom filter would then drop the FULL (and a
-    subsequent ``core.check()`` would report a phantom backup).  This
-    helper re-records each FULL with the extension so the state-derived
-    path matches the on-disk file.  Idempotent — already-correct records
-    are left untouched.
-    """
-    for full in state.get_full_backups(str(target_dir)):
-        if full.name.endswith(".qcow2"):
-            continue
-        state.remove_full_backup(str(target_dir), full.name)
-        state.record_full_backup(str(target_dir), f"{full.name}.qcow2", full.timestamp, full.disk)
-
-
 # ── Tests ────────────────────────────────────────────────────────────
 
 
@@ -186,9 +168,12 @@ def test_check_real_targets_all_consistent(test_vm):
     fulls = state.get_full_backups(str(target_dir))
     assert len(fulls) > 0, "Expected at least one FULL backup after core.run()"
 
-    # Normalize FULL state records so the next run's startup phantom
-    # filter and the final check() see the anchor (Phase 2 quirk).
-    _normalize_full_state(state, target_dir)
+    # Corrected behavior: the recorded FULL name carries the ``.qcow2``
+    # extension and its path resolves to the real on-disk file.
+    assert fulls[0].name.endswith(".qcow2"), (
+        f"Recorded FULL name must carry the .qcow2 extension, got {fulls[0].name}"
+    )
+    assert fulls[0].path.exists(), f"Recorded FULL path must exist: {fulls[0].path}"
 
     # Create second snapshot for incremental backup
     time.sleep(1)
@@ -202,6 +187,13 @@ def test_check_real_targets_all_consistent(test_vm):
     result2 = core.run(vm_name)
     if result2.results and not result2.results[0].success:
         pytest.skip(f"Second core.run failed: {result2.results[0].error}")
+
+    # Run 2 must create an incremental delta, not a new FULL — exactly
+    # one FULL record remains.
+    fulls_after_run2 = state.get_full_backups(str(target_dir))
+    assert len(fulls_after_run2) == 1, (
+        f"Expected exactly one FULL record after run 2, got {len(fulls_after_run2)}"
+    )
 
     # Run check — all targets should be consistent
     check_results = core.check(vm_name)
@@ -280,10 +272,6 @@ def test_check_real_targets_broken_chain(test_vm):
         if not full_files:
             pytest.skip("No FULL backup files found on target — cannot test broken chain")
 
-    # Normalize FULL state records so the subsequent runs create real
-    # incremental deltas instead of re-creating FULLs (Phase 2 quirk).
-    _normalize_full_state(state, target_dir)
-
     # inc1
     time.sleep(1)
     snap2 = _snapshot_create(shell, vm_name, f"{vm_name}.brk-s2", snapshot_dir, base_image)
@@ -293,6 +281,11 @@ def test_check_real_targets_broken_chain(test_vm):
     if result2.results and not result2.results[0].success:
         pytest.skip(f"inc1 backup failed: {result2.results[0].error}")
 
+    # Run 2 must create an incremental delta, not a new FULL.
+    assert len(state.get_full_backups(str(target_dir))) == 1, (
+        "Expected FULL count to stay at 1 after run 2 (incremental created)"
+    )
+
     # inc2
     time.sleep(1)
     snap3 = _snapshot_create(shell, vm_name, f"{vm_name}.brk-s3", snapshot_dir, base_image)
@@ -301,6 +294,11 @@ def test_check_real_targets_broken_chain(test_vm):
     result3 = core.run(vm_name)
     if result3.results and not result3.results[0].success:
         pytest.skip(f"inc2 backup failed: {result3.results[0].error}")
+
+    # Run 3 must also create an incremental delta — still exactly one FULL.
+    assert len(state.get_full_backups(str(target_dir))) == 1, (
+        "Expected FULL count to stay at 1 after run 3 (incremental created)"
+    )
 
     # Identify incremental files on target (non-FULL qcow2)
     incremental_files = sorted([f for f in target_dir.glob("*.qcow2") if ".FULL." not in f.name])
@@ -608,10 +606,9 @@ def test_check_real_targets_after_retention(test_vm):
         time.sleep(1)
         core.run(vm_name)
 
-    # After retention, check that everything is consistent.
-    # Normalize FULL state records first so check() sees the anchor
-    # (Phase 2 quirk — Core records FULL names without .qcow2).
-    _normalize_full_state(state, target_dir)
+    # After retention, check that everything is consistent.  The
+    # recorded FULL paths resolve to real on-disk files, so no phantom
+    # cleanup is needed before check().
     check_results = core.check(vm_name)
     assert vm_name in check_results
     cr = check_results[vm_name]

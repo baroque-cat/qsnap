@@ -17,10 +17,21 @@ class InMemoryStateManager(IStateManager):
     """In-memory state manager for unit tests."""
 
     @staticmethod
-    def _normalize_full_name(full_name: str) -> str:
-        """Normalize a FULL backup name to stem form (without ``.qcow2``).
+    def _to_extended_name(name: str) -> str:
+        """Normalize a FULL backup name to extended form (with .qcow2).
 
-        Mirrors ``JsonStateManager._normalize_full_name`` for test parity
+        Mirrors JsonStateManager._to_extended_name for test parity
+        (design D4).
+        """
+        if name.endswith(".qcow2"):
+            return name
+        return name + ".qcow2"
+
+    @staticmethod
+    def _normalize_full_name(full_name: str) -> str:
+        """Normalize a FULL backup name to stem form (without .qcow2).
+
+        Mirrors JsonStateManager._normalize_full_name for test parity
         (design D3).
         """
         if full_name.endswith(".qcow2"):
@@ -148,13 +159,20 @@ class InMemoryStateManager(IStateManager):
         timestamp: datetime,
         disk: str,
     ) -> None:
+        """Append a full backup record for *target_path*/*disk*.
+
+        Mirrors JsonStateManager.record_full_backup: normalizes *name*
+        to extended form and derives *path* from the normalized name
+        (design D4).
+        """
         from pathlib import Path
 
+        normalized_name = self._to_extended_name(name)
         entries = self._full_backups.setdefault(target_path, [])
         entries.append(
             FullBackupInfo(
-                name=name,
-                path=Path(target_path) / name,
+                name=normalized_name,
+                path=Path(target_path) / normalized_name,
                 timestamp=timestamp,
                 disk=disk,
             )
@@ -175,10 +193,16 @@ class InMemoryStateManager(IStateManager):
         return list(target_deps.get(normalized, []))
 
     def remove_full_backup(self, target_path: str, name: str) -> bool:
-        """Remove a full backup record from in-memory state."""
+        """Remove a full backup record from in-memory state.
+
+        Mirrors JsonStateManager.remove_full_backup: normalizes the
+        lookup *name* to extended form before matching, so both stem
+        and extended callers remove the same record (design D4).
+        """
+        lookup_name = self._to_extended_name(name)
         entries = self._full_backups.get(target_path, [])
         for entry in entries:
-            if entry.name == name:
+            if entry.name == lookup_name:
                 entries.remove(entry)
                 return True
         return False

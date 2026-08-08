@@ -179,7 +179,9 @@ def test_bitmap_incremental_registers_dependency(
             return_value=delta_result,
         ),
         patch.object(
-            mock_state, "record_incremental_dependency", wraps=mock_state.record_incremental_dependency
+            mock_state,
+            "record_incremental_dependency",
+            wraps=mock_state.record_incremental_dependency,
         ) as spy,
     ):
         core._backup_target(vm, target, [snap])
@@ -365,7 +367,7 @@ def test_dependency_visible_in_check_state(
 
     # Create FULL and incremental files on disk (existence check passes).
     full_name = "vm.FULL.monthly"
-    full_path = backup_dir / full_name
+    full_path = backup_dir / f"{full_name}.qcow2"
     full_path.touch()
 
     inc_name = "vm.20250101T000000"

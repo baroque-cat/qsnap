@@ -238,6 +238,15 @@ def test_full_created_when_incrementals_exceed_chain_length(test_vm, caplog):
         f"Fulls: {[(f.name, f.timestamp) for f in all_fulls]}"
     )
 
+    # Every recorded FULL must carry the .qcow2 extension and its path
+    # must resolve to the physical file on disk
+    # (fix-full-backup-state-extension).
+    for full in all_fulls:
+        assert full.name.endswith(".qcow2"), (
+            f"FULL state entry must carry .qcow2 extension, got {full.name!r}"
+        )
+        assert full.path.exists(), f"FULL state entry path must exist on disk: {full.path}"
+
     # Check for FULL creation log.
     created_logs = [
         r.message for r in caplog.records if "created FULL" in r.message and vm_name in r.message
@@ -352,6 +361,15 @@ def test_full_not_created_when_incrementals_within_chain_length(test_vm, caplog)
         f"but got before={num_fulls_before}, after={len(fulls_after)}"
     )
 
+    # The surviving FULL record must carry the .qcow2 extension and its
+    # path must resolve to the physical file on disk
+    # (fix-full-backup-state-extension).
+    for full in fulls_after:
+        assert full.name.endswith(".qcow2"), (
+            f"FULL state entry must carry .qcow2 extension, got {full.name!r}"
+        )
+        assert full.path.exists(), f"FULL state entry path must exist on disk: {full.path}"
+
     _cleanup_checkpoints(shell, vm_name)
 
 
@@ -426,6 +444,16 @@ def test_first_backup_to_target_always_creates_full(test_vm, caplog):
     # Step 5: Verify FULL recorded in state.
     fulls_in_state = state.get_full_backups(str(target_dir))
     assert len(fulls_in_state) >= 1, f"Expected FULL recorded in state, got {len(fulls_in_state)}"
+
+    # The recorded FULL entry must carry the .qcow2 extension and its
+    # path must resolve to the physical file on disk
+    # (fix-full-backup-state-extension).
+    assert fulls_in_state[0].name.endswith(".qcow2"), (
+        f"FULL state entry must carry .qcow2 extension, got {fulls_in_state[0].name!r}"
+    )
+    assert fulls_in_state[0].path.exists(), (
+        f"FULL state entry path must exist on disk: {fulls_in_state[0].path}"
+    )
 
     _cleanup_checkpoints(shell, vm_name)
 

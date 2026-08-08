@@ -223,7 +223,10 @@ def test_rollback_deletes_broken_full_and_checkpoint(test_vm, caplog):
 
     # Core logs the failed FULL via the retry wrapper (Phase 2 — the old
     # "rolled back" message no longer exists).
-    assert "failed after retries" in all_logs.lower() and "old generations preserved" in all_logs.lower(), (
+    assert (
+        "failed after retries" in all_logs.lower()
+        and "old generations preserved" in all_logs.lower()
+    ), (
         f"Expected 'FULL backup failed after retries' log with forced "
         f"verification failure. Logs: {all_logs[:500]}"
     )
@@ -376,17 +379,12 @@ def test_stopped_vm_failed_full_deletes_no_checkpoint(test_vm, caplog):
             f"(VM exited during seed). Baselines: {baselines}"
         )
 
-    # Phase 2 quirk: Core records the FULL under its stem name, so
-    # ``FullBackupInfo.path`` lacks the ``.qcow2`` extension and startup
-    # validation would treat the seed FULL as a phantom.  Re-record with
-    # the real filename so the second run keeps the seed FULL in state.
+    # Corrected behavior: the seed FULL's recorded path resolves to the
+    # real on-disk file, so startup validation keeps the seed FULL in
+    # state for the second run — no re-recording needed.
     seed_fulls = state.get_full_backups(str(target_dir))
-    if seed_fulls:
-        seed_name = seed_fulls[0].name
-        state.remove_full_backup(str(target_dir), seed_name)
-        state.record_full_backup(
-            str(target_dir), f"{seed_name}.qcow2", seed_fulls[0].timestamp, "vda"
-        )
+    assert seed_fulls, "Expected the seed FULL to be recorded in state"
+    assert seed_fulls[0].path.exists(), f"Seed FULL recorded path must exist: {seed_fulls[0].path}"
 
     # Fresh snapshot for the stopped-VM backup source.
     fresh_snap = _snapshot_create(

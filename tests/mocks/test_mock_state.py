@@ -144,3 +144,82 @@ def test_inmemory_reset_target_state_nonexistent_target_no_error() -> None:
     assert mgr.get_full_backups("/nonexistent/target") == []
     assert mgr.get_incremental_dependencies("/nonexistent/target", "any") == []
     assert mgr.get_last_backup_allocation("/nonexistent/target", "vda") is None
+
+
+# ── FULL backup name normalization (mock parity, design D1/D4) ──────────
+
+
+@pytest.mark.mock
+def test_inmemory_record_full_backup_normalizes_stem() -> None:
+    """record_full_backup stores stem names in extended (.qcow2) form."""
+    mgr = InMemoryStateManager()
+    target = "/mnt/backup/testvm"
+    stem = "testvm.FULL.20260101_vda_a1b2c3"
+
+    mgr.record_full_backup(
+        target,
+        stem,
+        datetime(2026, 1, 1, 12, 0, 0),
+        "vda",
+    )
+
+    recorded = mgr.get_last_full_backup(target)
+    assert recorded is not None
+    assert recorded.name == stem + ".qcow2"
+
+
+@pytest.mark.mock
+def test_inmemory_record_full_backup_derives_extended_path() -> None:
+    """record_full_backup derives path from the normalized (.qcow2) name."""
+    mgr = InMemoryStateManager()
+    target = "/mnt/backup/testvm"
+    stem = "testvm.FULL.20260101_vda_a1b2c3"
+
+    mgr.record_full_backup(
+        target,
+        stem,
+        datetime(2026, 1, 1, 12, 0, 0),
+        "vda",
+    )
+
+    recorded = mgr.get_last_full_backup(target)
+    assert recorded is not None
+    assert recorded.path == Path(target) / (stem + ".qcow2")
+
+
+@pytest.mark.mock
+def test_inmemory_remove_full_backup_accepts_stem_lookup() -> None:
+    """remove_full_backup with a stem lookup removes the extended record."""
+    mgr = InMemoryStateManager()
+    target = "/mnt/backup/testvm"
+    extended = "testvm.FULL.20260101_vda_a1b2c3.qcow2"
+
+    mgr.record_full_backup(
+        target,
+        extended,
+        datetime(2026, 1, 1, 12, 0, 0),
+        "vda",
+    )
+    assert len(mgr.get_full_backups(target)) == 1
+
+    removed = mgr.remove_full_backup(target, "testvm.FULL.20260101_vda_a1b2c3")
+
+    assert removed is True
+    assert mgr.get_full_backups(target) == []
+
+
+@pytest.mark.mock
+def test_inmemory_remove_full_backup_non_matching_returns_false() -> None:
+    """remove_full_backup for an unrecorded name returns False, keeps others."""
+    mgr = InMemoryStateManager()
+    target = "/mnt/backup/testvm"
+
+    mgr.record_full_backup(
+        target,
+        "testvm.FULL.20260101_vda_a1b2c3",
+        datetime(2026, 1, 1, 12, 0, 0),
+        "vda",
+    )
+
+    assert mgr.remove_full_backup(target, "testvm.FULL.20260101_vdb_ffff00") is False
+    assert len(mgr.get_full_backups(target)) == 1

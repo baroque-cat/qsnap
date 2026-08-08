@@ -1094,9 +1094,7 @@ def test_restore_at_selects_first_point_above(
     assert result.snapshot_name == points[1].name, (
         f"First point >= at should be selected, got {result.snapshot_name}"
     )
-    assert "[restore] --at" in caplog.text, (
-        "The actually-used point must be logged"
-    )
+    assert "[restore] --at" in caplog.text, "The actually-used point must be logged"
     assert points[1].name in caplog.text
 
 
@@ -1131,9 +1129,7 @@ def test_restore_at_exact_match_selected(
         result = core.restore(at=requested)
 
     assert result.success is True
-    assert result.snapshot_name == points[1].name, (
-        "The exact-matching point should be selected"
-    )
+    assert result.snapshot_name == points[1].name, "The exact-matching point should be selected"
 
 
 @pytest.mark.unit

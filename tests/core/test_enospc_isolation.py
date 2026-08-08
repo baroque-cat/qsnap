@@ -718,9 +718,7 @@ def test_suspended_target_still_runs_retention_cleanup(
         result = core.run()
 
     assert result.space_limited is True
-    run_spy.assert_not_called(), (
-        "no transfer may be attempted for a gate-suspended target"
-    )
+    run_spy.assert_not_called(), ("no transfer may be attempted for a gate-suspended target")
     assert retention_spy.called
     assert cleanup_spy.called
 
@@ -764,9 +762,7 @@ def test_strict_gate_no_transfer_attempted(
         result = core.run()
 
     assert result.space_limited is True
-    run_spy.assert_not_called(), (
-        "no transfer may be attempted for a gate-suspended target"
-    )
+    run_spy.assert_not_called(), ("no transfer may be attempted for a gate-suspended target")
 
 
 # ── VM-level isolation ───────────────────────────────────────────────────

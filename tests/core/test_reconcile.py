@@ -190,7 +190,7 @@ def test_reconcile_cleans_dependency_records_on_orphan_deletion(
     orphan_backup = SnapshotInfo(
         name=orphan_name, path=orphan_path, timestamp=datetime.now(), allocation=0, disk="vda"
     )
-    mock_state.record_full_backup("vda", str(target.path), full_name, datetime.now())
+    mock_state.record_full_backup(str(target.path), full_name, datetime.now(), "vda")
     mock_shell.expect_first("--backing-chain").returns(
         success_result('[{"format": "qcow2", "filename": "' + str(orphan_path) + '"}]')
     )

@@ -163,6 +163,16 @@ def test_startup_validation(test_vm, caplog):
     state_fulls_before = state.get_full_backups(str(target_dir))
     assert len(state_fulls_before) >= 1, "State must have FULL entry after run 1"
 
+    # The recorded FULL entry must carry the .qcow2 extension and its
+    # path must resolve to the physical file on disk
+    # (fix-full-backup-state-extension).
+    assert state_fulls_before[0].name.endswith(".qcow2"), (
+        f"FULL state entry must carry .qcow2 extension, got {state_fulls_before[0].name!r}"
+    )
+    assert state_fulls_before[0].path.exists(), (
+        f"FULL state entry path must exist on disk: {state_fulls_before[0].path}"
+    )
+
     # ── Simulate disk failure: delete the FULL backup file ────────────
     first_full_path.unlink()
     assert not first_full_path.exists(), (

@@ -5155,7 +5155,8 @@ class Core:
                         tgt_hash = provider.target_hash(str(target.path))
                         prefix = f"qsnap-{tgt_hash}-{disk_target}-"
                         disk_cks = [
-                            n for n in provider.list_checkpoints(vm_config.name)
+                            n
+                            for n in provider.list_checkpoints(vm_config.name)
                             if n.startswith(prefix)
                         ]
                         if disk_cks:
@@ -5261,7 +5262,7 @@ class Core:
                 if needs_full:
                     self._state.record_full_backup(
                         str(target.path),
-                        result.snapshot_name,
+                        f"{result.snapshot_name}.qcow2",
                         datetime.now(),
                         result.disk or disk_target,
                     )

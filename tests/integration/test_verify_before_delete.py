@@ -154,9 +154,7 @@ def test_old_generation_not_deleted_on_failed_verification(test_vm, caplog):
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
-    )
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda")
     assert full_path.exists(), "FULL backup file must exist"
 
     # Step 3: Corrupt the FULL file to force M2 verification to fail
@@ -305,9 +303,7 @@ def test_old_generation_deleted_after_successful_verification(test_vm, caplog):
 
     gen1_path = full_result1.target_path
     gen1_name = gen1_path.stem
-    state.record_full_backup(
-        str(target_dir), f"{gen1_name}.qcow2", datetime.now(), disk="vda"
-    )
+    state.record_full_backup(str(target_dir), f"{gen1_name}.qcow2", datetime.now(), disk="vda")
     assert gen1_path.exists(), "Generation 1 FULL must exist"
 
     # Step 3: Create second snapshot.

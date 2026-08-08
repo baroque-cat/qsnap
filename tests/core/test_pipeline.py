@@ -2597,9 +2597,7 @@ def test_transfer_retries_on_content_comparison_mismatch(
     ):
         core._backup_target(vm, target, [])
 
-    assert run_spy.call_count >= 2, (
-        "content comparison mismatch should be retried at least once"
-    )
+    assert run_spy.call_count >= 2, "content comparison mismatch should be retried at least once"
     assert "succeeded on retry" in caplog.text
 
 
@@ -4426,9 +4424,7 @@ def test_dry_run_logs_planned_actions(
 
     # No mutations executed
     assert not create_spy.called, "snapshot provider create_multi() must NOT be called in dry-run"
-    assert not transfer_spy.called, (
-        "backup provider run_backup() must NOT be called in dry-run"
-    )
+    assert not transfer_spy.called, "backup provider run_backup() must NOT be called in dry-run"
 
     # Pipeline still "succeeds" in dry-run
     assert result.success is True
@@ -4806,8 +4802,7 @@ def test_core_passes_convert_parallel_to_run_backup_delta(
 
     assert run_spy.called, "run_backup should be called"
     assert run_spy.call_args.kwargs.get("convert_parallel") == 8, (
-        f"convert_parallel should be 8, got: "
-        f"{run_spy.call_args.kwargs.get('convert_parallel')!r}"
+        f"convert_parallel should be 8, got: {run_spy.call_args.kwargs.get('convert_parallel')!r}"
     )
 
 
@@ -5571,9 +5566,7 @@ def test_active_blockjob_defers_disk_backup(
     assert not run_spy.called, (
         "run_backup should NOT be called when a block job is active on the disk"
     )
-    assert "deferred" in caplog.text.lower(), (
-        "The blockjob deferral should be logged"
-    )
+    assert "deferred" in caplog.text.lower(), "The blockjob deferral should be logged"
 
 
 def test_no_blockjob_backup_proceeds(
@@ -6084,9 +6077,7 @@ def test_startup_healthy_checkpoint_kept(
         core._validate_state_at_startup(vm)
 
     delete_calls = [c for c in mock_shell.call_history if "checkpoint-delete" in c]
-    assert not delete_calls, (
-        "virsh checkpoint-delete should NOT be called for a healthy checkpoint"
-    )
+    assert not delete_calls, "virsh checkpoint-delete should NOT be called for a healthy checkpoint"
 
 
 def test_startup_orphan_checkpoint_delete_failure_non_fatal(

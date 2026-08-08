@@ -182,9 +182,7 @@ def test_target_chain_length_none_no_full_triggered(
     ):
         core._backup_target(vm, target, [snap])
 
-    assert full_spy.called, (
-        "run_backup should be called when target_chain_length is None"
-    )
+    assert full_spy.called, "run_backup should be called when target_chain_length is None"
     assert full_spy.call_args.kwargs["force_full"] is False, (
         "run_backup should NOT be called with force_full=True when target_chain_length is None"
     )
@@ -349,8 +347,7 @@ def test_dry_run_logs_full_would_be_created(
     # qemu-img info --backing-chain returns no actual-size, so the estimate
     # is undecidable and logged as "size unknown".
     expected_fragment = (
-        "[dry-run] Would create FULL backup for disk vda"
-        " (size unknown, method=NBD, VM=running)"
+        "[dry-run] Would create FULL backup for disk vda (size unknown, method=NBD, VM=running)"
     )
     assert expected_fragment in caplog.text, (
         "Dry-run should log 'Would create FULL backup' with per-disk context "

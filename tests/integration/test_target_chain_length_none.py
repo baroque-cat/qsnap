@@ -203,9 +203,7 @@ def test_target_chain_length_none_no_full(test_vm, caplog):
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
-    )
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda")
 
     # Step 2: Record 8 incrementals — well beyond any typical chain_length.
     for i in range(8):
@@ -297,9 +295,7 @@ def test_target_chain_length_three_triggers_full(test_vm, caplog):
 
     full_path = full_result.target_path
     full_name = full_path.stem
-    state.record_full_backup(
-        str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda"
-    )
+    state.record_full_backup(str(target_dir), f"{full_name}.qcow2", datetime.now(), disk="vda")
 
     # Step 2: Record 4 incrementals (exceeds chain_length=3).
     for i in range(4):

@@ -790,9 +790,7 @@ def test_failed_full_rollback_deletes_only_failed_disk_checkpoint(test_vm_multi_
     # on failure the provider deletes only the successor checkpoint it
     # created during the failed attempt.
     vda_baseline = next((cp for cp in baselines if "-vda-" in cp), None)
-    assert vda_baseline is not None, (
-        f"Seed run must have created a vda baseline, got {baselines}"
-    )
+    assert vda_baseline is not None, f"Seed run must have created a vda baseline, got {baselines}"
     assert vda_baseline in cps_after, (
         f"vda prior baseline must be preserved for retry, got {cps_after}"
     )

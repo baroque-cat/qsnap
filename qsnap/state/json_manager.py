@@ -367,6 +367,17 @@ class JsonStateManager(IStateManager):
         deprecated keys are read-tolerantly — unknown fields are silently
         ignored.
 
+        Name-extension migration (design D2): entries whose ``name`` or
+        ``path`` lack the ``.qcow2`` extension (stem format, written by
+        the buggy version after commit ``0811599``) are normalized to
+        extended form on load.  ``name`` and ``path`` are checked
+        **independently** — a per-field guard prevents double-append.
+        When the stored ``path`` is stem-based, it is rebuilt as
+        ``str(Path(target_path) / normalized_name)``.  This migration
+        runs BEFORE deduplication so that a stem entry and its extended
+        twin collapse into a single record.  Pre-regression production
+        state (already extended) passes through unchanged.
+
         Deduplication migration (design D4): entries with duplicate
         ``(name, target_path)`` tuples are removed on load, keeping the
         first occurrence.  This fixes the double-recording bug where
@@ -391,6 +402,24 @@ class JsonStateManager(IStateManager):
             else:
                 logger.warning("Unexpected entry in _full_backups.json for %s", key)
 
+        # --- Name-extension migration (runs BEFORE dedup, design D2) ---
+        had_extension_fix = False
+        for target_path, entries in data.items():
+            for entry in entries:
+                name = str(entry.get("name", ""))
+                path_val = str(entry.get("path", ""))
+
+                name_fixed = not name.endswith(".qcow2")
+                path_fixed = not path_val.endswith(".qcow2")
+
+                if name_fixed:
+                    entry["name"] = name + ".qcow2"
+                    had_extension_fix = True
+                if path_fixed:
+                    # Rebuild path from the (possibly just-fixed) name.
+                    entry["path"] = str(Path(target_path) / str(entry["name"]))
+                    had_extension_fix = True
+
         # Deduplication migration: remove entries with duplicate
         # (name, target_path) tuples, keeping the first.  The target_path
         # is the dict key; the name is the "name" field in each entry.
@@ -413,9 +442,11 @@ class JsonStateManager(IStateManager):
                 unique_entries.append(entry)
             deduplicated_data[target_path] = unique_entries
 
-        # Persist deduplicated state so the migration is one-time and
-        # idempotent (subsequent loads find no duplicates, no logging).
-        if had_duplicates:
+        had_changes = had_extension_fix or had_duplicates
+
+        # Persist repaired state so the migration is one-time and
+        # idempotent (subsequent loads find no changes, no logging).
+        if had_changes:
             self._save_full_backups(deduplicated_data)
 
         return deduplicated_data
@@ -482,13 +513,20 @@ class JsonStateManager(IStateManager):
         timestamp: datetime,
         disk: str,
     ) -> None:
-        """Append a full backup record for *target_path*/*disk*."""
+        """Append a full backup record for *target_path*/*disk*.
+
+        Normalizes *name* to extended form (appending ``.qcow2`` when
+        missing) before persisting, and derives ``path`` from the
+        normalized name.  This enforces the ``.qcow2`` name invariant
+        defensively so no future caller can regress the format (design D1).
+        """
+        normalized_name = self._to_extended_name(name)
         data = self._load_full_backups()
         entries = data.get(target_path, [])
         entries.append(
             {
-                "name": name,
-                "path": str(Path(target_path) / name),
+                "name": normalized_name,
+                "path": str(Path(target_path) / normalized_name),
                 "timestamp": timestamp.isoformat(),
                 "disk": disk,
             }
@@ -500,6 +538,20 @@ class JsonStateManager(IStateManager):
 
     def _dependencies_path(self) -> Path:
         return self._state_dir / "_dependencies.json"
+
+    @staticmethod
+    def _to_extended_name(name: str) -> str:
+        """Normalize a FULL backup name to extended form (with ``.qcow2``).
+
+        Inverse counterpart of :meth:`_normalize_full_name`.  Returns
+        *name* unchanged if it already ends with ``.qcow2``, otherwise
+        appends ``.qcow2``.  Used by :meth:`record_full_backup` and
+        :meth:`remove_full_backup` to enforce the ``.qcow2`` name
+        invariant for ``_full_backups.json`` entries.
+        """
+        if name.endswith(".qcow2"):
+            return name
+        return name + ".qcow2"
 
     @staticmethod
     def _normalize_full_name(full_name: str) -> str:
@@ -577,11 +629,20 @@ class JsonStateManager(IStateManager):
         return list(target_deps.get(normalized, []))
 
     def remove_full_backup(self, target_path: str, name: str) -> bool:
-        """Remove a full backup record from persistent state."""
+        """Remove a full backup record from persistent state.
+
+        Name-format tolerant (design D3): normalizes the lookup *name* to
+        the extended form (appending ``.qcow2`` when missing) before
+        matching against stored entries.  Both stem callers
+        (e.g. ``Core._cleanup_backups``, which passes ``BackupInfo.name``
+        from ``provider.list()`` — always a stem) and extended callers
+        (which pass state-derived ``full.name``) remove the same record.
+        """
+        lookup_name = self._to_extended_name(name)
         data = self._load_full_backups()
         entries = data.get(target_path, [])
         original_len = len(entries)
-        data[target_path] = [e for e in entries if e.get("name") != name]
+        data[target_path] = [e for e in entries if e.get("name") != lookup_name]
         if len(data[target_path]) == original_len:
             return False
         self._save_full_backups(data)
