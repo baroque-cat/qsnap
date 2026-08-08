@@ -842,3 +842,126 @@ def test_contract_remove_full_backup_non_matching_returns_false(mgr_cls, tmp_pat
     target = "/mnt/backup/testvm"
 
     assert mgr.remove_full_backup(target, "nonexistent.qcow2") is False
+
+
+# ── crash-evidence state fields contract (recover-lost-checkpoint-bitmaps) ──
+# state-management spec: ``get_boot_id``/``set_boot_id`` (host boot
+# identifier per VM) and ``get_last_commit_ts``/``set_last_commit_ts``
+# (per-disk last-commit marker) are abstract on IStateManager.  Every
+# concrete implementation must provide them; a subclass missing any of
+# them fails to instantiate with TypeError (TESTING.md contract-test
+# rule).
+
+
+def test_istate_manager_boot_id_methods_abstract():
+    """get_boot_id and set_boot_id are abstract on IStateManager.
+
+    The host boot-id tracking methods declared by ``IStateManager`` for
+    the recover-lost-checkpoint-bitmaps change MUST be present in
+    ``__abstractmethods__`` so that every concrete implementation is
+    forced to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_boot_id" in abstract_methods
+    assert "set_boot_id" in abstract_methods
+
+
+def test_istate_manager_last_commit_ts_methods_abstract():
+    """get_last_commit_ts and set_last_commit_ts are abstract on IStateManager.
+
+    The per-disk last-commit marker methods MUST be in
+    ``__abstractmethods__`` so that every concrete implementation is
+    forced to provide them.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_last_commit_ts" in abstract_methods
+    assert "set_last_commit_ts" in abstract_methods
+
+
+def test_concrete_implementations_have_crash_evidence_methods(tmp_path):
+    """JsonStateManager and InMemoryStateManager implement the four new methods.
+
+    Both concrete managers provide callable ``get_boot_id``,
+    ``set_boot_id``, ``get_last_commit_ts``, and ``set_last_commit_ts``
+    matching the ``IStateManager`` declarations.
+    """
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+
+    for mgr, label in [
+        (json_mgr, "JsonStateManager"),
+        (inmemory_mgr, "InMemoryStateManager"),
+    ]:
+        assert callable(mgr.get_boot_id), f"{label} missing get_boot_id"
+        assert callable(mgr.set_boot_id), f"{label} missing set_boot_id"
+        assert callable(mgr.get_last_commit_ts), f"{label} missing get_last_commit_ts"
+        assert callable(mgr.set_last_commit_ts), f"{label} missing set_last_commit_ts"
+
+
+def test_crash_evidence_methods_work_in_both_implementations(tmp_path):
+    """boot_id / last_commit_ts round-trip in both concrete implementations.
+
+    A subclass implementing the interface is not enough — the concrete
+    managers must actually persist the values (mock parity, TESTING.md
+    paradigm table).
+    """
+    json_mgr = JsonStateManager(state_dir=tmp_path)
+    inmemory_mgr = InMemoryStateManager()
+
+    for mgr in (json_mgr, inmemory_mgr):
+        assert mgr.get_boot_id("testvm") is None
+        mgr.set_boot_id("testvm", "boot-A")
+        assert mgr.get_boot_id("testvm") == "boot-A"
+
+        assert mgr.get_last_commit_ts("testvm", "vda") is None
+        mgr.set_last_commit_ts("testvm", "vda", "20260808T160000")
+        assert mgr.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+
+
+def test_missing_crash_evidence_methods_fails_instantiation():
+    """A subclass missing the crash-evidence methods raises TypeError.
+
+    When a concrete subclass of ``IStateManager`` provides every abstract
+    method EXCEPT ``get_boot_id``/``set_boot_id``/
+    ``get_last_commit_ts``/``set_last_commit_ts``, instantiation MUST
+    raise ``TypeError`` because the ABC enforces all abstract methods.
+    This guarantees no future implementation can silently omit the
+    crash-evidence contract (state-management spec).
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "get_boot_id" in abstract_methods
+    assert "set_boot_id" in abstract_methods
+    assert "get_last_commit_ts" in abstract_methods
+    assert "set_last_commit_ts" in abstract_methods
+
+    # A subclass that implements everything EXCEPT the four crash-evidence
+    # methods — including the per-disk reset methods.
+    class _MissingCrashEvidence(IStateManager):
+        def get_last_allocation(self, vm_name, disk): ...
+        def set_last_allocation(self, vm_name, disk, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, disk, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp, disk): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, disk): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path, disk): ...
+        def set_last_backup_allocation(self, target_path, disk, alloc): ...
+        def clear_last_backup_allocation(self, target_path, disk): ...
+        def remove_all_incremental_dependencies(self, target_path, full_name): ...
+        def reset_vm_state(self, vm_name): ...
+        def reset_target_state(self, target_path): ...
+        def reset_vm_disk_state(self, vm_name, disk): ...
+        def reset_target_disk_state(self, target_path, vm_name, disk): ...
+
+    with pytest.raises(TypeError):
+        _MissingCrashEvidence()

@@ -129,6 +129,22 @@ def _file_counts_by_extension(directory: Path, ext: str) -> int:
     return len(list(directory.glob(f"*.{ext}")))
 
 
+def _capture_checkpoint_set(shell: SubprocessShell, vm_name: str) -> list[str]:
+    """Return the sorted set of libvirt checkpoints for *vm_name*.
+
+    Read-only: uses ``virsh checkpoint-list --name``.  An empty list is
+    returned when the query fails (the zero-mutation invariant then
+    trivially holds — an unqueryable set cannot be mutated).
+    """
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if not result.success:
+        return []
+    return sorted(line.strip() for line in result.stdout.strip().splitlines() if line.strip())
+
+
 def _zero_mutation_assertions(
     vm_name: str,
     snapshot_dir: Path,
@@ -137,6 +153,8 @@ def _zero_mutation_assertions(
     result,
     initial_snap_count: int,
     initial_target_count: int,
+    checkpoints_before: list[str],
+    shell: SubprocessShell,
 ) -> None:
     """Shared assertions for zero-mutation tests."""
     # 1. actions is empty
@@ -166,6 +184,13 @@ def _zero_mutation_assertions(
     # 8. State unchanged — no deferred ops
     assert state.get_deferred_operations(vm_name) == [], (
         "State should have no deferred ops after dry-run"
+    )
+    # 9. Libvirt checkpoint set is byte-identical (spec: zero-mutation
+    # invariant "the set of libvirt checkpoints is unchanged").
+    checkpoints_after = _capture_checkpoint_set(shell, vm_name)
+    assert checkpoints_after == checkpoints_before, (
+        "Dry-run must not create/delete/modify libvirt checkpoints: "
+        f"before={checkpoints_before} after={checkpoints_after}"
     )
 
 
@@ -214,6 +239,8 @@ _READ_ONLY_PREFIXES = (
     "virsh domblklist",
     "virsh dumpxml",
     "virsh checkpoint-list",
+    "virsh blockjob",
+    "virsh qemu-monitor-command",
     "virsh --version",
     "test ",
     "which ",
@@ -259,6 +286,9 @@ def test_dry_run_zero_mutation_single_disk(test_vm):
     initial_snap_count = _file_counts_by_extension(snapshot_dir, "qcow2")
     initial_target_count = _file_counts_by_extension(target_dir, "qcow2")
 
+    # Snapshot the initial libvirt checkpoint set (zero-mutation invariant).
+    checkpoints_before = _capture_checkpoint_set(shell, vm_name)
+
     # The test_vm fixture creates a base_image which is already in tmpdir,
     # not in snapshot_dir.  Count snapshot_dir files for the assertion.
     # Actually the base_image is in tmpdir root; snapshot_dir is separate.
@@ -276,6 +306,8 @@ def test_dry_run_zero_mutation_single_disk(test_vm):
         result,
         initial_snap_count,
         initial_target_count,
+        checkpoints_before,
+        shell,
     )
 
 
@@ -301,6 +333,7 @@ def test_dry_run_zero_mutation_multi_disk(test_vm_multi_disk):
     for disk, sdir in snapshot_dirs.items():
         initial_counts[disk] = _file_counts_by_extension(sdir, "qcow2")
     initial_target_count = _file_counts_by_extension(target_dir, "qcow2")
+    checkpoints_before = _capture_checkpoint_set(shell, vm_name)
 
     core, vm_config, state = _build_core(
         shell,
@@ -340,6 +373,13 @@ def test_dry_run_zero_mutation_multi_disk(test_vm_multi_disk):
     )
     assert state.get_deferred_operations(vm_name) == [], (
         "State should have no deferred ops after dry-run"
+    )
+
+    # Libvirt checkpoint set byte-identical (zero-mutation invariant).
+    checkpoints_after = _capture_checkpoint_set(shell, vm_name)
+    assert checkpoints_after == checkpoints_before, (
+        "Dry-run must not create/delete/modify libvirt checkpoints: "
+        f"before={checkpoints_before} after={checkpoints_after}"
     )
 
 
@@ -675,7 +715,8 @@ def test_dry_run_shell_calls_are_all_read_only(test_vm):
     Uses an allowlist approach: every recorded command must start with
     one of the ``_READ_ONLY_PREFIXES`` (``qemu-img info``, ``virsh
     domstate``, ``virsh dominfo``, ``virsh domblklist``, ``virsh dumpxml``,
-    ``virsh checkpoint-list``, ``virsh --version``, ``test``, ``which``,
+    ``virsh checkpoint-list``, ``virsh blockjob``, ``virsh
+    qemu-monitor-command``, ``virsh --version``, ``test``, ``which``,
     ``find``, ``du``).  Any command that does not match fails the test;
     all offenders are collected and printed together for quick triage.
     """

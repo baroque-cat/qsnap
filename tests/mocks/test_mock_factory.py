@@ -250,7 +250,7 @@ def test_mock_factory_snapshot_provider_create_multi(make_vm_config):
     results = provider.create_multi(make_vm_config(), specs, quiesce=False)
     assert isinstance(results, list)
     assert len(results) == len(specs)
-    for result, spec in zip(results, specs):
+    for result, spec in zip(results, specs, strict=False):
         assert isinstance(result, SnapshotResult)
         assert result.success is True
         assert result.disk == spec.disk

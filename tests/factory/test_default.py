@@ -162,7 +162,7 @@ def test_factory_always_returns_bitmap_backup_provider(
 
     assert isinstance(provider, BitmapBackupProvider)
     assert isinstance(provider._nbd, LibnbdClient)
-    assert not hasattr(provider, "_state")
+    assert provider._state is factory._state
     mock_check.assert_called_once_with(mock_shell)
 
 
@@ -249,7 +249,7 @@ def test_factory_bitmap_mode_new_libvirt_returns_bitmap(
 
     assert isinstance(provider, BitmapBackupProvider)
     assert isinstance(provider._nbd, LibnbdClient)
-    assert not hasattr(provider, "_state")
+    assert provider._state is factory._state
     mock_check.assert_called_once_with(mock_shell)
 
 
@@ -287,8 +287,9 @@ def test_factory_constructs_bitmap_with_nbd_without_state(
     assert isinstance(provider._nbd, LibnbdClient), (
         "Factory must wire a LibnbdClient into BitmapBackupProvider"
     )
-    assert not hasattr(provider, "_state"), (
-        "Factory must NOT inject IStateManager into BitmapBackupProvider"
+    assert provider._state is factory._state, (
+        "Factory must inject IStateManager into BitmapBackupProvider for the "
+        "recovery path (recover-lost-checkpoint-bitmaps, design D4/D5)"
     )
 
 
@@ -328,7 +329,7 @@ def test_factory_libvirt_7_2_returns_bitmap(
 
     assert isinstance(provider, BitmapBackupProvider)
     assert isinstance(provider._nbd, LibnbdClient)
-    assert not hasattr(provider, "_state")
+    assert provider._state is factory._state
 
 
 def test_factory_old_libvirt_raises_runtime_error(

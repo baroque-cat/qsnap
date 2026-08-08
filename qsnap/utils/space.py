@@ -138,6 +138,64 @@ def estimate_incremental_size(shell: IShell, source_path: Path) -> int | None:
     return size if size > 0 else None
 
 
+def estimate_recovered_delta_size(shell: IShell, layers: list[Path]) -> int | None:
+    """Estimate the transfer size for a recovered delta.
+
+    Returns the sum of ``actual-size`` over every layer in *layers*
+    (the copy-set of post-freeze overlays).  When a layer cannot be
+    queried, falls back to a FULL chain-sum estimate of the topmost
+    layer — a conservative upper bound that is always safe.
+
+    The returned value is an **upper bound** (the actual transfer may
+    be smaller because identical-content shadowing is not deducted).
+    Callers should mark it with ``~`` in summary output.
+    """
+    total: int = 0
+    for layer in layers:
+        layer_size = _layer_actual_size(shell, layer)
+        if layer_size is None:
+            # Unreadable layer — fall back to FULL estimate.
+            logger.debug(
+                "Cannot estimate recovered-delta size: layer %s is unreadable — "
+                "falling back to FULL chain-sum estimate",
+                layer,
+            )
+            return estimate_full_size(shell, layers[-1])
+        total += layer_size
+
+    return total if total > 0 else None
+
+
+def _layer_actual_size(shell: IShell, path: Path) -> int | None:
+    """Return the ``actual-size`` of a single qcow2 layer via
+    ``qemu-img info --output=json``.  Returns ``None`` on failure."""
+    result = shell.run(
+        [
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--output=json",
+            str(path),
+        ],
+        timeout=30,
+        check=True,
+    )
+    if not result.success:
+        return None
+    try:
+        info = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    actual_size = info.get("actual-size")
+    if actual_size is None:
+        return None
+    try:
+        size = int(actual_size)
+    except (ValueError, TypeError):
+        return None
+    return size if size > 0 else None
+
+
 def check_free_space(
     target_dir: Path,
     estimate: int | None,

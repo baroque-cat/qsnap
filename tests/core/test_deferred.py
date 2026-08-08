@@ -1418,7 +1418,7 @@ def test_offline_commit_enospc_defers_no_runtime_error(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    _add_snapshot(mock_state, "testvm", "snap1")
     snap_info = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
@@ -1473,7 +1473,7 @@ def test_live_commit_enospc_defers(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    _add_snapshot(mock_state, "testvm", "snap1")
     snap_info = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
@@ -1526,7 +1526,7 @@ def test_deferred_enospc_drained_later(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    _add_snapshot(mock_state, "testvm", "snap1")
     snap_info = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),
@@ -1633,7 +1633,7 @@ def test_non_space_commit_failure_aborts(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state, "testvm", "snap1")
+    _add_snapshot(mock_state, "testvm", "snap1")
     snap_info = SnapshotInfo(
         name="snap1",
         path=Path("/tmp/snap1.qcow2"),

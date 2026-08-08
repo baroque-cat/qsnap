@@ -15,14 +15,14 @@ the free-space gate (``check_free_space`` patched in ``qsnap.core``).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from qsnap.core import BackupAbortError, Core
-from qsnap.models.results import BackupResult, ShellResult, SnapshotInfo
+from qsnap.models.results import BackupResult, SnapshotInfo
 from qsnap.utils.space import SpaceCheckResult
 from tests.mocks import MockConfigFacade
 
@@ -83,6 +83,7 @@ def _failed_result(snap: SnapshotInfo, target, error: str = _ENOSPC) -> BackupRe
         bytes_transferred=0,
         error=error,
         disk=snap.disk,
+        kind="delta",
     )
 
 
@@ -95,6 +96,7 @@ def _ok_result(snap: SnapshotInfo, target) -> BackupResult:
         bytes_transferred=1048576,
         error=None,
         disk=snap.disk,
+        kind="delta",
     )
 
 
@@ -282,6 +284,7 @@ def test_verification_failure_not_treated_as_space_error(
         bytes_transferred=0,
         error="verification failed: qemu-img info returned No mock configured",
         disk=snap.disk,
+        kind="full",
     )
 
     with (
@@ -448,7 +451,7 @@ def test_next_run_resumes_interrupted_incremental(
         mock_factory._backup_provider,
         "run_backup",
         wraps=mock_factory._backup_provider.run_backup,
-    ) as transfer_spy:
+    ):
         result2 = core2.run()
 
     assert result2.space_limited is False
@@ -479,7 +482,7 @@ def test_next_run_retries_gate_skipped_full(
     target = make_target(path=str(tmp_path / "backup"))
     target.path.mkdir(parents=True, exist_ok=True)
     vm = make_vm_config(name="testvm", targets=[target])
-    snap = _add_snapshot(mock_state)
+    _add_snapshot(mock_state)
 
     insufficient = SpaceCheckResult(sufficient=False, free_bytes=0, estimate=5000, required=10000)
     sufficient = SpaceCheckResult(sufficient=True, free_bytes=10**12, estimate=5000, required=10000)
@@ -606,7 +609,7 @@ def test_warn_mode_proceeds(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state)
+    _add_snapshot(mock_state)
     _add_full_anchor(mock_state, target)
 
     caplog.set_level(logging.WARNING)
@@ -655,7 +658,7 @@ def test_off_mode_skips_gate(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state)
+    _add_snapshot(mock_state)
     _add_full_anchor(mock_state, target)
 
     with (
@@ -698,7 +701,7 @@ def test_suspended_target_still_runs_retention_cleanup(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state)
+    _add_snapshot(mock_state)
     _add_full_anchor(mock_state, target)
 
     with (
@@ -746,7 +749,7 @@ def test_strict_gate_no_transfer_attempted(
         shell=mock_shell,
     )
 
-    snap = _add_snapshot(mock_state)
+    _add_snapshot(mock_state)
     _add_full_anchor(mock_state, target)
 
     with (

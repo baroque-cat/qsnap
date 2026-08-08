@@ -35,6 +35,7 @@ from qsnap.models.results import (
     ActionRecord,
     BackupInfo,
     BackupResult,
+    BaselineAssessment,
     ChainVerifyResult,
     ChangeResult,
     CheckResult,
@@ -2576,6 +2577,14 @@ class Core:
         # Post-pipeline: check deferred operation thresholds (non-fatal)
         self._check_deferred_thresholds()
 
+        # Record host boot_id after a fully successful pipeline run
+        # (recover-lost-checkpoint-bitmaps, design D3).  The boot_id
+        # enables the recovery path to detect unclean host shutdowns
+        # and produce accurate WARNING messages.  Only recorded when
+        # all VMs succeeded (no errors, not dry-run).
+        if not self._dry_run and all(r.success for r in results):
+            self._record_boot_id(vms)
+
         # Transaction log (spec: transaction-log/spec.md).
         # Write one line per ActionRecord if transaction_log is configured.
         # Skipped in dry-run mode.
@@ -2674,6 +2683,33 @@ class Core:
                 # above is still emitted).
                 if not self._dry_run:
                     self._state.update_deferred_warning(vm.name, oldest_idx, now)
+
+    # ── Crash-evidence helpers (recover-lost-checkpoint-bitmaps, design D3) ──
+
+    @staticmethod
+    def _read_host_boot_id() -> str | None:
+        """Read the host boot_id from /proc/sys/kernel/random/boot_id."""
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError:
+            return None
+
+    def _record_boot_id(self, vms: list[VMConfig]) -> None:
+        """Record the current host boot_id for every VM in *vms*."""
+        boot_id = self._read_host_boot_id()
+        if boot_id is None:
+            logger.warning("Cannot read host boot_id — crash detection may be inaccurate")
+            return
+        for vm in vms:
+            try:
+                self._state.set_boot_id(vm.name, boot_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to record boot_id for VM %s: %s",
+                    vm.name,
+                    exc,
+                )
 
     def _filter_vms(self, vm_filter: str | None) -> list[VMConfig]:
         vms = self._config.get_vms()
@@ -3266,7 +3302,14 @@ class Core:
                 target_hash = provider.target_hash(str(target.path))
                 for disk_cfg in vm_config.disks:
                     self._check_orphan_checkpoint(
-                        vm_config.name, str(target.path), target_hash, disk_cfg.target
+                        vm_config.name,
+                        str(target.path),
+                        target_hash,
+                        disk_cfg.target,
+                        provider=provider,
+                        vm_config=vm_config,
+                        target=target,
+                        disk_cfg=disk_cfg,
                     )
             except Exception as exc:
                 logger.warning(
@@ -3283,6 +3326,10 @@ class Core:
         target_path_str: str,
         target_hash: str,
         disk: str,
+        provider: IBackupProvider | None = None,
+        vm_config: VMConfig | None = None,
+        target: TargetConfig | None = None,
+        disk_cfg: DiskConfig | None = None,
     ) -> None:
         """Check and clean an orphan checkpoint at startup (design D9).
 
@@ -3294,6 +3341,12 @@ class Core:
         checkpoint ts check is used as fallback.  If no such file
         exists, the checkpoint is an orphan of a crashed export — it
         is deleted best-effort with a WARNING.  Non-fatal in all cases.
+
+        Additionally (recover-lost-checkpoint-bitmaps, design D12):
+        when a covering file exists, the checkpoint's dirty bitmap is
+        probed via the provider.  A DEAD-bitmap checkpoint is treated
+        as an orphan and removed.  In dry-run mode, only a prediction
+        is logged — no checkpoint is deleted.
         """
         target_path = Path(target_path_str)
         try:
@@ -3352,9 +3405,77 @@ class Core:
                 except OSError:
                     continue
             if found:
-                return  # Healthy
+                # Covered by a backup file, but the bitmap may still be
+                # dead after an unclean host shutdown (design D12 of
+                # recover-lost-checkpoint-bitmaps).  Probe the bitmap
+                # when a provider and context are available.
+                if (
+                    provider is not None
+                    and vm_config is not None
+                    and disk_cfg is not None
+                    and target is not None
+                ):
+                    try:
+                        assessment = provider.assess_baseline(vm_config, target, disk_cfg)
+                        if assessment.status == "dead":
+                            # Crash evidence (design D3): compare the host
+                            # boot_id with the stored marker to attribute
+                            # the dead bitmap to an unclean host shutdown.
+                            boot_evidence = ""
+                            current_boot_id = self._read_host_boot_id()
+                            stored_boot_id = self._state.get_boot_id(vm_name)
+                            if (
+                                current_boot_id is not None
+                                and stored_boot_id is not None
+                                and current_boot_id != stored_boot_id
+                            ):
+                                boot_evidence = (
+                                    " — host boot changed since last "
+                                    "successful run: unclean host shutdown "
+                                    "detected"
+                                )
+                            logger.warning(
+                                "[startup] %s: dead-bitmap checkpoint "
+                                "detected — %s (disk %s, target %s, "
+                                "covering file exists but dirty bitmap "
+                                "is gone%s)",
+                                vm_name,
+                                newest,
+                                disk,
+                                target_path_str,
+                                boot_evidence,
+                            )
+                            # Fall through to deletion below.
+                        else:
+                            return  # Healthy — bitmap is alive.
+                    except Exception as exc:
+                        logger.debug(
+                            "[startup] %s: bitmap probe failed for "
+                            "checkpoint %s (disk %s): %s — treating as "
+                            "healthy to avoid false-positive deletion",
+                            vm_name,
+                            newest,
+                            disk,
+                            exc,
+                        )
+                        return  # Probe failure → assume healthy.
+                else:
+                    return  # Pre-existing behavior: covered → healthy.
 
-            # Orphan: no backup file covers this checkpoint.
+            # Orphan: no backup file covers this checkpoint, or
+            # the bitmap is dead (design D12 extended invariant).
+            if self._dry_run:
+                # Dry-run guard (recover-lost-checkpoint-bitmaps, D10):
+                # predict without deleting.
+                logger.warning(
+                    "[startup] [dry-run] Would remove orphan checkpoint %s "
+                    "for VM %s (disk %s, target %s)",
+                    newest,
+                    vm_name,
+                    disk,
+                    target_path_str,
+                )
+                return
             logger.warning(
                 "[startup] %s: orphan checkpoint detected — %s (disk %s, "
                 "target %s, ts=%s) — deleting best-effort",
@@ -4650,6 +4771,14 @@ class Core:
             len(committable),
             merged_names,
         )
+        # Record last_commit_ts for recovery gate G1
+        # (recover-lost-checkpoint-bitmaps).  Written immediately after
+        # the successful commit — if the pipeline later aborts, a
+        # conservative marker is already in place and the next run will
+        # observe it.  The timestamp uses ISO-8601 compact format
+        # (same as qsnap timestamps everywhere).
+        commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
         for sn in committable:
             self._actions.append(
                 ActionRecord(
@@ -4929,6 +5058,7 @@ class Core:
         # Per-disk FULLs predicted in dry-run (threaded into retention).
         predicted_full_disks: list[str] = []
         target_suspended = False
+        successful_disks: list[BackupResult] = []
 
         if not skip_transfer:
             # Phantom FULL cleanup (unchanged).
@@ -5048,7 +5178,6 @@ class Core:
             # ── Per-disk backup loop ──────────────────────────────────
             failed_disks: list[BackupResult] = []
             full_failed_disks: list[BackupResult] = []
-            successful_disks: list[BackupResult] = []
             deferred_disk_targets: set[str] = set()
 
             for disk_cfg in vm_config.disks:
@@ -5062,8 +5191,10 @@ class Core:
                     continue
                 disk_target = disk_cfg.target
 
-                # Blockjob probe (design D9).
-                if not self._dry_run and is_vm_running(self._shell, vm_config.name):
+                # Blockjob probe (design D9, extended for dry-run parity D10).
+                # In dry-run mode, run the blockjob probe read-only for
+                # honest prediction.
+                if is_vm_running(self._shell, vm_config.name):
                     blockjob_cmd = [
                         "virsh",
                         "blockjob",
@@ -5083,8 +5214,15 @@ class Core:
                             vm_config.name,
                             disk_target,
                         )
-                        deferred_disk_targets.add(disk_target)
-                        continue
+                        if not self._dry_run:
+                            deferred_disk_targets.add(disk_target)
+                            continue
+                        else:
+                            logger.info(
+                                "[dry-run] Would defer backup for disk %s (blockjob active)",
+                                disk_target,
+                            )
+                            continue
 
                 # Determine whether a FULL is due.
                 disk_fulls = [f for f in all_fulls if f.disk == disk_target]
@@ -5097,6 +5235,24 @@ class Core:
                     )
                     chain_length = target.target_chain_length
                     needs_full = chain_length is not None and len(deps) > chain_length
+
+                # Dry-run: use assess_baseline for honest prediction
+                # (recover-lost-checkpoint-bitmaps, D10).
+                if self._dry_run:
+                    assessment = provider.assess_baseline(vm_config, target, disk_cfg)
+                    self._predict_dry_run_backup(
+                        vm_config,
+                        target,
+                        disk_target,
+                        assessment,
+                        needs_full,
+                        free_space_check=free_space_check,
+                        free_space_reserve=free_space_reserve,
+                        free_space_factor=free_space_factor,
+                    )
+                    if needs_full:
+                        predicted_full_disks.append(disk_target)
+                    continue
 
                 # Size estimate: chain-sum for FULL, active-layer actual-size for delta.
                 if needs_full:
@@ -5138,53 +5294,6 @@ class Core:
                 ):
                     target_suspended = True
                     break
-
-                # Dry-run: predict backup kind from checkpoint state.
-                if self._dry_run:
-                    vm_state = (
-                        "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
-                    )
-                    kind = "FULL" if needs_full else "delta"
-                    size_str = (
-                        f"~{self._format_bytes(size_estimate)}"
-                        if size_estimate is not None
-                        else "size unknown"
-                    )
-                    checkpoint_hint = ""
-                    if not needs_full:
-                        tgt_hash = provider.target_hash(str(target.path))
-                        prefix = f"qsnap-{tgt_hash}-{disk_target}-"
-                        disk_cks = [
-                            n
-                            for n in provider.list_checkpoints(vm_config.name)
-                            if n.startswith(prefix)
-                        ]
-                        if disk_cks:
-                            newest_ck = sorted(disk_cks)[-1]
-                            checkpoint_hint = f" since checkpoint {newest_ck}"
-                    logger.info(
-                        "[dry-run] Would create %s backup%s for disk %s (%s, method=NBD, VM=%s)",
-                        kind,
-                        checkpoint_hint,
-                        disk_target,
-                        size_str,
-                        vm_state,
-                    )
-                    self._predictions.append(
-                        ActionRecord(
-                            action="backup_full" if needs_full else "backup_transfer",
-                            vm_name=vm_config.name,
-                            name=f"{vm_config.name}.{'FULL.' if needs_full else ''}"
-                            f"{datetime.now().strftime('%Y%m%dT%H%M%S')}"
-                            f"_{disk_target}_{secrets.token_hex(3)}",
-                            path=target.path,
-                            size=size_estimate or 0,
-                            disk=disk_target,
-                        )
-                    )
-                    if needs_full:
-                        predicted_full_disks.append(disk_target)
-                    continue
 
                 # Real run: execute run_backup.
                 result = self._execute_with_retry(
@@ -5233,7 +5342,14 @@ class Core:
                     if result.duration > 0
                     else 0.0
                 )
-                action = "backup_full" if needs_full else "backup_transfer"
+                # Use result.kind for accurate action tracking
+                # (recover-lost-checkpoint-bitmaps).
+                if result.kind == "full":
+                    action = "backup_full"
+                elif result.kind == "recovered_delta":
+                    action = "backup_transfer"  # transfer-based, not full
+                else:
+                    action = "backup_transfer"
                 self._actions.append(
                     ActionRecord(
                         action=action,
@@ -5244,12 +5360,18 @@ class Core:
                         duration=result.duration,
                         disk=result.disk,
                         target=str(target.path),
+                        kind=result.kind,
                     )
                 )
+                kind_desc = {
+                    "full": "created FULL",
+                    "recovered_delta": "transferred recovered-delta",
+                    "delta": "transferred",
+                }.get(result.kind, "transferred")
                 logger.info(
                     "[backup] %s: %s %s → %s (%d B in %.1fs, %.1f MiB/s)",
                     vm_config.name,
-                    "created FULL" if needs_full else "transferred",
+                    kind_desc,
                     result.snapshot_name,
                     target.path,
                     result.bytes_transferred,
@@ -5331,6 +5453,42 @@ class Core:
         backups, retention_result = self._evaluate_backup_retention(
             vm_config, target, predicted_full_disks=predicted_full_disks or None
         )
+
+        # Immediate retirement of recovery-superseded generations
+        # (per-chain-retention spec, recover-lost-checkpoint-bitmaps D8):
+        # a recovery FULL retires the old generation regardless of
+        # keep_generations.  Augment the remove set with every non-newest
+        # FULL chain for disks that produced a recovery FULL.
+        recovery_full_disks = {r.disk for r in successful_disks if r.recovery}
+        if recovery_full_disks and retention_result is not None and not self._dry_run:
+            remove_set = set(retention_result.remove)
+            keep_set = set(retention_result.keep)
+            for disk_target in recovery_full_disks:
+                disk_fulls = sorted(
+                    (b for b in backups if b.disk == disk_target and ".FULL." in b.name),
+                    key=lambda b: b.timestamp,
+                )
+                # Retire every FULL except the newest (the recovery FULL).
+                for old_full in disk_fulls[:-1]:
+                    if old_full.name in keep_set:
+                        remove_set.add(old_full.name)
+                        keep_set.discard(old_full.name)
+                        # Also retire the old FULL's incrementals.
+                        for b in backups:
+                            if b.disk == disk_target and not b.is_full:
+                                anchor = self._resolve_chain_full_anchor(b.path)
+                                if anchor == old_full.name.rsplit(".", 1)[0]:
+                                    remove_set.add(b.name)
+                                    keep_set.discard(b.name)
+            if remove_set != set(retention_result.remove):
+                retention_result = RetentionResult(
+                    keep=[k for k in retention_result.keep if k not in remove_set],
+                    remove=[
+                        *retention_result.remove,
+                        *sorted(remove_set - set(retention_result.remove)),
+                    ],
+                )
+
         self._cleanup_backups(
             vm_config,
             target,
@@ -5470,6 +5628,108 @@ class Core:
                     chain_id = "__orphan__"
             chains.setdefault(chain_id, []).append(backup)
         return chains
+
+    def _predict_dry_run_backup(
+        self,
+        vm_config: VMConfig,
+        target: TargetConfig,
+        disk_target: str,
+        assessment: BaselineAssessment,
+        needs_full: bool,
+        *,
+        free_space_check: str = "off",
+        free_space_reserve: int = 0,
+        free_space_factor: float = 1.0,
+    ) -> None:
+        """Emit dry-run prediction from a baseline assessment.
+
+        Uses the ``assess_baseline`` result to predict the exact backup
+        outcome that a real run would produce: FULL, delta, or
+        recovered_delta (with gate status).  Emits a ``free_space_gate``
+        prediction when configured, and an ``ActionRecord`` into
+        ``self._predictions``.
+        """
+        # Free-space gate prediction (dry-run parity).
+        size_estimate = assessment.size_estimate
+        if free_space_check == "strict":
+            result = check_free_space(
+                Path(target.path),
+                size_estimate,
+                reserve=free_space_reserve,
+                factor=free_space_factor,
+            )
+            self._predictions.append(
+                ActionRecord(
+                    action="free_space_gate",
+                    vm_name=vm_config.name,
+                    name=str(target.path),
+                    path=target.path,
+                    size=size_estimate or 0,
+                    error=(
+                        None if result.sufficient else "insufficient space (would suspend target)"
+                    ),
+                )
+            )
+
+        vm_state = "running" if is_vm_running(self._shell, vm_config.name) else "stopped"
+
+        if needs_full or assessment.status == "no_checkpoint":
+            kind = "FULL"
+            action = "backup_full"
+            extra = ""
+        elif assessment.status == "dead":
+            if assessment.gates_passed:
+                kind = "recovered-delta"
+                action = "backup_transfer"
+                extra = (
+                    f" (recovery, gate OK, ~{self._format_bytes(assessment.size_estimate)})"
+                    if assessment.size_estimate
+                    else " (recovery, gate OK, size unknown)"
+                )
+            else:
+                kind = "FULL (recovery)"
+                action = "backup_full"
+                extra = f" (recovery gate failed: {assessment.failed_gate_reason})"
+        elif assessment.status == "unknown":
+            kind = "delta"
+            action = "backup_transfer"
+            extra = " (probe unknown, will attempt delta)"
+        else:
+            kind = "delta"
+            action = "backup_transfer"
+            checkpoint_hint = (
+                f" since checkpoint {assessment.newest_checkpoint}"
+                if assessment.newest_checkpoint
+                else ""
+            )
+            extra = checkpoint_hint
+
+        size_estimate = assessment.size_estimate
+        size_str = (
+            f"~{self._format_bytes(size_estimate)}" if size_estimate is not None else "size unknown"
+        )
+
+        logger.info(
+            "[dry-run] Would create %s backup%s for disk %s (%s, method=NBD, VM=%s)",
+            kind,
+            extra,
+            disk_target,
+            size_str,
+            vm_state,
+        )
+
+        self._predictions.append(
+            ActionRecord(
+                action=action,
+                vm_name=vm_config.name,
+                name=f"{vm_config.name}.{'FULL.' if action == 'backup_full' else ''}"
+                f"{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+                f"_{disk_target}_{secrets.token_hex(3)}",
+                path=target.path,
+                size=size_estimate or 0,
+                disk=disk_target,
+            )
+        )
 
     def _evaluate_backup_retention(
         self,

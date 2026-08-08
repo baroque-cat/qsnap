@@ -884,6 +884,10 @@ def test_action_appended_on_full_backup(
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
+    # The mock's BackupResult must carry kind="full" so Core records the
+    # backup_full action (recover-lost-checkpoint-bitmaps: action tracking
+    # is now driven by result.kind, not the needs_full decision).
+    mock_factory._bitmap_backup_provider._backup_kind = "full"
 
     # Spy on run_backup to verify new kwargs are passed by Core.
     bitmap_provider = mock_factory._bitmap_backup_provider
@@ -1481,6 +1485,10 @@ def test_full_backup_create_info_log(
     mock_state.record_snapshot("testvm", snap)
 
     # Count-based trigger: no prior FULLs causes first backup to create FULL.
+    # The mock result must carry kind="full" so Core logs "created FULL"
+    # (recover-lost-checkpoint-bitmaps: the log wording is driven by
+    # result.kind).
+    mock_factory._bitmap_backup_provider._backup_kind = "full"
 
     caplog.set_level(logging.INFO)
     with patch("qsnap.core.verify_full_backup", return_value=None):

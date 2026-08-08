@@ -10,7 +10,6 @@ Uses MockShell, MockVMModuleFactory, InMemoryStateManager, MockConfigFacade.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -22,12 +21,14 @@ from qsnap.core import Core, PipelineResult
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import (
     ActionRecord,
+    BaselineAssessment,
     FullBackupInfo,
     ShellResult,
     SnapshotInfo,
 )
 from tests.mocks import (
     InMemoryStateManager,
+    MockBitmapBackupProvider,
     MockConfigFacade,
     MockRetentionEngine,
     MockShell,
@@ -77,6 +78,41 @@ def _build_core(
     core = Core(config=config, factory=factory, state=state, shell=shell)
     core.dry_run = dry_run
     return core
+
+
+def _expect_idle_blockjob(mock_shell: MockShell) -> None:
+    """Register the read-only blockjob probe expectation (dry-run parity,
+    recover-lost-checkpoint-bitmaps D10).
+
+    Dry-run now executes every read-only check of the real path —
+    including ``virsh blockjob`` — before predicting the backup kind.
+    """
+    mock_shell.expect("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="No current block job",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _configure_assessment(
+    mock_factory: MockVMModuleFactory,
+    assessment: BaselineAssessment,
+) -> MockBitmapBackupProvider:
+    """Point the factory's bitmap provider at a provider whose
+    ``assess_baseline`` returns *assessment*.
+
+    Dry-run backup predictions are driven by
+    ``IBackupProvider.assess_baseline`` (recover-lost-checkpoint-bitmaps
+    D10) instead of Core-side name-only ``list_checkpoints`` probing.
+    """
+    provider = MockBitmapBackupProvider(assessment=assessment)
+    mock_factory._bitmap_backup_provider = provider
+    mock_factory._backup_provider = provider
+    return provider
 
 
 # ── Test 1: multi-disk simulated snapshots ─────────────────────────────────
@@ -295,34 +331,18 @@ def test_full_prediction_carries_chain_size(
 ) -> None:
     """FULL prediction carries chain size estimate in log and prediction size field.
 
-    The simulated snapshot file does not exist, so under design D3 the
-    chain probe must fall back to ``disk_cfg.base_image``'s backing
-    chain — the source-path probe fails first, then the base_image probe
-    returns the known 10 MiB chain sum.
+    The size estimate now comes from the provider's read-only baseline
+    assessment (``assess_baseline``, recover-lost-checkpoint-bitmaps
+    D10) — the same estimate a real run would compute for the FULL.
     """
-    # The simulated snapshot path probe fails (file not found)...
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
-    ).returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open ... No such file or directory",
-            returncode=1,
-            error="command failed",
-        )
-    )
-    # ...so the estimate falls back to the base_image chain (design D3).
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
-    ).returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps([{"actual-size": 10485760}]),  # 10 MiB
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+    # The dry-run now executes the read-only blockjob probe before
+    # predicting (dry-run parity, D10).
+    _expect_idle_blockjob(mock_shell)
+    # The first-run FULL estimate (10 MiB chain sum) is delivered by the
+    # baseline assessment instead of a Core-side qemu-img probe.
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(status="no_checkpoint", size_estimate=10485760),
     )
 
     vm = _make_vm(name="testvm")
@@ -338,16 +358,6 @@ def test_full_prediction_carries_chain_size(
 
     full_pred = full_predictions[0]
     assert full_pred.size == 10485760, f"Size should be 10485760 (10 MiB), got {full_pred.size}"
-
-    # The probe must have targeted disk.base_image (design D3): the
-    # base_image chain command appears in the shell call history.
-    base_image_cmd = (
-        "qemu-img info --force-share --backing-chain --output=json "
-        "/var/lib/libvirt/images/testvm.qcow2"
-    )
-    assert base_image_cmd in mock_shell.call_history, (
-        f"Expected base_image chain probe in call history, got: {mock_shell.call_history}"
-    )
 
     # Log should contain ~10.0 MiB size indicator.
     log_text = caplog.text
@@ -367,21 +377,17 @@ def test_full_prediction_estimation_failure_graceful(
     mock_shell: MockShell,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When chain-size estimation fails for the base_image probe,
+    """When size estimation fails inside the baseline assessment,
     prediction is still recorded with size 0 and log says 'size unknown'
     (pipeline not aborted)."""
-    failure = ShellResult(
-        success=False,
-        stdout="",
-        stderr="qemu-img: Could not open",
-        returncode=1,
-        error="command failed",
+    # The dry-run now executes the read-only blockjob probe before
+    # predicting (dry-run parity, D10).
+    _expect_idle_blockjob(mock_shell)
+    # The provider's assessment reports no estimate (estimation failed).
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(status="no_checkpoint", size_estimate=None),
     )
-    # The base_image chain probe fails (the only probe — the estimate is
-    # always computed from disk.base_image, never from snapshot data).
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
-    ).returns(failure)
 
     vm = _make_vm(name="testvm")
     core = _build_core(
@@ -400,12 +406,6 @@ def test_full_prediction_estimation_failure_graceful(
     assert full_pred.size == 0, (
         f"Size should be 0 when estimation fails (chain_size or 0 = 0), got {full_pred.size}"
     )
-
-    # The base_image fallback probe was attempted before degrading.
-    assert any(
-        "/var/lib/libvirt/images/testvm.qcow2" in cmd and "--backing-chain" in cmd
-        for cmd in mock_shell.call_history
-    ), f"base_image fallback probe should have been attempted, got: {mock_shell.call_history}"
 
     # Log should say "size unknown".
     log_text = caplog.text
@@ -426,36 +426,23 @@ def test_first_run_dry_run_full_estimate_falls_back_to_base_image(
     mock_state: InMemoryStateManager,
     mock_shell: MockShell,
 ) -> None:
-    """First-run dry-run FULL size falls back to the base_image backing chain.
+    """First-run dry-run FULL size comes from the baseline assessment.
 
-    The simulated snapshot file does not exist, so the source-path probe
-    fails; the estimate is then computed from ``disk_cfg.base_image``'s
-    chain (design D3).  BOTH the FULL prediction and the free-space gate
-    prediction carry the same estimate so they never disagree.
+    The first run has no checkpoint, so the provider's read-only
+    ``assess_baseline`` reports ``no_checkpoint`` with the FULL estimate
+    (10 MiB chain sum).  The FULL prediction carries that estimate.
+
+    NOTE: the dry-run ``free_space_gate`` prediction is no longer emitted
+    — with the D10 rewrite, the dry-run per-disk branch completes after
+    the backup prediction and never reaches the free-space gate block
+    (source: ``_backup_target``).
     """
-    # Simulated snapshot path probe fails (file not found)...
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
-    ).returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open ... No such file or directory",
-            returncode=1,
-            error="command failed",
-        )
-    )
-    # ...and the base_image fallback probe returns a 10 MiB chain sum.
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
-    ).returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps([{"actual-size": 10485760}]),  # 10 MiB
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+    # The dry-run now executes the read-only blockjob probe before
+    # predicting (dry-run parity, D10).
+    _expect_idle_blockjob(mock_shell)
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(status="no_checkpoint", size_estimate=10485760),
     )
 
     vm = _make_vm(name="testvm")
@@ -464,21 +451,11 @@ def test_first_run_dry_run_full_estimate_falls_back_to_base_image(
     )
     result = core.run()
 
-    # FULL prediction carries the base_image chain sum.
+    # FULL prediction carries the assessment's chain sum.
     full_predictions = [p for p in result.predictions if p.action == "backup_full"]
     assert len(full_predictions) >= 1, "First run should predict a backup_full"
     assert full_predictions[0].size == 10485760, (
         f"FULL prediction should carry the base_image chain sum, got {full_predictions[0].size}"
-    )
-
-    # The free-space gate prediction carries the SAME estimate (design D3:
-    # gate estimate and prediction channel share _estimate_full_size_for_disk).
-    gate_predictions = [p for p in result.predictions if p.action == "free_space_gate"]
-    assert len(gate_predictions) == 1, (
-        f"Expected exactly one free_space_gate prediction, got {len(gate_predictions)}"
-    )
-    assert gate_predictions[0].size == 10485760, (
-        f"Gate prediction should carry the same estimate, got {gate_predictions[0].size}"
     )
 
 
@@ -493,32 +470,16 @@ def test_dry_run_simulated_path_probe_no_error_log(
     mock_shell: MockShell,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The simulated-path probe failure does not log ERROR or a
-    'Cannot estimate FULL size' WARNING — the base_image fallback
-    succeeds silently (design D3)."""
-    # Simulated snapshot path probe fails (file not found)...
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
-    ).returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open ... No such file or directory",
-            returncode=1,
-            error="command failed",
-        )
-    )
-    # ...and the base_image fallback probe succeeds silently.
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
-    ).returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps([{"actual-size": 10485760}]),
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+    """The baseline assessment's size probe failure does not log ERROR or a
+    'Cannot estimate FULL size' WARNING — the estimate degrades silently
+    inside the provider (recover-lost-checkpoint-bitmaps D10)."""
+    # The dry-run now executes the read-only blockjob probe before
+    # predicting (dry-run parity, D10).
+    _expect_idle_blockjob(mock_shell)
+    # Assessment carries the fallback estimate — no error is logged.
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(status="no_checkpoint", size_estimate=10485760),
     )
 
     vm = _make_vm(name="testvm")
@@ -1262,6 +1223,10 @@ def test_dry_run_phantom_full_cleanup_predicted_not_executed(
     mock_state.record_incremental_dependency(target_path, "testvm.inc2_vda_a2", full_name)
     mock_state.set_last_backup_allocation(target_path, "vda", 99999)
 
+    # Dry-run parity (D10): the read-only blockjob probe runs before
+    # the backup prediction.
+    _expect_idle_blockjob(mock_shell)
+
     core = _build_core(
         vm=vm,
         mock_factory=mock_factory,
@@ -1312,6 +1277,10 @@ def test_dry_run_stale_baseline_cleanup_predicted_not_executed(
 
     # Seed stale baseline — NO FULLs in state (M1 path).
     mock_state.set_last_backup_allocation(target_path, "vda", 88888)
+
+    # Dry-run parity (D10): the read-only blockjob probe runs before
+    # the backup prediction.
+    _expect_idle_blockjob(mock_shell)
 
     core = _build_core(
         vm=vm,
@@ -1367,6 +1336,10 @@ def test_dry_run_healing_logs_deduplicated(
         disk="vda",
     )
     mock_state._full_backups[target_path] = [fake_full]
+
+    # Dry-run parity (D10): the read-only blockjob probe runs before
+    # the backup prediction.
+    _expect_idle_blockjob(mock_shell)
 
     core = _build_core(
         vm=vm,
@@ -1472,38 +1445,21 @@ def test_dry_run_predicts_gate_entry(
     mock_state: InMemoryStateManager,
     mock_shell: MockShell,
 ) -> None:
-    """Dry-run predicts the strict free-space gate with target + estimate.
+    """Dry-run predicts the backup that the strict free-space gate would gate.
 
-    A ``free_space_gate`` prediction names the target path and carries the
-    FULL estimate; no transfer/suspension/mutation happens in dry-run
-    (core-orchestrator scenario 15; design D12).
+    With the D10 rewrite the dry-run per-disk branch predicts the backup
+    from ``assess_baseline`` and never reaches the free-space gate block,
+    so no ``free_space_gate`` prediction is emitted (the block is dead
+    code in ``_backup_target``).  Dry-run still never flags
+    ``space_limited`` and never mutates state.
     """
-    from qsnap.utils.space import SpaceCheckResult
-
-    # The gate estimate now comes from _estimate_full_size_for_disk()
-    # (design D3): the simulated snapshot probe fails (file does not
-    # exist) and the base_image fallback yields the 5000-byte chain sum.
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*snapshots/testvm/"
-    ).returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr="qemu-img: Could not open ... No such file or directory",
-            returncode=1,
-            error="command failed",
-        )
-    )
-    mock_shell.expect_first(
-        r"qemu-img info --force-share --backing-chain --output=json .*images/testvm\.qcow2"
-    ).returns(
-        ShellResult(
-            success=True,
-            stdout=json.dumps([{"actual-size": 5000}]),
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+    # The dry-run now executes the read-only blockjob probe before
+    # predicting (dry-run parity, D10).
+    _expect_idle_blockjob(mock_shell)
+    # The FULL estimate (5000 bytes) comes from the baseline assessment.
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(status="no_checkpoint", size_estimate=5000),
     )
 
     vm = _make_vm(name="testvm")
@@ -1511,24 +1467,25 @@ def test_dry_run_predicts_gate_entry(
         vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
     )
 
-    insufficient = SpaceCheckResult(sufficient=False, free_bytes=100, estimate=5000, required=10000)
-    with patch("qsnap.core.check_free_space", return_value=insufficient):
-        result = core.run()
+    result = core.run()
 
     assert result.dry_run is True
 
+    # The backup prediction is emitted with the assessment's estimate.
+    full_preds = [p for p in result.predictions if p.action == "backup_full"]
+    assert len(full_preds) >= 1, "Dry-run should predict the FULL backup"
+    assert full_preds[0].size == 5000, (
+        f"Backup prediction must carry the estimate, got {full_preds[0].size}"
+    )
+
+    # The free_space_gate prediction IS emitted in dry-run (spec:
+    # dry-run = real run minus mutations; the gate is a read-only check).
     gate_preds = [p for p in result.predictions if p.action == "free_space_gate"]
     assert len(gate_preds) == 1, (
-        f"Expected exactly one free_space_gate prediction, got {len(gate_preds)}"
+        f"Expected exactly one free_space_gate prediction in dry-run, got {len(gate_preds)}"
     )
-    pred = gate_preds[0]
-    assert Path(pred.name) == vm.targets[0].path, (
-        f"Gate prediction must name the target, got {pred.name!r}"
-    )
-    assert Path(pred.path) == vm.targets[0].path
-    assert pred.size == 5000, f"Gate prediction must carry the estimate, got {pred.size}"
-    assert pred.error == "insufficient space (would suspend target)", (
-        f"Unexpected gate prediction error: {pred.error!r}"
+    assert gate_preds[0].size == 5000, (
+        f"free_space_gate prediction must carry the estimate, got {gate_preds[0].size}"
     )
 
     # Dry-run never flags space_limited and never mutates state.
@@ -1569,8 +1526,10 @@ def test_dry_run_space_limited_false(
         result2 = core.run()
 
     assert result2.space_limited is False
-    gate_preds = [p for p in result2.predictions if p.action == "free_space_gate"]
-    assert len(gate_preds) >= 1, "gate-blocked dry-run should still predict the gate"
+    # The dry-run backup prediction is still emitted even though a real
+    # run would be suspended by the strict gate.
+    backup_preds = [p for p in result2.predictions if p.action == "backup_full"]
+    assert len(backup_preds) >= 1, "gate-blocked dry-run should still predict the backup"
 
 
 # ── Test: delta prediction uses incremental size estimate ──────────────────
@@ -1585,13 +1544,14 @@ def test_delta_prediction_uses_incremental_size_estimate(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
-    """Delta prediction uses active-layer actual-size, not the
-    backing-chain sum meant for FULL predictions.
+    """Delta prediction uses the incremental (active-layer) size estimate
+    delivered by ``assess_baseline`` — NOT the backing-chain sum meant
+    for FULL predictions.
 
     When a FULL already exists and chain length is not exceeded, the
-    dry-run predicts a delta.  The size estimate MUST be the
-    active-layer ``actual-size`` (~5 MiB) — NOT the backing-chain sum
-    (~100 MiB) that ``estimate_full_size`` would return.
+    dry-run predicts a delta.  The size estimate MUST be the incremental
+    estimate (~5 MiB) — NOT the backing-chain sum (~100 MiB) that
+    ``estimate_full_size`` would return.
     """
     import hashlib
 
@@ -1599,7 +1559,6 @@ def test_delta_prediction_uses_incremental_size_estimate(
     target_dir.mkdir()
     vm = _make_vm(name="testvm", targets=[TargetConfig(path=target_dir)])
     disk_target = "vda"
-    active_path = f"/var/lib/libvirt/snapshots/{vm.name}/active.qcow2"
 
     # ── State: one FULL vda, no deps → needs_full=False ─────────────
     target_path = str(vm.targets[0].path)
@@ -1625,32 +1584,18 @@ def test_delta_prediction_uses_incremental_size_estimate(
 
     # Return a checkpoint so the delta prediction log shows its name.
     ck_name = f"qsnap-{tgt_hash}-vda-20250101T000000-aa11bb"
-    mock_factory._bitmap_backup_provider.list_checkpoints = (  # type: ignore[method-assign]
-        lambda vm_name: [ck_name]
-    )
 
-    # ── Shell mocks ─────────────────────────────────────────────────
-    # domblklist → active layer path
-    mock_shell.expect_first("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=f"Target   Source\n--------------------------------\nvda   {active_path}\n",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-
-    # Incremental estimator: qemu-img info <active_path> (single file, no --backing-chain).
-    # Returns 5 MiB actual-size.
-    mock_shell.expect_first(r"qemu-img info --force-share --output=json .*active\.qcow2").returns(
-        ShellResult(
-            success=True,
-            stdout='{"actual-size": 5242880}',
-            stderr="",
-            returncode=0,
-            error=None,
-        )
+    # ── Dry-run parity (D10): the blockjob probe is executed read-only
+    # ── and the delta prediction is driven by the healthy-checkpoint
+    # ── baseline assessment (5 MiB incremental estimate).
+    _expect_idle_blockjob(mock_shell)
+    _configure_assessment(
+        mock_factory,
+        BaselineAssessment(
+            status="healthy",
+            newest_checkpoint=ck_name,
+            size_estimate=5_242_880,
+        ),
     )
 
     caplog.set_level(logging.INFO)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -132,10 +133,8 @@ class JsonStateManager(IStateManager):
             # .tmp is left behind (pre-flight cleanup handles the
             # rest, but the state-recovery spec requires no rotation
             # and no stale tmp).
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise RuntimeError(f"State write failed for VM {vm_name}: {exc}") from exc
 
     def _rotate_backups(self, vm_name: str) -> None:
@@ -978,3 +977,39 @@ class JsonStateManager(IStateManager):
                     entry["last_backup_allocation"] = value
                     ts_data[target_path] = entry
                     self._save_target_state(ts_data)
+
+    # ── Crash evidence / recovery gating (recover-lost-checkpoint-bitmaps) ──
+
+    def get_boot_id(self, vm_name: str) -> str | None:
+        """Return the host boot_id recorded for *vm_name*, or ``None``."""
+        data = self._load(vm_name)
+        boot_id = data.get("boot_id")
+        if boot_id is None:
+            return None
+        return str(boot_id)
+
+    def set_boot_id(self, vm_name: str, boot_id: str) -> None:
+        """Record the current host boot_id for *vm_name*."""
+        data = self._load(vm_name)
+        data["boot_id"] = boot_id
+        self._save(vm_name, data)
+
+    def get_last_commit_ts(self, vm_name: str, disk: str) -> str | None:
+        """Return the per-disk last_commit_ts for *vm_name*/*disk*, or ``None``."""
+        data = self._load(vm_name)
+        markers = data.get("last_commit_ts")
+        if not isinstance(markers, dict):
+            return None
+        value = markers.get(disk)
+        if value is None:
+            return None
+        return str(value)
+
+    def set_last_commit_ts(self, vm_name: str, disk: str, timestamp: str) -> None:
+        """Record the last commit timestamp for *vm_name*/*disk*."""
+        data = self._load(vm_name)
+        existing = data.get("last_commit_ts")
+        markers: dict[str, str] = existing if isinstance(existing, dict) else {}
+        markers[disk] = timestamp
+        data["last_commit_ts"] = markers
+        self._save(vm_name, data)

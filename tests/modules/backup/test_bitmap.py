@@ -103,6 +103,59 @@ def _expect_no_blockjob(mock_shell) -> None:
     )
 
 
+def _load_shell_output_fixture(name: str) -> str:
+    """Read a canned shell-output fixture from tests/fixtures/shell_outputs/."""
+    fixture = Path(__file__).resolve().parents[2] / "fixtures" / "shell_outputs" / name
+    return fixture.read_text(encoding="utf-8")
+
+
+def _expect_healthy_probe(mock_shell, cp_name: str) -> None:
+    """Register a HEALTHY QMP probe for *cp_name* (recover-lost-checkpoint-bitmaps).
+
+    Loads the canned ``qmp_block_nodes_healthy.json`` fixture and rewrites
+    the advertised bitmap name to *cp_name* so the exact-name match in
+    ``BitmapBackupProvider._probe_running_vm`` returns HEALTHY.
+    """
+    payload = json.loads(_load_shell_output_fixture("qmp_block_nodes_healthy.json"))
+    for node in payload.get("return", []):
+        for bitmap in node.get("dirty-bitmaps", []):
+            bitmap["name"] = cp_name
+    mock_shell.expect("qemu-monitor-command").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _expect_stopped_probe_healthy(mock_shell, cp_name: str) -> None:
+    """Register a HEALTHY stopped-VM probe for *cp_name*.
+
+    The stopped-VM probe runs ``qemu-img info -U --backing-chain
+    --output=json``; the fixture advertises the checkpoint-named bitmap on
+    an intermediate layer (with_bitmaps), with the name rewritten to
+    *cp_name* so the exact-name match returns HEALTHY.
+    """
+    payload = json.loads(
+        _load_shell_output_fixture("qemu_img_info_backing_chain_with_bitmaps.json")
+    )
+    for layer in payload if isinstance(payload, list) else [payload]:
+        for bitmap in layer.get("dirty-bitmaps", []):
+            bitmap["name"] = cp_name
+    mock_shell.expect("qemu-img info -U --backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
 def _setup_incr_expectations(mock_shell, target, prev_data: tuple[Path, str, str]) -> MockNbdClient:
     """Register incremental copy-loop expectations and return a MockNbdClient.
 
@@ -251,10 +304,11 @@ def test_bitmap_constructor_stores_nbd() -> None:
     assert provider._nbd is nbd
 
 
-def test_constructor_rejects_state_manager(mock_shell, mock_state):
-    """Provider constructor no longer accepts IStateManager (backup-provider)."""
-    with pytest.raises(TypeError):
-        BitmapBackupProvider(mock_shell, state=mock_state)  # type: ignore[call-arg]
+def test_constructor_accepts_state_manager(mock_shell, mock_state):
+    """Provider constructor accepts IStateManager for the recovery path
+    (recover-lost-checkpoint-bitmaps, design D4/D5: G1 gate + copy-set)."""
+    provider = BitmapBackupProvider(mock_shell, state=mock_state)
+    assert provider._state is mock_state
 
 
 def test_constructor_works_without_state_manager(mock_shell):
@@ -309,6 +363,7 @@ def test_run_backup_first_backup_creates_full_with_atomic_checkpoint(
     assert result.error is None
     assert result.disk == "vda", f"BackupResult must carry disk='vda', got {result.disk!r}"
     assert result.deferred is False
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
     backup_cmds = [cmd for cmd in all_run_cmds if "backup-begin" in cmd]
@@ -380,6 +435,7 @@ def test_run_backup_result_carries_disk(
     assert result.success is True
     assert result.disk == "vda", f"BackupResult must carry disk='vda', got {result.disk!r}"
     assert result.target_path.name.endswith(".qcow2")
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -421,6 +477,7 @@ def test_checkpoint_cleanup_after_successful_transfer(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -436,6 +493,7 @@ def test_checkpoint_cleanup_after_successful_transfer(
 
     assert result.success is True
     assert result.disk == "vda"
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
     mock_wbxml.assert_called_once()
@@ -498,6 +556,8 @@ def test_checkpoint_rotation_after_successful_run_backup(
             success=True, stdout=f"{middle}\n{prior}\n", stderr="", returncode=0, error=None
         )
     )
+    # The probe targets the NEWEST checkpoint (middle) — healthy.
+    _expect_healthy_probe(mock_shell, middle)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())
     mock_shell.expect("domjobabort").returns(success_result())
@@ -512,6 +572,7 @@ def test_checkpoint_rotation_after_successful_run_backup(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     delete_cmds = [cmd for cmd in all_run_cmds if "checkpoint-delete" in cmd]
@@ -569,6 +630,7 @@ def test_checkpoint_delete_failure_non_fatal(
     mock_shell.expect("checkpoint-list").returns(
         ShellResult(success=True, stdout=prior + "\n", stderr="", returncode=0, error=None)
     )
+    _expect_healthy_probe(mock_shell, prior)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(
         ShellResult(
@@ -674,6 +736,7 @@ def test_run_backup_failure_preserves_prior_checkpoint(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # successor best-effort
     mock_shell.expect("domjobabort").returns(success_result())
@@ -932,6 +995,7 @@ def test_run_backup_full_unified_engine_succeeds(
     assert result.error is None
     assert result.disk == "vda"
     assert result.bytes_transferred == 65536
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
     all_stall_cmds = [" ".join(call_obj.args[0]) for call_obj in stall_spy.call_args_list]
@@ -991,6 +1055,7 @@ def test_run_backup_full_with_compression(
     assert result.success is True
     assert result.disk == "vda"
     assert result.bytes_transferred == 65536
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
     all_stall_cmds = [" ".join(call_obj.args[0]) for call_obj in stall_spy.call_args_list]
@@ -1764,6 +1829,7 @@ def test_run_backup_failure_deletes_partial_file(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("rm -f").returns(success_result())  # stale socket
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # successor best-effort
@@ -1864,6 +1930,7 @@ def test_run_backup_verify_failure_deletes_file(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("rm -f").returns(success_result())  # stale socket
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # successor best-effort
@@ -1977,6 +2044,7 @@ def test_atomic_incremental_passes_checkpoint_xml_and_incremental(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1991,6 +2059,7 @@ def test_atomic_incremental_passes_checkpoint_xml_and_incremental(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     mock_wbxml.assert_called_once()
     _, kwargs = mock_wbxml.call_args
@@ -2040,6 +2109,7 @@ def test_run_backup_backup_begin_failure_preserves_prior_checkpoint(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     _expect_no_blockjob(mock_shell)
     mock_shell.expect("rm -f").returns(success_result())
     backup_error = "backup-begin failed: domain is shut off"
@@ -2387,6 +2457,9 @@ def test_stopped_vm_with_checkpoint_defers_no_mutation(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    # Stopped-VM bitmap probe (recover-lost-checkpoint-bitmaps): the
+    # checkpoint's bitmap is healthy on an intermediate layer of the chain.
+    _expect_stopped_probe_healthy(mock_shell, prior_checkpoint)
 
     with patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy:
         provider = BitmapBackupProvider(mock_shell, nbd=MockNbdClient())
@@ -2398,8 +2471,10 @@ def test_stopped_vm_with_checkpoint_defers_no_mutation(
     assert result.bytes_transferred == 0
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
-    assert len(all_run_cmds) == 2, (
-        f"Only checkpoint-list + dominfo expected (no mutation), got: {all_run_cmds}"
+    # checkpoint-list + dominfo + stopped-VM bitmap probe — all read-only.
+    assert len(all_run_cmds) == 3, (
+        f"Only checkpoint-list + dominfo + stopped-VM probe expected "
+        f"(no mutation), got: {all_run_cmds}"
     )
     assert not any("backup-begin" in cmd for cmd in all_run_cmds)
     assert not any("checkpoint-delete" in cmd for cmd in all_run_cmds)
@@ -2423,6 +2498,8 @@ def test_active_blockjob_defers_run_backup(
             success=True, stdout=prior_checkpoint + "\n", stderr="", returncode=0, error=None
         )
     )
+    # Probe runs before the blockjob probe — healthy keeps the delta decision.
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     # dominfo from conftest → running; blockjob probe reports an active job.
     mock_shell.expect("virsh blockjob").returns(
         ShellResult(
@@ -2620,6 +2697,7 @@ def test_run_backup_stopped_vm_direct_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
     # Stopped-VM FULL creates no checkpoint — BackupResult.checkpoint
     # must be None (design D1).
@@ -2660,6 +2738,7 @@ def test_run_backup_running_vm_reports_checkpoint_name(
 
     assert result.success is True
     assert result.checkpoint is not None
+    assert result.kind == "full", f"FULL path must report kind='full', got {result.kind!r}"
 
     target_hash = BitmapBackupProvider.target_hash(str(target.path))
     assert re.fullmatch(
@@ -3601,6 +3680,7 @@ def test_incremental_chain_to_full_traversable(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -3612,6 +3692,7 @@ def test_incremental_chain_to_full_traversable(
     assert result.success is True
     assert result.error is None
     assert result.disk == "vda"
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
 
 @pytest.mark.unit
@@ -3669,6 +3750,7 @@ def test_incremental_chain_to_full_broken(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         # _cleanup_partial_file
         mock_shell.expect(f"rm -f {target.path / (_delta_backup_name() + '.qcow2')}").returns(
@@ -3734,6 +3816,7 @@ def test_incremental_checkpoint_missing(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         # _cleanup_partial_file
         mock_shell.expect(f"rm -f {target.path / (_delta_backup_name() + '.qcow2')}").returns(
@@ -3812,10 +3895,12 @@ def test_multi_disk_run_returns_per_disk_results(
     assert results[0].disk == "vda", (
         f"First result should carry disk='vda', got {results[0].disk!r}"
     )
+    assert results[0].kind == "full", f"FULL path must report kind='full', got {results[0].kind!r}"
     assert results[1].success is True
     assert results[1].disk == "vdb", (
         f"Second result should carry disk='vdb', got {results[1].disk!r}"
     )
+    assert results[1].kind == "full", f"FULL path must report kind='full', got {results[1].kind!r}"
 
 
 def test_failed_run_backup_still_carries_disk(

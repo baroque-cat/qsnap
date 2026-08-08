@@ -20,6 +20,7 @@ from qsnap.models.config import DiskConfig, RetentionPolicy, TargetConfig, VMCon
 from qsnap.models.results import (
     BackupInfo,
     BackupResult,
+    BaselineAssessment,
     ChangeResult,
     CommitResult,
     RetentionItem,
@@ -88,15 +89,29 @@ class MockBitmapBackupProvider(IBackupProvider):
     ``run_backup`` returns ``BackupResult`` objects whose
     ``target_path`` points to a standalone qcow2 file (no backing chain),
     reflecting bitmap backup semantics (design D3).
+
+    Configurable via constructor:
+    - ``assessment``: BaselineAssessment returned by ``assess_baseline``
+      (default: no_checkpoint).
+    - ``backup_kind``: ``"full"``, ``"delta"``, or ``"recovered_delta"``
+      — the kind set on BackupResult returned by ``run_backup``.
     """
 
-    def __init__(self, shell: IShell | None = None, deferred: bool = False) -> None:
+    def __init__(
+        self,
+        shell: IShell | None = None,
+        deferred: bool = False,
+        assessment: BaselineAssessment | None = None,
+        backup_kind: str = "delta",
+    ) -> None:
         # Constructor accepts IShell but doesn't need it for mock behavior.
         # ``deferred=True`` simulates the stopped-VM-with-checkpoint case:
         # run_backup() reports success but defers the transfer (no file,
         # no checkpoint mutation, baseline not updated — design D8).
         self._shell = shell
         self._deferred = deferred
+        self._assessment = assessment or BaselineAssessment(status="no_checkpoint")
+        self._backup_kind = backup_kind
 
     def run_backup(
         self,
@@ -117,7 +132,7 @@ class MockBitmapBackupProvider(IBackupProvider):
         disk_target = disk.target
         freeze_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
         hex_suffix = secrets.token_hex(3)
-        if force_full:
+        if force_full or self._backup_kind == "full":
             name = f"{vm_config.name}.FULL.{freeze_ts}_{disk_target}_{hex_suffix}"
         else:
             name = f"{vm_config.name}.{freeze_ts}_{disk_target}_{hex_suffix}"
@@ -130,7 +145,14 @@ class MockBitmapBackupProvider(IBackupProvider):
             error=None,
             disk=disk_target,
             deferred=self._deferred,
+            kind=self._backup_kind,
         )
+
+    def assess_baseline(
+        self, vm_config: VMConfig, target: TargetConfig, disk: DiskConfig
+    ) -> BaselineAssessment:
+        """Return the configured baseline assessment (read-only)."""
+        return self._assessment
 
     def list(self, target: TargetConfig) -> list[BackupInfo]:
         return []

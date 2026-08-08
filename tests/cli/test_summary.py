@@ -119,6 +119,71 @@ def test_summary_table_backup_transfers():
 
 
 # ---------------------------------------------------------------------------
+# test_summary_table_backup_transfers_with_recovered_delta (2b)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_table_backup_transfers_with_recovered_delta():
+    """Recovered-delta backup rows SHALL render distinctly from plain deltas.
+
+    Spec (backup-provider, "Recovered delta is auditable"): a backup whose
+    ``kind == "recovered_delta"`` is a transfer (not a FULL) but the
+    summary SHALL identify it as a recovered delta — the legend documents
+    the ``rrr`` symbol for "transferred recovered-delta backup (bitmap
+    lost, self-healed)", and the row must use it instead of the plain
+    ``>>>`` transfer symbol.
+    """
+    result = PipelineResult(
+        results=[
+            VMRunResult(vm_name="vm-test", success=True),
+        ],
+        actions=[
+            _make_action(
+                "backup_transfer",
+                vm_name="vm-test",
+                name="inc_001",
+                path=Path("/backups/vm-test/inc_001.qcow2"),
+                size=52428800,
+                duration=2.5,
+            ),
+            _make_action(
+                "recovered_delta",
+                vm_name="vm-test",
+                name="rec_001",
+                path=Path("/backups/vm-test/rec_001.qcow2"),
+                size=10485760,
+                duration=1.5,
+            ),
+        ],
+        dry_run=False,
+    )
+    output = format_summary(result)
+
+    assert "qsnap Backup Summary" in output
+    assert "vm-test:" in output
+    # Plain delta keeps its >>> symbol and its size/duration/speed line.
+    assert ">>>" in output
+    assert "inc_001" in output
+    assert "50.0 MiB" in output
+    # Recovered delta is a transfer row — it must carry the size/duration
+    # transfer formatting — but rendered with the distinct rrr symbol.
+    assert "rrr" in output, (
+        "Recovered-delta rows must render with the distinct 'rrr' symbol "
+        "documented in the legend, not the plain '>>>' transfer symbol"
+    )
+    assert "rec_001" in output
+    assert "10.0 MiB" in output
+    # The legend documents the rrr symbol.
+    assert "transferred recovered-delta backup" in output
+    # The recovered-delta row is NOT rendered as a plain >>> row.
+    recovered_lines = [line for line in output.split("\n") if "rec_001" in line]
+    assert recovered_lines, "Expected a summary row for the recovered-delta backup"
+    assert ">>>" not in recovered_lines[0], (
+        f"Recovered-delta row must not use the plain transfer symbol: {recovered_lines[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # test_summary_table_with_errors (3)
 # ---------------------------------------------------------------------------
 

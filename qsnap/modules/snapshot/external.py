@@ -7,6 +7,7 @@ the injected shell abstraction.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
@@ -644,10 +645,8 @@ class ExternalSnapshotProvider(ISnapshotProvider):
     def _rm_files(self, paths: list[Path]) -> None:
         """Best-effort removal of created snapshot files."""
         for p in paths:
-            try:
+            with contextlib.suppress(OSError):
                 p.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def list(self, vm_config: VMConfig) -> list[SnapshotInfo]:
         """List existing snapshots via the backing chains of all disks.

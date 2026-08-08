@@ -22,6 +22,7 @@ _SYMBOLS: dict[str, str] = {
     "snapshot_create": "+++",
     "snapshot_delete": "---",
     "backup_transfer": ">>>",
+    "recovered_delta": "rrr",
     "backup_full": "***",
     "error": "!!!",
     "backup_delete": "---",
@@ -32,6 +33,7 @@ _LEGEND_LINES: list[tuple[str, str]] = [
     ("+++", "created snapshot"),
     ("---", "deleted snapshot (blockcommitted)"),
     (">>>", "transferred incremental backup"),
+    ("rrr", "transferred recovered-delta backup (bitmap lost, self-healed)"),
     ("***", "created FULL backup"),
     ("<<<", "blockcommit (merged snapshots into base)"),
     ("!!!", "ERROR"),
@@ -80,6 +82,10 @@ def _format_action(action: ActionRecord) -> str:
     None) are rendered without the prefix, exactly as before.
     """
     symbol = _SYMBOLS.get(action.action, "???")
+    # Recovered deltas get a distinct symbol (spec: backup-provider
+    # "Recovered delta is auditable"; design D11).
+    if action.action == "backup_transfer" and action.kind == "recovered_delta":
+        symbol = "rrr"
     indent = "    "  # 4 spaces for table rows
     lead = f"{symbol} [{action.disk}] " if action.disk is not None else f"{symbol}  "
 
@@ -88,6 +94,13 @@ def _format_action(action: ActionRecord) -> str:
     if action.action == "snapshot_delete":
         return f"{indent}{lead}{action.name}"
     if action.action == "backup_transfer":
+        target = str(action.path) if action.path else "-"
+        return (
+            f"{indent}{lead}{action.name}  → {target}  "
+            f"({_format_size(action.size)} in {action.duration:.1f}s, "
+            f"{_format_speed(action.size, action.duration)})"
+        )
+    if action.action == "recovered_delta":
         target = str(action.path) if action.path else "-"
         return (
             f"{indent}{lead}{action.name}  → {target}  "
@@ -116,6 +129,9 @@ def _format_prediction(action: ActionRecord) -> str:
     if action.action == "free_space_gate":
         return ""  # internal prediction, not a user-facing backup action
     symbol = _SYMBOLS.get(action.action, "???")
+    # Recovered deltas get a distinct symbol (design D11).
+    if action.action == "backup_transfer" and action.kind == "recovered_delta":
+        symbol = "rrr"
     indent = "    "  # 4 spaces for table rows
     lead = f"{symbol} [{action.disk}] " if action.disk is not None else f"{symbol}  "
     size = f"~{_format_size(action.size)}" if action.size > 0 else "size unknown"
@@ -125,6 +141,9 @@ def _format_prediction(action: ActionRecord) -> str:
     if action.action == "snapshot_delete":
         return f"{indent}{lead}{action.name}"
     if action.action == "backup_transfer":
+        target = str(action.path) if action.path else "-"
+        return f"{indent}{lead}{action.name}  → {target}  ({size})"
+    if action.action == "recovered_delta":
         target = str(action.path) if action.path else "-"
         return f"{indent}{lead}{action.name}  → {target}  ({size})"
     if action.action == "backup_full":

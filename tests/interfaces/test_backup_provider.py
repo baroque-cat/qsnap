@@ -21,7 +21,13 @@ import pytest
 from qsnap.core import Core
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
-from qsnap.models.results import BackupInfo, BackupResult, ShellResult, SnapshotInfo
+from qsnap.models.results import (
+    BackupInfo,
+    BackupResult,
+    BaselineAssessment,
+    ShellResult,
+    SnapshotInfo,
+)
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from tests.mocks.mock_modules import MockBitmapBackupProvider
 from tests.mocks.mock_shell import MockShell
@@ -214,6 +220,105 @@ def test_backup_provider_delete_accepts_backupinfo(provider_cls):
     assert isinstance(result, ShellResult)
 
 
+# ── assess_baseline contract ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize("provider_cls", PROVIDER_CLASSES)
+def test_backup_provider_assess_baseline_contract(provider_cls):
+    """assess_baseline() returns a valid BaselineAssessment, never None.
+
+    ``IBackupProvider.assess_baseline(vm_config, target, disk)`` is a
+    read-only baseline assessment for dry-run parity (backup-provider
+    spec, design D10).  Every implementation — including the mock — must
+    return a frozen ``BaselineAssessment`` object whose ``status`` is one
+    of the four defined states.  A bare ``MockShell`` yields
+    ``no_checkpoint`` (checkpoint-list fails non-fatally → empty).
+    """
+    sig = inspect.signature(provider_cls.assess_baseline)
+    for required in ("vm_config", "target", "disk"):
+        assert required in sig.parameters, (
+            f"{required} missing from {provider_cls.__name__}.assess_baseline"
+        )
+
+    provider = _make_provider(provider_cls)
+    vm_config = _make_vm_config()
+    disk = vm_config.disks[0]
+    target = _make_target()
+
+    result = provider.assess_baseline(vm_config, target, disk)
+
+    # Never None; always a frozen BaselineAssessment.
+    assert result is not None, f"{provider_cls.__name__}.assess_baseline must never return None"
+    assert isinstance(result, BaselineAssessment)
+    assert result.__dataclass_params__.frozen is True
+
+    # Status is one of the defined tri-state-plus-absent values.
+    assert result.status in ("no_checkpoint", "healthy", "dead", "unknown"), (
+        f"Unexpected baseline status {result.status!r}"
+    )
+    # newest_checkpoint is None when no checkpoint is reported.
+    if result.status == "no_checkpoint":
+        assert result.newest_checkpoint is None
+
+
+@pytest.mark.parametrize("provider_cls", PROVIDER_CLASSES)
+def test_backup_provider_assess_baseline_is_read_only(provider_cls, tmp_path):
+    """assess_baseline issues no mutating shell commands.
+
+    The assessment MUST be read-only (dry-run parity): with a preloaded
+    shell, no ``checkpoint-create``, ``checkpoint-delete``, ``backup-*``,
+    ``domjobabort``, or file-writing ``qemu-img`` command may be issued.
+    For the mock, the method performs no shell calls at all.
+    """
+    shell = MockShell()
+    # Preload a read-only checkpoint-list result so the real provider
+    # reaches a deterministic no-checkpoint assessment.
+    shell.expect(r"virsh checkpoint-list").returns(
+        ShellResult(
+            success=True,
+            stdout="",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    provider = provider_cls(shell=shell) if provider_cls is BitmapBackupProvider else provider_cls()
+
+    vm_config = _make_vm_config()
+    disk = vm_config.disks[0]
+    target = _make_target()
+
+    result = provider.assess_baseline(vm_config, target, disk)
+    assert isinstance(result, BaselineAssessment)
+
+    for cmd in shell.call_history:
+        assert "checkpoint-create" not in cmd
+        assert "checkpoint-delete" not in cmd
+        assert "backup-begin" not in cmd
+        assert "domjobabort" not in cmd
+
+
+# ── BackupResult.kind contract ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("provider_cls", PROVIDER_CLASSES)
+def test_backup_provider_run_backup_result_carries_kind(provider_cls):
+    """run_backup() results carry a BackupResult.kind in the defined set.
+
+    ``kind`` identifies how the backup was produced — ``"full"``,
+    ``"delta"``, or ``"recovered_delta"`` (backup-provider spec).
+    """
+    provider = _make_provider(provider_cls)
+    vm_config = _make_vm_config()
+    disk = vm_config.disks[0]
+    target = _make_target()
+
+    result = provider.run_backup(vm_config, target, disk, force_full=True)
+    assert isinstance(result, BackupResult)
+    assert result.kind in ("full", "delta", "recovered_delta")
+
+
 # ── Orthogonality: no SnapshotInfo in the provider API ───────────────
 
 
@@ -227,6 +332,8 @@ def test_backup_provider_api_never_references_snapshotinfo(provider_cls):
     """
     interface_methods = [name for name in IBackupProvider.__dict__ if not name.startswith("_")]
     assert interface_methods, "expected IBackupProvider to declare public methods"
+    # The new read-only assessment method is part of the public API.
+    assert "assess_baseline" in interface_methods
 
     for name in interface_methods:
         for method in (getattr(IBackupProvider, name), getattr(provider_cls, name)):
@@ -245,3 +352,13 @@ def test_backup_provider_api_never_references_snapshotinfo(provider_cls):
                     f"{provider_cls.__name__}.{name} return type "
                     f"references SnapshotInfo ({ret_str})"
                 )
+
+    # Explicit assess_baseline orthogonality check: the signature takes
+    # (vm_config, target, disk) and returns BaselineAssessment — never
+    # SnapshotInfo (backup-target-orthogonality spec scenario "Provider
+    # receives no SnapshotInfo").
+    assess_sig = inspect.signature(provider_cls.assess_baseline)
+    assert "SnapshotInfo" not in str(assess_sig)
+    ret_str = _annotation_str(assess_sig.return_annotation)
+    assert "BaselineAssessment" in ret_str
+    assert "SnapshotInfo" not in ret_str

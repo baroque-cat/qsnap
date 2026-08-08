@@ -1,0 +1,1 @@
+[{"filename": "/var/lib/libvirt/images/testvm-vda.base.qcow2"}, {"filename": "/var/lib/libvirt/images/testvm-vda.snap1.qcow2", "dirty-bitmaps": [{"name": "qsnap-abc12345-vda-20260808T160755-e1eb7a", "inconsistent": false}]}, {"filename": "/var/lib/libvirt/images/testvm-vda.snap2.qcow2"}]

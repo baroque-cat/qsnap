@@ -3088,3 +3088,207 @@ def test_full_backup_migration_no_disk_unparseable_fallback_vda(
 
     assert len(backups) == 1
     assert backups[0].disk == "vda", f"Expected fallback disk='vda', got {backups[0].disk!r}"
+
+
+# ── crash-evidence state fields: boot_id / last_commit_ts ─────────────────
+# recover-lost-checkpoint-bitmaps (state-management spec): the per-VM state
+# file gains two OPTIONAL fields — ``boot_id`` (host boot identifier,
+# recorded after each fully successful run) and a per-disk
+# ``last_commit_ts`` map (written after every successful blockcommit /
+# ``qemu-img commit``).  Both are additive: legacy state files without
+# them load with readers returning ``None`` (unknown), and no migration
+# pass rewrites existing files.  Resets keep the new fields coherent.
+
+
+def test_boot_id_round_trips_through_json(tmp_path: Path) -> None:
+    """set_boot_id then get_boot_id round-trips through the JSON state file.
+
+    The ``boot_id`` key is serialized in ``{vm}.json`` and survives a
+    fresh manager instance (state-management scenario "Boot id recorded
+    on successful run").
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_boot_id("testvm", "boot-A")
+    assert manager.get_boot_id("testvm") == "boot-A"
+
+    # Serialized as an optional key in the per-VM JSON file.
+    state_file = tmp_path / "testvm.json"
+    assert state_file.exists()
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data.get("boot_id") == "boot-A"
+
+    # Round-trip through a fresh instance.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    assert manager2.get_boot_id("testvm") == "boot-A"
+
+
+def test_boot_id_absent_in_legacy_state_returns_none(tmp_path: Path) -> None:
+    """Legacy state files without ``boot_id`` load with get_boot_id() == None.
+
+    Absence is "unknown", never an error, and no migration rewrite
+    happens (state-management scenario "Missing boot id is unknown, not
+    an error").
+    """
+    state_file = tmp_path / "testvm.json"
+    legacy_data = {
+        "last_allocation": {"vda": 4096},
+        "snapshots": [],
+        "deferred_operations": [],
+    }
+    state_file.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+    with open(state_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    assert manager.get_boot_id("testvm") is None
+    assert manager.get_last_allocation("testvm", "vda") == 4096
+
+    # No migration rewrite on read.
+    with open(state_file, encoding="utf-8") as fh:
+        assert fh.read() == original_raw
+
+
+def test_last_commit_ts_round_trips_through_json(tmp_path: Path) -> None:
+    """set_last_commit_ts then get_last_commit_ts round-trips per disk.
+
+    The per-disk ``last_commit_ts`` map survives a fresh manager
+    instance and disks are independent (state-management scenario
+    "Marker written after successful blockcommit").
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_commit_ts("testvm", "vda", "20260808T160000")
+    manager.set_last_commit_ts("testvm", "vdb", "20260808T170000")
+
+    # Serialized as an optional per-disk map in the per-VM JSON file.
+    state_file = tmp_path / "testvm.json"
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data.get("last_commit_ts") == {
+        "vda": "20260808T160000",
+        "vdb": "20260808T170000",
+    }
+
+    # Round-trip through a fresh instance, per-disk independent.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    assert manager2.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+    assert manager2.get_last_commit_ts("testvm", "vdb") == "20260808T170000"
+
+    # Overwrite one disk — the other is unaffected.
+    manager2.set_last_commit_ts("testvm", "vda", "20260809T000000")
+    assert manager2.get_last_commit_ts("testvm", "vda") == "20260809T000000"
+    assert manager2.get_last_commit_ts("testvm", "vdb") == "20260808T170000"
+
+
+def test_last_commit_ts_absent_in_legacy_state_returns_none(tmp_path: Path) -> None:
+    """Legacy state files without ``last_commit_ts`` load with get() == None.
+
+    Absent marker is "unknown" — recovery gate G1 treats it
+    conservatively as failed (state-management scenario "Absent marker
+    is conservative").
+    """
+    state_file = tmp_path / "testvm.json"
+    state_file.write_text(
+        json.dumps({"last_allocation": {"vda": 4096}}),
+        encoding="utf-8",
+    )
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    assert manager.get_last_commit_ts("testvm", "vda") is None
+    assert manager.get_last_commit_ts("testvm", "vdb") is None
+    # A VM with no state file at all also reads None.
+    assert manager.get_last_commit_ts("never_seen", "vda") is None
+
+
+def test_boot_id_and_last_commit_ts_persist_across_boot_change(
+    tmp_path: Path,
+) -> None:
+    """boot_id change is detectable across a simulated host restart.
+
+    State holds boot-A; a later run records boot-B.  Readers observe the
+    new value — crash-evidence consumers can conclude the host restarted
+    since the last successful run.  ``last_commit_ts`` markers survive
+    the boot change (they are VM/disk state, not host state).
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_boot_id("testvm", "boot-A")
+    manager.set_last_commit_ts("testvm", "vda", "20260808T160000")
+
+    # Host restarts — next successful run records the new boot_id.
+    manager.set_boot_id("testvm", "boot-B")
+
+    assert manager.get_boot_id("testvm") == "boot-B"
+    assert manager.get_boot_id("testvm") != "boot-A"
+    # Per-disk commit marker survives the reboot.
+    assert manager.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+
+
+def test_reset_vm_disk_state_keeps_new_fields_coherent(tmp_path: Path) -> None:
+    """reset_vm_disk_state leaves boot_id and last_commit_ts coherent.
+
+    The per-disk reset removes the disk's snapshots/allocation/deferred
+    state; the crash-evidence fields (host ``boot_id`` and the per-disk
+    ``last_commit_ts`` markers) must remain structurally intact and
+    readable for every disk (state-management spec: additive optional
+    fields, no migration).
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_boot_id("testvm", "boot-A")
+    manager.set_last_commit_ts("testvm", "vda", "20260808T160000")
+    manager.set_last_commit_ts("testvm", "vdb", "20260808T170000")
+    manager.set_last_allocation("testvm", "vda", 1000)
+    manager.set_last_allocation("testvm", "vdb", 2000)
+
+    manager.reset_vm_disk_state("testvm", "vda")
+
+    # New fields are coherent and preserved.
+    assert manager.get_boot_id("testvm") == "boot-A"
+    assert manager.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+    assert manager.get_last_commit_ts("testvm", "vdb") == "20260808T170000"
+
+    # Legacy per-disk state was cleared for the reset disk only.
+    assert manager.get_last_allocation("testvm", "vda") is None
+    assert manager.get_last_allocation("testvm", "vdb") == 2000
+
+    # On-disk structure remains valid JSON with the new fields intact.
+    with open(tmp_path / "testvm.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data.get("boot_id") == "boot-A"
+    assert data.get("last_commit_ts") == {
+        "vda": "20260808T160000",
+        "vdb": "20260808T170000",
+    }
+
+
+def test_reset_target_disk_state_keeps_new_fields_coherent(tmp_path: Path) -> None:
+    """reset_target_disk_state leaves per-VM boot_id/last_commit_ts alone.
+
+    Target resets operate on the per-target files only; the per-VM
+    crash-evidence fields must not be affected (state-management spec:
+    additive optional fields).
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_boot_id("testvm", "boot-A")
+    manager.set_last_commit_ts("testvm", "vda", "20260808T160000")
+    manager.record_full_backup(
+        "/mnt/backup/shared",
+        "testvm.FULL.20260808T030000_vda_a1b2c3.qcow2",
+        datetime(2026, 8, 8, 3, 0, 0),
+        "vda",
+    )
+
+    manager.reset_target_disk_state("/mnt/backup/shared", "testvm", "vda")
+
+    # Per-VM crash-evidence fields are untouched.
+    assert manager.get_boot_id("testvm") == "boot-A"
+    assert manager.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+    # Target state was cleared for the disk.
+    assert manager.get_full_backups("/mnt/backup/shared") == []

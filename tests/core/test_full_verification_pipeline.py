@@ -228,6 +228,7 @@ def test_full_created_m1_fails_corrupt_bit_not_recorded(
         error="verification failed: FULL backup has corrupt bit set — file is damaged",
         disk="vda",
         checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+        kind="full",
     )
 
     with (
@@ -283,6 +284,7 @@ def test_full_created_m1_fails_not_qcow2_not_recorded(
         bytes_transferred=0,
         error="verification failed: expected format qcow2, got raw",
         disk="vda",
+        kind="full",
     )
 
     with (
@@ -681,6 +683,7 @@ def test_full_verify_content_comparison_mismatch_fails(
         bytes_transferred=0,
         error="verification failed: content comparison mismatch",
         disk="vda",
+        kind="full",
     )
 
     with (
@@ -740,6 +743,7 @@ def test_full_backup_recorded_after_run_backup_succeeds(
             bytes_transferred=1048576,
             error=None,
             disk="vda",
+            kind="full",
         )
 
     orig_record = mock_state.record_full_backup
@@ -796,6 +800,7 @@ def test_full_backup_verify_fails_not_recorded(
         bytes_transferred=0,
         error="verification failed: qemu-img check found 3 errors",
         disk="vda",
+        kind="full",
     )
 
     with (
@@ -1644,6 +1649,7 @@ def test_failed_full_verification_triggers_abort(
         error="verification failed: FULL backup has corrupt bit set — file is damaged",
         disk="vda",
         checkpoint="qsnap-ab12cd34-vda-20260807T020000-9f8e7d",
+        kind="full",
     )
 
     caplog.set_level(logging.WARNING)
@@ -2003,6 +2009,7 @@ def test_retries_exhausted_keeps_old_generations(
         bytes_transferred=0,
         error="verification failed: content comparison mismatch",
         disk="vda",
+        kind="full",
     )
 
     with (
@@ -2100,6 +2107,7 @@ def test_full_backup_creation_retried_transient(
             bytes_transferred=1048576,
             error=None,
             disk="vda",
+            kind="full",
         )
 
     with (

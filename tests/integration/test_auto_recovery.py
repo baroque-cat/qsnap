@@ -629,6 +629,12 @@ def test_per_chain_retention_multiple_chains_over_time(test_vm, caplog):
             force_full=True,
         )
         assert full_result.success, f"FULL chain {suffix} failed: {full_result.error}"
+        # The real BitmapBackupProvider probes the prior checkpoint before
+        # deciding the kind; force_full=True still yields a FULL result
+        # that must carry kind="full" (spec: backup-provider).
+        assert full_result.kind == "full", (
+            f"Forced FULL must report kind 'full', got {full_result.kind!r}"
+        )
         full_path = full_result.target_path
         full_name = full_path.stem
 
@@ -886,6 +892,11 @@ def test_production_incident_reproduction(test_vm, caplog):
         vm_config.disks[0],
     )
     assert full_result.success, f"run_backup failed: {full_result.error}"
+    # The provider's bitmap-health probe runs before the FULL decision on
+    # this real shell; the resulting FULL must carry kind="full".
+    assert full_result.kind == "full", (
+        f"Incident-reproduction FULL must report kind 'full', got {full_result.kind!r}"
+    )
     full_path = full_result.target_path
     full_name = full_path.stem
 

@@ -585,10 +585,7 @@ class ConfigFacade(IConfigFacade):
         # Backup engine options: VM overrides global (target may override VM).
         # compress.
         vm_compress: bool
-        if "compress" in vm_raw:
-            vm_compress = bool(vm_raw["compress"])
-        else:
-            vm_compress = global_cfg.compress
+        vm_compress = bool(vm_raw["compress"]) if "compress" in vm_raw else global_cfg.compress
 
         # compression_type.
         vm_compression_type: str

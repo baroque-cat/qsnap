@@ -350,3 +350,43 @@ class InMemoryStateManager(IStateManager):
         entry = self._target_state.get(target_path)
         if entry is not None and disk in entry:
             del entry[disk]
+
+    # ── Crash evidence / recovery gating (recover-lost-checkpoint-bitmaps) ──
+
+    def get_boot_id(self, vm_name: str) -> str | None:
+        """Return the host boot_id recorded for *vm_name*, or ``None``."""
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return None
+        boot_id = vm_state.get("boot_id")
+        if boot_id is None:
+            return None
+        return str(boot_id)
+
+    def set_boot_id(self, vm_name: str, boot_id: str) -> None:
+        """Record the current host boot_id for *vm_name*."""
+        if vm_name not in self._state:
+            self._state[vm_name] = {}
+        self._state[vm_name]["boot_id"] = boot_id
+
+    def get_last_commit_ts(self, vm_name: str, disk: str) -> str | None:
+        """Return the per-disk last_commit_ts for *vm_name*/*disk*, or ``None``."""
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return None
+        markers = vm_state.get("last_commit_ts")
+        if not isinstance(markers, dict):
+            return None
+        value = markers.get(disk)
+        if value is None:
+            return None
+        return str(value)
+
+    def set_last_commit_ts(self, vm_name: str, disk: str, timestamp: str) -> None:
+        """Record the last commit timestamp for *vm_name*/*disk*."""
+        if vm_name not in self._state:
+            self._state[vm_name] = {}
+        existing = self._state[vm_name].get("last_commit_ts")
+        markers: dict[str, str] = existing if isinstance(existing, dict) else {}
+        markers[disk] = timestamp
+        self._state[vm_name]["last_commit_ts"] = markers

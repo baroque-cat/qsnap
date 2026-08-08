@@ -332,6 +332,9 @@ def test_incremental_after_full(test_vm):
         stall_timeout=300,
     )
     assert result_full.success, f"FULL backup failed: {result_full.error}"
+    assert result_full.kind == "full", (
+        f"First backup with no checkpoint must be a FULL, got {result_full.kind!r}"
+    )
     full_actual = _get_actual_size(shell, result_full.target_path)
     assert full_actual > 0, f"FULL actual-size must be > 0, got {full_actual}"
 
@@ -393,6 +396,12 @@ def test_incremental_after_full(test_vm):
     assert inc_result.success, (
         f"Incremental backup failed: {inc_result.error}. "
         f"Check that run_backup detected the checkpoint created by the FULL."
+    )
+    # Delta runs now issue one read-only QMP probe (virsh
+    # qemu-monitor-command) before backup-begin; the result must carry
+    # kind="delta" (spec: backup-provider).
+    assert inc_result.kind == "delta", (
+        f"Incremental after a checkpoint must be a delta, got {inc_result.kind!r}"
     )
 
     # Step 6: Size assertions.
@@ -495,6 +504,7 @@ def test_incremental_compression_not_applied(test_vm, caplog):
         stall_timeout=300,
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
+    assert r_full.kind == "full", f"Compressed FULL must report kind 'full', got {r_full.kind!r}"
     ct_full = _get_compression_type(shell, r_full.target_path)
     assert ct_full == "zstd", f"FULL must have compression-type 'zstd', got {ct_full!r}"
 
@@ -534,6 +544,10 @@ def test_incremental_compression_not_applied(test_vm, caplog):
     # If not successful, report but don't fail — environment may differ.
     if inc_result.success:
         inc_path = inc_result.target_path
+
+        # Delta runs issue one read-only QMP probe before backup-begin;
+        # the result must carry kind="delta" (spec: backup-provider).
+        assert inc_result.kind == "delta", f"Incremental must be a delta, got {inc_result.kind!r}"
 
         # Step 4: Compression-type must be "zlib" (default), NOT "zstd"
         # — proving the delta was written uncompressed (design D6).  The
@@ -675,6 +689,7 @@ path = "{target_dir}"
         stall_timeout=stall_seconds,
     )
     assert r_full.success, f"zstd FULL failed: {r_full.error}"
+    assert r_full.kind == "full", f"Compressed FULL must report kind 'full', got {r_full.kind!r}"
     ct_full = _get_compression_type(shell, r_full.target_path)
     assert ct_full == "zstd", f"FULL must have compression-type 'zstd', got {ct_full!r}"
 
@@ -712,6 +727,10 @@ path = "{target_dir}"
     # If not successful, report but don't fail — environment may differ.
     if inc_result.success:
         inc_path = inc_result.target_path
+
+        # Delta runs issue one read-only QMP probe before backup-begin;
+        # the result must carry kind="delta" (spec: backup-provider).
+        assert inc_result.kind == "delta", f"Incremental must be a delta, got {inc_result.kind!r}"
 
         # Step 4: The stall-detected qemu-img convert of the FULL must
         # have received stall_timeout=120 (the VM-inherited "2m" parsed
@@ -800,6 +819,7 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         stall_timeout=300,
     )
     assert r_full.success, f"FULL failed: {r_full.error}"
+    assert r_full.kind == "full", f"First backup must be a FULL, got {r_full.kind!r}"
     full_actual = _get_actual_size(shell, r_full.target_path)
 
     # Step 2: Write exactly 5 MB.
@@ -836,6 +856,9 @@ def test_incremental_dirty_bytes_proportional(test_vm):
         stall_timeout=300,
     )
     assert inc_result.success, f"Incremental failed: {inc_result.error}"
+    assert inc_result.kind == "delta", (
+        f"Incremental after a checkpoint must be a delta, got {inc_result.kind!r}"
+    )
 
     # Step 5: Size assertions.
     transferred = inc_result.bytes_transferred
@@ -928,6 +951,9 @@ def test_free_space_gate_strict_blocks_incremental_before_transfer(test_vm, capl
     )
     if not full_result.success:
         pytest.skip(f"FULL backup failed: {full_result.error}")
+    assert full_result.kind == "full", (
+        f"Seeded FULL must report kind 'full', got {full_result.kind!r}"
+    )
     full_name = full_result.target_path.stem
 
     state = InMemoryStateManager()

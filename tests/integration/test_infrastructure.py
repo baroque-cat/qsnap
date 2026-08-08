@@ -426,12 +426,14 @@ def test_state_save_oserror_surfaces_runtime_error(tmp_path: Path, caplog):
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "vm1.json").write_text(_json.dumps({"snapshots": []}))
 
-    with patch(
-        "qsnap.state.json_manager.os.replace",
-        side_effect=OSError(28, "No space left on device"),
+    with (
+        patch(
+            "qsnap.state.json_manager.os.replace",
+            side_effect=OSError(28, "No space left on device"),
+        ),
+        pytest.raises(RuntimeError, match="State write failed for VM vm1"),
     ):
-        with pytest.raises(RuntimeError, match="State write failed for VM vm1"):
-            manager.record_snapshot("vm1", info)
+        manager.record_snapshot("vm1", info)
 
     # CRITICAL log names the VM and the state path.
     critical_msgs = [

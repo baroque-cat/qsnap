@@ -155,6 +155,7 @@ def test_bitmap_incremental_registers_dependency(
         bytes_transferred=1048576,
         error=None,
         disk="vda",
+        kind="delta",
     )
 
     # Create a fresh shell with only our expectations (no conftest noise).
@@ -246,6 +247,7 @@ def test_failed_transfer_records_no_dependency(
             bytes_transferred=0,
             error="simulated transfer failure",
             disk=disk.target,
+            kind="delta",
         )
 
     failing_provider.run_backup = _failing_run_backup  # type: ignore[method-assign]

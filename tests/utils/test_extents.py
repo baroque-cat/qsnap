@@ -266,3 +266,94 @@ def test_overlap_all_base_data_false_returns_empty() -> None:
     allocated = [_e(0, 1000, False)]
     result = overlap_with_allocation(dirty, allocated)
     assert result == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Recovered-delta copy-set semantics (bitmap-loss-recovery, D5)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The recovered-delta copy loop iterates ONLY the ``base:allocation``
+# meta-context (no dirty-bitmap).  Per NBD semantics, zero clusters
+# (guest discards) are reported as data=True and MUST be copied
+# explicitly — skipping them would expose stale backing data.  Holes
+# (data=False) are the only extents skipped.
+
+
+@pytest.mark.unit
+def test_recovered_delta_copy_set_includes_zero_extents_skips_holes() -> None:
+    """The recovered-delta copy set from ``base:allocation`` keeps data and
+    zero extents (both ``data=True``) and drops holes (``data=False``).
+
+    This is the pure-function basis of the D5 rule: "copy ALL data and
+    zero extents into <tmp>, skipping only holes" (spec scenario "Zero
+    extents are copied").
+    """
+    alloc_raw = [
+        _e(0, 65536, True),  # allocated data
+        _e(65536, 65536, True),  # zero cluster (guest discard — data=True)
+        _e(131072, 65536, False),  # hole — the ONLY skipped extent
+        _e(196608, 65536, True),  # allocated data
+    ]
+    unified = unify_extents(alloc_raw)
+    copy_set = [e for e in unified if e.data]
+
+    assert copy_set == [
+        _e(0, 131072, True),  # data + zero merged (same flag, adjacent)
+        _e(196608, 65536, True),
+    ]
+    # The hole region [131072, 196608) is absent from the copy set.
+    assert all(e.data for e in copy_set)
+    assert sum(e.length for e in copy_set) == 131072 + 65536
+
+
+@pytest.mark.unit
+def test_recovered_delta_copy_set_preserves_zero_regions_after_unify() -> None:
+    """Unification never merges a zero extent into a hole: the data flag
+    boundary is preserved, so the copy loop can still distinguish
+    "copy explicitly" (data=True) from "skip" (data=False)."""
+    alloc_raw = [
+        _e(0, 65536, True),  # zero cluster
+        _e(65536, 65536, False),  # hole
+        _e(131072, 65536, True),  # data
+    ]
+    unified = unify_extents(alloc_raw)
+    assert unified == alloc_raw  # flags differ → no merge across boundary
+
+    copy_set = [e for e in unified if e.data]
+    assert copy_set == [_e(0, 65536, True), _e(131072, 65536, True)]
+
+
+@pytest.mark.unit
+def test_recovered_delta_copy_set_is_allocation_only() -> None:
+    """The recovered delta copies extents straight from ``base:allocation``
+    — it must NOT be intersected with a dirty-bitmap context (there is no
+    usable bitmap: that is the whole incident).  Filtering the unified
+    allocation list by ``data`` yields the full copy set."""
+    alloc_raw = [
+        _e(0, 262144, True),
+        _e(262144, 65536, False),  # hole
+        _e(327680, 131072, True),
+    ]
+    copy_set = [e for e in unify_extents(alloc_raw) if e.data]
+
+    # Same shape as the zero_skip FULL loop: all non-hole extents.
+    assert copy_set == [_e(0, 262144, True), _e(327680, 131072, True)]
+    # No extent of the copy set lies inside a hole.
+    hole = _e(262144, 65536, False)
+    for extent in copy_set:
+        assert not (
+            extent.offset < hole.offset + hole.length
+            and extent.offset + extent.length > hole.offset
+        )
+
+
+@pytest.mark.unit
+def test_recovered_delta_hole_only_layer_produces_empty_copy_set() -> None:
+    """A layer whose extents are all holes contributes nothing to the
+    recovered delta — holes are never copied."""
+    alloc_raw = [
+        _e(0, 65536, False),
+        _e(65536, 65536, False),
+    ]
+    copy_set = [e for e in unify_extents(alloc_raw) if e.data]
+    assert copy_set == []

@@ -185,6 +185,7 @@ def test_backup_retry_max_zero_calls_once(test_vm):
             duration=0.0,
             disk="vda",
             deferred=False,
+            kind="full",
         )
 
     with patch.object(core, "_execute_with_retry", wraps=_spy_execute_with_retry):
@@ -268,6 +269,7 @@ def test_backup_retry_max_two_retries_on_transient_failure(test_vm):
             duration=0.0,
             disk="vda",
             deferred=False,
+            kind="full",
         )
 
     with patch.object(core, "_execute_with_retry", wraps=_spy_execute_with_retry):

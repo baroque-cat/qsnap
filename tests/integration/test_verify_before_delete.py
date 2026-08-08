@@ -391,6 +391,7 @@ def _fake_full_backup_factory(error: str):
             error=error,
             duration=0.0,
             disk=disk.target,
+            kind="full",
         )
 
     return _fake_full

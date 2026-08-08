@@ -115,6 +115,17 @@ class BackupResult:
     during the operation — populated by ``create_full_backup`` on the
     running-VM path and ``None`` when no checkpoint was created
     (stopped-VM path or plain transfers).
+
+    ``kind`` records the backup kind — ``"full"``, ``"delta"``, or
+    ``"recovered_delta"`` — for audit trails and summary rendering.
+    Defaults to ``"delta"`` for backward compatibility with callers
+    that do not yet set it.
+
+    ``recovery`` is ``True`` when this result was produced by the
+    bitmap-loss recovery path (FULL fallback after a dead-bitmap
+    checkpoint).  Core uses it to retire the superseded generation
+    immediately regardless of ``keep_generations`` (per-chain-retention
+    spec, recover-lost-checkpoint-bitmaps design D8).
     """
 
     success: bool
@@ -127,6 +138,35 @@ class BackupResult:
     disk: str | None = None
     checkpoint: str | None = None
     deferred: bool = False
+    kind: str = "delta"
+    recovery: bool = False
+
+
+@dataclass(frozen=True)
+class BaselineAssessment:
+    """Read-only baseline assessment for dry-run parity and recovery gating.
+
+    Returned by :meth:`IBackupProvider.assess_baseline`.  Provides the
+    health status of the newest checkpoint's dirty bitmap, the gate
+    outcome (when the bitmap is dead), and a size estimate for the
+    backup that will be produced.
+
+    ``status`` is one of ``"no_checkpoint"``, ``"healthy"``, ``"dead"``,
+    or ``"unknown"``.  ``newest_checkpoint`` is the checkpoint name used
+    for the assessment, or ``None`` when no checkpoint exists.
+    ``gates_passed`` is ``True`` when all recovery gates (G1–G3) pass
+    (only meaningful when ``status == "dead"``; ``False`` otherwise).
+    ``failed_gate_reason`` names the first failed gate (e.g. ``"G1"``),
+    or is ``None`` when all gates pass or the status is not ``"dead"``.
+    ``size_estimate`` is the estimated transfer size in bytes, or
+    ``None`` when undecidable.
+    """
+
+    status: str
+    newest_checkpoint: str | None = None
+    gates_passed: bool = False
+    failed_gate_reason: str | None = None
+    size_estimate: int | None = None
 
 
 # ── Commit (blockcommit) ─────────────────────────────────────────────────
@@ -488,3 +528,4 @@ class ActionRecord:
     error: str | None = None
     disk: str | None = None
     target: str | None = None
+    kind: str = "delta"

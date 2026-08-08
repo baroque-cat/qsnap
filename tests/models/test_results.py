@@ -20,6 +20,7 @@ from qsnap.models.results import (
     ActionRecord,
     BackupInfo,
     BackupResult,
+    BaselineAssessment,
     ChainVerifyResult,
     ChangeResult,
     CommitResult,
@@ -248,6 +249,141 @@ def test_backup_result_deferred_true():
     # Verify mutation raises FrozenInstanceError.
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.deferred = False
+
+
+# ── BackupResult.kind (backup-provider spec) ───────────────────────────────
+
+
+def test_backup_result_kind_defaults_delta():
+    """BackupResult.kind defaults to "delta" for backward compatibility.
+
+    Existing constructors that do not set the field keep delta-compatible
+    behavior (backup-provider spec: "The field SHALL default to
+    ``"delta"``-compatible behavior for existing constructors").
+    """
+    result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+    )
+    assert result.kind == "delta"
+
+
+def test_backup_result_kind_full_delta_recovered_delta():
+    """BackupResult.kind accepts and preserves full/delta/recovered_delta.
+
+    ``kind`` records how the backup was produced — ``"full"`` (normal
+    FULL export), ``"delta"`` (regular dirty-block delta), or
+    ``"recovered_delta"`` (bitmap-loss recovery copy set).  Each value
+    round-trips through the frozen dataclass (backup-provider spec
+    scenarios "Regular paths keep their kinds" / "Recovered delta is
+    auditable").
+    """
+    base_kwargs = {
+        "success": True,
+        "snapshot_name": "myvm.20260808T031542_vda_a1b2c3",
+        "source_path": Path("/src/snap1"),
+        "target_path": Path("/dst/snap1"),
+        "bytes_transferred": 4096,
+        "error": None,
+        "disk": "vda",
+    }
+    full = BackupResult(**base_kwargs, kind="full")
+    delta = BackupResult(**base_kwargs, kind="delta")
+    recovered = BackupResult(**base_kwargs, kind="recovered_delta")
+
+    assert full.kind == "full"
+    assert delta.kind == "delta"
+    assert recovered.kind == "recovered_delta"
+
+    # The kind is part of equality — different kinds are unequal.
+    assert full != delta
+    assert delta != recovered
+    assert full != recovered
+
+
+def test_backup_result_kind_is_frozen():
+    """BackupResult.kind cannot be mutated (frozen dataclass)."""
+    result = BackupResult(
+        success=True,
+        snapshot_name="snap1",
+        source_path=Path("/src/snap1"),
+        target_path=Path("/dst/snap1"),
+        bytes_transferred=0,
+        error=None,
+        kind="full",
+    )
+    assert result.__dataclass_params__.frozen is True
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.kind = "delta"
+
+
+def test_backup_result_kind_field_declared():
+    """BackupResult declares the kind field with default "delta"."""
+    field_names = {f.name for f in dataclasses.fields(BackupResult)}
+    assert "kind" in field_names
+    kind_field = next(f for f in dataclasses.fields(BackupResult) if f.name == "kind")
+    assert kind_field.default == "delta"
+
+
+# ── BaselineAssessment (backup-provider spec, design D10) ──────────────────
+
+
+def test_baseline_assessment_fields_and_defaults():
+    """BaselineAssessment carries status plus optional assessment fields.
+
+    ``status`` is one of ``no_checkpoint|healthy|dead|unknown``;
+    ``newest_checkpoint``, ``gates_passed``, ``failed_gate_reason``, and
+    ``size_estimate`` describe the baseline for recovery gating and
+    dry-run size prediction.
+    """
+    result = BaselineAssessment(status="no_checkpoint")
+    assert result.status == "no_checkpoint"
+    assert result.newest_checkpoint is None
+    assert result.gates_passed is False
+    assert result.failed_gate_reason is None
+    assert result.size_estimate is None
+
+    dead = BaselineAssessment(
+        status="dead",
+        newest_checkpoint="qsnap-ab12cd34-vda-20260808T160755-e1eb7a",
+        gates_passed=False,
+        failed_gate_reason="G1",
+        size_estimate=1048576,
+    )
+    assert dead.newest_checkpoint == "qsnap-ab12cd34-vda-20260808T160755-e1eb7a"
+    assert dead.gates_passed is False
+    assert dead.failed_gate_reason == "G1"
+    assert dead.size_estimate == 1048576
+
+
+def test_baseline_assessment_is_frozen():
+    """BaselineAssessment is a frozen dataclass; mutation raises FrozenInstanceError."""
+    result = BaselineAssessment(status="healthy", newest_checkpoint="cp-1")
+    assert result.__dataclass_params__.frozen is True
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.status = "dead"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.newest_checkpoint = "cp-2"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.gates_passed = True
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.failed_gate_reason = "G2"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.size_estimate = 999
+
+
+def test_baseline_assessment_equality():
+    """BaselineAssessment instances with equal fields compare equal."""
+    a = BaselineAssessment(status="dead", newest_checkpoint="cp-1", gates_passed=True)
+    b = BaselineAssessment(status="dead", newest_checkpoint="cp-1", gates_passed=True)
+    c = BaselineAssessment(status="dead", newest_checkpoint="cp-1", gates_passed=False)
+    assert a == b
+    assert a != c
 
 
 # ── BackupInfo (target-world model, design D2) ───────────────────────────

@@ -34,10 +34,46 @@ except ImportError:
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
+from qsnap.interfaces.shell import IShell
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+from qsnap.models.results import ShellResult
+from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
 from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
+from qsnap.utils.nbd_client import LibnbdClient
 from tests.mocks import InMemoryStateManager, MockConfigFacade
+
+
+class _RecordingShell(IShell):
+    """IShell wrapper that delegates to SubprocessShell and records commands.
+
+    Used to assert that a covered checkpoint's dirty bitmap is probed
+    (read-only ``virsh qemu-monitor-command``) during startup validation
+    (recover-lost-checkpoint-bitmaps, design D12).
+    """
+
+    def __init__(self, delegate: SubprocessShell) -> None:
+        self._delegate = delegate
+        self._commands: list[list[str]] = []
+
+    @property
+    def commands(self) -> list[list[str]]:
+        """The recorded command lists, in execution order."""
+        return list(self._commands)
+
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
+        self._commands.append(list(cmd))
+        return self._delegate.run(cmd, timeout, check)
+
+    def run_with_stall_detection(
+        self,
+        cmd: list[str],
+        output_file: Path | None = None,
+        stall_timeout: int = 1800,
+        check: bool = False,
+    ) -> ShellResult:
+        self._commands.append(list(cmd))
+        return self._delegate.run_with_stall_detection(cmd, output_file, stall_timeout, check)
 
 
 def _cleanup_checkpoints(shell: SubprocessShell, vm_name: str) -> None:
@@ -68,6 +104,21 @@ def _count_checkpoints(shell: SubprocessShell, vm_name: str) -> int:
     return sum(
         1 for line in (result.stdout or "").splitlines() if line.strip().startswith("qsnap-")
     )
+
+
+def _checkpoint_names(shell: SubprocessShell, vm_name: str) -> list[str]:
+    """Return the qsnap-prefixed checkpoint names of *vm_name*."""
+    result = shell.run(
+        ["virsh", "checkpoint-list", "--name", "--domain", vm_name],
+        timeout=30,
+    )
+    if not result.success:
+        return []
+    return [
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if line.strip().startswith("qsnap-")
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -159,6 +210,32 @@ def test_startup_validation(test_vm, caplog):
         f"Expected at least 1 qsnap checkpoint after first run, got {ckpts_before}"
     )
 
+    # ── D12: a covered checkpoint is probed at startup and kept on HEALTHY ──
+    # The checkpoint from run 1 is covered by the FULL backup file; startup
+    # validation must probe its dirty bitmap (read-only QMP) and KEEP the
+    # checkpoint when the bitmap is healthy (keep-on-HEALTHY).
+    rec_shell = _RecordingShell(shell)
+    core_probe = Core(
+        config=config,
+        factory=DefaultFactory(shell=rec_shell, state=state),
+        state=state,
+        shell=rec_shell,
+    )
+    with caplog.at_level(logging.INFO):
+        core_probe._validate_state_at_startup(vm_config)
+    qmp_probes = [" ".join(cmd) for cmd in rec_shell.commands if "qemu-monitor-command" in cmd]
+    assert len(qmp_probes) >= 1, (
+        f"Covered checkpoint must be probed at startup (qemu-monitor-command). "
+        f"Recorded commands: {[' '.join(c) for c in rec_shell.commands]}"
+    )
+    assert _count_checkpoints(shell, vm_name) == ckpts_before, (
+        f"Healthy covered checkpoint must be KEPT at startup (keep-on-HEALTHY): "
+        f"before={ckpts_before}, after={_count_checkpoints(shell, vm_name)}"
+    )
+    assert not any("dead-bitmap checkpoint" in r.message for r in caplog.records), (
+        f"Healthy bitmap must not be flagged dead. Logs: {[r.message for r in caplog.records]}"
+    )
+
     # Record FULLs in state for confirmation before we delete the file.
     state_fulls_before = state.get_full_backups(str(target_dir))
     assert len(state_fulls_before) >= 1, "State must have FULL entry after run 1"
@@ -244,4 +321,128 @@ def test_startup_validation(test_vm, caplog):
     )
 
     # ── Cleanup ────────────────────────────────────────────────────────
+    _cleanup_checkpoints(shell, vm_name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test: Covered checkpoint with a DEAD bitmap is removed at startup (D12)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_startup_dead_bitmap_covered_checkpoint_removed(test_vm, caplog):
+    """A covered checkpoint with a DEAD bitmap is removed at startup.
+
+    recover-lost-checkpoint-bitmaps design D12: when a covering backup
+    file exists but the checkpoint's dirty bitmap is dead (lost after an
+    unclean host shutdown), startup validation treats the checkpoint as
+    an orphan and deletes it best-effort (delete-on-DEAD).  The covering
+    FULL backup file itself must be preserved.
+
+    1. Start VM; run a FULL backup (checkpoint + bitmap + covering file).
+    2. Manufacture a REAL dead bitmap (mechanism c, test-plan §5.2):
+       ``virsh destroy``, ``qemu-img bitmap --remove <active-layer>
+       <checkpoint>``, ``virsh start``.
+    3. Run ``core._validate_state_at_startup()``.
+    4. Verify: "dead-bitmap checkpoint detected" WARNING; checkpoint
+       removed; covering FULL file still present.
+    """
+    from datetime import datetime
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    if not is_libvirt_new_enough(shell):
+        pytest.skip("libvirt < 7.2 — NBD backup-begin not available")
+
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    _cleanup_checkpoints(shell, vm_name)
+
+    # Step 1: FULL backup → checkpoint + bitmap + covering file.
+    provider = BitmapBackupProvider(shell, nbd=LibnbdClient())
+    target = TargetConfig(path=target_dir, compress=False, verify="off")
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        targets=[target],
+    )
+    full_result = provider.run_backup(vm_config, target, vm_config.disks[0])
+    if not full_result.success:
+        pytest.skip(f"FULL backup failed: {full_result.error}")
+    cp_name = full_result.checkpoint
+    assert cp_name is not None, "FULL backup must create a checkpoint"
+    covering_file = full_result.target_path
+    assert covering_file.exists(), "Covering FULL file must exist"
+
+    state = InMemoryStateManager()
+    state.record_full_backup(
+        str(target_dir),
+        f"{full_result.snapshot_name}.qcow2",
+        datetime.now(),
+        disk="vda",
+    )
+    config = MockConfigFacade(vms=[vm_config], config_path=tmpdir / "startup_dead.toml")
+    core = Core(
+        config=config,
+        factory=DefaultFactory(shell=shell, state=state),
+        state=state,
+        shell=shell,
+    )
+
+    # Step 2: Manufacture a REAL dead bitmap (mechanism c).
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    time.sleep(1)
+    shell.run(
+        ["qemu-img", "bitmap", "--remove", str(base_image), cp_name],
+        timeout=60,
+    )
+    restart = shell.run(["virsh", "start", vm_name], timeout=60)
+    if not restart.success:
+        pytest.skip("VM did not restart after dead-bitmap manufacture")
+    time.sleep(2)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state after restart")
+
+    # The checkpoint metadata must survive the restart (mechanism c
+    # precondition); otherwise the delete-on-DEAD path is untestable.
+    assert cp_name in _checkpoint_names(shell, vm_name), (
+        f"Checkpoint {cp_name!r} must survive the VM restart: {_checkpoint_names(shell, vm_name)}"
+    )
+
+    # Self-validate the incident state: the probe must report DEAD.
+    probe = provider._probe_checkpoint_bitmap(vm_name, cp_name, "vda", True, base_image)
+    if probe != "dead":
+        pytest.skip(
+            f"Mechanism (c) did not produce a DEAD probe on this libvirt "
+            f"(got {probe!r}) — bitmap survived the restart"
+        )
+
+    # Step 3: Startup validation — delete-on-DEAD.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        core._validate_state_at_startup(vm_config)
+
+    # Step 4: dead-bitmap WARNING + checkpoint removed + file preserved.
+    dead_logs = [r.message for r in caplog.records if "dead-bitmap checkpoint" in r.message]
+    assert len(dead_logs) >= 1, (
+        f"Startup must log the dead-bitmap WARNING. Logs: {[r.message for r in caplog.records]}"
+    )
+    assert cp_name not in _checkpoint_names(shell, vm_name), (
+        f"Dead-bitmap covered checkpoint {cp_name!r} must be removed at startup "
+        f"(delete-on-DEAD). Got: {_checkpoint_names(shell, vm_name)}"
+    )
+    assert covering_file.exists(), f"Covering FULL backup file must be preserved: {covering_file}"
+
     _cleanup_checkpoints(shell, vm_name)

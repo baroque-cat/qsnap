@@ -7,7 +7,11 @@ from pathlib import Path
 
 from qsnap.interfaces.backup import IBackupProvider
 from qsnap.models.config import DiskConfig, VMConfig
-from qsnap.models.results import SnapshotResult, SnapshotSpec
+from qsnap.models.results import (
+    BaselineAssessment,
+    SnapshotResult,
+    SnapshotSpec,
+)
 from tests.mocks.mock_modules import MockBitmapBackupProvider, MockSnapshotProvider
 
 
@@ -58,7 +62,7 @@ def test_mock_create_multi_validity():
     # One result per spec.
     assert isinstance(results, list)
     assert len(results) == len(specs)
-    for result, spec in zip(results, specs):
+    for result, spec in zip(results, specs, strict=True):
         assert isinstance(result, SnapshotResult)
         assert result.success is True
         assert result.disk == spec.disk
@@ -100,3 +104,106 @@ def test_mock_backup_provider_api_carries_no_snapshotinfo():
         assert "SnapshotInfo" not in (
             getattr(signature.return_annotation, "__name__", repr(signature.return_annotation))
         ), f"MockBitmapBackupProvider.{name} return annotation references SnapshotInfo"
+
+
+# ── assess_baseline mock contract (backup-provider spec) ──────────────────
+# TESTING.md §2: every mock method must return a valid result type (never
+# None).  ``MockBitmapBackupProvider.assess_baseline`` must return a valid
+# frozen ``BaselineAssessment`` — never ``None``.
+
+
+def test_mock_backup_provider_assess_baseline_returns_valid_assessment(make_vm_config, make_target):
+    """MockBitmapBackupProvider.assess_baseline returns a BaselineAssessment.
+
+    The mock implements the read-only assessment contract (backup-provider
+    spec scenario "Mock implements the assessment contract"): a valid
+    frozen result object, never ``None``, with a defined status.
+    """
+    provider = MockBitmapBackupProvider()
+    assert isinstance(provider, IBackupProvider)
+
+    vm_config = make_vm_config()
+    target = make_target()
+    disk = vm_config.disks[0]
+
+    result = provider.assess_baseline(vm_config, target, disk)
+
+    assert result is not None, "assess_baseline must never return None"
+    assert isinstance(result, BaselineAssessment)
+    assert result.__dataclass_params__.frozen is True
+    assert result.status in ("no_checkpoint", "healthy", "dead", "unknown")
+
+
+def test_mock_backup_provider_assess_baseline_configurable_assessment(
+    make_vm_config,
+    make_target,
+):
+    """A configured assessment is returned as-is (read-only).
+
+    Core dry-run tests inject a specific assessment (e.g. dead checkpoint
+    with a failed gate); the mock must return exactly that object, never
+    replacing it or returning None.
+    """
+    configured = BaselineAssessment(
+        status="dead",
+        newest_checkpoint="qsnap-ab12cd34-vda-20260808T160755-e1eb7a",
+        gates_passed=False,
+        failed_gate_reason="G1",
+        size_estimate=1048576,
+    )
+    provider = MockBitmapBackupProvider(assessment=configured)
+
+    vm_config = make_vm_config()
+    target = make_target()
+    disk = vm_config.disks[0]
+
+    result = provider.assess_baseline(vm_config, target, disk)
+    assert result is configured
+    assert result.status == "dead"
+    assert result.failed_gate_reason == "G1"
+    assert result.size_estimate == 1048576
+
+
+def test_mock_backup_provider_assess_baseline_signature(
+    make_vm_config,
+    make_target,
+):
+    """assess_baseline matches the IBackupProvider declaration.
+
+    The signature takes (vm_config, target, disk) and is annotated to
+    return BaselineAssessment — the interface contract is preserved by
+    the mock (backup-provider spec: BREAKING interface addition).
+    """
+    provider = MockBitmapBackupProvider()
+    sig = inspect.signature(provider.assess_baseline)
+    for required in ("vm_config", "target", "disk"):
+        assert required in sig.parameters
+
+    ret = sig.return_annotation
+    ret_name = getattr(ret, "__name__", repr(ret))
+    assert "BaselineAssessment" in ret_name
+
+    # Default constructor builds a valid no-checkpoint assessment.
+    result = provider.assess_baseline(make_vm_config(), make_target(), make_vm_config().disks[0])
+    assert isinstance(result, BaselineAssessment)
+    assert result.status == "no_checkpoint"
+
+
+def test_mock_backup_provider_run_backup_kind_is_valid():
+    """MockBitmapBackupProvider.run_backup sets a valid kind on the result.
+
+    ``BackupResult.kind`` must be one of ``full``/``delta``/
+    ``recovered_delta`` (backup-provider spec: "Backup results carry the
+    backup kind").
+    """
+    from qsnap.models.config import TargetConfig
+    from qsnap.models.results import BackupResult
+
+    provider = MockBitmapBackupProvider(backup_kind="recovered_delta")
+    vm_config = _make_vm_config()
+    target = TargetConfig(path=Path("/mnt/backup/testvm"))
+    disk = vm_config.disks[0]
+    result = provider.run_backup(vm_config, target, disk)
+    assert isinstance(result, BackupResult)
+    assert result.kind in ("full", "delta", "recovered_delta")
+    assert result.kind == "recovered_delta"

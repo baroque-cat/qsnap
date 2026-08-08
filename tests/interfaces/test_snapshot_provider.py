@@ -223,7 +223,7 @@ def test_snapshot_provider_create_multi_success_path(cls, init_kwargs):
     results = provider.create_multi(vm_config, specs, quiesce=True)
     assert isinstance(results, list)
     assert len(results) == len(specs)
-    for result, spec in zip(results, specs):
+    for result, spec in zip(results, specs, strict=False):
         assert isinstance(result, SnapshotResult)
         assert isinstance(result.success, bool)
         assert result.success is True

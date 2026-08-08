@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
-from qsnap.models.results import BackupInfo, BackupResult, ShellResult
+from qsnap.models.results import BackupInfo, BackupResult, BaselineAssessment, ShellResult
 
 
 class IBackupProvider(ABC):
@@ -49,6 +49,25 @@ class IBackupProvider(ABC):
 
         ``convert_out_of_order`` maps to the ``qemu-img convert -W``
         flag.
+        """
+        ...
+
+    # ── Read-only baseline assessment (for dry-run parity, design D10) ──
+
+    @abstractmethod
+    def assess_baseline(
+        self, vm_config: VMConfig, target: TargetConfig, disk: DiskConfig
+    ) -> BaselineAssessment:
+        """Return a read-only baseline assessment for *disk* on *target*.
+
+        The assessment probes the newest checkpoint's dirty bitmap (if
+        one exists), evaluates recovery gates G1–G3 when the bitmap is
+        dead, and provides a size estimate for the backup that would be
+        produced.  This method MUST be read-only — it must not create,
+        delete, or modify any file, checkpoint, or state record.
+
+        Used by :meth:`Core._backup_target` dry-run prediction to render
+        honest predictions (real run minus mutations).
         """
         ...
 

@@ -34,6 +34,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -42,6 +43,10 @@ from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
 from qsnap.models.results import SnapshotInfo
 from qsnap.modules.backup.bitmap import BitmapBackupProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
+
+if TYPE_CHECKING:
+    from qsnap.core import Core
+    from tests.mocks.mock_state import InMemoryStateManager
 from qsnap.utils.nbd import (
     is_libvirt_new_enough,
     is_vm_running,
@@ -214,6 +219,9 @@ def test_full_backup_compression_modes(test_vm):
         vm_config.disks[0],
     )
     assert result_none.success, f"Uncompressed FULL failed: {result_none.error}"
+    assert result_none.kind == "full", (
+        f"First backup with no checkpoint must be a FULL, got {result_none.kind!r}"
+    )
     _assert_standalone_qcow2(shell, result_none.target_path)
     ct_none = _get_compression_type(shell, result_none.target_path)
     assert ct_none == "zlib", (
@@ -231,6 +239,9 @@ def test_full_backup_compression_modes(test_vm):
         compression_type="zstd",
     )
     assert result_zstd.success, f"zstd FULL failed: {result_zstd.error}"
+    assert result_zstd.kind == "full", (
+        f"Compressed FULL must report kind 'full', got {result_zstd.kind!r}"
+    )
     _assert_standalone_qcow2(shell, result_zstd.target_path)
     ct_zstd = _get_compression_type(shell, result_zstd.target_path)
     assert ct_zstd == "zstd", f"zstd FULL: expected compression-type 'zstd', got {ct_zstd!r}"
@@ -246,6 +257,9 @@ def test_full_backup_compression_modes(test_vm):
         compression_type="zlib",
     )
     assert result_zlib.success, f"zlib FULL failed: {result_zlib.error}"
+    assert result_zlib.kind == "full", (
+        f"Compressed FULL must report kind 'full', got {result_zlib.kind!r}"
+    )
     _assert_standalone_qcow2(shell, result_zlib.target_path)
     ct_zlib = _get_compression_type(shell, result_zlib.target_path)
     assert ct_zlib == "zlib", f"zlib FULL: expected compression-type 'zlib', got {ct_zlib!r}"
@@ -316,6 +330,9 @@ def test_full_backup_stopped_vm(test_vm, caplog):
     )
 
     assert result.success, f"Stopped-VM FULL must succeed, got: {result.error}"
+
+    # Stopped-VM FULL is still a FULL — the result must carry kind="full".
+    assert result.kind == "full", f"Stopped-VM FULL must report kind 'full', got {result.kind!r}"
 
     # Stopped-VM FULL creates NO checkpoint (design D1): the direct
     # qemu-img convert path never runs virsh backup-begin, so the
@@ -399,6 +416,12 @@ def test_full_backup_running_vm_nbd(test_vm, caplog):
     )
 
     assert result.success, f"Running-VM NBD FULL must succeed, got: {result.error}"
+
+    # Every run_backup success must carry the backup kind (spec:
+    # backup-provider — "Backup results carry the backup kind").
+    assert result.kind == "full", (
+        f"Running-VM NBD FULL must report kind 'full', got {result.kind!r}"
+    )
 
     # qemu-img convert must appear.
     convert_calls = [
@@ -512,6 +535,10 @@ def test_full_backup_qemu_img_convert_engine_default(test_vm, caplog):
     )
 
     assert result.success, f"qemu-img-convert FULL must succeed, got: {result.error}"
+
+    assert result.kind == "full", (
+        f"qemu-img-convert FULL must report kind 'full', got {result.kind!r}"
+    )
 
     # qemu-img convert must appear AND nbd:unix: must appear (NBD path for running VM).
     convert_calls = [
@@ -772,6 +799,8 @@ def test_full_backup_custom_convert_parallel_and_out_of_order(test_vm, caplog):
 
     assert result.success, f"custom-flags FULL must succeed, got: {result.error}"
 
+    assert result.kind == "full", f"custom-flags FULL must report kind 'full', got {result.kind!r}"
+
     # The command should appear in DEBUG logs as a list.  Look for a
     # convert command with '2' immediately after '-m' (parallel=2),
     # and verify no '-W' flag (out_of_order=False).
@@ -920,6 +949,10 @@ path = "{target_dir}"
     )
 
     assert result.success, f"VM-level engine options FULL must succeed, got: {result.error}"
+
+    assert result.kind == "full", (
+        f"VM-level engine options FULL must report kind 'full', got {result.kind!r}"
+    )
 
     # Step 4: Assert the convert argv at DEBUG level.
     convert_messages = [

@@ -79,6 +79,35 @@ def _expect_no_blockjob(mock_shell) -> None:
     )
 
 
+def _expect_healthy_probe(mock_shell, cp_name: str) -> None:
+    """Register a HEALTHY QMP probe for *cp_name* (recover-lost-checkpoint-bitmaps).
+
+    Loads the canned ``qmp_block_nodes_healthy.json`` fixture and rewrites
+    the advertised bitmap name to *cp_name* so the exact-name match in
+    ``BitmapBackupProvider._probe_running_vm`` returns HEALTHY — the delta
+    path proceeds without entering recovery.
+    """
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "shell_outputs"
+        / "qmp_block_nodes_healthy.json"
+    )
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    for node in payload.get("return", []):
+        for bitmap in node.get("dirty-bitmaps", []):
+            bitmap["name"] = cp_name
+    mock_shell.expect("qemu-monitor-command").returns(
+        ShellResult(
+            success=True,
+            stdout=json.dumps(payload),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -215,6 +244,7 @@ def test_run_backup_subsequent_creates_single_delta_chained(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -241,6 +271,7 @@ def test_run_backup_subsequent_creates_single_delta_chained(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
     assert result.disk == "vda"
     # Freeze-timestamp delta name — no snapshot name anywhere.
     assert result.target_path.name == f"{_delta_backup_name()}.qcow2", (
@@ -289,6 +320,7 @@ def test_incremental_backup_named_freeze_ts_disk_hex(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -312,6 +344,7 @@ def test_incremental_backup_named_freeze_ts_disk_hex(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
     assert re.fullmatch(
         r"testvm\.\d{8}T\d{6}_vda_[0-9a-f]{6}\.qcow2",
         result.target_path.name,
@@ -347,6 +380,7 @@ def test_delta_named_by_freeze_point_no_snapshot_name(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())
     mock_shell.expect("domjobabort").returns(success_result())
@@ -370,6 +404,7 @@ def test_delta_named_by_freeze_point_no_snapshot_name(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
     assert _FREEZE_STR in result.target_path.name, (
         f"Delta name must embed the freeze timestamp {_FREEZE_STR}, got {result.target_path.name}"
     )
@@ -415,6 +450,7 @@ def test_copy_loop_reads_only_dirty_extents(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -441,6 +477,7 @@ def test_copy_loop_reads_only_dirty_extents(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     pread_calls = [c for c in nbd.calls if c[0] == "pread"]
     assert len(pread_calls) > 0, "Expected at least one pread call"
@@ -494,6 +531,7 @@ def test_first_incremental_backing_is_full(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
         mock_shell.expect("domjobabort").returns(success_result())
@@ -519,6 +557,7 @@ def test_first_incremental_backing_is_full(
             result = provider.run_backup(vm_config, target, snapshot)
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     create_cmds = [cmd for cmd in all_run_cmds if "qemu-img create" in cmd]
@@ -567,6 +606,7 @@ def test_previous_backup_vanished_retryable_failure(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())
     mock_shell.expect("domjobabort").returns(success_result())
@@ -650,6 +690,7 @@ def test_previous_existence_rechecked_before_create(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -676,6 +717,7 @@ def test_previous_existence_rechecked_before_create(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
@@ -748,6 +790,7 @@ def test_mid_copy_failure_cleans_temp_qemu_nbd_and_socket(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())
     mock_shell.expect("domjobabort").returns(success_result())
@@ -828,6 +871,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -854,6 +898,7 @@ def test_successful_transfer_no_tmp_or_socket_remain(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     tmp_suffix = f"{_delta_backup_name()}.qcow2.tmp"
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
@@ -932,6 +977,7 @@ def test_stall_watchdog_aborts_with_correct_error_string(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # successor
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1020,6 +1066,7 @@ def test_slow_progressing_loop_not_killed(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1045,6 +1092,7 @@ def test_slow_progressing_loop_not_killed(
         result = provider.run_backup(vm_config, target, vm_config.disks[0], stall_timeout=5)
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
 
 def test_zero_stall_timeout_disables_watchdog(
@@ -1107,6 +1155,7 @@ def test_zero_stall_timeout_disables_watchdog(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1132,6 +1181,7 @@ def test_zero_stall_timeout_disables_watchdog(
         result = provider.run_backup(vm_config, target, vm_config.disks[0], stall_timeout=0)
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
 
 def test_incremental_uses_unified_engine_no_convert(
@@ -1164,6 +1214,7 @@ def test_incremental_uses_unified_engine_no_convert(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1189,6 +1240,7 @@ def test_incremental_uses_unified_engine_no_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
@@ -1233,6 +1285,7 @@ def test_run_backup_incremental_dirty_blocks_only_zero_skip_false(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1259,6 +1312,7 @@ def test_run_backup_incremental_dirty_blocks_only_zero_skip_false(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     # Verify _transfer was called with zero_skip=False
     assert transfer_mock.call_count == 1
@@ -1296,6 +1350,7 @@ def test_incremental_always_uses_pread_pwrite(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1321,6 +1376,7 @@ def test_incremental_always_uses_pread_pwrite(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
@@ -1411,6 +1467,7 @@ def test_qemu_img_info_shows_backing_filename(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         mock_shell.expect("checkpoint-delete").returns(success_result())  # successor
         mock_shell.expect("domjobabort").returns(success_result())
@@ -1473,6 +1530,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
         mock_shell.expect("domjobabort").returns(success_result())
@@ -1499,6 +1557,7 @@ def test_restore_chain_resolved_without_bitmap_specific_logic(
             result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
     create_cmds = [cmd for cmd in all_run_cmds if "qemu-img create" in cmd]
@@ -1547,6 +1606,7 @@ def test_bitmap_incremental_ignores_compress_setting(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1573,6 +1633,7 @@ def test_bitmap_incremental_ignores_compress_setting(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
 
@@ -1694,6 +1755,7 @@ def test_full_size_verify_failure_triggers_cleanup(
                 error=None,
             )
         )
+        _expect_healthy_probe(mock_shell, prior_checkpoint)
         mock_shell.expect("backup-begin").returns(success_result())
         mock_shell.expect("checkpoint-delete").returns(success_result())
         mock_shell.expect("domjobabort").returns(success_result())
@@ -1771,6 +1833,7 @@ def test_size_sanity_check_warns_on_large_transfer(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1798,6 +1861,7 @@ def test_size_sanity_check_warns_on_large_transfer(
     assert result.success is True, (
         f"Backup should succeed despite large transfer, got error: {result.error}"
     )
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
     # The large delta is named by its freeze point.
     assert result.target_path.name == f"{_delta_backup_name()}.qcow2"
 
@@ -1837,6 +1901,7 @@ def test_run_backup_normal_prior_always_set(
             error=None,
         )
     )
+    _expect_healthy_probe(mock_shell, prior_checkpoint)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())  # rotation
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1864,6 +1929,7 @@ def test_run_backup_normal_prior_always_set(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
     # Prior is set → incremental copy_loop used, NOT _full_pull_lifecycle
     assert mock_fpl.call_count == 0, (
         "_full_pull_lifecycle should NOT be called when prior exists (normal path)"
@@ -1906,6 +1972,8 @@ def test_second_run_backup_uses_successor_as_baseline(
             error=None,
         )
     )
+    # The probe targets the NEWEST checkpoint (the successor) each run.
+    _expect_healthy_probe(mock_shell, successor)
     mock_shell.expect("backup-begin").returns(success_result())
     mock_shell.expect("checkpoint-delete").returns(success_result())
     mock_shell.expect("domjobabort").returns(success_result())
@@ -1931,6 +1999,7 @@ def test_second_run_backup_uses_successor_as_baseline(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "delta", f"Delta path must report kind='delta', got {result.kind!r}"
 
     # write_backup_xml receives the newest checkpoint as the incremental baseline.
     mock_wbxml.assert_called_once()

@@ -223,3 +223,44 @@ class IStateManager(ABC):
         - the ``last_backup_allocation`` entry keyed by *disk*.
         """
         ...
+
+    # ── Crash evidence / recovery gating (recover-lost-checkpoint-bitmaps) ──
+
+    @abstractmethod
+    def get_boot_id(self, vm_name: str) -> str | None:
+        """Return the host boot_id recorded for *vm_name*, or ``None``.
+
+        The boot_id is persisted after every fully successful pipeline
+        run so that the recovery path can detect unclean host shutdowns
+        (changed boot_id + dead bitmap + covering backup file → WARNING).
+        """
+        ...
+
+    @abstractmethod
+    def set_boot_id(self, vm_name: str, boot_id: str) -> None:
+        """Record the current host boot_id for *vm_name*."""
+        ...
+
+    @abstractmethod
+    def get_last_commit_ts(self, vm_name: str, disk: str) -> str | None:
+        """Return the per-disk ``last_commit_ts`` for *vm_name*/*disk*, or ``None``.
+
+        Written by Core after every successful blockcommit /
+        ``qemu-img commit``.  Used by recovery gate G1: a commit
+        timestamp after the checkpoint freeze invalidates the
+        recovered-delta copy set and forces a FULL fallback.
+
+        Returns an ISO-8601 string (e.g. ``"20260808T160000"``) when set,
+        or ``None`` when the marker is absent (pre-feature state — G1
+        fails conservatively).
+        """
+        ...
+
+    @abstractmethod
+    def set_last_commit_ts(self, vm_name: str, disk: str, timestamp: str) -> None:
+        """Record the last commit timestamp for *vm_name*/*disk*.
+
+        *timestamp* is an ISO-8601 compact string (e.g.
+        ``"20260808T160000"``).
+        """
+        ...

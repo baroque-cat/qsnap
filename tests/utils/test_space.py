@@ -17,7 +17,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from qsnap.models.results import ShellResult
-from qsnap.utils.space import check_free_space, estimate_full_size, estimate_incremental_size
+from qsnap.utils.space import (
+    check_free_space,
+    estimate_full_size,
+    estimate_incremental_size,
+    estimate_recovered_delta_size,
+)
 
 # ── estimate_full_size ───────────────────────────────────────────────────
 
@@ -253,6 +258,88 @@ def test_estimate_incremental_size_probe_uses_check_true(clean_shell) -> None:
     assert "--backing-chain" not in cmd
     assert timeout == 30
     assert check is True
+
+
+# ── estimate_recovered_delta_size ─────────────────────────────────────────
+
+
+def test_estimate_recovered_delta_size_sums_copy_set(clean_shell) -> None:
+    """Recovered-delta estimate = sum of ``actual-size`` over every layer
+    of the copy set (bitmap-loss-recovery spec, size-estimation scenario
+    "Estimate sums the copy set").
+
+    Each layer is probed individually via ``qemu-img info --force-share
+    --output=json`` (no ``--backing-chain`` — the copy set is bounded by
+    state timestamps, not by the live chain).
+    """
+    shell = clean_shell
+    layers = [
+        Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+        Path("/var/lib/libvirt/snapshots/testvm/snap3.qcow2"),
+    ]
+    for layer, size in zip(layers, [1048576, 2097152, 3145728], strict=True):
+        # Distinct pattern per layer (MockShell first-match-wins).
+        shell.expect(f"qemu-img info --force-share --output=json {layer}").returns(
+            _json_result({"filename": str(layer), "actual-size": size})
+        )
+
+    estimate = estimate_recovered_delta_size(shell, layers)
+
+    assert estimate == 1048576 + 2097152 + 3145728
+    # One probe per layer, in order, without --backing-chain.
+    assert shell.call_history == [
+        f"qemu-img info --force-share --output=json {layer}" for layer in layers
+    ]
+
+
+def test_estimate_recovered_delta_falls_back_to_full_on_unreadable_layer(
+    clean_shell,
+) -> None:
+    """An unreadable copy-set layer falls back to the FULL chain-sum
+    estimate of the topmost layer — a conservative upper bound that is
+    always safe (spec scenario "Unreadable layer falls back to FULL
+    estimate")."""
+    shell = clean_shell
+    layers = [
+        Path("/var/lib/libvirt/snapshots/testvm/snap1.qcow2"),
+        Path("/var/lib/libvirt/snapshots/testvm/snap2.qcow2"),
+    ]
+
+    # First layer probe fails (unreadable) → FULL fallback.
+    shell.expect("qemu-img info --force-share --output=json").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="qemu-img: Could not open snap1.qcow2",
+            returncode=1,
+            error="qemu-img: Could not open snap1.qcow2",
+        )
+    )
+    # Fallback: chain-sum over the topmost layer.
+    shell.expect("qemu-img info --force-share --backing-chain --output=json").returns(
+        _json_result(
+            [
+                {"filename": "/var/lib/libvirt/images/testvm.qcow2", "actual-size": 1048576},
+                {
+                    "filename": "/var/lib/libvirt/snapshots/testvm/snap2.qcow2",
+                    "actual-size": 2097152,
+                },
+            ]
+        )
+    )
+
+    estimate = estimate_recovered_delta_size(shell, layers)
+
+    assert estimate == 1048576 + 2097152
+    # The unreadable layer triggered the conservative fallback: the
+    # backing-chain probe of the topmost layer was issued.
+    assert any("--backing-chain" in cmd for cmd in shell.call_history)
+
+
+def test_estimate_recovered_delta_empty_copy_set_returns_none(clean_shell) -> None:
+    """An empty copy set yields None (undecidable — nothing to sum)."""
+    assert estimate_recovered_delta_size(clean_shell, []) is None
 
 
 # ── check_free_space ─────────────────────────────────────────────────────

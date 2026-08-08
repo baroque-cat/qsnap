@@ -25,6 +25,7 @@ from qsnap.core import BackupAbortError, Core, PipelineResult
 from qsnap.models.config import DiskConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
+    BaselineAssessment,
     ChangeResult,
     CommitResult,
     FullBackupInfo,
@@ -34,7 +35,7 @@ from qsnap.models.results import (
     SnapshotResult,
     SnapshotSpec,
 )
-from tests.mocks import MockConfigFacade
+from tests.mocks import MockBitmapBackupProvider, MockConfigFacade
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
 
@@ -463,9 +464,11 @@ def test_dry_run_logs_no_mutation(
 
     # IShell.run may be called for read-only operations: qemu-img info
     # --force-share for chain-size and allocation estimation (design D5),
-    # virsh domstate for deferred drain planning (design D8), and
+    # virsh domstate for deferred drain planning (design D8),
     # _validate_environment() read-only calls (which, test, virsh dominfo,
-    # find).  Verify only read-only shell calls were made.
+    # find), and — since dry-run parity (recover-lost-checkpoint-bitmaps,
+    # D10) — the read-only blockjob probe.  Verify only read-only shell
+    # calls were made.
     read_only_patterns = (
         "qemu-img info",
         "du",
@@ -473,6 +476,7 @@ def test_dry_run_logs_no_mutation(
         "which ",
         "virsh dominfo",
         "virsh domstate",
+        "virsh blockjob",
         "find",
         "qemu-nbd",
     )
@@ -5510,7 +5514,7 @@ def test_onchange_gate_uses_detector_not_snapshot_names(
         mock_factory._backup_provider,
         "list",
         wraps=mock_factory._backup_provider.list,
-    ) as list_spy:
+    ):
         should_proceed, _ = core._should_backup_onchange(vm, target)
 
     assert should_proceed is True
@@ -5965,6 +5969,11 @@ def test_startup_orphan_checkpoint_deleted_at_startup(
     A checkpoint whose freeze timestamp is not covered by any backup
     file on the target is the orphan of a crashed export — it must be
     deleted (design D9), not preserved.
+
+    Recovery-parity note (recover-lost-checkpoint-bitmaps, D12): the
+    bitmap probe only runs for COVERED checkpoints.  An uncovered
+    (orphan) checkpoint is deleted without a probe — its bitmap state
+    is irrelevant because no backup file can serve as its baseline.
     """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
@@ -6035,7 +6044,14 @@ def test_startup_healthy_checkpoint_kept(
     mock_shell,
     tmp_path,
 ):
-    """Startup validation keeps a checkpoint covered by a backup file."""
+    """Startup validation keeps a checkpoint covered by a backup file.
+
+    The covering file alone is no longer sufficient (design D12 of
+    recover-lost-checkpoint-bitmaps): the checkpoint's dirty bitmap is
+    probed via ``provider.assess_baseline``.  A HEALTHY bitmap keeps the
+    checkpoint; only a DEAD bitmap (or a missing covering file) leads
+    to deletion.
+    """
     target_dir = tmp_path / "backup"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = make_target(path=str(target_dir))
@@ -6060,8 +6076,19 @@ def test_startup_healthy_checkpoint_kept(
 
     target_hash = mock_factory._bitmap_backup_provider.target_hash(str(target.path))
     healthy_checkpoint = f"qsnap-{target_hash}-vda-20250801T120000"
+    # The covered checkpoint's bitmap probe reports HEALTHY — the
+    # checkpoint is kept (only DEAD probes are treated as orphans).
+    healthy_provider = MockBitmapBackupProvider(
+        assessment=BaselineAssessment(
+            status="healthy",
+            newest_checkpoint=healthy_checkpoint,
+            size_estimate=1048576,
+        )
+    )
+    mock_factory._bitmap_backup_provider = healthy_provider
+    mock_factory._backup_provider = healthy_provider
     with patch.object(
-        mock_factory._bitmap_backup_provider,
+        healthy_provider,
         "list",
         return_value=[backup],
     ):
@@ -6088,7 +6115,12 @@ def test_startup_orphan_checkpoint_delete_failure_non_fatal(
     mock_shell,
     caplog,
 ):
-    """A failed orphan-checkpoint deletion is non-fatal (WARNING only)."""
+    """A failed orphan-checkpoint deletion is non-fatal (WARNING only).
+
+    The orphan (uncovered) checkpoint is deleted without a bitmap probe
+    (recover-lost-checkpoint-bitmaps D12: probes run only for covered
+    checkpoints).  A deletion failure must not abort the pipeline.
+    """
     target = make_target()
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -7813,6 +7845,7 @@ def test_full_creation_retried_via_execute_with_retry(
             target_path=target.path / "testvm.FULL.qcow2",
             bytes_transferred=1048576,
             error=None,
+            kind="full",
         )
 
     with (

@@ -73,7 +73,7 @@ class DefaultFactory(IVMModuleFactory):
             # Hard failure: the backup transport dependency is an
             # actionable error naming the system package.
             raise RuntimeError(MISSING_LIBNBD_ERROR)
-        return BitmapBackupProvider(self._shell, LibnbdClient())
+        return BitmapBackupProvider(self._shell, LibnbdClient(), state=self._state)
 
     def create_retention_engine(self, policy: RetentionPolicy) -> IRetentionEngine:
         return TimeBasedRetention(policy)

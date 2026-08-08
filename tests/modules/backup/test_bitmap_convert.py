@@ -117,6 +117,7 @@ def test_run_backup_running_vm_compressed(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     # Verify the convert command was passed to run_with_stall_detection
     convert_calls = [
@@ -155,6 +156,7 @@ def test_run_backup_running_vm_uncompressed(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -189,6 +191,7 @@ def test_run_backup_stopped_vm_compressed(mock_shell, make_vm_config, make_targe
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -225,6 +228,7 @@ def test_run_backup_stopped_vm_uncompressed(mock_shell, make_vm_config, make_tar
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -309,6 +313,7 @@ def test_run_backup_convert_success_renames_tmp_to_final(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
     assert result.target_path.suffix == ".qcow2"
     assert ".tmp" not in result.target_path.name
 
@@ -338,6 +343,7 @@ def test_run_backup_running_vm_uses_nbd_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
 
@@ -373,6 +379,7 @@ def test_run_backup_stopped_vm_uses_direct_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
 
@@ -417,6 +424,7 @@ def test_run_backup_full_does_not_use_write_server_or_transfer(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
     mock_wserver.assert_not_called()
     mock_transfer.assert_not_called()
 
@@ -444,6 +452,7 @@ def test_run_backup_convert_uses_stall_detection(
         result = provider.run_backup(vm_config, target, vm_config.disks[0], stall_timeout=1800)
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     # Spied run_with_stall_detection should have been called
     convert_stall_calls = [
@@ -476,6 +485,7 @@ def test_run_backup_stall_detection_output_file_is_tmp(
         result = provider.run_backup(vm_config, target, vm_config.disks[0], stall_timeout=1800)
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_stall_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -513,6 +523,7 @@ def test_run_backup_stall_detection_timeout_from_target_config(
         )
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_stall_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -554,6 +565,7 @@ def test_run_backup_first_full_via_qemu_img_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     all_run_cmds = [" ".join(call_obj.args[0]) for call_obj in run_spy.call_args_list]
 
@@ -608,6 +620,7 @@ def test_run_backup_full_pull_lifecycle_uses_convert(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
     assert mock_fpl.call_count == 1, (
         f"run_backup() FULL should call _full_pull_lifecycle once, got {mock_fpl.call_count}"
     )
@@ -633,6 +646,7 @@ def test_run_backup_full_pull_lifecycle_no_write_server(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
     mock_wserver.assert_not_called()
     mock_transfer.assert_not_called()
 
@@ -659,6 +673,7 @@ def test_run_backup_global_section_compress_false_affects_convert_cmd(
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_stall_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -694,6 +709,7 @@ def test_run_backup_custom_convert_parallel(
         result = provider.run_backup(vm_config, target, vm_config.disks[0], convert_parallel=2)
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
 
     convert_calls = [
         call for call in stall_spy.call_args_list if "qemu-img" in " ".join(call.args[0])
@@ -725,6 +741,7 @@ def test_stopped_vm_no_checkpoint_offline_full(mock_shell, make_vm_config, make_
         result = provider.run_backup(vm_config, target, vm_config.disks[0])
 
     assert result.success is True
+    assert result.kind == "full", f"FULL convert path must report kind='full', got {result.kind!r}"
     assert result.deferred is False
     assert result.disk == "vda"
     assert result.checkpoint is None, "Offline FULL creates no checkpoint"
