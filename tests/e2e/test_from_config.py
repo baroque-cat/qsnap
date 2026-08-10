@@ -214,8 +214,11 @@ def test_config_to_restore_after_recovered_delta(e2e_vm, caplog):
     )
 
     backups_after_run3 = sorted(target_dir.glob("*.qcow2"))
-    assert len(backups_after_run3) == 3, (
-        f"Expected a 3rd backup after the recovery run, got {len(backups_after_run3)}: "
+    # D8: recovery FULL retires the entire superseded generation
+    # (old FULL + its incrementals) immediately after verification.
+    assert len(backups_after_run3) == 1, (
+        f"Expected only recovery FULL after D8 retirement, "
+        f"got {len(backups_after_run3)}: "
         f"{[p.name for p in backups_after_run3]}"
     )
     newest_backup = max(backups_after_run3, key=lambda p: parse_timestamp(p.stem, p))

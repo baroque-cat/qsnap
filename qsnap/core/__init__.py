@@ -218,6 +218,11 @@ class Core:
         # dry-run mode only; real runs accumulate _actions instead.  Never
         # written to the transaction log.
         self._predictions: list[ActionRecord] = []
+        # Recovery-pending track (recover-lost-checkpoint-bitmaps, D13):
+        # when startup deletes a dead-bitmap checkpoint with a covering
+        # file, the subsequent FULL must trigger immediate retirement.
+        # Maps (target_path, disk) → True; in-memory, single-run scope.
+        self._recovery_pending: dict[tuple[str, str], bool] = {}
         # Per-VM simulated snapshots produced by the most recent
         # _execute_snapshot_steps() dry-run; threaded by _execute_pipeline()
         # into the backup steps so retention and transfer predictions
@@ -3204,9 +3209,11 @@ class Core:
         # Auto-recovery: detect and delete broken-chain backups (spec:
         # auto-recovery).  Runs BEFORE retention evaluation to ensure
         # per-chain grouping can resolve all chains.
-        if self._preserve_backups or self._dry_run:
-            # Skip auto-recovery when preserve or dry-run mode is
-            # active — user wants to inspect state without modifications.
+        # In dry-run mode, run read-only assessment (WARNING / predict)
+        # but skip all deletions and state mutations.
+        if self._preserve_backups:
+            # Skip auto-recovery when preserve mode is active — user
+            # wants to inspect state without modifications.
             return
 
         for target in vm_config.targets:
@@ -3310,6 +3317,63 @@ class Core:
                         vm_config=vm_config,
                         target=target,
                         disk_cfg=disk_cfg,
+                    )
+
+                # ── Startup FULL supplementation (design D11) ──────────
+                # Register on-disk FULL backups that are missing from
+                # _full_backups.json.  This self-heals the state after a
+                # recovery FULL was created but not recorded, and closes
+                # the recording gap for any FULL-not-in-state scenario.
+                try:
+                    state_fulls = self._state.get_full_backups(str(target.path))
+                    state_full_stems = {
+                        f.name.replace(".qcow2", "") for f in state_fulls
+                    }
+                    for b in provider.list(target):
+                        if not b.is_full:
+                            continue
+                        if b.name in state_full_stems:
+                            continue
+                        m1_error = verify_full_backup(
+                            self._shell, b.path, "metadata"
+                        )
+                        if m1_error is not None:
+                            logger.warning(
+                                "[startup] %s: skipping untracked FULL %s — "
+                                "verification failed: %s",
+                                vm_config.name,
+                                b.name,
+                                m1_error,
+                            )
+                            continue
+                        if self._dry_run:
+                            logger.info(
+                                "[dry-run] Would supplement untracked FULL %s "
+                                "into state",
+                                b.name,
+                            )
+                            continue
+                        logger.info(
+                            "[startup] %s: supplementing untracked FULL %s "
+                            "into state",
+                            vm_config.name,
+                            b.name,
+                        )
+                        disk_inferred = b.disk or "vda"
+                        record_ts = b.timestamp if b.timestamp is not None else datetime.now()
+                        self._state.record_full_backup(
+                            str(target.path),
+                            b.name,
+                            record_ts,
+                            disk_inferred,
+                        )
+                except Exception as supp_exc:
+                    logger.warning(
+                        "[startup] %s: failed to supplement state for "
+                        "target %s: %s",
+                        vm_config.name,
+                        target.path,
+                        supp_exc,
                     )
             except Exception as exc:
                 logger.warning(
@@ -3446,6 +3510,12 @@ class Core:
                                 boot_evidence,
                             )
                             # Fall through to deletion below.
+                            # Record recovery intent so the FULL that
+                            # follows triggers immediate retirement
+                            # (design D13: recovery-pending track).
+                            self._recovery_pending[
+                                (target_path_str, disk)
+                            ] = True
                         else:
                             return  # Healthy — bitmap is alive.
                     except Exception as exc:
@@ -5380,8 +5450,10 @@ class Core:
                 )
                 successful_disks.append(result)
 
-                # Record FULL in state.
-                if needs_full:
+                # Record FULL in state (design D10: always register by result.kind,
+                # not by Core's needs_full, so that recovery FULLs triggered by
+                # dead checkpoints are tracked).
+                if result.kind == "full":
                     self._state.record_full_backup(
                         str(target.path),
                         f"{result.snapshot_name}.qcow2",
@@ -5389,8 +5461,8 @@ class Core:
                         result.disk or disk_target,
                     )
 
-                # Record incremental dependency.
-                if not needs_full and result.success and not result.deferred:
+                # Record incremental dependency (deltas and recovered deltas).
+                if result.kind != "full" and result.success and not result.deferred:
                     anchor = self._resolve_chain_full_anchor(result.target_path)
                     if anchor is not None:
                         self._state.record_incremental_dependency(
@@ -5460,6 +5532,13 @@ class Core:
         # keep_generations.  Augment the remove set with every non-newest
         # FULL chain for disks that produced a recovery FULL.
         recovery_full_disks = {r.disk for r in successful_disks if r.recovery}
+        # Also consider disks flagged by startup dead-bitmap deletion
+        # (design D13): these produce a plain FULL (recovery=False)
+        # but still need immediate retirement.
+        if not self._dry_run:
+            for (tgt_str, disk), _ in self._recovery_pending.items():
+                if tgt_str == str(target.path):
+                    recovery_full_disks.add(disk)
         if recovery_full_disks and retention_result is not None and not self._dry_run:
             remove_set = set(retention_result.remove)
             keep_set = set(retention_result.keep)
@@ -5477,7 +5556,7 @@ class Core:
                         for b in backups:
                             if b.disk == disk_target and not b.is_full:
                                 anchor = self._resolve_chain_full_anchor(b.path)
-                                if anchor == old_full.name.rsplit(".", 1)[0]:
+                                if anchor == old_full.name:
                                     remove_set.add(b.name)
                                     keep_set.discard(b.name)
             if remove_set != set(retention_result.remove):

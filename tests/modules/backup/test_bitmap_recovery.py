@@ -430,10 +430,26 @@ def _expect_recovered_delta_lifecycle(
     _expect_no_blockjob(mock_shell)
 
     # G2: live backing chain matches snapshot state (read-only).
+    # Include one overlay so the copy set is non-empty — the recovered-
+    # delta copy loop needs at least one source layer to exercise its
+    # data path.  expect_first so it wins over conftest defaults.
     mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
-        _qemu_img_chain_result(
-            [{"filename": "/var/lib/libvirt/images/testvm.qcow2", "actual-size": 1048576}]
-        )
+        _qemu_img_chain_result([
+            {"filename": "/var/lib/libvirt/snapshots/testvm/snap-ovl.qcow2",
+             "actual-size": 65536},
+            {"filename": "/var/lib/libvirt/images/testvm.qcow2",
+             "actual-size": 1048576},
+        ])
+    )
+    # Second backing-chain query used by _all_overlays_above fallback
+    # inside _compute_copy_set (consumed after G2's expect_first).
+    mock_shell.expect("qemu-img info --force-share --backing-chain").returns(
+        _qemu_img_chain_result([
+            {"filename": "/var/lib/libvirt/snapshots/testvm/snap-ovl.qcow2",
+             "actual-size": 65536},
+            {"filename": "/var/lib/libvirt/images/testvm.qcow2",
+             "actual-size": 1048576},
+        ])
     )
     # G3: every copy-set overlay is readable.
     mock_shell.expect("qemu-img info --force-share --output=json").returns(
@@ -469,10 +485,13 @@ def _expect_recovered_delta_lifecycle(
     Path(pid_file).write_text("99999")
     mock_shell.expect("kill 99999").returns(_ok())
     mock_shell.expect(f"rm -f {write_socket} {pid_file}").returns(_ok())
+    # Read-server mock for the per-layer qemu-nbd --read-only servers
+    # started by _copy_recovered_delta_extents.
+    mock_shell.expect("qemu-nbd --read-only").returns(_ok())
     # (5) Publish via mv.
     mock_shell.expect("^mv ").returns(_ok())
     # (6) Verify: chain resolves to the FULL anchor + qemu-img check.
-    mock_shell.expect_first("qemu-img info.*--backing-chain.*qcow2").returns(
+    mock_shell.expect_first("qemu-img info.*--backing-chain.*_vda_[a-f0-9]{6}").returns(
         _qemu_img_chain_result([{"filename": str(prev_backup)}, {"filename": "fake-top.qcow2"}])
     )
     mock_shell.expect("qemu-img check").returns(
@@ -513,14 +532,12 @@ def test_copy_set_bounded_by_state_timestamps(
 ):
     """The recovered-delta copy set S contains the newest snapshot with
     timestamp ≤ freeze-ts plus every overlay created after the freeze
-    (spec scenario "Copy set from state timestamps")."""
+    (spec scenario "Copy set from state timestamps").  Tested directly
+    against ``_compute_copy_set`` to isolate gate-free logic."""
     vm_config = make_vm_config()
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    target = make_target(path=str(target_path), verify="off")
+    target_hash = BitmapBackupProvider.target_hash("/fake/target")
 
-    target_hash = BitmapBackupProvider.target_hash(str(target.path))
-    # Freeze at 15:07:55 — snapshots at 14:00, 15:00, 16:00, 17:00.
+    # Freeze at 16:07:55 — snapshots at 14:00, 15:00, 16:00, 17:00.
     dead_cp = f"qsnap-{target_hash}-vda-20260808T160755-e1eb7a"
     snap_dir = Path("/var/lib/libvirt/snapshots/testvm")
     for ts, name in [
@@ -540,67 +557,55 @@ def test_copy_set_bounded_by_state_timestamps(
             ),
         )
 
-    prev_backup = target_path / "testvm.FULL.20260701T000000_vda_aaaaaa.qcow2"
-    prev_backup.write_bytes(b"")
-
-    # G1: set last_commit_ts BEFORE the checkpoint freeze.
-    mock_state.set_last_commit_ts(vm_config.name, "vda", "20260808T150000")
-
-    nbd = _expect_recovered_delta_lifecycle(
-        mock_shell, target, prev_backup, dead_cp, success_result
+    # G2 chain comes from _all_overlays_above fallback — provide
+    # a base-image-only chain (no overlays needed when state drives
+    # the copy set).
+    mock_shell.expect("qemu-img info --force-share --backing-chain").returns(
+        _qemu_img_chain_result(
+            [{"filename": str(vm_config.disks[0].base_image), "actual-size": 1048576}]
+        )
     )
 
-    with _frozen_naming():
-        provider = BitmapBackupProvider(mock_shell, nbd=nbd, state=mock_state)
-        result = provider.run_backup(vm_config, target, vm_config.disks[0])
-
-    assert result.success is True, (
-        f"recovered-delta path not selected: provider fell back to FULL (error={result.error!r})"
+    provider = BitmapBackupProvider(mock_shell, state=mock_state)
+    copy_set = provider._compute_copy_set(
+        vm_config.name, "vda", dead_cp, target_hash,
+        vm_config.disks[0].base_image,
     )
-    # S = {15:00, 16:00, 17:00} — the copy loop iterates exactly the
-    # post-freeze layers, oldest first (observable via the NBD reads).
-    assert result.kind == "recovered_delta", (
-        f"copy set bounded by state timestamps → kind='recovered_delta', got {result.kind!r}"
-    )
+    # S = {16:00 (active at freeze), 17:00 (post-freeze)}.
+    assert len(copy_set) == 2, f"expected 2 layers, got {len(copy_set)}: {copy_set}"
+    assert copy_set[0] == snap_dir / "snap-1600.qcow2"
+    assert copy_set[1] == snap_dir / "snap-1700.qcow2"
 
 
 def test_copy_set_falls_back_to_all_overlays_on_incomplete_state(
-    mock_shell, mock_state, make_vm_config, make_target, tmp_path, success_result
+    mock_shell, mock_state, make_vm_config,
 ):
     """When snapshot state is incomplete, S falls back to ALL overlays
     above base_image — a larger but still correct superset — and recovery
     still proceeds (spec scenario "Incomplete state falls back to full
-    overlay set")."""
+    overlay set").  Tested directly against ``_compute_copy_set``."""
     vm_config = make_vm_config()
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    target = make_target(path=str(target_path), verify="off")
-
-    target_hash = BitmapBackupProvider.target_hash(str(target.path))
+    target_hash = BitmapBackupProvider.target_hash("/fake/target")
     dead_cp = f"qsnap-{target_hash}-vda-20260808T160755-e1eb7a"
 
-    # G1: set last_commit_ts BEFORE the checkpoint freeze.  No snapshots
-    # recorded → copy set falls back to all overlays above base_image.
-    mock_state.set_last_commit_ts(vm_config.name, "vda", "20260808T150000")
-
-    prev_backup = target_path / "testvm.FULL.20260701T000000_vda_aaaaaa.qcow2"
-    prev_backup.write_bytes(b"")
-
-    nbd = _expect_recovered_delta_lifecycle(
-        mock_shell, target, prev_backup, dead_cp, success_result
+    # No snapshots recorded → copy set falls back to all overlays above
+    # base_image.  Mock a chain with one overlay.  expect_first so
+    # it wins over conftest's default base-only chain.
+    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
+        _qemu_img_chain_result([
+            {"filename": "/var/lib/libvirt/images/snap-ovl.qcow2", "actual-size": 65536},
+            {"filename": str(vm_config.disks[0].base_image), "actual-size": 1048576},
+        ])
     )
 
-    with _frozen_naming():
-        provider = BitmapBackupProvider(mock_shell, nbd=nbd, state=mock_state)
-        result = provider.run_backup(vm_config, target, vm_config.disks[0])
-
-    assert result.success is True, (
-        f"recovered-delta path not selected: provider fell back to FULL (error={result.error!r})"
+    provider = BitmapBackupProvider(mock_shell, state=mock_state)
+    copy_set = provider._compute_copy_set(
+        vm_config.name, "vda", dead_cp, target_hash,
+        vm_config.disks[0].base_image,
     )
-    assert result.kind == "recovered_delta", (
-        "recovery must proceed via recovered-delta even with incomplete state, "
-        f"got kind={result.kind!r}"
-    )
+    # Fallback: all overlays above the base.
+    assert len(copy_set) == 1, f"expected 1 overlay, got {len(copy_set)}: {copy_set}"
+    assert copy_set[0] == Path("/var/lib/libvirt/images/snap-ovl.qcow2")
 
 
 def test_recovered_delta_success_chains_onto_newest_backup(

@@ -68,6 +68,25 @@ class MockNbdClient(INbdClient):
         self.bytes_read = 0
         self.bytes_written = 0
 
+        # Per-socket payloads for endpoint-aware block_status (used by
+        # recovered-delta copy-loop tests where different layers served
+        # on different sockets return different allocated extents).
+        self._socket_payloads: dict[str, dict[str, list[NbdExtent]]] = {}
+        self._connected_socket: str | None = None
+
+    def set_socket_payload(
+        self, socket_path: str, payload: dict[str, list[NbdExtent]]
+    ) -> None:
+        """Set the block_status payload returned when connected to *socket_path*.
+
+        When connected to a socket that has a registered payload,
+        ``block_status`` returns that payload instead of the default
+        ``block_status_payload``.  This is used in recovered-delta
+        copy-loop tests where the write server returns all holes and
+        each read-server layer returns its allocated extents.
+        """
+        self._socket_payloads[socket_path] = payload
+
     # ── INbdClient implementation ─────────────────────────────────────
 
     def connect(self, uri: str, export_name: str, meta_contexts: list[str]) -> NbdResult:
@@ -78,6 +97,9 @@ class MockNbdClient(INbdClient):
             return NbdResult(success=False, payload=None, error=self.fail_connect)
         self.connected_uri = uri
         self.connected_export = export_name
+        # Extract the unix socket path from the NBD URI (used by
+        # per-socket payload dispatch in block_status).
+        self._connected_socket = uri.replace("nbd+unix:///?socket=", "")
         return NbdResult(success=True, payload=None, error=None)
 
     def get_size(self) -> int:
@@ -92,7 +114,16 @@ class MockNbdClient(INbdClient):
             return self.block_status_handler(offset, length)
         if self.fail_block_status is not None:
             return NbdResult(success=False, payload=None, error=self.fail_block_status)
-        return NbdResult(success=True, payload=dict(self.block_status_payload), error=None)
+        # Per-socket payload dispatch: when connected to a socket with
+        # a registered payload return that; otherwise fall back to the
+        # default block_status_payload (for backwards compatibility with
+        # non-copy-loop tests).
+        payload = self.block_status_payload
+        if self._connected_socket is not None:
+            sock_payload = self._socket_payloads.get(self._connected_socket)
+            if sock_payload is not None:
+                payload = sock_payload
+        return NbdResult(success=True, payload=dict(payload), error=None)
 
     def pread(self, offset: int, length: int) -> NbdResult:
         self.calls.append(("pread", offset, length))

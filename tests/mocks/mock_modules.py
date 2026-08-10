@@ -145,7 +145,7 @@ class MockBitmapBackupProvider(IBackupProvider):
             error=None,
             disk=disk_target,
             deferred=self._deferred,
-            kind=self._backup_kind,
+            kind="full" if (force_full or self._backup_kind == "full") else self._backup_kind,
         )
 
     def assess_baseline(

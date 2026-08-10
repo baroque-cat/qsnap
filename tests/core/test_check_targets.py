@@ -858,7 +858,6 @@ def test_check_missing_checkpoint(
 
 @pytest.mark.unit
 @pytest.mark.mock
-@pytest.mark.xfail(reason="Implementation gap: multiple checkpoints per target not yet detected")
 def test_check_multiple_checkpoints(
     tmp_path: Path,
     make_vm_config,

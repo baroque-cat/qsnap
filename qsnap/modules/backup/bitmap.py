@@ -121,6 +121,13 @@ _BASE_ALLOCATION_CONTEXT = "base:allocation"
 """NBD standard meta-context advertising allocated vs hole/zero extents."""
 
 
+def _same_file(path: Path, other: str | None) -> bool:
+    """Return True when *path* resolves to the same file as *other*."""
+    if other is None:
+        return False
+    return os.path.realpath(str(path)) == os.path.realpath(other)
+
+
 @dataclass(frozen=True)
 class _CopyResult:
     """Outcome of the dirty-block copy loop (design D2).
@@ -316,16 +323,20 @@ class BitmapBackupProvider(IBackupProvider):
                 )
 
         # 6. Determine backup kind.
-        #    FULL when no checkpoint, forced, or recovery with no prior.
-        #    Recovery mode handles the dead-bitmap case (recovered delta
-        #    or FULL fallback) via a separate branch below.
-        is_full = (prior is None or force_full) and not recovery_mode
+        #    FULL when no checkpoint or forced.  Recovery mode handles
+        #    the dead-bitmap case (recovered delta or FULL fallback) via
+        #    a separate branch below; force_full overrides recovery.
+        is_full = prior is None or force_full
 
         # 6b. Recovery mode: when the bitmap is DEAD, evaluate gates and
         #     attempt a recovered delta; fall back to FULL on gate failure
         #     or transfer failure (design D4/D6/D7).
+        #     force_full overrides recovery — a user-requested or
+        #     Core-forced FULL always wins, but recovery cleanup (dead
+        #     checkpoint deletion, immediate retirement) still applies
+        #     (design D10).
         recovery_full = False
-        if recovery_mode:
+        if recovery_mode and not force_full:
             # recovery_mode is only set when prior is not None (the probe
             # ran against a discovered checkpoint).
             assert prior is not None  # noqa: S101 — narrowing for type checker
@@ -366,6 +377,17 @@ class BitmapBackupProvider(IBackupProvider):
                     prior,
                     failed_gate,
                 )
+            is_full = True
+            recovery_full = True
+        elif recovery_mode:
+            # force_full + dead bitmap: FULL with recovery cleanup.
+            assert prior is not None  # noqa: S101 — narrowing for type checker
+            logger.warning(
+                "[backup] %s: dead checkpoint %s — force_full requested, "
+                "routing to FULL with recovery cleanup",
+                vm_config.name,
+                prior,
+            )
             is_full = True
             recovery_full = True
 
@@ -493,9 +515,31 @@ class BitmapBackupProvider(IBackupProvider):
                         prior = self._select_newest(
                             candidates, target_hash, disk_target, vm_config.name
                         )
-                        is_full = prior is None or force_full
+                        # Re-probe: the newly-discovered checkpoint may
+                        # also have a dead bitmap.  Evaluate recovery
+                        # gates so the retry can attempt a recovered
+                        # delta (design D9).
                         recovery_full = False
-                        recovery_mode = False
+                        if prior is not None and not force_full:
+                            running = is_vm_running(
+                                self._shell, vm_config.name
+                            )
+                            probe_status = self._probe_checkpoint_bitmap(
+                                vm_config.name,
+                                prior,
+                                disk_target,
+                                running,
+                                disk.base_image,
+                            )
+                            if probe_status == "dead":
+                                recovery_mode = True
+                                is_full = False
+                            else:
+                                recovery_mode = False
+                                is_full = False
+                        else:
+                            recovery_mode = False
+                            is_full = prior is None or force_full
                         if is_full:
                             # Regenerate FULL name for the retry.
                             freeze_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -686,19 +730,6 @@ class BitmapBackupProvider(IBackupProvider):
                     vm_config.name, target_hash, disk_target, successor
                 )
 
-                # Recovery FULL cleanup (design D8): delete the dead
-                # checkpoint whose bitmap was lost.  Deletion only
-                # occurs AFTER the new FULL passes verification.
-                if recovery_full and prior is not None:
-                    logger.info(
-                        "[backup] %s: recovery FULL succeeded for disk %s — "
-                        "deleting dead checkpoint %s",
-                        vm_config.name,
-                        disk_target,
-                        prior,
-                    )
-                    self._delete_checkpoint_best_effort(vm_config.name, prior)
-
             else:
                 # ── Stopped VM: offline FULL ──────────────────────────
                 # Stopped VM with no checkpoint → offline FULL via
@@ -729,6 +760,20 @@ class BitmapBackupProvider(IBackupProvider):
                         error=transfer_error,
                         disk=disk_target,
                     )
+
+            # Recovery FULL cleanup (design D8): delete the dead
+            # checkpoint whose bitmap was lost.  Deletion only
+            # occurs AFTER the new FULL passes verification.
+            # Applies to both running and stopped VM paths.
+            if recovery_full and prior is not None:
+                logger.info(
+                    "[backup] %s: recovery FULL succeeded for disk %s — "
+                    "deleting dead checkpoint %s",
+                    vm_config.name,
+                    disk_target,
+                    prior,
+                )
+                self._delete_checkpoint_best_effort(vm_config.name, prior)
 
             # Get final file size.
             try:
@@ -1811,23 +1856,44 @@ class BitmapBackupProvider(IBackupProvider):
             )
             return "unknown"
 
-        nodes = data.get("return", [])
+        # Guard: non-dict JSON or QMP error object (has "error" key
+        # instead of "return").
+        if not isinstance(data, dict):
+            return "unknown"
+        nodes = data.get("return")
+        if nodes is None:
+            logger.debug(
+                "Bitmap probe for checkpoint %s on VM %s: QMP error response",
+                checkpoint_name,
+                vm_name,
+            )
+            return "unknown"
         if not isinstance(nodes, list):
             return "unknown"
 
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            bitmaps = node.get("dirty-bitmaps")
-            if not isinstance(bitmaps, list):
-                continue
-            for bitmap in bitmaps:
-                if not isinstance(bitmap, dict):
+        try:
+            for node in nodes:
+                if not isinstance(node, dict):
                     continue
-                if bitmap.get("name") != checkpoint_name:
+                bitmaps = node.get("dirty-bitmaps")
+                if not isinstance(bitmaps, list):
                     continue
-                inconsistent = bitmap.get("inconsistent", False)
-                return "healthy" if not inconsistent else "dead"
+                for bitmap in bitmaps:
+                    if not isinstance(bitmap, dict):
+                        continue
+                    if bitmap.get("name") != checkpoint_name:
+                        continue
+                    inconsistent = bitmap.get("inconsistent", False)
+                    return "healthy" if not inconsistent else "dead"
+        except Exception:
+            logger.debug(
+                "Bitmap probe for checkpoint %s on VM %s: unexpected error "
+                "scanning block nodes",
+                checkpoint_name,
+                vm_name,
+                exc_info=True,
+            )
+            return "unknown"
 
         # No node advertises the bitmap — dead.
         return "dead"
@@ -1866,19 +1932,29 @@ class BitmapBackupProvider(IBackupProvider):
             return "unknown"
 
         layers: list[dict] = chain if isinstance(chain, list) else [chain]
-        for layer in layers:
-            if not isinstance(layer, dict):
-                continue
-            bitmaps = layer.get("dirty-bitmaps")
-            if not isinstance(bitmaps, list):
-                continue
-            for bitmap in bitmaps:
-                if not isinstance(bitmap, dict):
+        try:
+            for layer in layers:
+                if not isinstance(layer, dict):
                     continue
-                if bitmap.get("name") != checkpoint_name:
+                bitmaps = layer.get("dirty-bitmaps")
+                if not isinstance(bitmaps, list):
                     continue
-                inconsistent = bitmap.get("inconsistent", False)
-                return "healthy" if not inconsistent else "dead"
+                for bitmap in bitmaps:
+                    if not isinstance(bitmap, dict):
+                        continue
+                    if bitmap.get("name") != checkpoint_name:
+                        continue
+                    inconsistent = bitmap.get("inconsistent", False)
+                    return "healthy" if not inconsistent else "dead"
+        except Exception:
+            logger.debug(
+                "Bitmap probe for checkpoint %s on stopped VM (path %s): "
+                "unexpected error scanning chain layers",
+                checkpoint_name,
+                source_path,
+                exc_info=True,
+            )
+            return "unknown"
 
         return "dead"
 
@@ -2004,7 +2080,10 @@ class BitmapBackupProvider(IBackupProvider):
             return False, "G1"
 
         # G2: live backing chain matches snapshot state.
-        if not self._gate_g2_chain_matches_state(vm_config.name, disk_target, base_image):
+        if not self._gate_g2_chain_matches_state(
+            vm_config.name, disk_target, base_image,
+            checkpoint_name=checkpoint_name, target_hash=target_hash,
+        ):
             return False, "G2"
 
         # G3: every copy-set overlay is readable.
@@ -2052,21 +2131,28 @@ class BitmapBackupProvider(IBackupProvider):
         return commit_ts < freeze_ts
 
     def _gate_g2_chain_matches_state(
-        self, vm_name: str, disk_target: str, base_image: Path
+        self,
+        vm_name: str,
+        disk_target: str,
+        base_image: Path,
+        *,
+        checkpoint_name: str,
+        target_hash: str,
     ) -> bool:
-        """Check G2: live backing chain contains every post-freeze snapshot in order.
+        """Check G2: live backing chain contains every post-freeze snapshot.
 
-        Pragmatic implementation: when snapshot state is unavailable the
-        gate passes (the copy-set fallback to all overlays covers it).
-        When state is available, verify the live chain is readable via
-        ``qemu-img info --backing-chain`` (spec scenario "All gates pass").
+        All snapshots in state with a timestamp later than the dead
+        checkpoint's freeze must be present in the live backing chain
+        in the same order (oldest→newest).  Missing or reordered
+        snapshots fail the gate (conservative → FULL fallback).
+
+        When snapshot state is unavailable, the gate passes (the
+        copy-set fallback to all overlays above base_image covers it).
         """
         if self._state is None:
-            # No state — cannot verify chain against state.  The copy-set
-            # fallback to all overlays above base_image covers this case.
             return True
 
-        # Verify the live backing chain is readable (read-only).
+        # Read the live backing chain.
         result = self._shell.run(
             [
                 "qemu-img",
@@ -2087,6 +2173,74 @@ class BitmapBackupProvider(IBackupProvider):
                 return False
         except json.JSONDecodeError:
             return False
+
+        # Collect chain file paths (top→base order, reverse for
+        # overlay oldest→newest).
+        chain_paths: list[Path] = []
+        for node in chain:
+            if isinstance(node, dict) and "filename" in node:
+                chain_paths.append(Path(node["filename"]))
+        # Reverse so oldest is at index 0 (base_image last).
+        chain_paths.reverse()
+        # Drop the base image itself.
+        if chain_paths and _same_file(chain_paths[-1], base_image):
+            chain_paths.pop()
+        # Now chain_paths is oldest-overlay-first.
+
+        # Get the checkpoint freeze timestamp.  If unparseable,
+        # conservative: fail.
+        freeze_ts = self._parse_checkpoint_timestamp(
+            checkpoint_name, target_hash, disk_target
+        )
+        if freeze_ts is None:
+            # Cannot parse — fall back to readability check.
+            return True
+
+        # Collect post-freeze snapshot paths from state, ordered by
+        # creation timestamp.
+        snapshots = self._state.get_snapshots(vm_name)
+        post_freeze: list[Path] = []
+        for s in snapshots:
+            if s.disk and s.disk != disk_target:
+                continue
+            s_ts = s.timestamp
+            if s_ts is None:
+                continue
+            if isinstance(s_ts, str):
+                try:
+                    s_ts = datetime.fromisoformat(s_ts)
+                except (ValueError, TypeError):
+                    continue
+            if s_ts > freeze_ts:
+                s_path = Path(s.path) if s.path else None
+                if s_path is not None:
+                    post_freeze.append(s_path)
+
+        if not post_freeze:
+            # No post-freeze snapshots to verify — readability check
+            # already passed above.
+            return True
+
+        # Verify every post-freeze snapshot appears in chain_paths in
+        # the same relative order.
+        chain_idx = 0
+        for pf_path in post_freeze:
+            found = False
+            while chain_idx < len(chain_paths):
+                if _same_file(chain_paths[chain_idx], pf_path):
+                    found = True
+                    chain_idx += 1  # advance for next snapshot
+                    break
+                chain_idx += 1
+            if not found:
+                logger.warning(
+                    "[backup] %s: G2 failed — post-freeze snapshot %s "
+                    "not found in live chain",
+                    vm_name,
+                    pf_path,
+                )
+                return False
+
         return True
 
     def _gate_g3_overlays_readable(self, copy_set: list[Path]) -> bool:
@@ -2208,7 +2362,7 @@ class BitmapBackupProvider(IBackupProvider):
             if isinstance(node, dict) and "filename" in node
         ]
         # Exclude the base image (the bottom of the chain).
-        if layers and layers[-1] == base_image:
+        if layers and _same_file(layers[-1], str(base_image)):
             layers = layers[:-1]
         layers.reverse()
         return layers
@@ -2423,11 +2577,11 @@ class BitmapBackupProvider(IBackupProvider):
         """Copy data+zero extents from the copy set into the write server.
 
         For each layer in *copy_set* (oldest→newest), serve the layer
-        read-only and copy ALL data and zero extents into the target,
-        skipping only holes (spec: recovered delta lifecycle step 4).
-        Zero extents are copied explicitly because guest discards are
-        represented as zero clusters and skipping them would expose stale
-        backing data.
+        read-only via ``qemu-nbd`` and copy ALL data and zero extents
+        into the target via the write server, skipping only holes
+        (spec: recovered delta lifecycle step 4).  Zero extents are
+        copied explicitly because guest discards are represented as
+        zero clusters and skipping them would expose stale backing data.
 
         Returns ``None`` on success, or an error string on failure.
         """
@@ -2436,63 +2590,159 @@ class BitmapBackupProvider(IBackupProvider):
 
         # Connect to the write server (destination).
         dst = self._nbd
-        dst_conn = dst.connect(f"nbd+unix:///?socket={write_socket}", "", [])
+        dst_conn = dst.connect(
+            f"nbd+unix:///?socket={write_socket}", "", []
+        )
         if not dst_conn.success:
             return dst_conn.error or "recovered-delta destination NBD connect failed"
 
         try:
-            # Query block status to get the extents to copy.
             size = dst.get_size()
             if size == 0:
-                # No size — use the copy set layers to determine extents.
-                # For each layer, read base:allocation and copy data+zero.
-                pass
+                return "recovered-delta write server reported zero size"
 
-            # Use the NBD client's block_status to get the extents.
-            # The mock provides the extents via block_status_payload.
-            window = max(1, dst.get_max_request_size())
-            alloc_raw: list[NbdExtent] = []
-            offset = 0
-            while offset < size:
-                length = min(window, size - offset)
-                status = dst.block_status(offset, length)
-                if not status.success:
-                    return status.error or "recovered-delta block_status failed"
-                payload = cast(dict[str, list[NbdExtent]], status.payload or {})
-                alloc_raw.extend(payload.get(_BASE_ALLOCATION_CONTEXT, []))
-                offset += length
+            # ── Per-layer read+copy loop ──────────────────────────────
+            for i, layer_path in enumerate(copy_set):
+                read_socket = (
+                    f"/tmp/qsnap-recovery-read-{os.getpid()}"
+                    f"-{disk_target}-{i}.sock"
+                )
+                read_pid_file = Path(
+                    f"/tmp/qsnap-qemu-nbd-read-{os.getpid()}"
+                    f"-{disk_target}-{i}.pid"
+                )
 
-            # Copy data+zero extents, skip holes.  Do NOT unify extents —
-            # the recovered-delta copy must preserve individual extent
-            # boundaries so zero clusters are written explicitly (spec:
-            # zero extents are copied).
-            to_copy = [e for e in alloc_raw if e.data]
+                # (a) Start the read server.
+                nbd_cmd = [
+                    "qemu-nbd",
+                    "--read-only",
+                    "--persistent",
+                    "--pid-file",
+                    str(read_pid_file),
+                    "--socket",
+                    read_socket,
+                    "--format=qcow2",
+                    str(layer_path),
+                ]
+                nbd_result = self._shell.run(nbd_cmd, timeout=30, check=True)
+                if not nbd_result.success:
+                    return (
+                        f"qemu-nbd read server failed for {layer_path}: "
+                        f"{nbd_result.error}"
+                    )
 
-            chunk_size = max(1, dst.get_max_request_size())
-            for extent in to_copy:
-                pos = extent.offset
-                remaining = extent.length
-                while remaining > 0:
-                    count = min(chunk_size, remaining)
-                    read = dst.pread(pos, count)
-                    if not read.success:
-                        return read.error or "recovered-delta pread failed"
-                    data = read.payload
-                    if not isinstance(data, bytes) or len(data) != count:
-                        return "recovered-delta pread returned unexpected payload"
-                    write = dst.pwrite(pos, data)
-                    if not write.success:
-                        return write.error or "recovered-delta pwrite failed"
-                    pos += count
-                    remaining -= count
+                read_pid: int | None = None
+                try:
+                    read_pid = int(read_pid_file.read_text().strip())
+                except (OSError, ValueError):
+                    pass
 
-            # Flush before disconnecting.
-            if dst.can_flush():
-                dst.flush()
+                # (b) Connect to the read server.
+                read_uri = f"nbd+unix:///?socket={read_socket}"
+                read_conn = dst.connect(read_uri, "", [_BASE_ALLOCATION_CONTEXT])
+                if not read_conn.success:
+                    self._cleanup_read_server(
+                        read_pid, read_pid_file, read_socket
+                    )
+                    return (
+                        f"recovered-delta read NBD connect failed for "
+                        f"{layer_path}: {read_conn.error}"
+                    )
 
+                # (c) Walk base:allocation, copy data and zero.
+                window = max(1, dst.get_max_request_size())
+                offset = 0
+                while offset < size:
+                    length = min(window, size - offset)
+                    status = dst.block_status(offset, length)
+                    if not status.success:
+                        self._cleanup_read_server(
+                            read_pid, read_pid_file, read_socket
+                        )
+                        return (
+                            f"recovered-delta block_status failed for "
+                            f"{layer_path}: {status.error}"
+                        )
+                    payload = cast(
+                        dict[str, list[NbdExtent]], status.payload or {}
+                    )
+                    for extent in payload.get(_BASE_ALLOCATION_CONTEXT, []):
+                        if not extent.data:
+                            continue  # hole — skip
+                        pos = extent.offset
+                        remaining = extent.length
+                        while remaining > 0:
+                            count = min(window, remaining)
+                            read_result = dst.pread(pos, count)
+                            if not read_result.success:
+                                self._cleanup_read_server(
+                                    read_pid, read_pid_file, read_socket
+                                )
+                                return (
+                                    f"recovered-delta pread failed for "
+                                    f"{layer_path}: {read_result.error}"
+                                )
+                            # Reconnect to the write server to write.
+                            dst.connect(
+                                f"nbd+unix:///?socket={write_socket}",
+                                "",
+                                [],
+                            )
+                            write_result = dst.pwrite(
+                                pos,
+                                cast(bytes, read_result.payload),
+                            )
+                            if not write_result.success:
+                                self._cleanup_read_server(
+                                    read_pid, read_pid_file, read_socket
+                                )
+                                return (
+                                    f"recovered-delta pwrite failed: "
+                                    f"{write_result.error}"
+                                )
+                            pos += count
+                            remaining -= count
+
+                        # Reconnect back to the read server for the
+                        # next extent.
+                        dst.connect(read_uri, "", [_BASE_ALLOCATION_CONTEXT])
+                    offset += length
+
+                # (d) Cleanup the read server.
+                self._cleanup_read_server(
+                    read_pid, read_pid_file, read_socket
+                )
+
+                # Reconnect to the write server for the next layer.
+                dst.connect(
+                    f"nbd+unix:///?socket={write_socket}", "", []
+                )
+
+            # ── Flush and done ────────────────────────────────────────
+            dst.flush()
             return None
-        finally:
-            dst.disconnect()
+
+        except Exception as exc:
+            return f"recovered-delta copy failed: {exc}"
+
+    @staticmethod
+    def _cleanup_read_server(
+        read_pid: int | None,
+        pid_file: Path,
+        socket_path: str,
+    ) -> None:
+        """Kill a recovered-delta read server and remove its artifacts."""
+        import signal as _signal
+
+        if read_pid is not None:
+            try:
+                os.kill(read_pid, _signal.SIGTERM)
+            except OSError:
+                pass
+        with contextlib.suppress(OSError):
+            pid_file.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            Path(socket_path).unlink(missing_ok=True)
 
     def _verify_recovered_delta(self, target_file: Path) -> str | None:
         """Verify the recovered delta: chain-to-FULL + qemu-img check.
