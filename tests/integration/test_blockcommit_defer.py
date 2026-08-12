@@ -7,6 +7,12 @@ Verifies:
   chain shortened, VM bootable)
 - XML-referenced tip excluded from offline commit and deferred with
   reason "active_layer" (VM stays bootable)
+- Block-job probe classification against REAL libvirt idle-disk output
+- Commit-intent journal (design D4): intent written before the
+  irreversible commit, cleared only after the outcome is finalized,
+  never written for deferred layers, write→clear ordering in the
+  deferred-drain path, cleared on definitive (ENOSPC) failure
+- ``[blockcommit]`` intent log lines (design D9)
 
 All tests require a running libvirt daemon and are marked
 ``@pytest.mark.integration``.  Run only when explicitly requested::
@@ -27,10 +33,56 @@ import pytest
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
-from qsnap.models.results import RetentionResult, SnapshotInfo
+from qsnap.models.results import CommitIntent, RetentionResult, SnapshotInfo
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
+
+
+class _IntentJournalState(InMemoryStateManager):
+    """InMemoryStateManager plus the commit-intent journal.
+
+    The upstream mock (``tests/mocks/mock_state.py``, mocks-contracts
+    group) gains the three ``IStateManager`` intent-journal methods in
+    the same change; this local subclass keeps the integration suite
+    self-sufficient (and is a thin pass-through once the upstream mock
+    lands).
+    """
+
+    def set_commit_in_progress(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        base: str,
+        started_ts: str,
+    ) -> None:
+        if vm_name not in self._state:
+            self._state[vm_name] = {}
+        records = self._state[vm_name].setdefault("commit_in_progress", [])
+        records[:] = [r for r in records if r.disk != disk]
+        records.append(
+            CommitIntent(
+                disk=disk,
+                snapshots=list(snapshots),
+                base=base,
+                started_ts=started_ts,
+            )
+        )
+
+    def get_commit_in_progress(self, vm_name: str) -> list[CommitIntent]:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return []
+        return list(vm_state.get("commit_in_progress", []))
+
+    def clear_commit_in_progress(self, vm_name: str, disk: str) -> None:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return
+        records = vm_state.get("commit_in_progress", [])
+        vm_state["commit_in_progress"] = [r for r in records if r.disk != disk]
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
@@ -44,9 +96,10 @@ def _build_core(
     snapshot_dir: Path,
     target_dir: Path,
     lifecycle_mode: str = "virsh",
-) -> tuple[Core, VMConfig, InMemoryStateManager]:
-    """Build a Core instance with InMemoryStateManager and DefaultFactory."""
-    state = InMemoryStateManager()
+) -> tuple[Core, VMConfig, _IntentJournalState]:
+    """Build a Core instance with an in-memory state manager (including
+    the commit-intent journal) and DefaultFactory."""
+    state = _IntentJournalState()
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -169,13 +222,57 @@ def _chain_contains_path(tip_path: Path, needle: Path, shell: SubprocessShell) -
     return False
 
 
+def _probe_idle_disk_none(shell: SubprocessShell, core: Core, vm_config: VMConfig) -> None:
+    """Assert the REAL ``virsh blockjob`` probe parses as ``"none"``.
+
+    Design D6: the pre-commit probe must classify an idle disk exactly
+    the way real libvirt reports it (``"No current block job"``).
+    """
+    result = shell.run(
+        ["virsh", "blockjob", "--domain", vm_config.name, "--path", "vda"],
+        timeout=30,
+    )
+    assert result.success, f"virsh blockjob probe failed: {result.error}"
+    assert "No current block job" in result.stdout or not result.stdout.strip(), (
+        f"Idle disk should report no block job, got: {result.stdout!r}"
+    )
+    assert core._probe_blockjob(vm_config, "vda") == "none", (
+        "Core probe classification must be 'none' for an idle disk"
+    )
+
+
+def _spy_intent_journal(
+    state: _IntentJournalState,
+) -> tuple[list[tuple[str, str, list[str]]], object, object]:
+    """Wrap the intent set/clear methods to record call ordering.
+
+    Returns ``(calls, restore_set, restore_clear)``; each call entry is
+    ``("set"|"clear", disk, [snapshot names])`` (clear carries no list).
+    """
+    calls: list[tuple[str, str, list[str]]] = []
+    orig_set = state.set_commit_in_progress
+    orig_clear = state.clear_commit_in_progress
+
+    def _spy_set(vm_name: str, disk: str, snapshots: list[str], base: str, started_ts: str) -> None:
+        calls.append(("set", disk, list(snapshots)))
+        return orig_set(vm_name, disk, snapshots, base, started_ts)
+
+    def _spy_clear(vm_name: str, disk: str) -> None:
+        calls.append(("clear", disk, []))
+        return orig_clear(vm_name, disk)
+
+    state.set_commit_in_progress = _spy_set  # type: ignore[method-assign]
+    state.clear_commit_in_progress = _spy_clear  # type: ignore[method-assign]
+    return calls, orig_set, orig_clear
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: Live commit of non-active snapshots while VM running (virsh)
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_live_commit_non_active_while_running_integration(test_vm):
+def test_live_commit_non_active_while_running_integration(test_vm, caplog):
     """Live commit of non-active snapshot via virsh blockcommit.
 
     1. Start VM, create snap1, snap2, snap3 (snap3 = active layer).
@@ -183,6 +280,10 @@ def test_live_commit_non_active_while_running_integration(test_vm):
     3. Assert: snap1 file DELETED from disk; snap2's backing points
        to base image; VM still running with snap3 as active layer;
        NO deferred entries created.
+    4. Race-hardening (design D4/D6/D9): the real ``virsh blockjob``
+       probe on the idle disk parses as ``"none"``; a ``[blockcommit]``
+       INFO intent line precedes the commit; the commit-intent journal
+       is cleared after success; ``last_commit_ts`` is written.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -230,12 +331,17 @@ def test_live_commit_non_active_while_running_integration(test_vm):
     backing_before = _backing_points_to(snap2_path, snap1_path, shell)
     assert backing_before, "snap2 should point to snap1 before commit"
 
+    # Design D6: the REAL pre-commit probe on the idle disk parses "none".
+    _probe_idle_disk_none(shell, core, vm_config)
+
     # Invoke blockcommit with remove = {snap1}
     retention = RetentionResult(
         keep=[snap2.name, snap3.name],
         remove=[snap1.name],
     )
-    core._blockcommit_snapshots(vm_config, retention)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        core._blockcommit_snapshots(vm_config, retention)
 
     # --- Assertions ---
 
@@ -270,6 +376,23 @@ def test_live_commit_non_active_while_running_integration(test_vm):
     assert snap2.name in remaining_names, "snap2 should remain in state"
     assert snap3.name in remaining_names, "snap3 should remain in state"
 
+    # (g) Commit-intent journal (design D4): cleared after success.
+    assert state.get_commit_in_progress(vm_name) == [], (
+        "Intent journal must be empty after a successful commit"
+    )
+
+    # (h) last_commit_ts (design D4/G1) is written for the disk.
+    assert state.get_last_commit_ts(vm_name, "vda") is not None, (
+        "last_commit_ts must be set after a successful commit"
+    )
+
+    # (i) Observability (design D9): a [blockcommit] intent INFO line
+    #     preceded the commit.
+    commit_lines = [r.message for r in caplog.records if "[blockcommit]" in r.message]
+    assert any("committing" in m and "mode=virsh" in m for m in commit_lines), (
+        f"Expected a [blockcommit] intent line before the commit, got: {commit_lines}"
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 2: Active layer deferred when in remove set (running VM, virsh)
@@ -285,6 +408,9 @@ def test_active_layer_deferred_running_integration(test_vm):
     3. Assert: snap1 committed live (file deleted); snap3 deferred with
        reason "vm_running"; no "requires active flag" error; chain intact;
        VM healthy.
+    4. Race-hardening (design D4/D6): the real pre-commit probe parses
+       ``"none"``; the deferred active layer NEVER gets a commit-intent
+       record (intent precedes only irreversible commits).
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -326,12 +452,24 @@ def test_active_layer_deferred_running_integration(test_vm):
     assert snap1_path.exists(), f"snap1 file should exist: {snap1_path}"
     assert snap3_path.exists(), f"snap3 file should exist: {snap3_path}"
 
+    # Design D6: the REAL pre-commit probe on the idle disk parses "none".
+    _probe_idle_disk_none(shell, core, vm_config)
+
+    # Spy the intent journal so we can prove the deferred ACTIVE layer
+    # never receives an intent record (design D4: intent precedes only
+    # irreversible commits — deferral paths never write intent).
+    intent_calls, orig_set, orig_clear = _spy_intent_journal(state)
+
     # Invoke blockcommit with remove = {snap1, snap3}
     retention = RetentionResult(
         keep=[snapshots[1].name],
         remove=[snap1.name, snap3.name],
     )
     core._blockcommit_snapshots(vm_config, retention)
+
+    # Restore the spied methods before further state assertions.
+    state.set_commit_in_progress = orig_set  # type: ignore[method-assign]
+    state.clear_commit_in_progress = orig_clear  # type: ignore[method-assign]
 
     # --- Assertions ---
 
@@ -370,6 +508,19 @@ def test_active_layer_deferred_running_integration(test_vm):
     assert snap1.name not in remaining_names, "snap1 should be removed from state"
     assert snap3.name in remaining_names, "snap3 (deferred) should still be in state"
 
+    # (g) Design D4: no intent record was ever written for the deferred
+    #     active layer — and the journal is empty after the run (the
+    #     live commit of snap1 cleared its own transient record).
+    assert state.get_commit_in_progress(vm_name) == [], (
+        "Intent journal must be empty: the deferred active layer never "
+        "writes an intent and the committed layer cleared its own"
+    )
+    set_calls = [c for c in intent_calls if c[0] == "set"]
+    assert set_calls, "Expected at least one intent set for the committed layer"
+    assert all(snap3.name not in call[2] for call in set_calls), (
+        f"Deferred active layer must never appear in an intent record: {set_calls}"
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 3: Deferred blockcommit executes after VM shutdown (strengthened)
@@ -377,7 +528,7 @@ def test_active_layer_deferred_running_integration(test_vm):
 
 
 @pytest.mark.integration
-def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm):
+def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm, caplog):
     """Deferred blockcommit drains after VM shutdown via qemu-img executor.
 
     1. Start VM, create 2 snapshots with lifecycle_mode="qemu-img".
@@ -387,6 +538,9 @@ def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm):
     5. Strengthened assertions: committed file DELETED from disk;
        backing chain on tip SHORTENED and intact; committed names
        removed from IStateManager; virsh start SUCCEEDS afterwards.
+    6. Race-hardening (design D4/D9): the drain writes a commit-intent
+       record before the offline commit and clears it after (write→clear
+       ordering) and emits the ``[blockcommit]`` intent INFO line.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -452,8 +606,18 @@ def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm):
     time.sleep(0.5)
     assert _vm_is_shut_off(shell, vm_name), "VM should be shut off"
 
+    # Spy the intent journal so we can assert the drain's write→clear
+    # ordering (design D4 success ordering: intent cleared LAST).
+    intent_calls, orig_set, orig_clear = _spy_intent_journal(state)
+
     # Step 4: Execute deferred operations.
-    core._check_deferred_operations(vm_config)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        core._check_deferred_operations(vm_config)
+
+    # Restore the spied methods before further state assertions.
+    state.set_commit_in_progress = orig_set  # type: ignore[method-assign]
+    state.clear_commit_in_progress = orig_clear  # type: ignore[method-assign]
 
     # Step 5: Strengthened assertions.
 
@@ -496,6 +660,21 @@ def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm):
     time.sleep(1)
     assert _vm_is_running(shell, vm_name), "VM should be running after start"
     shell.run(["virsh", "destroy", vm_name], timeout=30)
+
+    # (f) Design D4: the drain wrote an intent record and cleared it
+    #     (write→clear ordering), and the journal is empty afterwards.
+    assert intent_calls == [("set", "vda", [oldest.name]), ("clear", "vda", [])], (
+        f"Drain must write an intent before the commit and clear it last: {intent_calls}"
+    )
+    assert state.get_commit_in_progress(vm_name) == [], (
+        "Intent journal must be empty after the drain"
+    )
+
+    # (g) Design D9: the drain emitted the [blockcommit] intent INFO line.
+    commit_lines = [r.message for r in caplog.records if "[blockcommit]" in r.message]
+    assert any("committing" in m and "mode=qemu-img" in m for m in commit_lines), (
+        f"Expected a [blockcommit] intent line from the drain, got: {commit_lines}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -890,7 +1069,18 @@ def test_offline_commit_enospc_defers_then_drains_integration(test_vm, caplog):
     # The deferred queue is drained by ``_check_deferred_operations`` at
     # the start of the next pipeline run (``prune`` itself only evaluates
     # retention + lifecycle; it does not consult the queue).
+    #
+    # Design D4: after the ENOSPC deferral the intent journal must be
+    # empty (definitive-failure rule clears the intent), and the REAL
+    # drain must show write→clear ordering.
+    assert state.get_commit_in_progress(vm_name) == [], (
+        "Intent journal must be cleared after a definitive (ENOSPC) failure"
+    )
+
+    intent_calls, orig_set, orig_clear = _spy_intent_journal(state)
     core._check_deferred_operations(vm_config)
+    state.set_commit_in_progress = orig_set  # type: ignore[method-assign]
+    state.clear_commit_in_progress = orig_clear  # type: ignore[method-assign]
 
     # Oldest file committed (deleted), chain shortened, queue empty.
     assert not oldest_path.exists(), f"Oldest snapshot must be committed after drain: {oldest_path}"
@@ -900,6 +1090,15 @@ def test_offline_commit_enospc_defers_then_drains_integration(test_vm, caplog):
     )
     assert state.get_deferred_operations(vm_name) == [], (
         "Deferred queue must be empty after the drain"
+    )
+
+    # Design D4: the real drain wrote an intent before the offline
+    # commit and cleared it after (write→clear ordering).
+    assert intent_calls == [("set", "vda", [oldest.name]), ("clear", "vda", [])], (
+        f"Drain must write an intent before the commit and clear it last: {intent_calls}"
+    )
+    assert state.get_commit_in_progress(vm_name) == [], (
+        "Intent journal must be empty after the real drain"
     )
 
     # Cleanup: restart and stop the VM for teardown (fixture destroys

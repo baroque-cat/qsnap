@@ -6,12 +6,18 @@ newest 48 (``snapshot_preserve_min=48`` dominates the default
 ``chain_length=24`` under load), without corrupting data or breaking
 backing-file references.
 
+It then extends the surviving chain past the old hard-coded 64-iteration
+broken-file walk cap (design D8 of blockcommit-recovery): after removing
+a mid-chain overlay, the dynamic ``max(64, measured+2)`` walk bound must
+still identify the missing file.
+
 Marked ``@pytest.mark.stress`` — requires a libvirt environment with a
 disposable test VM.
 """
 
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from pathlib import Path
@@ -21,6 +27,7 @@ import pytest
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
 from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+from qsnap.models.results import CommitIntent
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.helpers import snapshot_create
 from tests.mocks.mock_config import MockConfigFacade
@@ -28,6 +35,55 @@ from tests.mocks.mock_state import InMemoryStateManager
 
 #: Number of snapshots in the chain (must exceed the 48 floor).
 _CHAIN_DEPTH = 55
+
+#: Extra snapshots layered on top after the floor prune.  The surviving
+#: chain is 48 overlays deep; adding this many more pushes the deepest
+#: remaining overlay to depth 66 from the active layer — beyond the old
+#: fixed 64-iteration walk cap.
+_EXTRA_DEPTH = 18
+
+
+class _IntentJournalState(InMemoryStateManager):
+    """InMemoryStateManager plus the commit-intent journal.
+
+    Local stand-in while ``tests/mocks/mock_state.py`` (mocks-contracts
+    group) lands the three ``IStateManager`` intent-journal methods in
+    the same change; a thin pass-through once the upstream mock lands.
+    """
+
+    def set_commit_in_progress(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        base: str,
+        started_ts: str,
+    ) -> None:
+        if vm_name not in self._state:
+            self._state[vm_name] = {}
+        records = self._state[vm_name].setdefault("commit_in_progress", [])
+        records[:] = [r for r in records if r.disk != disk]
+        records.append(
+            CommitIntent(
+                disk=disk,
+                snapshots=list(snapshots),
+                base=base,
+                started_ts=started_ts,
+            )
+        )
+
+    def get_commit_in_progress(self, vm_name: str) -> list[CommitIntent]:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return []
+        return list(vm_state.get("commit_in_progress", []))
+
+    def clear_commit_in_progress(self, vm_name: str, disk: str) -> None:
+        vm_state = self._state.get(vm_name)
+        if vm_state is None:
+            return
+        records = vm_state.get("commit_in_progress", [])
+        vm_state["commit_in_progress"] = [r for r in records if r.disk != disk]
 
 
 def _vm_is_running(shell: SubprocessShell, vm_name: str) -> bool:
@@ -59,6 +115,12 @@ def test_long_chain_default_preserve_min_48(stress_env):
        deleted), the newest 48 survive, the deferred queue stays empty.
     4. The active layer's backing chain is intact (``qemu-img check``
        passes) and the VM is still running.
+    5. Depth-fix proof (blockcommit-recovery D8): layer 18 more
+       snapshots on top (chain = 66 overlays + base), delete the deepest
+       remaining overlay (66 layers below the active layer — beyond the
+       old fixed 64-iteration walk cap), and assert the broken-file walk
+       still identifies the missing file via the dynamic
+       ``max(64, measured+2)`` bound; ``check`` reports the chain broken.
     """
     shell: SubprocessShell = stress_env["shell"]
     vm_name: str = stress_env["vm_name"]
@@ -74,7 +136,7 @@ def test_long_chain_default_preserve_min_48(stress_env):
     time.sleep(1)
     assert _vm_is_running(shell, vm_name), "VM should be running"
 
-    state = InMemoryStateManager()
+    state = _IntentJournalState()
     snapshots = []
     for i in range(_CHAIN_DEPTH):
         hex_sfx = secrets.token_hex(3)
@@ -158,5 +220,77 @@ def test_long_chain_default_preserve_min_48(stress_env):
 
     # VM still running after the live blockcommit.
     assert _vm_is_running(shell, vm_name), "VM should still be running"
+
+    # ──────────────────────────────────────────────────────────────────
+    # Depth-fix proof (blockcommit-recovery design D8): the broken-file
+    # walk must identify a missing file beyond the old hard-coded 64
+    # iteration cap on a REAL chain.
+    #
+    # After the floor prune, 48 overlays remain.  Layering 18 more
+    # snapshots on top pushes the DEEPEST remaining overlay (the former
+    # s7, now repointed at the base by the prune) to depth 66 from the
+    # active layer — deeper than 64.  Deleting that file makes the
+    # ``qemu-img info --backing-chain`` scan fail, so the walk runs with
+    # the dynamic bound ``max(64, measured + 2)`` (measured from the 66
+    # state records ⇒ bound 76).  With the old fixed cap of 64 the walk
+    # would exhaust its iterations and return ``None``.
+    # ──────────────────────────────────────────────────────────────────
+    for i in range(_CHAIN_DEPTH, _CHAIN_DEPTH + _EXTRA_DEPTH):
+        hex_sfx = secrets.token_hex(3)
+        snap = snapshot_create(
+            shell,
+            vm_name,
+            f"{vm_name}.chain-{i:03d}-{hex_sfx}",
+            "vda",
+            snapshot_dir,
+            base_image,
+        )
+        state.record_snapshot(vm_name, snap)
+        time.sleep(0.35)
+
+    deep_snaps = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
+    assert len(deep_snaps) == _CHAIN_DEPTH + _EXTRA_DEPTH - 7, (
+        f"Expected {_CHAIN_DEPTH + _EXTRA_DEPTH - 7} snapshots in state, got {len(deep_snaps)}"
+    )
+
+    # The oldest remaining overlay sits at depth 66 from the active layer.
+    deepest = deep_snaps[0]
+    deepest_path = deepest.path
+    assert deepest_path.exists(), f"Deepest overlay must exist before truncation: {deepest_path}"
+    active_top = deep_snaps[-1].path
+    assert _qemu_img_check(shell, active_top), (
+        "Chain must be healthy before the deliberate truncation"
+    )
+
+    # Deliberately truncate the chain: remove the oldest remaining overlay.
+    rm_result = shell.run(["rm", "-f", str(deepest_path)], timeout=10, check=True)
+    assert rm_result.success and not deepest_path.exists(), (
+        f"Deepest overlay must be removed: {deepest_path}"
+    )
+
+    # (a) ``check`` surfaces the broken chain end-to-end (read-only, VM
+    #     still running — matches the plan's "run `check`").
+    check_results = core.check(vm_name)
+    check_result = check_results[vm_name]
+    assert check_result.status == "broken", (
+        f"check must report the truncated chain as broken, got {check_result.status!r}"
+    )
+    assert len(check_result.broken_snapshots) > 0, "check must report at least one broken snapshot"
+
+    # (b) The dynamic-bound walk identifies the missing file.  The VM is
+    #     shut off first: the walk's per-file ``qemu-img info`` call does
+    #     not pass ``--force-share`` and therefore cannot read the active
+    #     layer of a running VM (known source limitation — tracked in the
+    #     integration-stress QA report).
+    shell.run(["virsh", "destroy", vm_name], timeout=30)
+    time.sleep(0.5)
+    verify = core._verify_backing_chain(vm_config, "vda")
+    assert verify.success is False, "A truncated chain must fail verification"
+    assert verify.broken_file is not None, (
+        "broken_file must be identified even beyond 64 layers (dynamic walk bound)"
+    )
+    assert os.path.realpath(verify.broken_file) == os.path.realpath(str(deepest_path)), (
+        f"Walk must identify the deleted overlay {deepest_path}, got {verify.broken_file}"
+    )
 
     shell.run(["virsh", "destroy", vm_name], timeout=30)

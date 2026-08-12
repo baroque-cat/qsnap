@@ -132,6 +132,11 @@ class GlobalConfig:
     # when the VM disk has not changed since the last backup to that
     # target).  Inherited by VM and target levels.
     backup_create: str = "always"
+    # Maximum wall-clock time in seconds for a single blockcommit
+    # (``virsh blockcommit --wait`` or ``qemu-img commit``).  When
+    # exceeded the command is killed and the outcome is classified as
+    # ``"unknown"`` (never as ``"failure"``).  Default 1800 s (30 min).
+    blockcommit_timeout: int = 1800
 
 
 @dataclass(frozen=True)

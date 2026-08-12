@@ -74,7 +74,12 @@ def test_qemu_img_commit_manager_requires_shell():
     ids=["blockcommit", "qemu_img_commit", "mock"],
 )
 def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
-    """blockcommit() returns a CommitResult."""
+    """blockcommit() returns a CommitResult with an ``outcome`` attribute.
+
+    All three implementations accept the ``timeout`` keyword (default 1800)
+    added by the harden-blockcommit-races lifecycle-manager spec and return
+    a ``CommitResult`` carrying the three-valued ``outcome`` field.
+    """
     manager = cls(**init_kwargs)
     vm_config = VMConfig(
         name="testvm",
@@ -96,5 +101,8 @@ def test_lifecycle_manager_blockcommit_returns_commit_result(cls, init_kwargs):
         disk="vda",
         base_image=Path("/var/lib/libvirt/images/testvm.qcow2"),
         deep_verify=True,
+        timeout=900,
     )
     assert isinstance(result, CommitResult)
+    assert hasattr(result, "outcome")
+    assert result.outcome in ("success", "failure", "unknown")

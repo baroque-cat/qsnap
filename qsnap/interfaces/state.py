@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.models.results import CommitIntent, DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 
 
 class IStateManager(ABC):
@@ -167,9 +167,10 @@ class IStateManager(ABC):
     def reset_vm_state(self, vm_name: str) -> None:
         """Atomically clear all per-VM state.
 
-        Clears the ``snapshots`` list, ``last_allocation`` baseline, and
-        ``deferred_operations`` queue for *vm_name*.  Used by
-        :meth:`Core.restore` to reset VM state after disk replacement.
+        Clears the ``snapshots`` list, ``last_allocation`` baseline, the
+        ``deferred_operations`` queue, and the ``commit_in_progress``
+        intent journal for *vm_name*.  Used by :meth:`Core.restore` to
+        reset VM state after disk replacement.
         """
         ...
 
@@ -200,7 +201,9 @@ class IStateManager(ABC):
           ``last_allocation`` without per-disk keys is treated as absent
           and left untouched);
         - every deferred blockcommit operation whose ``disk`` equals
-          *disk* (deferred operations for other disks are kept).
+          *disk* (deferred operations for other disks are kept);
+        - every commit-intent record (``commit_in_progress``) whose
+          ``disk`` equals *disk* (intents for other disks are kept).
         """
         ...
 
@@ -221,6 +224,37 @@ class IStateManager(ABC):
           ``(vm_name, disk)`` — the disk is derived from the FULL backup
           name via :func:`parse_disk_from_snapshot_name`;
         - the ``last_backup_allocation`` entry keyed by *disk*.
+        """
+        ...
+
+    # ── Commit intent journal ──────────────────────────────────────────
+
+    @abstractmethod
+    def set_commit_in_progress(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        base: str,
+        started_ts: str,
+    ) -> None:
+        """Upsert the commit-intent record for (*vm_name*, *disk*).
+
+        At most one record exists per disk — a second call with the same
+        *disk* replaces the previous record.
+        """
+        ...
+
+    @abstractmethod
+    def get_commit_in_progress(self, vm_name: str) -> list[CommitIntent]:
+        """Return all commit-intent records for *vm_name*."""
+        ...
+
+    @abstractmethod
+    def clear_commit_in_progress(self, vm_name: str, disk: str) -> None:
+        """Remove the commit-intent record for (*vm_name*, *disk*).
+
+        No-op when no record exists for this disk.
         """
         ...
 

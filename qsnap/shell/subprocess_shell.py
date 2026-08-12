@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
@@ -199,6 +201,161 @@ class SubprocessShell(IShell):
                         "cmd=%s stall_timeout=%d returncode=%d duration=%.3fs",
                         cmd,
                         stall_timeout,
+                        result.returncode,
+                        duration,
+                    )
+                return result
+        except Exception:
+            # Unexpected error — ensure process is reaped.
+            proc.kill()
+            proc.wait()
+            raise
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat: Callable[[int], None],
+        check: bool = False,
+    ) -> ShellResult:
+        """Execute *cmd* with a hard *timeout* and periodic heartbeat callback.
+
+        Runs the command via ``Popen`` with stdout/stderr pipes drained
+        continuously by daemon reader threads.  Polls the process every
+        *heartbeat_seconds*; on each poll expiry calls
+        ``on_heartbeat(elapsed)``.  When the total elapsed time reaches
+        *timeout*, the process is killed and a timeout
+        :class:`ShellResult` is returned.
+        """
+        start = time.monotonic()
+        logger.debug(
+            "cmd=%s timeout=%d heartbeat=%d",
+            cmd,
+            timeout,
+            heartbeat_seconds,
+        )
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            duration = time.monotonic() - start
+            result = ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                returncode=-1,
+                error=f"Command not found: {exc}",
+            )
+            logger.debug(
+                "cmd=%s returncode=%d duration=%.3fs error=%s",
+                cmd,
+                result.returncode,
+                duration,
+                result.error,
+            )
+            return result
+
+        # Daemon reader threads so a chatty child never blocks on a full
+        # pipe buffer.  Captured output is collected into mutable
+        # containers and joined after process exit with a bounded wait.
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        def _drain(pipe: subprocess.PIPE | None, sink: list[bytes]) -> None:  # type: ignore[valid-type]
+            if pipe is not None:
+                while True:
+                    chunk = pipe.read(65536)
+                    if not chunk:
+                        break
+                    sink.append(chunk)
+
+        stdout_thread = threading.Thread(
+            target=_drain, args=(proc.stdout, stdout_chunks), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_drain, args=(proc.stderr, stderr_chunks), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            while True:
+                elapsed = time.monotonic() - start
+                if elapsed >= timeout:
+                    # Hard timeout — kill the process.
+                    proc.kill()
+                    proc.wait()
+                    duration = time.monotonic() - start
+                    result = ShellResult(
+                        success=False,
+                        stdout="",
+                        stderr="",
+                        returncode=-1,
+                        error=f"Command timed out after {timeout}s",
+                    )
+                    logger.error(
+                        "cmd=%s timeout=%d returncode=%d duration=%.3fs error=%s",
+                        cmd,
+                        timeout,
+                        result.returncode,
+                        duration,
+                        result.error,
+                    )
+                    # Drain remaining output from pipes before joining threads.
+                    stdout_thread.join(timeout=5)
+                    stderr_thread.join(timeout=5)
+                    return result
+
+                try:
+                    proc.wait(timeout=heartbeat_seconds)
+                except subprocess.TimeoutExpired:
+                    # Process still running — invoke heartbeat callback.
+                    # Elapsed is measured AT CALLBACK TIME (after the
+                    # slice wait expired), so the reported value matches
+                    # wall-clock reality (~60s, ~120s, ...) rather than
+                    # lagging one slice behind (observability spec).
+                    on_heartbeat(int(time.monotonic() - start))
+                    continue
+
+                # Process finished normally.
+                duration = time.monotonic() - start
+                # Drain remaining output.
+                stdout_thread.join(timeout=5)
+                stderr_thread.join(timeout=5)
+                stdout = b"".join(stdout_chunks).decode()
+                stderr = b"".join(stderr_chunks).decode()
+                success = proc.returncode == 0
+                error: str | None = None
+                if not success:
+                    error = stderr.strip() or f"Command failed with return code {proc.returncode}"
+                result = ShellResult(
+                    success=success,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=proc.returncode,
+                    error=error,
+                )
+                if not result.success and not check:
+                    logger.error(
+                        "cmd=%s timeout=%d heartbeat=%d returncode=%d duration=%.3fs error=%s",
+                        cmd,
+                        timeout,
+                        heartbeat_seconds,
+                        result.returncode,
+                        duration,
+                        result.error,
+                    )
+                else:
+                    logger.debug(
+                        "cmd=%s timeout=%d heartbeat=%d returncode=%d duration=%.3fs",
+                        cmd,
+                        timeout,
+                        heartbeat_seconds,
                         result.returncode,
                         duration,
                     )

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.models.results import CommitIntent, DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from qsnap.state.json_manager import JsonStateManager
 from tests.mocks.mock_state import InMemoryStateManager
 
@@ -304,7 +304,12 @@ def test_save_failed_write_does_not_rotate_backups(tmp_path: Path) -> None:
 
 
 def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
-    """add_deferred_blockcommit stores entry; get_deferred_operations returns it with correct fields."""
+    """add_deferred_blockcommit stores entry; get_deferred_operations returns it with correct fields.
+
+    The deferred queue is per-disk (deferred-operations spec): the entry
+    must carry the disk it was queued for, and ``last_warned_at`` starts
+    as ``None`` for a fresh entry.
+    """
     manager = JsonStateManager(state_dir=tmp_path)
 
     manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
@@ -316,6 +321,7 @@ def test_add_and_retrieve_deferred_blockcommit(tmp_path: Path) -> None:
     assert isinstance(op, DeferredBlockcommit)
     assert op.snapshots == ["snap1.qcow2"]
     assert op.reason == "apparmor"
+    assert op.disk == "vda"
     assert isinstance(op.since, datetime)
     # New entries have no warning timestamp yet.
     assert op.last_warned_at is None
@@ -334,6 +340,7 @@ def test_add_deferred_blockcommit_vm_running_reason(tmp_path: Path) -> None:
     assert isinstance(op, DeferredBlockcommit)
     assert op.snapshots == ["snap1.qcow2", "snap2.qcow2"]
     assert op.reason == "vm_running"
+    assert op.disk == "vda"
     assert isinstance(op.since, datetime)
     # New entries have no warning timestamp yet.
     assert op.last_warned_at is None
@@ -343,7 +350,7 @@ def test_add_deferred_blockcommit_active_layer_reason(tmp_path: Path) -> None:
     """add_deferred_blockcommit stores entry with "active_layer" reason."""
     manager = JsonStateManager(state_dir=tmp_path)
 
-    manager.add_deferred_blockcommit("vm1", "vda", ["snap3.qcow2"], "active_layer")
+    manager.add_deferred_blockcommit("vm1", "vdb", ["snap3.qcow2"], "active_layer")
 
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
@@ -352,9 +359,103 @@ def test_add_deferred_blockcommit_active_layer_reason(tmp_path: Path) -> None:
     assert isinstance(op, DeferredBlockcommit)
     assert op.snapshots == ["snap3.qcow2"]
     assert op.reason == "active_layer"
+    assert op.disk == "vdb"
     assert isinstance(op.since, datetime)
     # New entries have no warning timestamp yet.
     assert op.last_warned_at is None
+
+
+def test_add_deferred_blockcommit_blockjob_active_reason(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry with "blockjob_active" reason.
+
+    When a foreign/in-flight block job is detected on a disk (probe
+    before commit or stale-intent recovery), the commit is deferred with
+    reason ``"blockjob_active"`` (blockjob-protocol spec).  The reason
+    must round-trip through persistent state per disk.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "blockjob_active")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2"]
+    assert op.reason == "blockjob_active"
+    assert op.disk == "vda"
+    assert isinstance(op.since, datetime)
+    assert op.last_warned_at is None
+
+    # The reason survives a full state round-trip (re-load).
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    ops2 = manager2.get_deferred_operations("vm1")
+    assert len(ops2) == 1
+    assert ops2[0].reason == "blockjob_active"
+    assert ops2[0].disk == "vda"
+
+
+def test_add_deferred_blockcommit_vm_state_unknown_reason(tmp_path: Path) -> None:
+    """add_deferred_blockcommit stores entry with "vm_state_unknown" reason.
+
+    When the fail-closed offline race guard cannot re-check the VM state
+    (e.g. the recheck probe fails), the commit is deferred with reason
+    ``"vm_state_unknown"`` (fail-closed offline guard spec).  The reason
+    must round-trip through persistent state per disk.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit(
+        "vm1", "vda", ["snap1.qcow2", "snap2.qcow2"], "vm_state_unknown"
+    )
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+
+    op = ops[0]
+    assert isinstance(op, DeferredBlockcommit)
+    assert op.snapshots == ["snap1.qcow2", "snap2.qcow2"]
+    assert op.reason == "vm_state_unknown"
+    assert op.disk == "vda"
+    assert isinstance(op.since, datetime)
+    assert op.last_warned_at is None
+
+    # The reason survives a full state round-trip (re-load).
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    ops2 = manager2.get_deferred_operations("vm1")
+    assert len(ops2) == 1
+    assert ops2[0].reason == "vm_state_unknown"
+    assert ops2[0].disk == "vda"
+
+
+def test_multiple_disks_separate_deferred_entries(tmp_path: Path) -> None:
+    """Multiple disks of one VM hold independent deferred entries.
+
+    Each ``add_deferred_blockcommit`` call appends a separate entry
+    carrying its own disk, so the queue is per-disk (deferred-operations
+    spec scenario "Multiple disks can have separate deferred entries").
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
+    manager.add_deferred_blockcommit("vm1", "vdb", ["snap2.qcow2"], "vm_running")
+
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 2
+
+    by_disk = {op.disk: op for op in ops}
+    assert set(by_disk) == {"vda", "vdb"}
+    assert by_disk["vda"].snapshots == ["snap1.qcow2"]
+    assert by_disk["vda"].reason == "apparmor"
+    assert by_disk["vdb"].snapshots == ["snap2.qcow2"]
+    assert by_disk["vdb"].reason == "vm_running"
+
+    # Both entries survive a state round-trip with their disks intact.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    ops2 = manager2.get_deferred_operations("vm1")
+    assert len(ops2) == 2
+    assert {op.disk for op in ops2} == {"vda", "vdb"}
 
 
 def test_add_deferred_blockcommit_enospc_reason(tmp_path: Path) -> None:
@@ -403,6 +504,7 @@ def test_add_and_retrieve_deferred_operations(tmp_path: Path) -> None:
     assert isinstance(op, DeferredBlockcommit)
     assert op.snapshots == ["snap1.qcow2"]
     assert op.reason == "apparmor"
+    assert op.disk == "vda"
     assert isinstance(op.since, datetime)
 
 
@@ -411,9 +513,12 @@ def test_clear_deferred_operations(tmp_path: Path) -> None:
     manager = JsonStateManager(state_dir=tmp_path)
 
     manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
-    manager.add_deferred_blockcommit("vm1", "vda", ["snap2.qcow2", "snap3.qcow2"], "selinux")
+    manager.add_deferred_blockcommit("vm1", "vdb", ["snap2.qcow2", "snap3.qcow2"], "selinux")
 
-    assert len(manager.get_deferred_operations("vm1")) == 2
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 2
+    # Per-disk entries are tracked independently before the clear.
+    assert {op.disk for op in ops} == {"vda", "vdb"}
 
     manager.clear_deferred_operations("vm1")
 
@@ -433,7 +538,7 @@ def test_deferred_operations_persisted_to_json(tmp_path: Path) -> None:
     """Deferred operations survive across JsonStateManager instances pointing to the same dir."""
     manager1 = JsonStateManager(state_dir=tmp_path)
     manager1.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
-    manager1.add_deferred_blockcommit("vm1", "vda", ["snap2.qcow2"], "selinux")
+    manager1.add_deferred_blockcommit("vm1", "vdb", ["snap2.qcow2"], "selinux")
 
     # New manager instance, same state directory — must load persisted data.
     manager2 = JsonStateManager(state_dir=tmp_path)
@@ -442,9 +547,11 @@ def test_deferred_operations_persisted_to_json(tmp_path: Path) -> None:
     assert len(ops) == 2
     assert ops[0].snapshots == ["snap1.qcow2"]
     assert ops[0].reason == "apparmor"
+    assert ops[0].disk == "vda"
     assert isinstance(ops[0].since, datetime)
     assert ops[1].snapshots == ["snap2.qcow2"]
     assert ops[1].reason == "selinux"
+    assert ops[1].disk == "vdb"
     assert isinstance(ops[1].since, datetime)
 
 
@@ -474,7 +581,7 @@ def test_deferred_blockcommit_dataclass_fields() -> None:
 
 
 def test_state_round_trips_last_warned_at(tmp_path: Path) -> None:
-    """_deferred_to_dict / _dict_to_deferred preserve last_warned_at."""
+    """_deferred_to_dict / _dict_to_deferred preserve last_warned_at and disk."""
     warned = datetime(2025, 6, 1, 10, 0, 0)
     original = DeferredBlockcommit(
         snapshots=["snap1.qcow2"],
@@ -486,9 +593,21 @@ def test_state_round_trips_last_warned_at(tmp_path: Path) -> None:
 
     d = JsonStateManager._deferred_to_dict(original)
     assert d["last_warned_at"] == warned.isoformat()
+    assert d["disk"] == "vda"
 
     restored = JsonStateManager._dict_to_deferred(d)
     assert restored.last_warned_at == warned
+    assert restored.disk == "vda"
+
+    # The full file round-trip also preserves both fields.
+    manager = JsonStateManager(state_dir=tmp_path)
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
+    manager.update_deferred_warning("vm1", 0, warned)
+
+    reloaded = JsonStateManager(state_dir=tmp_path)
+    op = reloaded.get_deferred_operations("vm1")[0]
+    assert op.disk == "vda"
+    assert op.last_warned_at == warned
 
 
 def test_old_state_file_backward_compatible(tmp_path: Path) -> None:
@@ -501,6 +620,8 @@ def test_old_state_file_backward_compatible(tmp_path: Path) -> None:
     }
     restored = JsonStateManager._dict_to_deferred(raw_dict)
     assert restored.last_warned_at is None
+    # Legacy records without a disk field fall back to the legacy disk.
+    assert restored.disk == "vda"
 
     # Also verify through the full file-load path.
     state_file = tmp_path / "vm1.json"
@@ -513,6 +634,7 @@ def test_old_state_file_backward_compatible(tmp_path: Path) -> None:
     ops = manager.get_deferred_operations("vm1")
     assert len(ops) == 1
     assert ops[0].last_warned_at is None
+    assert ops[0].disk == "vda"
 
 
 def test_update_deferred_warning(tmp_path: Path) -> None:
@@ -531,6 +653,196 @@ def test_update_deferred_warning(tmp_path: Path) -> None:
 
     ops = manager.get_deferred_operations("vm1")
     assert ops[0].last_warned_at == warned
+
+
+# ── commit intent journal tests ─────────────────────────────────────────
+
+
+def test_commit_intent_set_get_clear(tmp_path: Path) -> None:
+    """set_commit_in_progress stores one CommitIntent; clear removes it.
+
+    commit-intent-journal scenario "Set, read, and clear an intent
+    record": the returned record carries the exact fields written, and
+    clearing the disk yields an empty list.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_commit_in_progress("vm1", "vda", ["s1"], "/data/img.qcow2", "20260812T150126")
+
+    intents = manager.get_commit_in_progress("vm1")
+    assert len(intents) == 1
+    intent = intents[0]
+    assert isinstance(intent, CommitIntent)
+    assert intent.disk == "vda"
+    assert intent.snapshots == ["s1"]
+    assert intent.base == "/data/img.qcow2"
+    assert intent.started_ts == "20260812T150126"
+
+    manager.clear_commit_in_progress("vm1", "vda")
+    assert manager.get_commit_in_progress("vm1") == []
+
+
+def test_commit_intent_upsert_same_disk(tmp_path: Path) -> None:
+    """A second set for the same disk replaces the record (at most one per disk).
+
+    commit-intent-journal scenario "Upsert replaces the record for the
+    same disk": the merged snapshot list holds the LATEST values, and
+    exactly one record remains.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_commit_in_progress("vm1", "vda", ["s1"], "/data/img.qcow2", "20260812T150126")
+    manager.set_commit_in_progress("vm1", "vda", ["s1", "s2"], "/data/img.qcow2", "20260812T160000")
+
+    intents = manager.get_commit_in_progress("vm1")
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.disk == "vda"
+    assert intent.snapshots == ["s1", "s2"]
+    assert intent.base == "/data/img.qcow2"
+    assert intent.started_ts == "20260812T160000"
+
+
+def test_commit_intent_multiple_disks_independent(tmp_path: Path) -> None:
+    """vda and vdb hold independent intent records; clearing vda leaves vdb.
+
+    commit-intent-journal scenario "Multiple disks hold independent
+    intent records": two disks yield two records and per-disk clear
+    removes only the target disk's record.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_commit_in_progress("vm1", "vda", ["s1"], "/data/img-a.qcow2", "20260812T150126")
+    manager.set_commit_in_progress("vm1", "vdb", ["s2"], "/data/img-b.qcow2", "20260812T150200")
+
+    intents = manager.get_commit_in_progress("vm1")
+    assert len(intents) == 2
+    by_disk = {i.disk: i for i in intents}
+    assert by_disk["vda"].snapshots == ["s1"]
+    assert by_disk["vdb"].snapshots == ["s2"]
+
+    manager.clear_commit_in_progress("vm1", "vda")
+
+    remaining = manager.get_commit_in_progress("vm1")
+    assert len(remaining) == 1
+    assert remaining[0].disk == "vdb"
+    assert remaining[0].snapshots == ["s2"]
+
+
+def test_commit_intent_survives_round_trip(tmp_path: Path) -> None:
+    """A written intent record survives re-instantiating the manager.
+
+    commit-intent-journal scenario "Intent survives a state round-trip":
+    a fresh JsonStateManager over the same state file returns the
+    identical record.
+    """
+    manager1 = JsonStateManager(state_dir=tmp_path)
+    manager1.set_commit_in_progress(
+        "vm1", "vda", ["s1", "s2"], "/data/img.qcow2", "20260812T150126"
+    )
+
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    intents = manager2.get_commit_in_progress("vm1")
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.disk == "vda"
+    assert intent.snapshots == ["s1", "s2"]
+    assert intent.base == "/data/img.qcow2"
+    assert intent.started_ts == "20260812T150126"
+
+
+def test_commit_intent_json_round_trip(tmp_path: Path) -> None:
+    """The journal round-trips through the JSON state file as a top-level list.
+
+    state-management scenario "Journal round-trip through JSON state":
+    the record is persisted under the ``commit_in_progress`` top-level
+    key of ``{vm}.json`` as a list of objects with the exact fields.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+    manager.set_commit_in_progress("vm1", "vda", ["s1"], "/data/img.qcow2", "20260812T150126")
+
+    state_file = tmp_path / "vm1.json"
+    assert state_file.exists()
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    journal = data.get("commit_in_progress")
+    assert journal == [
+        {
+            "disk": "vda",
+            "snapshots": ["s1"],
+            "base": "/data/img.qcow2",
+            "started_ts": "20260812T150126",
+        }
+    ]
+
+
+def test_commit_intent_atomic_with_other_state(tmp_path: Path) -> None:
+    """The intent journal is written in the same atomic save as other state.
+
+    state-management scenario "Journal write is atomic with other state":
+    writing an intent must not clobber existing per-VM state — both the
+    journal and pre-existing keys (last_allocation, deferred_operations,
+    snapshots) survive in one coherent file, and no ``.tmp`` remains.
+    """
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_last_allocation("vm1", "vda", 4096)
+    manager.add_deferred_blockcommit("vm1", "vda", ["snap1.qcow2"], "apparmor")
+    manager.set_commit_in_progress("vm1", "vda", ["s1"], "/data/img.qcow2", "20260812T150126")
+
+    # The pre-existing state is untouched by the journal write.
+    assert manager.get_last_allocation("vm1", "vda") == 4096
+    ops = manager.get_deferred_operations("vm1")
+    assert len(ops) == 1
+    assert ops[0].reason == "apparmor"
+    intents = manager.get_commit_in_progress("vm1")
+    assert len(intents) == 1
+    assert intents[0].snapshots == ["s1"]
+
+    # One atomic save produced one coherent file; no .tmp lingers.
+    assert not (tmp_path / "vm1.json.tmp").exists()
+    with open(tmp_path / "vm1.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["last_allocation"] == {"vda": 4096}
+    assert len(data["deferred_operations"]) == 1
+    assert data["commit_in_progress"][0]["disk"] == "vda"
+
+    # A fresh manager sees the combined state.
+    manager2 = JsonStateManager(state_dir=tmp_path)
+    assert manager2.get_last_allocation("vm1", "vda") == 4096
+    assert len(manager2.get_deferred_operations("vm1")) == 1
+    assert len(manager2.get_commit_in_progress("vm1")) == 1
+
+
+def test_legacy_state_file_loads_cleanly(tmp_path: Path) -> None:
+    """A legacy state file without commit_in_progress loads as an empty list.
+
+    state-management scenario "Legacy state file loads cleanly": no
+    migration is required and the read does not rewrite the file.
+    """
+    legacy_data = {
+        "last_allocation": {"vda": 4096},
+        "snapshots": [],
+        "deferred_operations": [],
+    }
+    state_file = tmp_path / "vm1.json"
+    state_file.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+    with open(state_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    assert manager.get_commit_in_progress("vm1") == []
+
+    # Existing legacy fields still work.
+    assert manager.get_last_allocation("vm1", "vda") == 4096
+
+    # Reads must not rewrite the legacy file (no migration pass).
+    with open(state_file, encoding="utf-8") as fh:
+        after_raw = fh.read()
+    assert after_raw == original_raw
 
 
 # ── full backup tracking tests ───────────────────────────────────────────
@@ -2108,6 +2420,24 @@ def test_reset_vm_state_clears_deferred_operations(tmp_path: Path) -> None:
     assert manager.get_deferred_operations("testvm") == []
 
 
+def test_reset_vm_state_clears_commit_intents(tmp_path: Path) -> None:
+    """After reset_vm_state, the commit intent journal is empty (parity with
+    InMemoryStateManager — a stale intent must not survive a VM reset)."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_commit_in_progress(
+        "testvm", "vda", ["snap1.qcow2"], "/images/testvm.qcow2", "20260808T160000"
+    )
+    manager.set_commit_in_progress(
+        "testvm", "vdb", ["snap2.qcow2"], "/images/testvm-vdb.qcow2", "20260808T160000"
+    )
+    assert len(manager.get_commit_in_progress("testvm")) == 2
+
+    manager.reset_vm_state("testvm")
+
+    assert manager.get_commit_in_progress("testvm") == []
+
+
 def test_reset_vm_state_nonexistent_vm_no_error(tmp_path: Path) -> None:
     """resetting a VM that has no state file does not raise."""
     manager = JsonStateManager(state_dir=tmp_path)
@@ -2341,6 +2671,27 @@ def test_reset_vm_disk_state_clears_only_given_disk(tmp_path: Path) -> None:
     assert manager.get_last_allocation("myvm", "vdb") == 2000, (
         "vdb last_allocation must be preserved"
     )
+
+
+def test_reset_vm_disk_state_clears_only_that_disks_intent(tmp_path: Path) -> None:
+    """reset_vm_disk_state filters the commit intent journal per disk: the
+    reset disk's intent is removed, other disks' intents are preserved."""
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    manager.set_commit_in_progress(
+        "myvm", "vda", ["snap_vda.qcow2"], "/images/myvm-vda.qcow2", "20260808T160000"
+    )
+    manager.set_commit_in_progress(
+        "myvm", "vdb", ["snap_vdb.qcow2"], "/images/myvm-vdb.qcow2", "20260808T160000"
+    )
+    assert len(manager.get_commit_in_progress("myvm")) == 2
+
+    manager.reset_vm_disk_state("myvm", "vda")
+
+    intents = manager.get_commit_in_progress("myvm")
+    assert len(intents) == 1, f"Expected only the vdb intent, got {intents}"
+    assert intents[0].disk == "vdb"
+    assert intents[0].snapshots == ["snap_vdb.qcow2"]
 
 
 def test_reset_vm_disk_state_legacy_bare_int(tmp_path: Path) -> None:

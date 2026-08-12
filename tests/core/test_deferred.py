@@ -1296,12 +1296,15 @@ def test_multidisk_deferred_drain_one_failure_independent(
     # Make blockcommit fail only for vda
     original_bc = lifecycle_manager.blockcommit
 
-    def _fail_vda(vm_config, snapshots_to_merge, *, disk, base_image, deep_verify=False):
+    def _fail_vda(
+        vm_config, snapshots_to_merge, *, disk, base_image, deep_verify=False, timeout=1800
+    ):
         if disk == "vda":
             return CommitResult(
                 success=False,
                 committed_snapshot="",
                 error="vda commit failed",
+                outcome="failure",
             )
         return original_bc(
             vm_config,
@@ -1309,6 +1312,7 @@ def test_multidisk_deferred_drain_one_failure_independent(
             disk=disk,
             base_image=base_image,
             deep_verify=deep_verify,
+            timeout=timeout,
         )
 
     with (
@@ -1659,3 +1663,250 @@ def test_non_space_commit_failure_aborts(
     # Not deferred, not space-limited — a definitive non-space abort.
     assert mock_state.get_deferred_operations("testvm") == []
     assert core._space_limited_targets == set()
+
+
+# ── test_drain_path_logs_intent_line (harden-blockcommit-races) ────────────
+
+
+def test_drain_path_logs_intent_line(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """The deferred-drain commit mirrors the main commit path: intent written
+    BEFORE the drain commit, the ``[blockcommit] ... (mode=..., timeout=...)``
+    INFO line emitted, the pre-commit block-job probe issued (live path), and
+    the intent cleared on success."""
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "running")
+    # domblklist returns a DIFFERENT (newer) file → snap1 is below active layer
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    events: list[str] = []
+    original_intent = mock_state.set_commit_in_progress
+    original_commit = lifecycle_manager.blockcommit
+
+    def _record_intent(*args, **kwargs):
+        events.append("intent")
+        return original_intent(*args, **kwargs)
+
+    def _record_commit(*args, **kwargs):
+        events.append("commit")
+        return original_commit(*args, **kwargs)
+
+    caplog.set_level(logging.INFO)
+    with (
+        patch.object(mock_state, "set_commit_in_progress", side_effect=_record_intent),
+        patch.object(lifecycle_manager, "blockcommit", side_effect=_record_commit) as bc_spy,
+    ):
+        core.snapshot()
+
+    # Intent precedes the drain commit; the queue is drained.
+    assert events == ["intent", "commit"], f"unexpected drain order: {events}"
+    assert bc_spy.called
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+
+    # Probe-before-drain-commit on the live path.
+    assert any("virsh blockjob" in c for c in mock_shell.call_history), (
+        "pre-commit block-job probe must run before the live drain commit"
+    )
+
+    # Observability: the [blockcommit] intent line carries mode/timeout.
+    assert (
+        "[blockcommit] testvm/vda: committing 1 snapshot(s) into "
+        "/var/lib/libvirt/images/testvm.qcow2 (mode=virsh, timeout=1800s)"
+    ) in caplog.text
+
+
+# ── Drain pre-commit probe active → re-queue without commit ───────────────
+
+
+def test_drain_probe_active_requeues_without_commit(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Deferred-drain live path: a pre-commit probe reporting an active job
+    re-queues the entry without committing and without writing an intent."""
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "running")
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Block job: type=blockcommit\nJob: 1048576/2097152\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(
+            lifecycle_manager, "blockcommit", wraps=lifecycle_manager.blockcommit
+        ) as bc_spy,
+    ):
+        core._check_deferred_operations(vm)
+
+    bc_spy.assert_not_called()
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].snapshots == ["snap1"]
+    assert remaining[0].reason == "apparmor"
+    # No intent was written — the probe blocks before the journal write.
+    assert mock_state.get_commit_in_progress("testvm") == []
+    # No commit command was issued (probe commands are "virsh blockjob").
+    assert not any("virsh blockcommit" in c for c in mock_shell.call_history)
+    assert "blockjob probe returned 'active'" in caplog.text
+
+
+# ── Drain unknown outcome → intent kept + entry re-queued ─────────────────
+
+
+def test_drain_unknown_outcome_keeps_intent_and_requeues(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A drain commit that times out (outcome='unknown') keeps the intent
+    record and re-queues the entry — the next run's step-0 intent recovery
+    reconciles it; it is NEVER treated as a definitive failure."""
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "snap1")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    _set_vm_state(mock_shell, "running")
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    unknown = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="Command timed out after 1800s",
+        outcome="unknown",
+    )
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(lifecycle_manager, "blockcommit", return_value=unknown) as bc_spy,
+    ):
+        core._check_deferred_operations(vm)
+
+    assert bc_spy.called
+    # Intent kept for the next run's reconciliation.
+    intents = mock_state.get_commit_in_progress("testvm")
+    assert len(intents) == 1
+    assert intents[0].disk == "vda"
+    assert intents[0].snapshots == ["snap1"]
+    # Entry re-queued with its original reason.
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].snapshots == ["snap1"]
+    assert remaining[0].reason == "apparmor"
+    # Snapshot record untouched (no convergence on unknown).
+    assert [s.name for s in mock_state.get_snapshots("testvm")] == ["snap1"]
+    assert "outcome unknown" in caplog.text
+
+
+# ── Drain offline race guard: domstate re-check failure fails closed ──────
+
+
+def test_drain_qemu_img_domstate_recheck_failure_keeps_queued(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Deferred-drain offline path: the immediate domstate re-check (design
+    D7, mirrored from the main path) fails closed — the entry stays queued,
+    no intent is written, and no qemu-img commit command is ever issued."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    _add_snapshot(mock_state, "testvm", "s1")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["s1"], "apparmor")
+    _set_vm_state(mock_shell, "shut off")
+    _set_domblklist(mock_shell, "/tmp/other.qcow2")
+
+    # The plan's domstate probe succeeds ("shut off"), but the immediate
+    # re-check right before the manager call fails (libvirtd went away).
+    orig_run = mock_shell.run
+    domstate_calls = {"n": 0}
+
+    def _flaky_domstate(cmd, timeout, check=False):
+        if cmd[:2] == ["virsh", "domstate"]:
+            domstate_calls["n"] += 1
+            if domstate_calls["n"] >= 2:
+                return ShellResult(
+                    success=False,
+                    stdout="",
+                    stderr="error: connection lost",
+                    returncode=1,
+                    error="connection lost",
+                )
+        return orig_run(cmd, timeout, check)
+
+    lifecycle_manager = mock_factory._lifecycle_manager
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(mock_shell, "run", side_effect=_flaky_domstate),
+        patch.object(
+            lifecycle_manager, "blockcommit", wraps=lifecycle_manager.blockcommit
+        ) as bc_spy,
+    ):
+        core._check_deferred_operations(vm)
+
+    # The re-check actually ran (plan probe + immediate re-check).
+    assert domstate_calls["n"] == 2
+    bc_spy.assert_not_called()
+    assert not any("qemu-img commit" in c for c in mock_shell.call_history)
+    # Entry stayed queued; no intent record was written.
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].snapshots == ["s1"]
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert "domstate re-check failed" in caplog.text

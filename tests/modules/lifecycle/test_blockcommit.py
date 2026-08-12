@@ -5,24 +5,41 @@ in complete isolation.  All ``virsh`` calls go through a mocked ``IShell``.
 The manager does NOT inherit from Core (design D1) and takes only ``IShell``
 as a constructor dependency.
 
-Test scenarios (per spec: lifecycle-manager/spec.md):
+Since the multi-disk refactor the manager no longer calls ``virsh domblklist``
+to resolve the disk target — ``disk`` is a keyword-only parameter.  The commit
+command is executed via ``IShell.run_with_heartbeat`` with a configurable
+``timeout`` (default 1800) and a periodic heartbeat callback that logs
+progress for long-running merges (harden-blockcommit-races).
 
-1. **Single snapshot success** -- domblklist resolves target "vda",
-   blockcommit returns exit 0, result is ``CommitResult(success=True)``.
+Test scenarios (per lifecycle-manager/spec.md + harden-blockcommit-races):
+
+1. **Single snapshot success** -- blockcommit returns exit 0, result is
+   ``CommitResult(success=True, outcome="success")`` and the default
+   ``timeout``/``heartbeat_seconds`` kwargs reach ``run_with_heartbeat``.
 2. **Virsh error** -- blockcommit returns non-zero exit code, result is
-   ``CommitResult(success=False, error=<stderr>)``.
+   ``CommitResult(success=False, outcome="failure")``.
 3. **Empty list no-op** -- empty ``snapshots_to_merge`` produces success
    with ``committed_snapshot=""`` and zero shell calls.
-4. **Timeout** -- blockcommit ``ShellResult`` has ``success=False`` with
-   error containing "timed out".
-5. **Multiple snapshots sequential** (design D4) -- snapshots merged one at
-   a time, oldest first.  Short-circuits on first failure: remaining
-   snapshots are NOT attempted.
+4. **Timeout -> unknown** -- a "timed out" result from ``run_with_heartbeat``
+   is classified ``outcome="unknown"`` (never ``"failure"``).
+5. **Injected timeout** -- the ``timeout=`` kwarg is forwarded to
+   ``run_with_heartbeat``.
+6. **Heartbeat callback** -- ``on_heartbeat`` is invoked during the wait;
+   heartbeat log lines appear during a long commit; a fast commit produces
+   no heartbeat lines.
+7. **Multiple snapshots sequential** (design D4) -- snapshots merged one at
+   a time, oldest first; short-circuits on first failure.
+8. **MAC denial** -- AppArmor/SELinux denials are definitive failures with
+   ``outcome="failure"``.
+9. **Deep verify** -- ``qemu-img check`` targets the disk's ``base_image``
+   and the helper's internal ``shell.run()`` call does NOT pass
+   ``check=True``.
 """
 
 from __future__ import annotations
 
 import inspect
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -33,28 +50,33 @@ from tests.mocks.mock_shell import MockShell
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-# Standard domblklist output with a single disk target "vda".
-_DOMBLKLIST_OUTPUT = (
-    " Target   Source\n"
-    "------------------------------------\n"
-    " vda      /var/lib/libvirt/images/testvm.qcow2\n"
-)
-
 
 class CountingShell(IShell):
-    """Wrapper around an ``IShell`` that records every command passed to ``run()``.
+    """Wrapper around an ``IShell`` that records every command passed to it.
 
     Delegates actual execution to the inner shell (typically ``MockShell``)
-    while capturing the full command list for post-call assertions such as
-    call-count verification and flag inspection.
+    while capturing the full command list plus per-call kwargs for
+    post-call assertions such as call-count verification, flag inspection,
+    and timeout/heartbeat kwarg checks.
+
+    The manager executes the live commit via ``run_with_heartbeat``, so this
+    double records those calls separately from plain ``run()`` calls
+    (``heartbeat_calls`` vs ``run_calls``).  Heartbeat callbacks are
+    delegated to the inner shell, which scripts them via
+    ``expect(...).returns(result, heartbeats=N)``.
     """
 
     def __init__(self, inner: IShell) -> None:
         self._inner = inner
         self.calls: list[list[str]] = []
+        # (cmd, timeout, check) for every run() invocation.
+        self.run_calls: list[tuple[list[str], int, bool]] = []
+        # (cmd, timeout, heartbeat_seconds) for every run_with_heartbeat() call.
+        self.heartbeat_calls: list[tuple[list[str], int, int]] = []
 
     def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         self.calls.append(list(cmd))
+        self.run_calls.append((list(cmd), timeout, check))
         return self._inner.run(cmd, timeout, check)
 
     def run_with_stall_detection(
@@ -67,6 +89,24 @@ class CountingShell(IShell):
         self.calls.append(list(cmd))
         return self._inner.run_with_stall_detection(
             cmd, output_file=output_file, stall_timeout=stall_timeout, check=check
+        )
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat,
+        check: bool = False,
+    ) -> ShellResult:
+        self.calls.append(list(cmd))
+        self.heartbeat_calls.append((list(cmd), timeout, heartbeat_seconds))
+        return self._inner.run_with_heartbeat(
+            cmd,
+            timeout=timeout,
+            heartbeat_seconds=heartbeat_seconds,
+            on_heartbeat=on_heartbeat,
+            check=check,
         )
 
 
@@ -92,6 +132,17 @@ def _blockcommit_calls(shell: CountingShell) -> list[list[str]]:
     return [c for c in shell.calls if "blockcommit" in " ".join(c)]
 
 
+def _qemu_img_check_runs(
+    shell: CountingShell,
+) -> list[tuple[list[str], int, bool]]:
+    """Extract the recorded ``qemu-img check`` run() calls (cmd, timeout, check)."""
+    return [c for c in shell.run_calls if "qemu-img check" in " ".join(c[0])]
+
+
+def _success() -> ShellResult:
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 1. Successful blockcommit of a single snapshot
 # ──────────────────────────────────────────────────────────────────────────
@@ -100,33 +151,18 @@ def _blockcommit_calls(shell: CountingShell) -> list[list[str]]:
 def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_config):
     """A single snapshot is merged successfully.
 
-    - ``virsh domblklist`` returns output with target "vda".
     - ``virsh blockcommit`` returns exit 0.
-    - Result: ``CommitResult(success=True, committed_snapshot=<snap.name>)``.
+    - Result: ``CommitResult(success=True, outcome="success")``.
     - The blockcommit command contains ``--base``, ``--top``, ``--delete``,
       ``--verbose``, ``--wait``.
+    - The commit is executed via ``run_with_heartbeat`` with the default
+      ``timeout=1800`` and ``heartbeat_seconds=60``.
+    - No ``virsh domblklist`` call is made (disk is keyword-only).
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -139,6 +175,7 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     assert result.success is True
     assert result.committed_snapshot == snap.name
     assert result.error is None
+    assert result.outcome == "success"
 
     # Verify exactly one blockcommit call with all required flags.
     bc_calls = _blockcommit_calls(shell)
@@ -157,6 +194,15 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     top_idx = cmd.index("--top")
     assert cmd[top_idx + 1] == str(snap.path)
 
+    # The command went through run_with_heartbeat with the default timeout.
+    assert len(shell.heartbeat_calls) == 1
+    _, hb_timeout, hb_seconds = shell.heartbeat_calls[0]
+    assert hb_timeout == 1800
+    assert hb_seconds == 60
+
+    # domblklist is never called by the manager.
+    assert not any("domblklist" in " ".join(c) for c in shell.calls)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 2. Blockcommit fails -- virsh returns non-zero exit code
@@ -166,22 +212,12 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
 def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
     """A non-zero exit code from virsh blockcommit yields a failure result.
 
-    - ``domblklist`` returns success.
     - ``blockcommit`` returns exit 1 with an error message.
-    - Result: ``CommitResult(success=False, error=<error from virsh>)``.
+    - Result: ``CommitResult(success=False, outcome="failure")``.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     error_msg = "error: operation failed: blockcommit"
     mock_shell.expect("virsh blockcommit").returns(
         ShellResult(
@@ -203,6 +239,7 @@ def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
     assert result.success is False
     assert result.error == error_msg
     assert result.committed_snapshot == snap.name
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -213,8 +250,10 @@ def test_blockcommit_virsh_error(mock_shell: MockShell, make_vm_config):
 def test_blockcommit_empty_list_no_op(mock_shell: MockShell, make_vm_config):
     """An empty snapshot list is a no-op.
 
-    - No ``domblklist`` call, no ``blockcommit`` call.
-    - Result: ``CommitResult(success=True, committed_snapshot="")``.
+    - No shell call at all (no domblklist, no blockcommit).
+    - Result: ``CommitResult(success=True, committed_snapshot="",
+      outcome="success")`` (lifecycle-manager spec "Empty snapshot list":
+      ``success=True`` SHALL imply ``outcome="success"``).
     """
     vm_config = make_vm_config()
 
@@ -228,43 +267,39 @@ def test_blockcommit_empty_list_no_op(mock_shell: MockShell, make_vm_config):
     assert result.success is True
     assert result.committed_snapshot == ""
     assert result.error is None
+    assert result.outcome == "success"
 
     # No shell commands should have been executed at all.
     assert len(shell.calls) == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 4. Blockcommit times out
+# 4. Blockcommit times out -- outcome is "unknown", never "failure"
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
-    """A blockcommit timeout yields ``CommitResult(success=False)`` with "timed out".
+def test_blockcommit_timeout_returns_unknown(mock_shell: MockShell, make_vm_config):
+    """A blockcommit timeout yields ``outcome="unknown"`` (never "failure").
 
-    - ``domblklist`` returns success.
-    - ``blockcommit`` returns ``ShellResult(success=False)`` with error
-      containing "timed out".
-    - Result: ``CommitResult(success=False)`` with error containing "timed out".
+    The job may have completed on the hypervisor after the client was
+    killed, so the manager must classify timeouts as indeterminate
+    (``outcome="unknown"``) so the caller can reconcile instead of
+    treating the commit as a definitive failure.
+
+    - ``run_with_heartbeat`` returns
+      ``ShellResult(success=False, error="Command timed out after 1800s")``.
+    - Result: ``CommitResult(success=False, outcome="unknown")``.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     mock_shell.expect("virsh blockcommit").returns(
         ShellResult(
             success=False,
             stdout="",
             stderr="",
             returncode=-1,
-            error="virsh blockcommit timed out after 3600 seconds",
+            error="Command timed out after 1800s",
         )
     )
 
@@ -277,10 +312,132 @@ def test_blockcommit_timeout(mock_shell: MockShell, make_vm_config):
 
     assert result.success is False
     assert "timed out" in result.error
+    assert result.error == "Command timed out after 1800s"
+    assert result.outcome == "unknown"
+    assert result.outcome != "failure"
+    assert result.committed_snapshot == ""
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 5. Multiple snapshots merged sequentially (design D4)
+# 5. Injected timeout is honored
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_injected_timeout_honored(mock_shell: MockShell, make_vm_config):
+    """The ``timeout=`` kwarg reaches ``run_with_heartbeat`` unchanged.
+
+    The caller (Core) passes ``GlobalConfig.blockcommit_timeout`` through
+    to the manager; the manager must forward it to the shell call.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh blockcommit").returns(_success())
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config,
+        [snap],
+        disk="vda",
+        base_image=vm_config.disks[0].base_image,
+        timeout=900,
+    )
+
+    assert result.success is True
+    assert len(shell.heartbeat_calls) == 1
+    _, timeout_kwarg, hb_seconds = shell.heartbeat_calls[0]
+    assert timeout_kwarg == 900
+    assert hb_seconds == 60
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6. Heartbeat callback + heartbeat log lines
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_blockcommit_heartbeat_callback_elapsed(mock_shell: MockShell, make_vm_config, caplog):
+    """The heartbeat callback fires during the wait with the elapsed time.
+
+    The mock shell scripts a single heartbeat (``heartbeats=1``); the
+    manager's callback must log a progress line carrying the elapsed
+    seconds.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh blockcommit").returns(_success(), heartbeats=1)
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    with caplog.at_level(logging.INFO, logger="qsnap.modules.lifecycle.blockcommit_manager"):
+        result = manager.blockcommit(
+            vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+        )
+
+    assert result.success is True
+    expected_line = f"[blockcommit] testvm/vda: still merging {snap.name} into base (60s elapsed)"
+    assert any(expected_line in rec.message for rec in caplog.records)
+
+
+def test_heartbeat_lines_during_long_commit(mock_shell: MockShell, make_vm_config, caplog):
+    """Heartbeat log lines appear during a long commit.
+
+    Two scripted heartbeats (at 60s and 120s) produce two
+    ``[blockcommit] ... still merging ...`` INFO lines.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh blockcommit").returns(_success(), heartbeats=2)
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    with caplog.at_level(logging.INFO, logger="qsnap.modules.lifecycle.blockcommit_manager"):
+        result = manager.blockcommit(
+            vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+        )
+
+    assert result.success is True
+    heartbeat_lines = [
+        rec.message
+        for rec in caplog.records
+        if "[blockcommit]" in rec.message and "still merging" in rec.message
+    ]
+    assert len(heartbeat_lines) == 2
+    assert " (60s elapsed)" in heartbeat_lines[0]
+    assert " (120s elapsed)" in heartbeat_lines[1]
+
+
+def test_fast_commit_no_heartbeat_lines(mock_shell: MockShell, make_vm_config, caplog):
+    """A fast commit produces no heartbeat lines.
+
+    With ``heartbeats=0`` (the default) the mock shell never invokes the
+    callback, so no ``[blockcommit]`` progress lines are logged.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh blockcommit").returns(_success())
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    with caplog.at_level(logging.INFO, logger="qsnap.modules.lifecycle.blockcommit_manager"):
+        result = manager.blockcommit(
+            vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+        )
+
+    assert result.success is True
+    heartbeat_lines = [rec.message for rec in caplog.records if "[blockcommit]" in rec.message]
+    assert heartbeat_lines == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. Multiple snapshots merged sequentially (design D4)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -312,24 +469,7 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
 
     # ── Success path: both snapshots merged ───────────────────────────
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -341,6 +481,7 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     assert result.success is True
     assert result.committed_snapshot == snap2.name  # last merged
     assert result.error is None
+    assert result.outcome == "success"
 
     # blockcommit called exactly twice (once per snapshot, oldest first).
     bc_calls = _blockcommit_calls(shell)
@@ -353,18 +494,9 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     # ── Failure path: short-circuit on first failure (design D4) ──────
     # If the first blockcommit fails, the second is NOT executed.
 
-    fail_shell = MockShell()
-    fail_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    fail_shell = CountingShell(MockShell())
     fail_error = "error: blockcommit failed for snap1"
-    fail_shell.expect("virsh blockcommit").returns(
+    fail_shell._inner.expect("virsh blockcommit").returns(
         ShellResult(
             success=False,
             stdout="",
@@ -374,8 +506,7 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
         )
     )
 
-    fail_counting = CountingShell(fail_shell)
-    fail_manager = BlockCommitManager(shell=fail_counting)
+    fail_manager = BlockCommitManager(shell=fail_shell)
 
     fail_result = fail_manager.blockcommit(
         vm_config, [snap1, snap2], disk="vda", base_image=vm_config.disks[0].base_image
@@ -384,39 +515,31 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     assert fail_result.success is False
     assert fail_result.committed_snapshot == snap1.name  # the one that failed
     assert fail_result.error == fail_error
+    assert fail_result.outcome == "failure"
 
     # Only one blockcommit call (for snap1); snap2 was NOT attempted.
-    fail_bc_calls = _blockcommit_calls(fail_counting)
+    fail_bc_calls = _blockcommit_calls(fail_shell)
     assert len(fail_bc_calls) == 1
     assert str(snap1.path) in fail_bc_calls[0]
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 6. MAC denial — AppArmor blocks blockcommit
+# 8. MAC denial — AppArmor blocks blockcommit
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_blockcommit_blocked_by_apparmor(mock_shell: MockShell, make_vm_config):
     """An AppArmor denial is detected and reported as a MAC failure.
 
-    - ``domblklist`` returns success.
     - ``blockcommit`` returns non-zero with stderr containing
       "Permission denied" and "apparmor".
-    - Result: ``CommitResult(success=False, error="blocked by apparmor")``.
+    - Result: ``CommitResult(success=False, error="blocked by apparmor",
+      outcome="failure")``.
     - ``committed_snapshot`` is empty (no snapshot was merged).
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     apparmor_stderr = (
         "error: Failed to pivot snapshot: Permission denied\n"
         "libvirt: AppArmor denial: cannot access /var/lib/libvirt/images"
@@ -441,34 +564,26 @@ def test_blockcommit_blocked_by_apparmor(mock_shell: MockShell, make_vm_config):
     assert result.success is False
     assert result.error == "blocked by apparmor"
     assert result.committed_snapshot == ""
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 7. MAC denial — SELinux blocks blockcommit
+# 9. MAC denial — SELinux blocks blockcommit
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
     """An SELinux denial is detected and reported as a MAC failure.
 
-    - ``domblklist`` returns success.
     - ``blockcommit`` returns non-zero with stderr containing
       "Operation not permitted" and "AVC".
-    - Result: ``CommitResult(success=False, error="blocked by selinux")``.
+    - Result: ``CommitResult(success=False, error="blocked by selinux",
+      outcome="failure")``.
     - ``committed_snapshot`` is empty (no snapshot was merged).
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     selinux_stderr = (
         "error: internal error: Operation not permitted\nSELinux: AVC denied: { read } for qemu"
     )
@@ -492,10 +607,11 @@ def test_blockcommit_blocked_by_selinux(mock_shell: MockShell, make_vm_config):
     assert result.success is False
     assert result.error == "blocked by selinux"
     assert result.committed_snapshot == ""
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 8. AppArmor denial error string enables Core deferral
+# 10. AppArmor denial error string enables Core deferral
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -511,15 +627,6 @@ def test_blockcommit_blocked_by_apparmor_returns_deferred(mock_shell: MockShell,
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     apparmor_stderr = "Permission denied: apparmor profile violation"
     mock_shell.expect("virsh blockcommit").returns(
         ShellResult(
@@ -542,10 +649,11 @@ def test_blockcommit_blocked_by_apparmor_returns_deferred(mock_shell: MockShell,
     assert result.success is False
     assert result.error is not None
     assert "apparmor" in result.error
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 9. SELinux denial error string enables Core deferral
+# 11. SELinux denial error string enables Core deferral
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -561,15 +669,6 @@ def test_blockcommit_blocked_by_selinux_returns_deferred(mock_shell: MockShell, 
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     selinux_stderr = "Operation not permitted: AVC denied"
     mock_shell.expect("virsh blockcommit").returns(
         ShellResult(
@@ -592,36 +691,27 @@ def test_blockcommit_blocked_by_selinux_returns_deferred(mock_shell: MockShell, 
     assert result.success is False
     assert result.error is not None
     assert "selinux" in result.error
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 10. Normal failure does NOT trigger MAC deferral
+# 12. Normal failure does NOT trigger MAC deferral
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_blockcommit_normal_failure_no_deferral(mock_shell: MockShell, make_vm_config):
     """A non-MAC failure does not produce a deferral error string.
 
-    - ``domblklist`` returns success.
     - ``blockcommit`` returns non-zero with stderr "No such file or
       directory" — a normal I/O error, not an AppArmor/SELinux denial.
-    - Result: ``CommitResult(success=False)`` with the original error
-      propagated (not "blocked by ...").
+    - Result: ``CommitResult(success=False, outcome="failure")`` with the
+      original error propagated (not "blocked by ...").
     - The error string does NOT contain "apparmor" or "selinux", so
       Core will not defer.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
     io_error = "error: No such file or directory"
     mock_shell.expect("virsh blockcommit").returns(
         ShellResult(
@@ -648,41 +738,27 @@ def test_blockcommit_normal_failure_no_deferral(mock_shell: MockShell, make_vm_c
     assert "blocked by" not in result.error
     # committed_snapshot reflects the snapshot that failed (normal path).
     assert result.committed_snapshot == snap.name
+    assert result.outcome == "failure"
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 11. Deep verify — qemu-img check on base image after commit
+# 13. Deep verify — qemu-img check on the disk's base image after commit
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     """deep_verify=True with clean qemu-img check returns success.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - qemu-img check returns JSON with ``{"corruptions": 0}``.
-    - Result: ``CommitResult(success=True, error=None)``.
+    - ``qemu-img check`` targets the disk's ``base_image``.
+    - The helper's internal ``shell.run()`` does NOT pass ``check=True``.
+    - Result: ``CommitResult(success=True, outcome="success")``.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
@@ -693,7 +769,8 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
         )
     )
 
-    manager = BlockCommitManager(shell=mock_shell)
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
     )
@@ -701,12 +778,57 @@ def test_blockcommit_deep_verify_passes(mock_shell: MockShell, make_vm_config):
     assert result.success is True
     assert result.error is None
     assert result.committed_snapshot == snap.name
+    assert result.outcome == "success"
+
+    # qemu-img check targets the disk's base image, via run() without check=True.
+    check_runs = _qemu_img_check_runs(shell)
+    assert len(check_runs) == 1
+    check_cmd, check_timeout, check_flag = check_runs[0]
+    assert str(vm_config.disks[0].base_image) in " ".join(check_cmd)
+    assert check_flag is False
+
+
+def test_blockcommit_deep_verify_injected_timeout_honored(mock_shell: MockShell, make_vm_config):
+    """deep_verify passes the injected timeout to ``qemu-img check``.
+
+    No hard-coded ceiling may remain in the commit path (lifecycle-manager
+    spec): the deep-verify helper receives the manager's ``timeout`` kwarg.
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("virsh blockcommit").returns(_success())
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions":0, "errors":0, "leaks":0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+    result = manager.blockcommit(
+        vm_config,
+        [snap],
+        disk="vda",
+        base_image=vm_config.disks[0].base_image,
+        deep_verify=True,
+        timeout=900,
+    )
+
+    assert result.success is True
+    check_runs = _qemu_img_check_runs(shell)
+    assert len(check_runs) == 1
+    assert check_runs[0][1] == 900, "qemu-img check must receive the injected timeout"
 
 
 def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_vm_config):
     """deep_verify=True with corruptions > 0 returns failure.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - qemu-img check returns JSON with ``{"corruptions": 5}``.
     - Result: ``CommitResult(success=False)`` with "deep verify" and
       "5" in the error message.
@@ -714,24 +836,7 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
@@ -742,7 +847,8 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
         )
     )
 
-    manager = BlockCommitManager(shell=mock_shell)
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
     )
@@ -752,11 +858,17 @@ def test_blockcommit_deep_verify_fails_corruptions(mock_shell: MockShell, make_v
     assert "5" in result.error
     assert "corruptions" in result.error
 
+    # The check still targeted the disk's base image without check=True.
+    check_runs = _qemu_img_check_runs(shell)
+    assert len(check_runs) == 1
+    assert str(vm_config.disks[0].base_image) in " ".join(check_runs[0][0])
+    assert check_runs[0][2] is False
+
 
 def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_config):
     """deep_verify=True with errors > 0 returns failure.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - qemu-img check returns JSON with ``{"corruptions":0, "errors":2, "leaks":0}``.
     - Result: ``CommitResult(success=False)`` with "deep verify" and
       "2 errors" in the error message.
@@ -764,24 +876,7 @@ def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_con
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
@@ -792,7 +887,8 @@ def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_con
         )
     )
 
-    manager = BlockCommitManager(shell=mock_shell)
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
     )
@@ -806,7 +902,7 @@ def test_blockcommit_deep_verify_fails_errors(mock_shell: MockShell, make_vm_con
 def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_config):
     """deep_verify=True with leaks > 0 returns failure.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - qemu-img check returns JSON with ``{"corruptions":0, "errors":0, "leaks":3}``.
     - Result: ``CommitResult(success=False)`` with "deep verify" and
       "3 leaks" in the error message.
@@ -814,24 +910,7 @@ def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_conf
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
@@ -842,7 +921,8 @@ def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_conf
         )
     )
 
-    manager = BlockCommitManager(shell=mock_shell)
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
     )
@@ -856,7 +936,7 @@ def test_blockcommit_deep_verify_fails_leaks(mock_shell: MockShell, make_vm_conf
 def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_config):
     """deep_verify=False does NOT call qemu-img check.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - No ``qemu-img check`` expectation is configured.
     - If qemu-img check were called, ``MockShell`` would return
       ``"No mock configured"`` and cause a failure.
@@ -865,27 +945,11 @@ def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_c
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     # Intentionally NO qemu-img check expectation set.
 
-    manager = BlockCommitManager(shell=mock_shell)
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=False
     )
@@ -894,9 +958,12 @@ def test_blockcommit_deep_verify_false_no_check(mock_shell: MockShell, make_vm_c
     assert result.error is None
     assert result.committed_snapshot == snap.name
 
+    # No qemu-img check run() call was recorded.
+    assert _qemu_img_check_runs(shell) == []
+
 
 # ──────────────────────────────────────────────────────────────────────────
-# 12. Blockcommit does NOT use --force-share (design D5)
+# 14. Blockcommit does NOT use --force-share (design D5)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -910,24 +977,7 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
             success=True,
@@ -968,7 +1018,7 @@ def test_blockcommit_no_force_share(mock_shell: MockShell, make_vm_config):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 12a. Multi-disk — blockcommit uses the correct disk's base
+# 15. Multi-disk — blockcommit uses the correct disk's base
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -982,8 +1032,6 @@ def test_blockcommit_multi_disk_uses_correct_disk_base(mock_shell: MockShell, ma
     - The virsh blockcommit command must contain ``--path vdb`` and
       ``--base <vdb base path>`` (NOT vda's base).
     """
-    from pathlib import Path
-
     from qsnap.models.config import DiskConfig
 
     vda_disk = DiskConfig(target="vda", base_image=Path("/tmp/vda.qcow2"))
@@ -996,24 +1044,7 @@ def test_blockcommit_multi_disk_uses_correct_disk_base(mock_shell: MockShell, ma
         disk="vdb",
     )
 
-    mock_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    mock_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    mock_shell.expect("virsh blockcommit").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -1028,7 +1059,7 @@ def test_blockcommit_multi_disk_uses_correct_disk_base(mock_shell: MockShell, ma
     assert len(bc_calls) == 1
     cmd = bc_calls[0]
 
-    # Must contain --path with the domain name and disk target.
+    # Must contain --domain with the domain name and disk target.
     assert "--domain" in cmd
     domain_idx = cmd.index("--domain")
     assert domain_idx + 1 < len(cmd)
@@ -1048,17 +1079,15 @@ def test_blockcommit_multi_disk_uses_correct_disk_base(mock_shell: MockShell, ma
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 13. Architecture — no cross-domain imports
+# 16. Deep verify survives a failing qemu-img check gracefully
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_deep_verify_graceful_qemu_img_failure(
-    clean_shell, make_vm_config, success_result, failure_result
-):
+def test_blockcommit_deep_verify_graceful_qemu_img_failure(clean_shell, make_vm_config):
     """When qemu-img check command itself fails (non-zero exit),
     BlockCommitManager returns a graceful CommitResult(success=False) without crashing.
 
-    - domblklist and blockcommit both succeed.
+    - blockcommit succeeds.
     - qemu-img check returns ShellResult(success=False, error=<crash error>).
     - Result: ``CommitResult(success=False, error="deep verify: qemu-img check failed: ...")``.
     - No exception propagates from the manager.
@@ -1066,24 +1095,7 @@ def test_blockcommit_deep_verify_graceful_qemu_img_failure(
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    clean_shell.expect("virsh domblklist").returns(
-        ShellResult(
-            success=True,
-            stdout=_DOMBLKLIST_OUTPUT,
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
-    clean_shell.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=True,
-            stdout="",
-            stderr="",
-            returncode=0,
-            error=None,
-        )
-    )
+    clean_shell.expect("virsh blockcommit").returns(_success())
     # qemu-img check command itself fails (non-zero exit code)
     clean_shell.expect("qemu-img check").returns(
         ShellResult(
@@ -1095,7 +1107,8 @@ def test_blockcommit_deep_verify_graceful_qemu_img_failure(
         )
     )
 
-    manager = BlockCommitManager(shell=clean_shell)
+    shell = CountingShell(clean_shell)
+    manager = BlockCommitManager(shell=shell)
     # This must NOT raise — graceful failure via CommitResult
     result = manager.blockcommit(
         vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, deep_verify=True
@@ -1106,6 +1119,11 @@ def test_blockcommit_deep_verify_graceful_qemu_img_failure(
     assert "deep verify" in result.error
     assert "qemu-img check failed" in result.error
     assert "Could not open base.qcow2" in result.error
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 17. Architecture — no cross-domain imports
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def test_blockcommit_no_cross_domain_imports():

@@ -580,3 +580,110 @@ def test_blockcommit_active_detection_fallback(
     remaining_names = [s.name for s in remaining]
     assert "snap1" not in remaining_names
     assert "snap2" in remaining_names
+
+
+# ── Test 7: race guard recheck FAILURE defers fail-closed (harden-blockcommit-races) ──
+
+
+def test_domstate_recheck_failure_defers_vm_state_unknown(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Fail-closed offline race guard: the plan selects qemu-img (first
+    domstate → "shut off"), but the immediate re-check FAILS (e.g. libvirt
+    connection lost).  The committable set is deferred with
+    ``"vm_state_unknown"`` and NO ``qemu-img commit`` command is ever issued
+    — a state-unknown VM must never be committed into offline.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(
+        name="testvm",
+        base_image="/var/lib/libvirt/images/testvm.qcow2",
+        snapshot_dir=_SNAP_DIR,
+        lifecycle_mode="virsh",  # irrelevant when shut off (plan picks qemu-img)
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1, snap2 = _add_two_snapshots(mock_state, "testvm")
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=_domblklist_for(str(snap2.path)),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Support _get_chain_length
+    mock_shell.expect(r"qemu-img info.*--backing-chain").returns(
+        ShellResult(success=True, stdout="[]", stderr="", returncode=0, error=None)
+    )
+
+    retention = RetentionResult(keep=["snap2"], remove=["snap1"])
+
+    # --- Sequential domstate responses: "shut off" then FAILURE ---
+    original_run = mock_shell.run
+    domstate_count = [0]
+
+    def _patched_run(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if "domstate" in cmd_str:
+            domstate_count[0] += 1
+            if domstate_count[0] == 1:
+                # plan: VM shut off → qemu-img mode
+                return ShellResult(
+                    success=True, stdout="shut off\n", stderr="", returncode=0, error=None
+                )
+            # race guard re-check: cannot connect to libvirt → state unknown
+            return ShellResult(
+                success=False,
+                stdout="",
+                stderr="error: failed to connect to the hypervisor",
+                returncode=1,
+                error="cannot connect to libvirt",
+            )
+        return original_run(cmd, timeout, check)
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(mock_shell, "run", side_effect=_patched_run),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+        patch.object(
+            mock_factory, "create_lifecycle_manager", wraps=mock_factory.create_lifecycle_manager
+        ) as clm_spy,
+    ):
+        core._blockcommit_snapshots(vm, retention)
+
+    # Manager was never invoked (fail-closed race guard triggered).
+    clm_spy.assert_not_called()
+    bc_spy.assert_not_called()
+
+    # No qemu-img commit command was issued at all.
+    assert not any("qemu-img commit" in c for c in mock_shell.call_history), (
+        "qemu-img commit must NEVER run when the VM state is unknown"
+    )
+
+    # Committable snap1 deferred with "vm_state_unknown".
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].snapshots == ["snap1"]
+    assert deferred[0].reason == "vm_state_unknown"
+
+    # State not mutated (snapshots still present).
+    remaining = mock_state.get_snapshots("testvm")
+    remaining_names = [s.name for s in remaining]
+    assert "snap1" in remaining_names
+    assert "snap2" in remaining_names

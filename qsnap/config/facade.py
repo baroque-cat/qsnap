@@ -61,6 +61,7 @@ _GLOBAL_KEYS: frozenset[str] = frozenset(
         "full_verify_before_delete",
         "transaction_log",
         "backup_create",
+        "blockcommit_timeout",
         "free_space_check",
         "free_space_reserve",
         "free_space_factor",
@@ -318,6 +319,15 @@ class ConfigFacade(IConfigFacade):
         if "backup_create" in raw:
             global_kwargs["backup_create"] = str(raw["backup_create"])
 
+        # Blockcommit timeout (seconds).  Validate the type BEFORE int()
+        # conversion so a non-integer value produces a clear ConfigError
+        # naming the option (not a raw ValueError).
+        if "blockcommit_timeout" in raw:
+            raw_value = raw["blockcommit_timeout"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                raise ConfigError(f"blockcommit_timeout must be an integer, got {raw_value!r}")
+            global_kwargs["blockcommit_timeout"] = int(raw_value)
+
         # Proactive free-space gate before backup transfers
         # (design D5/D16).
         if "free_space_check" in raw:
@@ -409,6 +419,16 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(
                 f"Invalid backup_create: {self._global.backup_create!r}. "
                 f"Must be one of: {', '.join(sorted(valid_backup_create))}"
+            )
+
+        # Validate blockcommit_timeout (positive integer).
+        if (
+            not isinstance(self._global.blockcommit_timeout, int)
+            or self._global.blockcommit_timeout < 1
+        ):
+            raise ConfigError(
+                f"blockcommit_timeout must be a positive integer, "
+                f"got {self._global.blockcommit_timeout!r}"
             )
 
         # Validate FULL verification tiers.

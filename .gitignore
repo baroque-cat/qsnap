@@ -6,6 +6,9 @@ plan*
 problem*
 bug.txt
 benchmark*
+dumpxml*
+state_all*
+
 
 # Python
 __pycache__/

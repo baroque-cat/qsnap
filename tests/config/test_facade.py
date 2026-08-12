@@ -808,3 +808,33 @@ def test_target_verify_absent_defaults_to_metadata(tmp_path: Path) -> None:
     facade = ConfigFacade(config_file)
     vm = facade.get_vm("testvm")
     assert vm.targets[0].verify == "metadata"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# harden-blockcommit-races: blockcommit_timeout validation (config-model)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, '"abc"'])
+def test_blockcommit_timeout_invalid_values_rejected(tmp_path: Path, bad_value) -> None:
+    """Zero, negative, and non-integer blockcommit_timeout values are rejected.
+
+    config-model scenario "Invalid values rejected": config parsing must
+    fail with a clear ``ConfigError`` naming the option for every invalid
+    value (pattern of ``test_zero_chain_length_rejected``).
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        f"blockcommit_timeout = {bad_value}\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    with pytest.raises(ConfigError, match="blockcommit_timeout"):
+        ConfigFacade(config_file)

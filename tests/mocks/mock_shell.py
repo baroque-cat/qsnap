@@ -8,6 +8,7 @@ responses.  Also supports ``.call_history`` for inspecting all calls made.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from qsnap.interfaces.shell import IShell
@@ -21,9 +22,11 @@ class _Expectation:
         self.pattern = pattern
         self._result: ShellResult | None = None
         self._exception: Exception | None = None
+        self.heartbeats: int = 0
 
-    def returns(self, result: ShellResult) -> _Expectation:
+    def returns(self, result: ShellResult, heartbeats: int = 0) -> _Expectation:
         self._result = result
+        self.heartbeats = heartbeats
         return self
 
     def raises(self, exception: Exception) -> _Expectation:
@@ -110,6 +113,44 @@ class MockShell(IShell):
         self._call_history.append(cmd_str)
         for exp in self._expectations:
             if re.search(exp.pattern, cmd_str):
+                return exp.execute()
+        return ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error=f"No mock configured for: {cmd_str}",
+        )
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat: Callable[[int], None],
+        check: bool = False,
+    ) -> ShellResult:
+        """Mock heartbeat execution — matches expectations like ``run``.
+
+        The mock does not perform real polling or process management.  It
+        matches the command against registered expectations (same as
+        :meth:`run`) and returns the preconfigured :class:`ShellResult`.
+
+        When the matching expectation was configured with
+        ``returns(result, heartbeats=N)``, ``on_heartbeat(elapsed)`` is
+        invoked exactly *N* times before the result is returned, with
+        *elapsed* values of ``heartbeat_seconds``, ``2 * heartbeat_seconds``,
+        … (deterministic mock of the real poll loop).  Tests that need to
+        assert heartbeat parameters (e.g. ``timeout``,
+        ``heartbeat_seconds``) inspect the command string via the
+        expectation pattern or the scripted ``on_heartbeat`` values.
+        """
+        cmd_str = " ".join(cmd)
+        self._call_history.append(cmd_str)
+        for exp in self._expectations:
+            if re.search(exp.pattern, cmd_str):
+                for i in range(exp.heartbeats):
+                    on_heartbeat((i + 1) * heartbeat_seconds)
                 return exp.execute()
         return ShellResult(
             success=False,

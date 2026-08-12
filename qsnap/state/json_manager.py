@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import cast
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.models.results import CommitIntent, DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from qsnap.utils.parsing import parse_disk_from_snapshot_name
 
 logger = logging.getLogger(__name__)
@@ -787,9 +787,10 @@ class JsonStateManager(IStateManager):
     def reset_vm_state(self, vm_name: str) -> None:
         """Atomically clear all per-VM state.
 
-        Clears the ``snapshots`` list, ``last_allocation`` baseline, and
-        ``deferred_operations`` queue for *vm_name*.  If the VM has no
-        state file, no file is created (no-op).
+        Clears the ``snapshots`` list, ``last_allocation`` baseline,
+        ``deferred_operations`` queue, and ``commit_in_progress`` intent
+        journal for *vm_name*.  If the VM has no state file, no file is
+        created (no-op).
         """
         path = self._state_path(vm_name)
         if not path.exists():
@@ -800,6 +801,7 @@ class JsonStateManager(IStateManager):
         # dict keyed by disk; an empty dict clears every disk).
         data["last_allocation"] = {}
         data["deferred_operations"] = []
+        data["commit_in_progress"] = []
         self._save(vm_name, data)
 
     def reset_target_state(self, target_path: str) -> None:
@@ -854,9 +856,10 @@ class JsonStateManager(IStateManager):
         """Atomically clear the per-VM state that belongs to *disk* only.
 
         Per-disk counterpart of :meth:`reset_vm_state`.  Removes only the
-        snapshots, ``last_allocation`` entry, and deferred operations that
-        belong to *disk*; state of the VM's other disks is preserved.  If
-        the VM has no state file, no file is created (no-op).
+        snapshots, ``last_allocation`` entry, deferred operations, and
+        commit-intent record that belong to *disk*; state of the VM's
+        other disks is preserved.  If the VM has no state file, no file is
+        created (no-op).
         """
         path = self._state_path(vm_name)
         if not path.exists():
@@ -896,6 +899,12 @@ class JsonStateManager(IStateManager):
                 if d_disk != disk:
                     kept.append(d)
             data["deferred_operations"] = kept
+
+        # Commit-intent journal: keep only records for OTHER disks.
+        raw_intents = data.get("commit_in_progress", [])
+        if raw_intents:
+            intents = cast(list[dict[str, object]], raw_intents)
+            data["commit_in_progress"] = [i for i in intents if i.get("disk") != disk]
 
         self._save(vm_name, data)
 
@@ -1012,4 +1021,84 @@ class JsonStateManager(IStateManager):
         markers: dict[str, str] = existing if isinstance(existing, dict) else {}
         markers[disk] = timestamp
         data["last_commit_ts"] = markers
+        self._save(vm_name, data)
+
+    # ── Commit intent journal ──────────────────────────────────────────
+
+    @staticmethod
+    def _intent_to_dict(intent: CommitIntent) -> dict[str, object]:
+        return {
+            "disk": intent.disk,
+            "snapshots": list(intent.snapshots),
+            "base": intent.base,
+            "started_ts": intent.started_ts,
+        }
+
+    @staticmethod
+    def _dict_to_intent(d: dict[str, object]) -> CommitIntent:
+        return CommitIntent(
+            disk=str(d["disk"]),
+            snapshots=list(d.get("snapshots", [])),  # type: ignore[arg-type]
+            base=str(d["base"]),
+            started_ts=str(d["started_ts"]),
+        )
+
+    def set_commit_in_progress(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        base: str,
+        started_ts: str,
+    ) -> None:
+        """Upsert the commit-intent record for (*vm_name*, *disk*)."""
+        data = self._load(vm_name)
+        raw_list: list[dict[str, object]] = list(data.get("commit_in_progress", []))  # type: ignore[arg-type]
+        # Upsert: replace existing record for the same disk.
+        replaced = False
+        for i, item in enumerate(raw_list):
+            if item.get("disk") == disk:
+                raw_list[i] = self._intent_to_dict(
+                    CommitIntent(
+                        disk=disk,
+                        snapshots=list(snapshots),
+                        base=base,
+                        started_ts=started_ts,
+                    )
+                )
+                replaced = True
+                break
+        if not replaced:
+            raw_list.append(
+                self._intent_to_dict(
+                    CommitIntent(
+                        disk=disk,
+                        snapshots=list(snapshots),
+                        base=base,
+                        started_ts=started_ts,
+                    )
+                )
+            )
+        data["commit_in_progress"] = raw_list
+        self._save(vm_name, data)
+
+    def get_commit_in_progress(self, vm_name: str) -> list[CommitIntent]:
+        """Return all commit-intent records for *vm_name*."""
+        data = self._load(vm_name)
+        raw_list = data.get("commit_in_progress", [])
+        if not raw_list:
+            return []
+        return [
+            self._dict_to_intent(d)  # type: ignore[arg-type]
+            for d in raw_list  # type: ignore[union-attr]
+        ]
+
+    def clear_commit_in_progress(self, vm_name: str, disk: str) -> None:
+        """Remove the commit-intent record for (*vm_name*, *disk*)."""
+        data = self._load(vm_name)
+        raw_list: list[dict[str, object]] = list(data.get("commit_in_progress", []))  # type: ignore[arg-type]
+        new_list = [item for item in raw_list if item.get("disk") != disk]
+        if len(new_list) == len(raw_list):
+            return  # No record to clear — no-op (no save needed).
+        data["commit_in_progress"] = new_list
         self._save(vm_name, data)

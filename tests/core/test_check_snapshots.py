@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from qsnap.core import Core
-from qsnap.models.results import SnapshotInfo
+from qsnap.models.results import ChainScanResult, RetentionResult, ShellResult, SnapshotInfo
 from tests.mocks import MockConfigFacade
 
 
@@ -412,8 +413,10 @@ def test_check_xml_backingstore_chain_mismatch(
 def test_check_broken_chain_middle_missing(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path, failure_result, success_result
 ):
-    """State: 3 snapshots, snap2 deleted from disk
-    → status="broken", broken contains snap2."""
+    """Blockcommit recovery: ``qemu-img info --backing-chain`` fails because
+    snap2 is missing mid-chain → the per-disk chain verification walks the
+    chain and reports ``ChainVerifyResult.broken_file == Path(snap2)``; the
+    VM pipeline aborts (broken chain needs operator intervention)."""
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
     base_img = tmp_path / "base.qcow2"
@@ -426,19 +429,36 @@ def test_check_broken_chain_middle_missing(
     _record_snapshot(mock_state, "testvm", "testvm.snap1", snap1, 0)
     _record_snapshot(mock_state, "testvm", "testvm.snap2", snap2, 1)
     _record_snapshot(mock_state, "testvm", "testvm.snap3", snap3, 2)
-    mock_shell.expect_first("virsh domblklist").returns(
-        success_result(_make_domblklist_output(snap3))
-    )
+    # The chain scan itself fails (missing file breaks qemu-img info)…
     mock_shell.expect_first("--backing-chain").returns(failure_result())
-    mock_shell.expect_first("virsh dumpxml").returns(
-        success_result(_make_dumpxml([snap3, snap2, snap1, base_img]))
-    )
+    chain_paths = [snap3, snap2, snap1, base_img]
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
-    result = core.check()
-    assert result["testvm"].status == "broken"
-    assert len(result["testvm"].broken_snapshots) > 0
+
+    # …and the broken-file walk pinpoints the ACTUAL missing file (snap2),
+    # regardless of its position in the chain.
+    with patch.object(
+        mock_shell, "run", side_effect=_make_walk_side_effect(mock_shell, chain_paths, 1)
+    ):
+        verify = core._verify_backing_chain(vm, "vda")
+    assert verify.success is False
+    assert verify.broken_file == Path(snap2), f"expected snap2, got {verify.broken_file}"
+    assert verify.disk == "vda"
+
+    # Pipeline abort: pre-commit verification failure raises RuntimeError
+    # with a Break-at hint naming the missing file.
+    with (
+        patch.object(
+            mock_shell, "run", side_effect=_make_walk_side_effect(mock_shell, chain_paths, 1)
+        ),
+        pytest.raises(RuntimeError) as excinfo,
+    ):
+        core._blockcommit_snapshots(
+            vm, RetentionResult(keep=["testvm.snap3"], remove=["testvm.snap1"])
+        )
+    assert "Break at:" in str(excinfo.value)
+    assert str(snap2) in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -654,8 +674,9 @@ def test_check_inconsistent_backing_filename(
 def test_check_detects_cycle_in_chain(
     make_vm_config, mock_factory, mock_state, mock_shell, tmp_path, success_result
 ):
-    """qemu-img info JSON shows a cycle in backing chain
-    → detected, status="broken"."""
+    """Blockcommit recovery: a cyclic reference is NOT a missing file — the
+    per-disk verification reports ``broken_file is None`` and the VM
+    pipeline aborts (broken chain needs operator intervention)."""
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
     base_img = tmp_path / "base.qcow2"
@@ -668,19 +689,138 @@ def test_check_detects_cycle_in_chain(
     _record_snapshot(mock_state, "testvm", "testvm.snap1", snap1, 0)
     _record_snapshot(mock_state, "testvm", "testvm.snap2", snap2, 1)
     _record_snapshot(mock_state, "testvm", "testvm.snap3", snap3, 2)
-    mock_shell.expect_first("virsh domblklist").returns(
-        success_result(_make_domblklist_output(snap3))
-    )
     chain_paths = [snap3, snap2, snap1, base_img]
     mock_shell.expect_first("--backing-chain").returns(
         success_result(_make_chain_json_cycle(chain_paths, 1))
     )
-    mock_shell.expect_first("virsh dumpxml").returns(success_result(_make_dumpxml(chain_paths)))
     vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
     config = MockConfigFacade(vms=[vm])
     core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
-    result = core.check()
-    assert result["testvm"].status == "broken"
-    assert any("cycle" in s for s in result["testvm"].broken_snapshots), (
-        f"Should report cycle detection, got: {result['testvm'].broken_snapshots}"
+
+    # Non-missing-file failure (cycle) → broken_file is None (spec:
+    # blockcommit-recovery "No broken file on other failures").
+    verify = core._verify_backing_chain(vm, "vda")
+    assert verify.success is False
+    assert verify.broken_file is None, f"expected None for cycle, got {verify.broken_file}"
+    assert verify.disk == "vda"
+
+    # Pipeline abort: a broken chain aborts the VM pipeline.
+    with pytest.raises(RuntimeError) as excinfo:
+        core._blockcommit_snapshots(
+            vm, RetentionResult(keep=["testvm.snap3"], remove=["testvm.snap1"])
+        )
+    assert "cycle" in str(excinfo.value)
+
+
+# ── blockcommit-recovery: deep-chain walk (harden-blockcommit-races) ───────
+
+
+def _make_walk_side_effect(mock_shell, chain_paths, missing_idx):
+    """Build a MockShell.run side effect that serves the per-file walk used
+    by ``_find_broken_chain_file``: every file exists except
+    ``chain_paths[missing_idx]``, and each file's ``qemu-img info
+    --output=json`` reports its backing-filename (the next entry)."""
+    import json as _json
+
+    original_run = mock_shell.run
+    missing = str(chain_paths[missing_idx])
+
+    def _run(cmd, timeout, check=False):
+        cmd_str = " ".join(cmd)
+        if cmd_str.startswith("test -f"):
+            path = cmd[2]
+            if path == missing:
+                return ShellResult(
+                    success=False, stdout="", stderr="", returncode=1, error="missing"
+                )
+            return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+        if cmd_str.startswith("qemu-img info --force-share --output=json"):
+            path = cmd[4]
+            idx = [str(p) for p in chain_paths].index(path)
+            entry: dict[str, object] = {"filename": str(path), "format": "qcow2"}
+            if idx + 1 < len(chain_paths):
+                entry["backing-filename"] = str(chain_paths[idx + 1])
+            return ShellResult(
+                success=True,
+                stdout=_json.dumps(entry),
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        return original_run(cmd, timeout, check)
+
+    return _run
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_broken_file_beyond_depth_64_identified(
+    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path
+):
+    """A 73-layer chain with the missing file at layer 70 (beyond the old
+    fixed 64-iteration cap) still gets its broken file identified, because
+    the walk bound scales with the measured chain length (max(64, 73+2))."""
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+    # Layer 0 = active layer … layer 72 = base.  Layer 70 is missing.
+    chain_paths = [snap_dir / f"layer{i}.qcow2" for i in range(73)]
+    _record_snapshot(mock_state, "testvm", "active", chain_paths[0], 0)
+
+    # The failing scan parsed 73 chain entries before breaking → measured 73.
+    with patch("qsnap.core.scan_backing_chain") as scan_mock:
+        scan_mock.return_value = ChainScanResult(
+            paths={str(p) for p in chain_paths},
+            broken_files=[],
+            success=False,
+            error="qemu-img info failed",
+        )
+        vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
+        config = MockConfigFacade(vms=[vm])
+        core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+        with patch.object(
+            mock_shell, "run", side_effect=_make_walk_side_effect(mock_shell, chain_paths, 70)
+        ):
+            verify = core._verify_backing_chain(vm, "vda")
+
+    assert verify.success is False
+    assert verify.broken_file == Path(chain_paths[70]), (
+        f"expected layer-70 path, got {verify.broken_file}"
     )
+    assert verify.disk == "vda"
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_find_broken_chain_walk_bound_scales(
+    make_vm_config, mock_factory, mock_state, mock_shell, tmp_path
+):
+    """When the failing scan parsed a 90-layer chain before breaking, the
+    broken-file walk is allowed at least max(64, 90+2) = 92 iterations."""
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+    chain_paths = [snap_dir / f"layer{i}.qcow2" for i in range(90)]
+    _record_snapshot(mock_state, "testvm", "active", chain_paths[0], 0)
+
+    with patch("qsnap.core.scan_backing_chain") as scan_mock:
+        scan_mock.return_value = ChainScanResult(
+            paths={str(p) for p in chain_paths},
+            broken_files=[],
+            success=False,
+            error="qemu-img info failed",
+        )
+        vm = make_vm_config(name="testvm", snapshot_dir=snap_dir, targets=[])
+        config = MockConfigFacade(vms=[vm])
+        core = Core(config=config, factory=mock_factory, state=mock_state, shell=mock_shell)
+
+        with patch.object(
+            core, "_find_broken_chain_file", wraps=core._find_broken_chain_file
+        ) as walk_spy:
+            verify = core._verify_backing_chain(vm, "vda")
+
+    assert verify.success is False
+    assert walk_spy.called, "the broken-file walk must run after a failed scan"
+    assert walk_spy.call_args.args[0] == chain_paths[0], "the walk must start at the active layer"
+    bound = walk_spy.call_args.kwargs.get("max_steps")
+    assert bound is not None
+    assert bound >= 92, f"walk bound must scale with measured chain length, got {bound}"

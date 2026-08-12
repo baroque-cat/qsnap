@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -204,6 +205,18 @@ class _StallRecordingShell(IShell):
     ) -> ShellResult:
         self._stall_calls.append((list(cmd), stall_timeout))
         return self._delegate.run_with_stall_detection(cmd, output_file, stall_timeout, check)
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat: Callable[[int], None],
+        check: bool = False,
+    ) -> ShellResult:
+        return self._delegate.run_with_heartbeat(
+            cmd, timeout, heartbeat_seconds, on_heartbeat, check
+        )
 
 
 def _get_snapshot_disk_path(shell: SubprocessShell, vm_name: str) -> Path | None:

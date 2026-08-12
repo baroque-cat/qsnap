@@ -82,3 +82,40 @@ def test_ishell_run_accepts_check_parameter():
     # so resolve them via ``typing.get_type_hints`` for a real type check.
     hints = typing.get_type_hints(IShell.run)
     assert hints.get("check") is bool
+
+
+def test_ishell_has_run_with_heartbeat():
+    """IShell declares ``run_with_heartbeat`` as an abstract method.
+
+    The method executes *cmd* with a hard *timeout* and a periodic
+    ``on_heartbeat(elapsed)`` callback (harden-blockcommit-races
+    shell-abstraction spec, design D2).  It must be present in
+    ``IShell.__abstractmethods__`` so that any concrete implementation
+    is required to provide it.
+    """
+    assert hasattr(IShell, "run_with_heartbeat")
+    assert "run_with_heartbeat" in IShell.__abstractmethods__
+
+    # Verify signature and return type.
+    sig = inspect.signature(IShell.run_with_heartbeat)
+    assert "cmd" in sig.parameters
+    assert "timeout" in sig.parameters
+    assert "heartbeat_seconds" in sig.parameters
+    assert "on_heartbeat" in sig.parameters
+    assert "check" in sig.parameters
+
+    # ``timeout`` has no default — callers must supply it.
+    timeout_param = sig.parameters["timeout"]
+    assert timeout_param.default is inspect.Parameter.empty
+
+    # ``heartbeat_seconds`` has no default — callers must supply it.
+    heartbeat_param = sig.parameters["heartbeat_seconds"]
+    assert heartbeat_param.default is inspect.Parameter.empty
+
+    # ``check`` defaults to False.
+    check_param = sig.parameters["check"]
+    assert check_param.default is False
+
+    # Return type must resolve to ShellResult.
+    hints = typing.get_type_hints(IShell.run_with_heartbeat)
+    assert hints.get("return") is ShellResult

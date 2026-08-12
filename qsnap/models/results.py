@@ -174,11 +174,29 @@ class BaselineAssessment:
 
 @dataclass(frozen=True)
 class CommitResult:
-    """Outcome of a ``virsh blockcommit`` operation."""
+    """Outcome of a ``virsh blockcommit`` operation.
+
+    ``outcome`` is ``"success"``, ``"failure"``, or ``"unknown"``.
+    ``"unknown"`` denotes an indeterminate outcome (command timed out or
+    was killed); the real state of the chain is unknown and MUST be
+    reconciled.  ``success=True`` implies ``outcome="success"`` — the
+    invariant is enforced in ``__post_init__`` (result-types spec).
+    Defaults to ``"failure"`` so every existing constructor call keeps
+    working unchanged.
+    """
 
     success: bool
     committed_snapshot: str
     error: str | None
+    outcome: str = "failure"
+
+    def __post_init__(self) -> None:
+        # result-types spec: "success=True SHALL imply outcome='success'".
+        if self.success and self.outcome != "success":
+            raise ValueError(
+                f"CommitResult invariant violated: success=True requires "
+                f"outcome='success', got outcome={self.outcome!r}"
+            )
 
 
 # ── Change detection ─────────────────────────────────────────────────────
@@ -278,6 +296,30 @@ class RetentionResult:
 
     keep: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
     remove: list[str] = field(default_factory=list)  # type: ignore[reportUnknownVariableType]
+
+
+# ── Commit intent journal ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CommitIntent:
+    """A record of an in-progress commit operation.
+
+    Written before every irreversible commit and cleared only after the
+    outcome is finalized.  Provides crash-window observability and zombie-
+    job attribution.
+
+    ``disk`` is the libvirt target device name (e.g. ``"vda"``).
+    ``snapshots`` is the merge set, oldest first.
+    ``base`` is the absolute path to the backing file receiving the merge.
+    ``started_ts`` is an opaque timestamp string (``YYYYMMDDTHHMMSS``) set
+    by the caller.
+    """
+
+    disk: str
+    snapshots: list[str]
+    base: str
+    started_ts: str
 
 
 # ── Deferred operations ──────────────────────────────────────────────────

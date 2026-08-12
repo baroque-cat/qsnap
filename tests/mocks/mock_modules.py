@@ -279,7 +279,18 @@ class MockChangeDetector(IChangeDetector):
 
 
 class MockLifecycleManager(ILifecycleManager):
-    """Mock lifecycle manager returning a valid CommitResult."""
+    """Mock lifecycle manager returning a valid CommitResult.
+
+    ``blockcommit`` accepts the full ``ILifecycleManager`` signature
+    including the ``timeout`` keyword (default 1800) and returns a
+    ``CommitResult`` carrying the three-valued ``outcome`` field
+    (``"success"`` on success, ``"failure"`` on failure — see
+    harden-blockcommit-races result-types spec).  Construct with
+    ``fail=True`` to script a definitive failure.
+    """
+
+    def __init__(self, fail: bool = False) -> None:
+        self._fail = fail
 
     def blockcommit(
         self,
@@ -289,11 +300,25 @@ class MockLifecycleManager(ILifecycleManager):
         disk: str,
         base_image: Path,
         deep_verify: bool = False,
+        timeout: int = 1800,
     ) -> CommitResult:
+        if self._fail:
+            return CommitResult(
+                success=False,
+                committed_snapshot="",
+                error="mock blockcommit failure",
+                outcome="failure",
+            )
         if not snapshots_to_merge:
-            return CommitResult(success=True, committed_snapshot="", error=None)
+            return CommitResult(
+                success=True,
+                committed_snapshot="",
+                error=None,
+                outcome="success",
+            )
         return CommitResult(
             success=True,
             committed_snapshot=snapshots_to_merge[0].name,
             error=None,
+            outcome="success",
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 from qsnap.models.results import ShellResult
@@ -15,7 +16,7 @@ class IShell(ABC):
     interface.  This enables timeout enforcement, structured logging, and
     full mockability in tests.
 
-    Two execution methods are provided:
+    Three execution methods are provided:
 
     - :meth:`run` — fixed-timeout execution for short commands (``virsh``,
       ``qemu-img info``).  Kills the process after *timeout* seconds.
@@ -25,6 +26,11 @@ class IShell(ABC):
       the process only when no growth is observed for *stall_timeout*
       seconds.  No maximum timeout — if data flows, the process runs
       to completion.
+    - :meth:`run_with_heartbeat` — fixed-timeout execution for long
+      commands (``virsh blockcommit``) that emits a periodic
+      ``on_heartbeat(elapsed)`` callback every *heartbeat_seconds*
+      while the process runs, then kills the process once *timeout*
+      seconds elapse.
     """
 
     @abstractmethod
@@ -72,5 +78,32 @@ class IShell(ABC):
 
         No speed or progress is logged — only DEBUG-level logs for
         command start, stall, and error events.
+        """
+        ...
+
+    @abstractmethod
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat: Callable[[int], None],
+        check: bool = False,
+    ) -> ShellResult:
+        """Execute *cmd* with a hard *timeout* and periodic heartbeat callback.
+
+        Runs *cmd* via ``Popen``.  Polls the process every
+        *heartbeat_seconds*; on each poll expiry calls
+        ``on_heartbeat(elapsed)`` where *elapsed* is the wall-clock
+        seconds since start.
+
+        When the total elapsed time reaches *timeout*, the process is
+        killed and ``ShellResult(success=False, returncode=-1,
+        error="Command timed out after {timeout}s")`` is returned.
+
+        Stdout and stderr are drained continuously by daemon reader
+        threads so a chatty child can never block on a full pipe buffer.
+        On normal exit, the captured stdout/stderr and returncode are
+        returned in the :class:`ShellResult`.
         """
         ...

@@ -1573,3 +1573,71 @@ def test_backup_delete_info_log(
     )
     assert "testvm" in delete_lines[0]
     assert "testvm.FULL.backup1" in delete_lines[0]
+
+
+# ── test_backup_probe_behavior_unchanged (harden-blockcommit-races) ─────────
+
+
+def test_backup_probe_behavior_unchanged(
+    make_vm_config,
+    make_target,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """The backup-path blockjob probe now routes through the shared
+    ``_probe_blockjob`` helper while producing the SAME deferral behavior as
+    before the refactor: INFO log, no run_backup call, no baseline update,
+    and not a failure.
+
+    Design D6 refactored the backup probe onto ``_probe_blockjob`` (the
+    same helper the commit path uses); the observable contract is unchanged.
+    """
+    target = make_target(backup_create="onchange")
+    vm = make_vm_config(name="testvm", targets=[target])
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Default conftest dominfo says the VM is running → probe executes.
+    # expect_first overrides the conftest idle-disk default so the probe
+    # classifies an ACTIVE job.
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Block job: type=blockcommit\nJob: 1048576/2097152\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    backup_provider = mock_factory._backup_provider
+    caplog.set_level(logging.INFO)
+
+    with (
+        patch.object(core, "_probe_blockjob", wraps=core._probe_blockjob) as probe_spy,
+        patch.object(backup_provider, "run_backup", wraps=backup_provider.run_backup) as run_spy,
+    ):
+        # Not a failure: the deferral returns normally (False == no backup
+        # failure per _backup_target's contract).
+        assert core._backup_target(vm, target, []) is False
+
+    # The backup probe routes through the shared helper with (vm, disk).
+    assert probe_spy.called
+    assert probe_spy.call_args.args[0] is vm
+    assert probe_spy.call_args.args[1] == "vda"
+
+    # Same deferral as before the refactor: no transfer, INFO log, and the
+    # onchange baseline is NOT advanced (gate stays open).
+    assert not run_spy.called, (
+        "run_backup should NOT be called when a block job is active on the disk"
+    )
+    assert "blockjob active on disk vda" in caplog.text
+    assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None
+    assert "backup deferred" in caplog.text.lower()

@@ -965,3 +965,140 @@ def test_missing_crash_evidence_methods_fails_instantiation():
 
     with pytest.raises(TypeError):
         _MissingCrashEvidence()
+
+
+# ── commit intent journal contract (harden-blockcommit-races) ────────────
+# commit-intent-journal spec: ``set_commit_in_progress`` /
+# ``get_commit_in_progress`` / ``clear_commit_in_progress`` are abstract on
+# IStateManager.  Behavior round-trips are parametrized over BOTH concrete
+# implementations (JsonStateManager + InMemoryStateManager) so mock and
+# production parity is enforced by the contract suite (TESTING.md §3).
+
+
+def test_istate_manager_commit_intent_methods_abstract():
+    """The three commit-intent journal methods are abstract on IStateManager.
+
+    A subclass implementing every abstract method EXCEPT
+    ``set_commit_in_progress`` / ``get_commit_in_progress`` /
+    ``clear_commit_in_progress`` MUST fail to instantiate with TypeError.
+    """
+    abstract_methods = IStateManager.__abstractmethods__
+    assert "set_commit_in_progress" in abstract_methods
+    assert "get_commit_in_progress" in abstract_methods
+    assert "clear_commit_in_progress" in abstract_methods
+
+    class _MissingIntentJournal(IStateManager):
+        def get_last_allocation(self, vm_name, disk): ...
+        def set_last_allocation(self, vm_name, disk, alloc): ...
+        def record_snapshot(self, vm_name, info): ...
+        def remove_snapshot(self, vm_name, snapshot_name): ...
+        def get_snapshots(self, vm_name): ...
+        def get_deferred_operations(self, vm_name): ...
+        def add_deferred_blockcommit(self, vm_name, disk, snapshots, reason): ...
+        def clear_deferred_operations(self, vm_name): ...
+        def update_deferred_warning(self, vm_name, index, timestamp): ...
+        def get_last_full_backup(self, target_path): ...
+        def set_last_full_backup(self, target_path, name, timestamp, disk): ...
+        def get_full_backups(self, target_path): ...
+        def record_full_backup(self, target_path, name, timestamp, disk): ...
+        def record_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_incremental_dependencies(self, target_path, full_name): ...
+        def remove_full_backup(self, target_path, name): ...
+        def remove_incremental_dependency(self, target_path, incremental_name, full_name): ...
+        def get_last_backup_allocation(self, target_path, disk): ...
+        def set_last_backup_allocation(self, target_path, disk, alloc): ...
+        def clear_last_backup_allocation(self, target_path, disk): ...
+        def remove_all_incremental_dependencies(self, target_path, full_name): ...
+        def reset_vm_state(self, vm_name): ...
+        def reset_target_state(self, target_path): ...
+        def reset_vm_disk_state(self, vm_name, disk): ...
+        def reset_target_disk_state(self, target_path, vm_name, disk): ...
+        def get_boot_id(self, vm_name): ...
+        def set_boot_id(self, vm_name, boot_id): ...
+        def get_last_commit_ts(self, vm_name, disk): ...
+        def set_last_commit_ts(self, vm_name, disk, timestamp): ...
+
+    with pytest.raises(TypeError):
+        _MissingIntentJournal()
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_commit_intent_set_get_clear(mgr_cls, tmp_path):
+    """Commit intent set → read → clear round-trips in both implementations.
+
+    Mirrors the commit-intent-journal scenario "Set, read, and clear an
+    intent record" (tests/state/test_manager.py parity for the mock).
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+
+    assert mgr.get_commit_in_progress("testvm") == []
+
+    mgr.set_commit_in_progress(
+        "testvm",
+        "vda",
+        ["snap1.qcow2", "snap2.qcow2"],
+        "/var/lib/libvirt/images/testvm.qcow2",
+        "20260808T160000",
+    )
+
+    intents = mgr.get_commit_in_progress("testvm")
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.disk == "vda"
+    assert intent.snapshots == ["snap1.qcow2", "snap2.qcow2"]
+    assert intent.base == "/var/lib/libvirt/images/testvm.qcow2"
+    assert intent.started_ts == "20260808T160000"
+
+    mgr.clear_commit_in_progress("testvm", "vda")
+    assert mgr.get_commit_in_progress("testvm") == []
+
+    # Clearing an absent disk is a no-op, not an error.
+    mgr.clear_commit_in_progress("testvm", "vdz")
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_commit_intent_upsert_same_disk(mgr_cls, tmp_path):
+    """A second set for the same disk replaces the record (upsert semantics).
+
+    Mirrors the commit-intent-journal scenario "Upsert replaces the record
+    for the same disk".
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+
+    mgr.set_commit_in_progress(
+        "testvm", "vda", ["snap1.qcow2"], "/base/testvm.qcow2", "20260808T160000"
+    )
+    mgr.set_commit_in_progress(
+        "testvm", "vda", ["snap1.qcow2", "snap2.qcow2"], "/base/testvm.qcow2", "20260808T170000"
+    )
+
+    intents = mgr.get_commit_in_progress("testvm")
+    assert len(intents) == 1, f"Upsert must keep one record, got {len(intents)}"
+    assert intents[0].snapshots == ["snap1.qcow2", "snap2.qcow2"]
+    assert intents[0].started_ts == "20260808T170000"
+
+
+@pytest.mark.parametrize("mgr_cls", [JsonStateManager, InMemoryStateManager])
+def test_contract_commit_intent_multiple_disks_independent(mgr_cls, tmp_path):
+    """Multiple disks hold independent intent records for the same VM.
+
+    Mirrors the commit-intent-journal scenario "Multiple disks hold
+    independent intent records".
+    """
+    mgr = _make_state_manager(mgr_cls, tmp_path)
+
+    mgr.set_commit_in_progress(
+        "testvm", "vda", ["snap1.qcow2"], "/base/testvm.qcow2", "20260808T160000"
+    )
+    mgr.set_commit_in_progress(
+        "testvm", "vdb", ["snap1-vdb.qcow2"], "/base/testvm-vdb.qcow2", "20260808T160000"
+    )
+
+    intents = mgr.get_commit_in_progress("testvm")
+    assert len(intents) == 2
+    assert {i.disk for i in intents} == {"vda", "vdb"}
+
+    mgr.clear_commit_in_progress("testvm", "vda")
+    remaining = mgr.get_commit_in_progress("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].disk == "vdb"

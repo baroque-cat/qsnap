@@ -354,6 +354,7 @@ def verify_bitmap_incremental(
 def deep_verify_base_image(
     shell: IShell,
     base_image: Path,
+    timeout: int = 1800,
 ) -> CommitResult | None:
     """Run ``qemu-img check`` on *base_image* after a blockcommit.
 
@@ -367,6 +368,10 @@ def deep_verify_base_image(
     Args:
         shell: :class:`IShell` instance for running qemu-img commands.
         base_image: Path to the base qcow2 image to verify.
+        timeout: Maximum wall-clock seconds for the ``qemu-img check``
+            call.  Injected by the lifecycle managers (their own
+            ``timeout`` kwarg) — no hard-coded ceiling in the commit
+            path (lifecycle-manager spec).
 
     Returns:
         ``None`` on success (zero corruptions/errors/leaks), or a
@@ -374,7 +379,7 @@ def deep_verify_base_image(
     """
     chk = shell.run(
         ["qemu-img", "check", "--output=json", str(base_image)],
-        timeout=3600,
+        timeout=timeout,
     )
     if not chk.success:
         return CommitResult(

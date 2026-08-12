@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -429,3 +430,185 @@ def test_stall_detection_logs_no_speed(caplog: object, tmp_path: Path, monkeypat
         assert "speed" not in msg_lower, f"Unexpected 'speed' in log: {msg}"
         assert "MB/s" not in msg, f"Unexpected 'MB/s' in log: {msg}"
         assert "rate" not in msg_lower, f"Unexpected 'rate' in log: {msg}"
+
+
+# ── run_with_heartbeat ──────────────────────────────────────────────────
+
+
+def test_run_with_heartbeat_normal_completion() -> None:
+    """A command finishing before the first heartbeat returns success.
+
+    Mirrors ``test_run_with_stall_detection_completes_normally``: the
+    child exits 0 immediately, so ``on_heartbeat`` must NEVER be called
+    (no poll expiry while the process is still running).
+    """
+    shell = SubprocessShell()
+    heartbeats: list[int] = []
+
+    result = shell.run_with_heartbeat(
+        ["echo", "hi"],
+        timeout=60,
+        heartbeat_seconds=10,
+        on_heartbeat=heartbeats.append,
+    )
+
+    assert isinstance(result, ShellResult)
+    assert result.success is True
+    assert result.returncode == 0
+    assert "hi" in result.stdout
+    assert result.stderr == ""
+    assert result.error is None
+    # The child exited before the first heartbeat slice elapsed.
+    assert heartbeats == []
+
+
+def test_run_with_heartbeat_heartbeat_fires() -> None:
+    """A long-running child triggers on_heartbeat with increasing elapsed.
+
+    The child sleeps ~2s with a 1s heartbeat slice: the poll loop must
+    expire at least once while the process is still running and report
+    strictly increasing elapsed values.
+    """
+    shell = SubprocessShell()
+    heartbeats: list[int] = []
+
+    result = shell.run_with_heartbeat(
+        ["sleep", "2"],
+        timeout=30,
+        heartbeat_seconds=1,
+        on_heartbeat=heartbeats.append,
+    )
+
+    assert isinstance(result, ShellResult)
+    assert result.success is True
+    assert result.returncode == 0
+    assert result.error is None
+
+    # At least one heartbeat fired while the child was running.
+    assert len(heartbeats) >= 1
+    # Elapsed values are strictly increasing (no duplicates, no going back).
+    assert all(b > a for a, b in zip(heartbeats, heartbeats[1:], strict=False))
+    # Heartbeats are reported only while the process runs — the final
+    # value must predate the generous 30s timeout by a wide margin
+    # (the child itself only sleeps ~2s).
+    assert heartbeats[-1] < 10
+
+
+def test_run_with_heartbeat_hard_timeout_kills() -> None:
+    """A child exceeding the hard timeout is killed with a timeout error.
+
+    ``sleep 10`` with ``timeout=2`` must be killed around the 2s mark
+    and return ``ShellResult(success=False, returncode=-1,
+    error="Command timed out after 2s")`` — and no further heartbeat may
+    fire after the kill.
+    """
+    shell = SubprocessShell()
+    heartbeats: list[int] = []
+
+    start = time.monotonic()
+    result = shell.run_with_heartbeat(
+        ["sleep", "10"],
+        timeout=2,
+        heartbeat_seconds=1,
+        on_heartbeat=heartbeats.append,
+    )
+    elapsed = time.monotonic() - start
+
+    assert isinstance(result, ShellResult)
+    assert result.success is False
+    assert result.returncode == -1
+    assert result.error == "Command timed out after 2s"
+    # The child was killed promptly instead of waiting out `sleep 10`.
+    assert elapsed < 9
+
+    # No further heartbeats after the kill/return.
+    heartbeats_at_return = len(heartbeats)
+    time.sleep(0.2)
+    assert len(heartbeats) == heartbeats_at_return
+
+
+def test_run_with_heartbeat_chatty_child_no_deadlock() -> None:
+    """A child writing >64KB to both pipes does not deadlock.
+
+    The child writes 200KB to stdout and 200KB to stderr while running —
+    well beyond the 64KB pipe buffer.  The daemon reader threads must
+    drain both pipes, the process must complete, and the full output must
+    be captured in the returned ShellResult.  Reader threads are joined
+    after process exit — no thread leak.
+    """
+    shell = SubprocessShell()
+    script = (
+        "import sys; "
+        "sys.stdout.write('x' * 200000); sys.stdout.flush(); "
+        "sys.stderr.write('y' * 200000); sys.stderr.flush()"
+    )
+    threads_before = threading.active_count()
+
+    result = shell.run_with_heartbeat(
+        [sys.executable, "-c", script],
+        timeout=30,
+        heartbeat_seconds=1,
+        on_heartbeat=lambda elapsed: None,
+    )
+
+    assert isinstance(result, ShellResult)
+    assert result.success is True
+    assert result.returncode == 0
+    assert result.error is None
+    # Full output from both pipes is captured (no deadlock, no truncation).
+    assert len(result.stdout) == 200000
+    assert result.stdout == "x" * 200000
+    assert len(result.stderr) == 200000
+    assert result.stderr == "y" * 200000
+
+    # Reader threads are joined after exit — no thread leak.  Allow a
+    # brief settle window for the joined threads to fully tear down.
+    for _ in range(20):
+        if threading.active_count() <= threads_before:
+            break
+        time.sleep(0.05)
+    assert threading.active_count() <= threads_before
+
+
+def test_run_with_heartbeat_check_mode_suppresses_error(caplog: object) -> None:
+    """run_with_heartbeat with check=True logs a failing command at DEBUG,
+    not ERROR — identical semantics to run(check=True) and
+    run_with_stall_detection(check=True) (shell-abstraction spec)."""
+    shell = SubprocessShell()
+
+    with caplog.at_level(logging.DEBUG, logger=SHELL_LOGGER):  # type: ignore[union-attr]
+        result = shell.run_with_heartbeat(
+            ["false"],
+            timeout=30,
+            heartbeat_seconds=10,
+            on_heartbeat=lambda elapsed: None,
+            check=True,
+        )
+
+    assert result.success is False
+
+    shell_records = [r for r in caplog.records if r.name == SHELL_LOGGER]  # type: ignore[union-attr]
+    error_records = [r for r in shell_records if r.levelno == logging.ERROR]
+    debug_records = [r for r in shell_records if r.levelno == logging.DEBUG]
+
+    assert len(error_records) == 0
+    assert len(debug_records) >= 1
+
+
+def test_run_with_heartbeat_check_false_logs_error(caplog: object) -> None:
+    """run_with_heartbeat with the default check=False logs failures at ERROR."""
+    shell = SubprocessShell()
+
+    with caplog.at_level(logging.DEBUG, logger=SHELL_LOGGER):  # type: ignore[union-attr]
+        result = shell.run_with_heartbeat(
+            ["false"],
+            timeout=30,
+            heartbeat_seconds=10,
+            on_heartbeat=lambda elapsed: None,
+        )
+
+    assert result.success is False
+
+    shell_records = [r for r in caplog.records if r.name == SHELL_LOGGER]  # type: ignore[union-attr]
+    error_records = [r for r in shell_records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1

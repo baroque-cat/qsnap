@@ -39,6 +39,7 @@ from qsnap.models.results import (
     ChainVerifyResult,
     ChangeResult,
     CheckResult,
+    CommitResult,
     DeferredBlockcommit,
     DeferredSummary,
     FullBackupInfo,
@@ -3326,17 +3327,13 @@ class Core:
                 # the recording gap for any FULL-not-in-state scenario.
                 try:
                     state_fulls = self._state.get_full_backups(str(target.path))
-                    state_full_stems = {
-                        f.name.replace(".qcow2", "") for f in state_fulls
-                    }
+                    state_full_stems = {f.name.replace(".qcow2", "") for f in state_fulls}
                     for b in provider.list(target):
                         if not b.is_full:
                             continue
                         if b.name in state_full_stems:
                             continue
-                        m1_error = verify_full_backup(
-                            self._shell, b.path, "metadata"
-                        )
+                        m1_error = verify_full_backup(self._shell, b.path, "metadata")
                         if m1_error is not None:
                             logger.warning(
                                 "[startup] %s: skipping untracked FULL %s — "
@@ -3348,14 +3345,12 @@ class Core:
                             continue
                         if self._dry_run:
                             logger.info(
-                                "[dry-run] Would supplement untracked FULL %s "
-                                "into state",
+                                "[dry-run] Would supplement untracked FULL %s into state",
                                 b.name,
                             )
                             continue
                         logger.info(
-                            "[startup] %s: supplementing untracked FULL %s "
-                            "into state",
+                            "[startup] %s: supplementing untracked FULL %s into state",
                             vm_config.name,
                             b.name,
                         )
@@ -3369,8 +3364,7 @@ class Core:
                         )
                 except Exception as supp_exc:
                     logger.warning(
-                        "[startup] %s: failed to supplement state for "
-                        "target %s: %s",
+                        "[startup] %s: failed to supplement state for target %s: %s",
                         vm_config.name,
                         target.path,
                         supp_exc,
@@ -3513,9 +3507,7 @@ class Core:
                             # Record recovery intent so the FULL that
                             # follows triggers immediate retirement
                             # (design D13: recovery-pending track).
-                            self._recovery_pending[
-                                (target_path_str, disk)
-                            ] = True
+                            self._recovery_pending[(target_path_str, disk)] = True
                         else:
                             return  # Healthy — bitmap is alive.
                     except Exception as exc:
@@ -3634,8 +3626,9 @@ class Core:
         """
         self._simulated_snapshots = []
 
-        # Step 0: Deferred blockcommit check
+        # Step 0: Deferred blockcommit check + stale commit-intent recovery
         self._check_deferred_operations(vm_config)
+        self._recover_commit_intents(vm_config)
 
         # Step 1: Change detection / ondemand check
         should_snapshot = True
@@ -3656,6 +3649,25 @@ class Core:
 
         # Step 2: Snapshot creation
         extra_snapshots: list[SnapshotInfo] = []
+        # Pre-snapshot block-job probe (blockjob-protocol): for a running
+        # VM, probe every disk about to be snapshotted.  Any active/error
+        # job skips snapshot creation this run (WARNING, baseline
+        # untouched, no deferred entry) — the next run retries.
+        if should_snapshot and is_vm_running(self._shell, vm_config.name):
+            blocked: list[str] = []
+            for disk in self._resolve_disks(vm_config):
+                probe = self._probe_blockjob(vm_config, disk.target)
+                if probe in ("active", "error"):
+                    blocked.append(disk.target)
+            if blocked:
+                logger.warning(
+                    "VM %s: blockjob active or probe error on disk(s) %s — "
+                    "skipping snapshot creation this run",
+                    vm_config.name,
+                    ", ".join(blocked),
+                )
+                should_snapshot = False
+
         if should_snapshot:
             created = self._create_snapshot(vm_config)
             if self._dry_run:
@@ -3779,15 +3791,101 @@ class Core:
             manager = self._factory.create_lifecycle_manager(
                 mode=plan.effective_mode,
             )
+
+            # Pre-commit block-job probe (live path only) — blockjob-protocol.
+            if plan.effective_mode == "virsh":
+                probe = self._probe_blockjob(vm_config, entry.disk)
+                if probe != "none":
+                    logger.warning(
+                        "VM %s disk %s: blockjob probe returned %r — deferring "
+                        "deferred blockcommit (reason: %s)",
+                        vm_config.name,
+                        entry.disk,
+                        probe,
+                        "blockjob_active" if probe == "active" else "vm_state_unknown",
+                    )
+                    remaining.append(entry)
+                    continue
+
+            # Race guard (design D2/D7), mirroring the main path: qemu-img
+            # writes into the base image — only safe while the VM stays shut
+            # off.  The plan's domstate probe may be stale by now, so
+            # re-check immediately before writing the intent / invoking the
+            # manager.  A FAILED re-check fails closed: the entry stays
+            # queued and no commit is ever started on unknown VM state.
+            if plan.effective_mode == "qemu-img":
+                recheck = self._shell.run(
+                    ["virsh", "domstate", "--domain", vm_config.name],
+                    timeout=30,
+                    check=True,
+                )
+                if not recheck.success:
+                    logger.warning(
+                        "VM %s state unknown (domstate re-check failed) — "
+                        "keeping deferred blockcommit of %d snapshot(s) for "
+                        "disk %s queued (reason: vm_state_unknown)",
+                        vm_config.name,
+                        len(plan.committable),
+                        entry.disk,
+                    )
+                    remaining.append(entry)
+                    continue
+                if "shut off" not in recheck.stdout.strip().lower():
+                    logger.info(
+                        "VM %s no longer shut off — keeping deferred "
+                        "blockcommit of %d snapshot(s) for disk %s queued",
+                        vm_config.name,
+                        len(plan.committable),
+                        entry.disk,
+                    )
+                    remaining.append(entry)
+                    continue
+
+            # Commit intent journal (design D4) + observability (design D9)
+            # around the deferred drain commit, mirroring the main path.
+            commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+            self._state.set_commit_in_progress(
+                vm_config.name,
+                entry.disk,
+                [s.name for s in plan.committable],
+                str(disk_cfg.base_image),
+                commit_ts,
+            )
+            global_cfg = self._config.get_global()
+            logger.info(
+                "[blockcommit] %s/%s: committing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
+                vm_config.name,
+                entry.disk,
+                len(plan.committable),
+                disk_cfg.base_image,
+                plan.effective_mode,
+                global_cfg.blockcommit_timeout,
+            )
             result = manager.blockcommit(
                 vm_config,
                 plan.committable,
                 disk=entry.disk,
                 base_image=disk_cfg.base_image,
                 deep_verify=vm_config.blockcommit_deep_verify,
+                timeout=global_cfg.blockcommit_timeout,
             )
+
+            if result.outcome == "unknown":
+                # Indeterminate — keep the intent, re-queue the entry; the
+                # next run's step-0 intent recovery reconciles it.
+                logger.warning(
+                    "Deferred blockcommit outcome unknown for VM %s disk %s: %s — "
+                    "keeping intent and retrying next run",
+                    vm_config.name,
+                    entry.disk,
+                    result.error,
+                )
+                remaining.append(entry)
+                continue
+
             if not result.success:
-                # Still failing — keep for next run
+                # Definitive failure — clear intent, keep for next run.
+                self._state.clear_commit_in_progress(vm_config.name, entry.disk)
                 logger.warning(
                     "Deferred blockcommit still failing for VM %s disk %s: %s",
                     vm_config.name,
@@ -3806,8 +3904,11 @@ class Core:
             queue_changed = True
             if plan.effective_mode == "qemu-img":
                 offline_drained = True
+            self._state.set_last_commit_ts(vm_config.name, entry.disk, commit_ts)
             for sn in plan.committable:
                 self._state.remove_snapshot(vm_config.name, sn.name)
+            # Clear intent last (design D4 success ordering).
+            self._state.clear_commit_in_progress(vm_config.name, entry.disk)
             if plan.deferrable:
                 # Partial drain — re-queue the remainder (XML tip / active
                 # layer) with the entry's ORIGINAL reason.
@@ -3976,6 +4077,168 @@ class Core:
                 )
             )
         return simulated
+
+    def _queue_deferred_once(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        reason: str,
+    ) -> None:
+        """Add a deferred blockcommit entry unless an equivalent one exists.
+
+        Implements the spec's "add/refresh" semantics for intent recovery:
+        an existing entry covering the same disk and the same snapshot set
+        (regardless of its reason) already represents the pending work —
+        appending another copy on every run would let the queue grow
+        without bound while the blocking condition persists (e.g. a
+        long-lived foreign block job).
+        """
+        wanted = sorted(snapshots)
+        for op in self._state.get_deferred_operations(vm_name):
+            if op.disk == disk and sorted(op.snapshots) == wanted:
+                logger.debug(
+                    "Deferred blockcommit for VM %s disk %s already queued "
+                    "(reason: %s) — not duplicating (would-be reason: %s)",
+                    vm_name,
+                    disk,
+                    op.reason,
+                    reason,
+                )
+                return
+        self._state.add_deferred_blockcommit(vm_name, disk, snapshots, reason)
+
+    def _recover_commit_intents(self, vm_config: VMConfig) -> None:
+        """Step-0 crash recovery of stale commit-intent records.
+
+        For each intent record of the VM, probe ``virsh blockjob``:
+
+        - Active job → keep the intent, defer the disk's commit this run
+          (WARNING, reason ``"blockjob_active"``).
+        - Probe failure → keep the intent, defer ``"vm_state_unknown"``
+          (fail closed).
+        - No job → reconcile reality: merge-set files gone → late-success
+          state convergence (WARNING "commit completed after previous run
+          timed out"); chain unchanged → clear intent (WARNING "previous
+          run died during commit attempt; no effect observed");
+          contradictory → keep intent and defer ``"vm_state_unknown"``.
+
+        Dry-run mode never writes or clears intent records — it only
+        predicts the recovery action.
+        """
+        intents = self._state.get_commit_in_progress(vm_config.name)
+        if not intents:
+            return
+
+        for intent in intents:
+            disk = intent.disk
+            disk_cfg = vm_config.get_disk(disk)
+            if disk_cfg is None:
+                logger.warning(
+                    "Stale commit intent references unconfigured disk %s "
+                    "for VM %s — discarding intent",
+                    disk,
+                    vm_config.name,
+                )
+                if not self._dry_run:
+                    self._state.clear_commit_in_progress(vm_config.name, disk)
+                continue
+
+            probe = self._probe_blockjob(vm_config, disk)
+            if probe == "active":
+                logger.warning(
+                    "VM %s disk %s: active block job detected during intent "
+                    "recovery — keeping intent and deferring commit "
+                    "(reason: blockjob_active)",
+                    vm_config.name,
+                    disk,
+                )
+                if not self._dry_run:
+                    self._queue_deferred_once(
+                        vm_config.name, disk, intent.snapshots, "blockjob_active"
+                    )
+                continue
+            if probe == "error":
+                logger.warning(
+                    "VM %s disk %s: blockjob probe failed during intent "
+                    "recovery — keeping intent and deferring commit "
+                    "(reason: vm_state_unknown)",
+                    vm_config.name,
+                    disk,
+                )
+                if not self._dry_run:
+                    self._queue_deferred_once(
+                        vm_config.name, disk, intent.snapshots, "vm_state_unknown"
+                    )
+                continue
+
+            # No active job — reconcile reality.
+            snapshots = [
+                s for s in self._state.get_snapshots(vm_config.name) if s.name in intent.snapshots
+            ]
+            if not snapshots:
+                # Every merge-set snapshot is already gone from state — the
+                # commit completed and converged before the crash; only the
+                # intent clear was lost.  NOTE: no ``set_last_commit_ts``
+                # here on purpose — the success ordering writes the marker
+                # BEFORE ``remove_snapshot``, so a run that removed the
+                # state records already persisted the marker.  Rewriting it
+                # with "now" could falsify the G1 recovery gate
+                # (commit-ts vs checkpoint freeze comparison).
+                logger.warning(
+                    "VM %s disk %s: stale commit intent with no remaining "
+                    "merge-set snapshots in state — discarding intent "
+                    "(commit completed after previous run timed out)",
+                    vm_config.name,
+                    disk,
+                )
+                if not self._dry_run:
+                    self._state.clear_commit_in_progress(vm_config.name, disk)
+                continue
+
+            outcome = self._reconcile_commit_outcome(
+                vm_config, disk, disk_cfg.base_image, snapshots
+            )
+
+            if outcome == "late_success":
+                logger.warning(
+                    "VM %s disk %s: commit completed after previous run timed "
+                    "out — state synced (snapshots: %s)",
+                    vm_config.name,
+                    disk,
+                    ", ".join(s.name for s in snapshots),
+                )
+                if not self._dry_run:
+                    commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+                    self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
+                    for sn in snapshots:
+                        self._state.remove_snapshot(vm_config.name, sn.name)
+                    self._state.clear_commit_in_progress(vm_config.name, disk)
+                continue
+
+            if outcome == "failure":
+                logger.warning(
+                    "VM %s disk %s: previous run died during a commit attempt; "
+                    "no effect observed — clearing intent",
+                    vm_config.name,
+                    disk,
+                )
+                if not self._dry_run:
+                    self._state.clear_commit_in_progress(vm_config.name, disk)
+                continue
+
+            # inconclusive — keep intent, defer fail-closed.
+            logger.warning(
+                "VM %s disk %s: commit outcome inconclusive during intent "
+                "recovery — keeping intent and deferring commit "
+                "(reason: vm_state_unknown)",
+                vm_config.name,
+                disk,
+            )
+            if not self._dry_run:
+                self._queue_deferred_once(
+                    vm_config.name, disk, intent.snapshots, "vm_state_unknown"
+                )
 
     def _create_snapshot(self, vm_config: VMConfig) -> list[SnapshotResult]:
         """Step 2: Create snapshots for ALL disks of *vm_config* in ONE
@@ -4242,8 +4505,15 @@ class Core:
         if not scan.success:
             # scan_backing_chain failed (command or parse error) — try
             # to find the broken file for partial blockcommit recovery
-            # (spec: blockcommit-recovery).
-            broken = self._find_broken_chain_file(active_path)
+            # (spec: blockcommit-recovery).  The walk bound scales with
+            # the measured chain length (design D8): use the failing
+            # scan's parsed chain when available, else the state snapshot
+            # count + 8.
+            measured = len(scan.paths) if scan.paths else None
+            if measured is None:
+                measured = len(snapshots) + 8
+            bound = max(64, measured + 2)
+            broken = self._find_broken_chain_file(active_path, max_steps=bound)
             return ChainVerifyResult(
                 success=False,
                 error=scan.error or "scan_backing_chain failed",
@@ -4252,28 +4522,43 @@ class Core:
             )
 
         if scan.broken_files:
-            # Chain has integrity issues (missing files, wrong format,
-            # cycles, etc.) — report the first broken file.
-            first = scan.broken_files[0]
+            # Chain has integrity issues.  Per spec blockcommit-recovery,
+            # ``broken_file`` SHALL be the absolute path of a genuinely
+            # missing file (regardless of depth), and ``None`` for every
+            # other cause (non-qcow2, cycle, backing-filename mismatch,
+            # a referencer whose backing is missing).  ``scan_backing_chain``
+            # does not separate causes, so identify a real missing file by
+            # walking the broken entries for an absolute path that does not
+            # exist on disk.
+            broken_file: Path | None = None
+            for entry in scan.broken_files:
+                entry_str = str(entry)
+                if entry_str.startswith("/") and not os.path.exists(entry_str):
+                    broken_file = Path(entry_str)
+                    break
             return ChainVerifyResult(
                 success=False,
                 error=f"Backing chain broken: {', '.join(scan.broken_files)}",
-                broken_file=Path(first),
+                broken_file=broken_file,
                 disk=disk,
             )
 
         return ChainVerifyResult(success=True, error=None, broken_file=None, disk=disk)
 
-    def _find_broken_chain_file(self, start_path: Path) -> Path | None:
+    def _find_broken_chain_file(self, start_path: Path, max_steps: int = 64) -> Path | None:
         """Walk the backing chain from *start_path* to find the first missing file.
 
         Used when ``qemu-img info --backing-chain`` fails to identify
         which specific file is broken (spec: blockcommit-recovery).
         Returns the path of the first missing file, or ``None`` if the
         chain walk itself fails or the chain is intact.
+
+        *max_steps* bounds the walk.  It is computed dynamically by the
+        caller (``max(64, measured_chain_length + 2)``) so chains deeper
+        than 64 layers are still fully walked (design D8).
         """
         current = Path(start_path)
-        for _ in range(64):  # bound the walk — real chains are short
+        for _ in range(max_steps):  # dynamic bound — see caller (design D8)
             # Check if current file exists.
             existence = self._shell.run(
                 ["test", "-f", str(current)],
@@ -4285,7 +4570,7 @@ class Core:
 
             # Get backing-filename for the current file.
             info_result = self._shell.run(
-                ["qemu-img", "info", "--output=json", str(current)],
+                ["qemu-img", "info", "--force-share", "--output=json", str(current)],
                 timeout=30,
                 check=True,
             )
@@ -4462,6 +4747,95 @@ class Core:
             effective_mode=None,
             defer_reason="vm_running",
         )
+
+    def _probe_blockjob(self, vm_config: VMConfig, disk: str) -> str:
+        """Probe the block-job state of one disk.
+
+        Runs ``virsh blockjob --domain <vm> --path <disk>`` with a
+        30-second timeout and classifies the result:
+
+        - ``"none"`` — no active block job (output contains "No current
+          block job" or is empty).
+        - ``"active"`` — any job-describing output.
+        - ``"error"`` — the probe call failed (non-zero exit, timeout, or
+          missing binary).
+        """
+        result = self._shell.run(
+            ["virsh", "blockjob", "--domain", vm_config.name, "--path", disk],
+            timeout=30,
+            check=True,
+        )
+        if not result.success:
+            return "error"
+        if "No current block job" in result.stdout or not result.stdout.strip():
+            return "none"
+        return "active"
+
+    def _reconcile_commit_outcome(
+        self,
+        vm_config: VMConfig,
+        disk: str,
+        base_image: Path,
+        snapshots: list[SnapshotInfo],
+        chain_length_before: int | None = None,
+    ) -> str:
+        """Reconcile an ``"unknown"`` commit outcome against observed reality.
+
+        Returns one of ``"late_success"``, ``"job_active"``, ``"failure"``,
+        or ``"inconclusive"``:
+
+        1. Probe ``virsh blockjob`` (30 s).  Active job → ``"job_active"``;
+           probe failure → ``"inconclusive"``.
+        2. With no active job, inspect the merge set (oldest first):
+           file existence plus backing-chain length.
+        3. All merge-set files absent AND the chain length decreased
+           accordingly → ``"late_success"`` (the job completed after the
+           client died; ``--delete`` removed the files).
+        4. All files present AND the chain length unchanged → ``"failure"``
+           (the job died without effect).
+        5. Any contradiction (partial deletion, chain length inconsistent
+           with file presence, measurement failure) → ``"inconclusive"``.
+
+        Classification requires the file check and the chain-length check
+        to agree (commit-reconciliation spec).  When *chain_length_before*
+        is provided (post-timeout dispatch path), agreement is enforced
+        quantitatively: ``late_success`` demands the chain shrank by
+        exactly the merge-set size, ``failure`` demands an unchanged
+        length, and any mismatch yields ``"inconclusive"``.  When it is
+        ``None`` (step-0 crash recovery has no pre-commit baseline), the
+        file evidence is corroborated by chain measurability alone.
+        """
+        probe = self._probe_blockjob(vm_config, disk)
+        if probe == "active":
+            return "job_active"
+        if probe == "error":
+            return "inconclusive"
+
+        # No active job — inspect reality.  A failed chain measurement
+        # means the file-existence signal cannot be corroborated, so the
+        # outcome is fail-closed "inconclusive".
+        chain_length = self._get_chain_length(vm_config, disk)
+        if chain_length is None:
+            return "inconclusive"
+
+        files_gone = sum(1 for s in snapshots if not os.path.exists(str(s.path)))
+        if files_gone == len(snapshots):
+            # All merge-set files absent.  With a pre-commit baseline the
+            # chain MUST have shrunk by exactly the merge-set size; a
+            # different delta contradicts the file evidence.
+            if chain_length_before is not None and chain_length_before - chain_length != len(
+                snapshots
+            ):
+                return "inconclusive"
+            return "late_success"
+        if files_gone == 0:
+            # All files present.  With a pre-commit baseline the chain
+            # MUST be unchanged; a changed length contradicts the file
+            # evidence.
+            if chain_length_before is not None and chain_length != chain_length_before:
+                return "inconclusive"
+            return "failure"
+        return "inconclusive"
 
     def _refresh_domain_backing_store(self, vm_config: VMConfig) -> None:
         """Strip stale ``<backingStore>`` elements from the domain XML.
@@ -4740,16 +5114,90 @@ class Core:
         # Get chain length before commit for post-commit comparison
         chain_length_before = self._get_chain_length(vm_config, disk)
 
-        # Race guard (design D2): qemu-img writes into the base image —
+        # Block-job protocol (design D6): before a LIVE commit, probe the
+        # disk's block-job state.  Only "none" proceeds; an active job is
+        # either our own zombie (reconcile) or an unknown job (defer);
+        # a failed probe fails closed (defer vm_state_unknown).
+        if effective_mode == "virsh":
+            probe = self._probe_blockjob(vm_config, disk)
+            intent_exists = any(
+                i.disk == disk for i in self._state.get_commit_in_progress(vm_config.name)
+            )
+            if probe == "active" and intent_exists:
+                # Our own probable zombie — reconcile instead of starting a
+                # competing commit.
+                self._dispatch_commit_outcome(
+                    vm_config,
+                    disk,
+                    base_image,
+                    committable,
+                    CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=None,
+                        outcome="unknown",
+                    ),
+                    chain_length_before=chain_length_before,
+                    effective_mode=effective_mode,
+                )
+                return
+            if probe == "active":
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "blockjob_active",
+                )
+                logger.warning(
+                    "VM %s disk %s: unknown active block job detected — "
+                    "deferring blockcommit (reason: blockjob_active)",
+                    vm_config.name,
+                    disk,
+                )
+                return
+            if probe == "error":
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "vm_state_unknown",
+                )
+                logger.warning(
+                    "VM %s disk %s: blockjob probe failed — deferring "
+                    "blockcommit (reason: vm_state_unknown)",
+                    vm_config.name,
+                    disk,
+                )
+                return
+
+        # Race guard (design D2/D7): qemu-img writes into the base image —
         # only safe while the VM stays shut off.  Re-check immediately
-        # before invoking the manager; a failed re-check is non-fatal.
+        # before invoking the manager.  A FAILED re-check fails closed:
+        # defer all candidates with reason "vm_state_unknown" and never
+        # proceed when the VM state is unknown.
         if effective_mode == "qemu-img":
             recheck = self._shell.run(
                 ["virsh", "domstate", "--domain", vm_config.name],
                 timeout=30,
                 check=True,
             )
-            if recheck.success and "shut off" not in recheck.stdout.strip().lower():
+            if not recheck.success:
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "vm_state_unknown",
+                )
+                logger.warning(
+                    "VM %s state unknown (domstate re-check failed) — deferring "
+                    "offline blockcommit of %d snapshot(s) for disk %s "
+                    "(reason: vm_state_unknown)",
+                    vm_config.name,
+                    len(committable),
+                    disk,
+                )
+                return
+            if "shut off" not in recheck.stdout.strip().lower():
                 self._state.add_deferred_blockcommit(
                     vm_config.name,
                     disk,
@@ -4771,68 +5219,176 @@ class Core:
         manager = self._factory.create_lifecycle_manager(
             mode=effective_mode,
         )
+
+        # Commit intent journal (design D4): write the intent BEFORE the
+        # irreversible commit starts, so a crash mid-commit is observable
+        # and attributable.  Cleared only after the outcome is finalized.
+        commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        if not self._dry_run:
+            self._state.set_commit_in_progress(
+                vm_config.name,
+                disk,
+                [s.name for s in committable],
+                str(base_image),
+                commit_ts,
+            )
+
+        # Observability (design D9): INFO intent line before every commit.
+        logger.info(
+            "[blockcommit] %s/%s: committing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
+            vm_config.name,
+            disk,
+            len(committable),
+            base_image,
+            effective_mode,
+            global_cfg.blockcommit_timeout,
+        )
+
         result = manager.blockcommit(
             vm_config,
             committable,
             disk=disk,
             base_image=base_image,
             deep_verify=vm_config.blockcommit_deep_verify,
+            timeout=global_cfg.blockcommit_timeout,
         )
 
-        # Check for MAC denial — defer if blocked by AppArmor/SELinux
-        if (
-            not result.success
-            and result.error
-            and ("apparmor" in result.error or "selinux" in result.error)
-        ):
-            reason = "apparmor" if "apparmor" in result.error else "selinux"
-            self._state.add_deferred_blockcommit(
-                vm_config.name,
-                disk,
-                [s.name for s in committable],
-                reason,
-            )
-            logger.info(
-                "Blockcommit blocked by %s for VM %s disk %s — deferred to next VM shutdown",
-                reason,
-                vm_config.name,
-                disk,
-            )
-            return
+        # ── Commit outcome dispatch (design D1/D5) ──────────────────────
+        self._dispatch_commit_outcome(
+            vm_config,
+            disk,
+            base_image,
+            committable,
+            result,
+            chain_length_before=chain_length_before,
+            effective_mode=effective_mode,
+        )
 
-        # Check for ENOSPC — defer if the commit failed because of
-        # disk-full.  Snapshot state records remain (they are only
-        # removed after successful commit), so the merge is retried
-        # intact by the next run (design D4).
-        if not result.success and result.error and is_space_error(result.error):
-            self._state.add_deferred_blockcommit(
-                vm_config.name,
-                disk,
-                [s.name for s in committable],
-                "enospc",
-            )
-            logger.warning(
-                "Blockcommit deferred due to disk-full for VM %s disk %s — will retry on next run",
-                vm_config.name,
-                disk,
-            )
-            # Track for exit code EXIT_DISKFULL (design D6).
-            target_key = f"blockcommit:{vm_config.name}:{disk}"
-            self._space_limited_targets.add(target_key)
-            return
+    def _dispatch_commit_outcome(
+        self,
+        vm_config: VMConfig,
+        disk: str,
+        base_image: Path,
+        committable: list[SnapshotInfo],
+        result: CommitResult,
+        *,
+        chain_length_before: int | None,
+        effective_mode: str,
+    ) -> None:
+        """Dispatch a commit outcome and converge state accordingly.
 
-        if not result.success:
-            # VM-level isolation: a definitive blockcommit failure (MAC
-            # denials are deferred above and never reach this branch)
-            # aborts the remaining steps of this VM.
+        Three-valued ``CommitResult.outcome`` handling:
+
+        - ``"unknown"`` → reconcile reality (late_success converges state,
+          job_active/inconclusive defer keeping the intent, failure aborts).
+        - ``"failure"`` → clear intent, then classify (MAC deferral, ENOSPC
+          deferral, or RuntimeError abort).
+        - ``"success"`` → converge state (set_last_commit_ts, remove_snapshot,
+          clear intent LAST), refresh XML, run post-commit verification.
+        """
+        global_cfg = self._config.get_global()
+        outcome = result.outcome
+
+        # ── unknown → reconciliation ─────────────────────────────────────
+        if outcome == "unknown":
+            reconciled = self._reconcile_commit_outcome(
+                vm_config,
+                disk,
+                base_image,
+                committable,
+                chain_length_before=chain_length_before,
+            )
+            if reconciled == "late_success":
+                logger.warning(
+                    "VM %s disk %s: blockcommit completed after client timeout "
+                    "— state synced (snapshots: %s)",
+                    vm_config.name,
+                    disk,
+                    ", ".join(s.name for s in committable),
+                )
+                outcome = "success"
+            elif reconciled == "job_active":
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "blockjob_active",
+                )
+                logger.warning(
+                    "VM %s disk %s: block job still active after timeout — "
+                    "deferring (reason: blockjob_active); intent kept",
+                    vm_config.name,
+                    disk,
+                )
+                return
+            elif reconciled == "failure":
+                self._state.clear_commit_in_progress(vm_config.name, disk)
+                msg = (
+                    f"Blockcommit failed for VM {vm_config.name} disk {disk}: "
+                    f"{result.error}. The block job died without effect — "
+                    f"inspect `virsh blockjob` and the libvirtd journal."
+                )
+                logger.error(msg)
+                raise RuntimeError(msg)
+            else:  # inconclusive
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "vm_state_unknown",
+                )
+                logger.warning(
+                    "VM %s disk %s: commit outcome inconclusive after timeout — "
+                    "deferring (reason: vm_state_unknown); intent kept",
+                    vm_config.name,
+                    disk,
+                )
+                return
+
+        # ── failure → clear intent + classify ────────────────────────────
+        if outcome == "failure":
+            self._state.clear_commit_in_progress(vm_config.name, disk)
+
+            # MAC denial — defer.
+            if result.error and ("apparmor" in result.error or "selinux" in result.error):
+                reason = "apparmor" if "apparmor" in result.error else "selinux"
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    reason,
+                )
+                logger.info(
+                    "Blockcommit blocked by %s for VM %s disk %s — deferred to next VM shutdown",
+                    reason,
+                    vm_config.name,
+                    disk,
+                )
+                return
+
+            # ENOSPC — defer.
+            if result.error and is_space_error(result.error):
+                self._state.add_deferred_blockcommit(
+                    vm_config.name,
+                    disk,
+                    [s.name for s in committable],
+                    "enospc",
+                )
+                logger.warning(
+                    "Blockcommit deferred due to disk-full for VM %s disk %s — will retry on next run",
+                    vm_config.name,
+                    disk,
+                )
+                target_key = f"blockcommit:{vm_config.name}:{disk}"
+                self._space_limited_targets.add(target_key)
+                return
+
+            # Definitive failure — VM-level isolation.
             msg = f"Blockcommit failed for VM {vm_config.name} disk {disk}: {result.error}"
             logger.error(msg)
             raise RuntimeError(msg)
 
-        # Blockcommit succeeded — record audit trail + btrbk-style INFO log
-        # (design D4, D5).  Emitted before post-commit verification; if
-        # verification later detects a problem, a separate CRITICAL log
-        # is emitted.
+        # ── success (or late_success) → converge state ───────────────────
         merged_names = ", ".join(s.name for s in committable)
         logger.info(
             "[blockcommit] %s/%s: merged %d snapshot(s) — %s",
@@ -4841,12 +5397,6 @@ class Core:
             len(committable),
             merged_names,
         )
-        # Record last_commit_ts for recovery gate G1
-        # (recover-lost-checkpoint-bitmaps).  Written immediately after
-        # the successful commit — if the pipeline later aborts, a
-        # conservative marker is already in place and the next run will
-        # observe it.  The timestamp uses ISO-8601 compact format
-        # (same as qsnap timestamps everywhere).
         commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
         self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
         for sn in committable:
@@ -4859,11 +5409,10 @@ class Core:
                     disk=disk,
                 )
             )
-            # Unconditional state cleanup (design D5): state must reflect
-            # disk reality before backup steps run — independent of
-            # chain_verify_after_commit.  Removal also happens before the
-            # post-commit measurement so it finds the current active layer.
             self._state.remove_snapshot(vm_config.name, sn.name)
+        # Clear intent LAST — a crash anywhere above still leaves the
+        # intent record for the next run to reconcile (design D4).
+        self._state.clear_commit_in_progress(vm_config.name, disk)
 
         # Offline commits deleted overlay files that the (inactive) domain
         # XML may still reference in <backingStore> chains — refresh the
@@ -4871,7 +5420,7 @@ class Core:
         if effective_mode == "qemu-img":
             self._refresh_domain_backing_store(vm_config)
 
-        # Post-commit chain verification
+        # Post-commit chain verification.
         if global_cfg.chain_verify_after_commit:
             if chain_length_before is None:
                 logger.info(
@@ -4884,10 +5433,6 @@ class Core:
                 chain_length_after = self._get_chain_length(vm_config, disk)
                 if chain_length_after is not None:
                     if chain_length_after >= chain_length_before:
-                        # VM-level isolation: an unchanged chain length
-                        # after commit means the merge likely did not
-                        # happen — the chain may be inconsistent.  Abort
-                        # the VM pipeline so the operator investigates.
                         msg = (
                             f"Blockcommit may have failed for VM {vm_config.name} "
                             f"disk {disk}: chain length unchanged "
@@ -5261,38 +5806,28 @@ class Core:
                     continue
                 disk_target = disk_cfg.target
 
-                # Blockjob probe (design D9, extended for dry-run parity D10).
+                # Blockjob probe (design D9, extended for dry-run parity D10,
+                # refactored onto _probe_blockjob per design D6).
                 # In dry-run mode, run the blockjob probe read-only for
-                # honest prediction.
-                if is_vm_running(self._shell, vm_config.name):
-                    blockjob_cmd = [
-                        "virsh",
-                        "blockjob",
-                        "--domain",
+                # honest prediction.  Only an ACTIVE job defers the backup;
+                # a failed probe ("error") behaves as before (no deferral).
+                if (
+                    is_vm_running(self._shell, vm_config.name)
+                    and self._probe_blockjob(vm_config, disk_target) == "active"
+                ):
+                    logger.info(
+                        "[backup] %s: blockjob active on disk %s — backup deferred for this run",
                         vm_config.name,
-                        "--path",
-                        str(disk_cfg.base_image),
-                    ]
-                    blockjob_result = self._shell.run(blockjob_cmd, timeout=30, check=True)
-                    if (
-                        blockjob_result.success
-                        and "No current block job" not in blockjob_result.stdout
-                    ):
+                        disk_target,
+                    )
+                    if not self._dry_run:
+                        deferred_disk_targets.add(disk_target)
+                    else:
                         logger.info(
-                            "[backup] %s: blockjob active on disk %s — "
-                            "backup deferred for this run",
-                            vm_config.name,
+                            "[dry-run] Would defer backup for disk %s (blockjob active)",
                             disk_target,
                         )
-                        if not self._dry_run:
-                            deferred_disk_targets.add(disk_target)
-                            continue
-                        else:
-                            logger.info(
-                                "[dry-run] Would defer backup for disk %s (blockjob active)",
-                                disk_target,
-                            )
-                            continue
+                    continue
 
                 # Determine whether a FULL is due.
                 disk_fulls = [f for f in all_fulls if f.disk == disk_target]

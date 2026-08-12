@@ -16,23 +16,56 @@ from tests.mocks.mock_modules import MockBitmapBackupProvider, MockSnapshotProvi
 
 
 def test_mock_shell_implements_full_interface():
-    """MockShell implements the full IShell ABC, including both ``run``
-    and ``run_with_stall_detection``."""
+    """MockShell implements the full IShell ABC, including ``run``,
+    ``run_with_stall_detection``, and ``run_with_heartbeat``."""
     from qsnap.interfaces.shell import IShell
     from tests.mocks.mock_shell import MockShell
 
     mock = MockShell()
     assert isinstance(mock, IShell), "MockShell must be an IShell instance"
 
-    # Both abstract methods must exist
+    # All three abstract methods must exist
     assert hasattr(mock, "run"), "MockShell must define run()"
     assert hasattr(mock, "run_with_stall_detection"), (
         "MockShell must define run_with_stall_detection()"
     )
+    assert hasattr(mock, "run_with_heartbeat"), "MockShell must define run_with_heartbeat()"
 
-    # run_with_stall_detection must be callable and accept the full
-    # IShell ABC signature.
+    # run_with_stall_detection and run_with_heartbeat must be callable and
+    # accept the full IShell ABC signature.
     assert callable(mock.run_with_stall_detection), "run_with_stall_detection must be callable"
+    assert callable(mock.run_with_heartbeat), "run_with_heartbeat must be callable"
+    sig = inspect.signature(mock.run_with_heartbeat)
+    for required in ("cmd", "timeout", "heartbeat_seconds", "on_heartbeat", "check"):
+        assert required in sig.parameters, f"run_with_heartbeat missing parameter {required}: {sig}"
+
+
+def test_inmemory_state_manager_intent_methods_present():
+    """InMemoryStateManager implements the intent-journal abstract methods.
+
+    The commit-intent journal methods (set/get/clear_commit_in_progress)
+    are abstract on ``IStateManager`` (commit-intent-journal spec); the
+    mock must provide all three and remain an ``IStateManager`` instance.
+    """
+    from qsnap.interfaces.state import IStateManager
+    from tests.mocks.mock_state import InMemoryStateManager
+
+    mgr = InMemoryStateManager()
+    assert isinstance(mgr, IStateManager), "InMemoryStateManager must be an IStateManager"
+
+    for method in (
+        "set_commit_in_progress",
+        "get_commit_in_progress",
+        "clear_commit_in_progress",
+    ):
+        assert hasattr(mgr, method), f"InMemoryStateManager must define {method}()"
+        assert callable(getattr(mgr, method)), f"{method} must be callable"
+
+    # Sanity: the methods actually work.
+    mgr.set_commit_in_progress("testvm", "vda", ["snap1.qcow2"], "/base.qcow2", "20260808T160000")
+    assert len(mgr.get_commit_in_progress("testvm")) == 1
+    mgr.clear_commit_in_progress("testvm", "vda")
+    assert mgr.get_commit_in_progress("testvm") == []
 
 
 def _make_vm_config() -> VMConfig:

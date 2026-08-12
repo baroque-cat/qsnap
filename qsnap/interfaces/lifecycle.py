@@ -21,6 +21,7 @@ class ILifecycleManager(ABC):
         disk: str,
         base_image: Path,
         deep_verify: bool = False,
+        timeout: int = 1800,
     ) -> CommitResult:
         """Merge snapshots of one disk into that disk's base image.
 
@@ -29,5 +30,9 @@ class ILifecycleManager(ABC):
         All snapshots in *snapshots_to_merge* belong to *disk*.  When
         *deep_verify* is True, run ``qemu-img check`` on *base_image*
         after a successful commit and report corruptions.
+
+        *timeout* is the maximum wall-clock time in seconds for the
+        entire commit call.  The caller passes it from
+        ``GlobalConfig.blockcommit_timeout``.
         """
         ...

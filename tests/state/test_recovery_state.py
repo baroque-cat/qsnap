@@ -212,6 +212,42 @@ def test_legacy_state_files_load_without_new_fields(tmp_path: Path) -> None:
     assert after_raw == original_raw, "reading a legacy state file must not rewrite it"
 
 
+def test_legacy_state_without_commit_in_progress_empty(tmp_path: Path) -> None:
+    """A state file predating commit_in_progress loads as an empty journal.
+
+    commit-intent-journal scenario "Old state file without
+    commit_in_progress": the key is additive and optional — a file
+    without it reads as an empty list with no error and no migration.
+    """
+    state_file = tmp_path / "testvm.json"
+    legacy_data = {
+        "last_allocation": {"vda": 4096},
+        "snapshots": [],
+        "deferred_operations": [],
+        "boot_id": "boot-A",
+        "last_commit_ts": {"vda": "20260808T160000"},
+    }
+    state_file.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+    with open(state_file, encoding="utf-8") as fh:
+        original_raw = fh.read()
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # No key → empty list, never an error.
+    assert manager.get_commit_in_progress("testvm") == []
+
+    # Existing fields (legacy + crash evidence) still work.
+    assert manager.get_last_allocation("testvm", "vda") == 4096
+    assert manager.get_boot_id("testvm") == "boot-A"
+    assert manager.get_last_commit_ts("testvm", "vda") == "20260808T160000"
+
+    # Reads must not rewrite the legacy file (no migration pass).
+    with open(state_file, encoding="utf-8") as fh:
+        after_raw = fh.read()
+    assert after_raw == original_raw
+
+
 @pytest.mark.parametrize("mgr_cls", STATE_MANAGER_CLASSES)
 def test_setting_new_fields_on_legacy_state_is_additive(mgr_cls, tmp_path) -> None:
     """Writing the new fields onto legacy state keeps all legacy fields."""

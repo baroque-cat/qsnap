@@ -128,3 +128,83 @@ def test_run_with_stall_detection_expect_first_priority():
     assert result is specific
     assert result.success is True
     assert result.stdout == "specific match"
+
+
+def test_run_with_heartbeat_scripted_heartbeats():
+    """run_with_heartbeat with expect(...).returns(result, heartbeats=2) records
+    the call, invokes the callback twice, and returns the result.
+
+    Covers the shell-abstraction scenario "MockShell implements the contract"
+    (test-plan mocks-contracts group): the mock must stay an ``IShell``, the
+    call must be recorded, ``on_heartbeat(elapsed)`` must fire exactly the
+    scripted number of times, and the scripted ``ShellResult`` is returned.
+    """
+    mock_shell = MockShell()
+    assert isinstance(mock_shell, IShell)
+
+    expected = ShellResult(
+        success=True,
+        stdout="commit complete",
+        stderr="",
+        returncode=0,
+        error=None,
+    )
+    mock_shell.expect("virsh blockcommit").returns(expected, heartbeats=2)
+
+    heartbeats: list[int] = []
+    result = mock_shell.run_with_heartbeat(
+        ["virsh", "blockcommit", "--domain", "testvm", "--path", "vda", "--wait"],
+        timeout=1800,
+        heartbeat_seconds=60,
+        on_heartbeat=heartbeats.append,
+    )
+
+    assert result is expected
+    assert result.success is True
+    assert result.stdout == "commit complete"
+    assert heartbeats == [60, 120], f"Expected two heartbeats at 60s/120s, got {heartbeats}"
+    assert mock_shell.call_history == ["virsh blockcommit --domain testvm --path vda --wait"]
+    # The mock still satisfies the ABC after the heartbeat path was added.
+    assert isinstance(mock_shell, IShell)
+
+
+def test_run_with_heartbeat_no_heartbeats_by_default():
+    """Without a scripted heartbeat count, run_with_heartbeat never calls back."""
+    mock_shell = MockShell()
+    assert isinstance(mock_shell, IShell)
+
+    expected = ShellResult(
+        success=True,
+        stdout="done",
+        stderr="",
+        returncode=0,
+        error=None,
+    )
+    mock_shell.expect("virsh blockcommit").returns(expected)
+
+    heartbeats: list[int] = []
+    result = mock_shell.run_with_heartbeat(
+        ["virsh", "blockcommit", "--domain", "testvm", "--path", "vda", "--wait"],
+        timeout=1800,
+        heartbeat_seconds=60,
+        on_heartbeat=heartbeats.append,
+    )
+
+    assert result is expected
+    assert heartbeats == [], f"Expected no heartbeats, got {heartbeats}"
+
+
+def test_run_with_heartbeat_returns_default_error_on_no_match():
+    """When no expectation matches, run_with_heartbeat returns an error
+    ShellResult (like run() and run_with_stall_detection())."""
+    mock_shell = MockShell()
+
+    result = mock_shell.run_with_heartbeat(
+        ["virsh", "blockcommit", "--domain", "testvm", "--path", "vda", "--wait"],
+        timeout=1800,
+        heartbeat_seconds=60,
+        on_heartbeat=lambda elapsed: None,
+    )
+    assert result.success is False
+    assert result.returncode == -1
+    assert "No mock configured for:" in result.error

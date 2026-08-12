@@ -2501,7 +2501,7 @@ def test_active_blockjob_defers_run_backup(
     # Probe runs before the blockjob probe — healthy keeps the delta decision.
     _expect_healthy_probe(mock_shell, prior_checkpoint)
     # dominfo from conftest → running; blockjob probe reports an active job.
-    mock_shell.expect("virsh blockjob").returns(
+    mock_shell.expect_first("virsh blockjob").returns(
         ShellResult(
             success=True,
             stdout="Block job: active\n",

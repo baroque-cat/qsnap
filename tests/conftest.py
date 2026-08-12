@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -34,17 +35,31 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     ``OSError: [Errno 122] Disk quota exceeded``.  Purge every ``pytest-*``
     dir except the current session's at session start.  Best-effort: cleanup
     failures must never break the run.
+
+    Only directories older than 1 hour are purged: concurrent pytest
+    sessions (e.g. parallel test agents) share the ``pytest-of-<user>``
+    root, and the ``pytest-current`` symlink lags behind the newest
+    session, so an unconditional purge deletes an *active* sibling
+    session's ``tmp_path`` mid-run (``FileNotFoundError`` during setup).
+    An age guard keeps the disk-quota protection while never removing a
+    directory a concurrent session may still be writing to.
     """
     try:
         root = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
         if not root.is_dir():
             return
-        current_link = root / "pytest-current"
-        current = current_link.resolve() if current_link.is_symlink() else None
+        now = time.time()
+        one_hour = 3600
         for child in root.iterdir():
-            if child.name == "pytest-current" or child == current:
+            if child.name == "pytest-current":
                 continue
-            if child.name.startswith("pytest-") and child.is_dir():
+            if not child.name.startswith("pytest-") or not child.is_dir():
+                continue
+            try:
+                age = now - child.stat().st_mtime
+            except OSError:
+                continue
+            if age >= one_hour:
                 shutil.rmtree(child, ignore_errors=True)
     except Exception:  # noqa: BLE001 — cleanup must never break the suite
         pass
@@ -102,6 +117,21 @@ def _setup_validation_expectations(shell: MockShell) -> None:
     # Tests needing a different state must use mock_shell.expect_first("domstate").
     shell.expect("virsh domstate").returns(
         ShellResult(success=True, stdout="shut off\n", stderr="", returncode=0, error=None)
+    )
+    # Default block-job probe (design D6): every live commit path and the
+    # pre-snapshot probe run ``virsh blockjob`` before proceeding.  An idle
+    # disk reports "No current block job" — without this default the probe
+    # classifies "No mock configured" as "error" and every existing commit
+    # test would defer instead of commit.  Tests needing an active job or a
+    # probe failure must use mock_shell.expect_first("virsh blockjob").
+    shell.expect("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="No current block job\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
     )
     # Default domblklist output for the active-layer detection in _plan_blockcommit().
     # Returns the latest snapshot from the common test fixture chain (snap4 in
@@ -302,6 +332,7 @@ def make_global_config():
         full_verify_before_delete: str = "check",
         transaction_log: str | None = None,
         backup_create: str = "always",
+        blockcommit_timeout: int = 1800,
     ) -> GlobalConfig:
         return GlobalConfig(
             state_dir=state_dir,
@@ -328,6 +359,7 @@ def make_global_config():
             full_verify_before_delete=full_verify_before_delete,
             transaction_log=transaction_log,
             backup_create=backup_create,
+            blockcommit_timeout=blockcommit_timeout,
         )
 
     return _make

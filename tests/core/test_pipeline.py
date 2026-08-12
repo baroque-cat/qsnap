@@ -35,7 +35,7 @@ from qsnap.models.results import (
     SnapshotResult,
     SnapshotSpec,
 )
-from tests.mocks import MockBitmapBackupProvider, MockConfigFacade
+from tests.mocks import MockBitmapBackupProvider, MockConfigFacade, MockRetentionEngine
 
 # ── test_pipeline_always_mode_creates_snapshot ───────────────────────────
 
@@ -642,8 +642,14 @@ def test_create_snapshot_explicit_disk_list_overrides_discovery(
     ):
         core.snapshot()
 
-    # domblklist should NOT be called (explicit disk list overrides discovery)
-    shell_spy.assert_not_called()
+    # Explicit disk list overrides discovery: domblklist is NEVER called.
+    # The pre-snapshot block-job probe (design D6) does run for a running
+    # VM — the conftest idle-disk default classifies "none" and the probe
+    # command itself is expected — but no active-layer discovery happens.
+    probe_calls = [" ".join(call.args[0]) for call in shell_spy.call_args_list if call.args]
+    assert not any("domblklist" in c for c in probe_calls), (
+        "domblklist should NOT be called (explicit disk list overrides discovery)"
+    )
     # Snapshot should use sda
     assert create_spy.called
     spec = create_spy.call_args.args[1][0]
@@ -5548,7 +5554,9 @@ def test_active_blockjob_defers_disk_backup(
     )
 
     # Default conftest dominfo says the VM is running → probe executes.
-    mock_shell.expect("virsh blockjob").returns(
+    # expect_first overrides the conftest idle-disk default ("No current
+    # block job") so the probe classifies this disk as having an active job.
+    mock_shell.expect_first("virsh blockjob").returns(
         ShellResult(
             success=True,
             stdout="Block job: active",
@@ -8329,3 +8337,1703 @@ def test_pipeline_skips_retention_when_backup_transfer_fails(
 
     # _cleanup_backups must NOT be called — the abort precedes retention.
     assert not cleanup_spy.called, "_cleanup_backups should be skipped when backup transfer fails"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# harden-blockcommit-races — commit reconciliation (×11)
+# ════════════════════════════════════════════════════════════════════════════
+
+_SNAP_DIR_BC = "/var/lib/libvirt/snapshots/testvm"
+_BASE_IMG_BC = "/var/lib/libvirt/images/testvm.qcow2"
+
+
+def _bc_snapshot(name: str, ts: datetime) -> SnapshotInfo:
+    """Build a single-disk SnapshotInfo under the standard testvm paths."""
+    return SnapshotInfo(
+        name=name,
+        path=Path(f"{_SNAP_DIR_BC}/{name}.qcow2"),
+        timestamp=ts,
+        allocation=1000,
+        disk="vda",
+    )
+
+
+def _make_commit_core(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    *,
+    blockcommit_timeout: int = 1800,
+    lifecycle_mode: str = "virsh",
+    chain_verify_before_commit: bool = False,
+    chain_verify_after_commit: bool = False,
+    **vm_kwargs: object,
+) -> tuple[Core, VMConfig]:
+    """Build a Core + VM pair wired for the blockcommit path.
+
+    Defaults to the shut-off / qemu-img executor path (conftest domstate
+    default "shut off") so no block-job probe interferes; tests needing
+    the live path override ``lifecycle_mode`` + ``virsh domstate``.
+    """
+    global_cfg = make_global_config(
+        chain_verify_before_commit=chain_verify_before_commit,
+        chain_verify_after_commit=chain_verify_after_commit,
+        blockcommit_timeout=blockcommit_timeout,
+    )
+    defaults: dict[str, object] = {
+        "name": "testvm",
+        "lifecycle_mode": lifecycle_mode,
+        "base_image": _BASE_IMG_BC,
+        "snapshot_dir": _SNAP_DIR_BC,
+    }
+    defaults.update(vm_kwargs)
+    vm = make_vm_config(**defaults)
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+    return core, vm
+
+
+def _script_running_virsh_domblklist(
+    mock_shell, active_path: str = f"{_SNAP_DIR_BC}/snap2.qcow2"
+) -> None:
+    """Script domstate=running + domblklist active layer for the live path."""
+    mock_shell.expect_first("virsh domstate").returns(
+        ShellResult(success=True, stdout="running\n", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(f"Target   Source\n--------------------------------\nvda   {active_path}\n"),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _script_shutoff_domblklist(mock_shell, tip_path: str = f"{_SNAP_DIR_BC}/snap2.qcow2") -> None:
+    """Script domblklist for the shut-off path (conftest domstate is shut off)."""
+    mock_shell.expect_first("virsh domblklist").returns(
+        ShellResult(
+            success=True,
+            stdout=(f"Target   Source\n--------------------------------\nvda   {tip_path}\n"),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+
+def _run_commit_for(core, vm, retention) -> None:
+    """Drive the full _blockcommit_snapshots step for one VM."""
+    with patch("os.path.exists", return_value=True):
+        core._blockcommit_snapshots(vm, retention)
+
+
+# ── 1. test_unknown_outcome_not_treated_as_failure ─────────────────────────
+
+
+def test_unknown_outcome_not_treated_as_failure(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """An 'unknown' CommitResult outcome is reconciled, never treated as a
+    definitive failure — the VM pipeline must not abort."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+
+    unknown = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="Command timed out after 1800s",
+        outcome="unknown",
+    )
+    with patch.object(core, "_reconcile_commit_outcome", return_value="late_success"):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+
+    # Converged, not aborted: snapshot removed, intent cleared, no deferred.
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ── 2. test_definitive_commit_failure_aborts_vm ────────────────────────────
+
+
+def test_definitive_commit_failure_aborts_vm(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A definitive 'failure' outcome still aborts the VM with RuntimeError."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+
+    failure = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="virsh blockcommit failed",
+        outcome="failure",
+    )
+    with pytest.raises(RuntimeError, match="Blockcommit failed for VM testvm disk vda"):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            failure,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+    # Intent cleared for a definitive failure.
+    assert mock_state.get_commit_in_progress("testvm") == []
+
+
+# ── 3. test_reconcile_late_success_after_timeout ───────────────────────────
+
+
+def test_reconcile_late_success_after_timeout(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """No job + merge-set files gone + chain shrank accordingly → 'late_success'.
+
+    With a pre-commit baseline (the dispatch path passes it), agreement is
+    quantitative: the chain must shrink by exactly the merge-set size.
+    The conftest backing-chain default measures length 1 post-hoc, so a
+    baseline of 2 with a 1-snapshot merge set agrees (2 - 1 == 1).
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    with patch("os.path.exists", return_value=False):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1], chain_length_before=2
+        )
+    assert outcome == "late_success"
+
+
+# ── 4. test_reconcile_job_active_after_timeout ─────────────────────────────
+
+
+def test_reconcile_job_active_after_timeout(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """An active block job after timeout → 'job_active'."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Block job: type=blockcommit\nBandwidth limit: 0 B/s\nJob: 1048576/2097152\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    outcome = core._reconcile_commit_outcome(vm, "vda", Path(_BASE_IMG_BC), [snap1])
+    assert outcome == "job_active"
+
+
+# ── 5. test_reconcile_dead_job_no_effect ───────────────────────────────────
+
+
+def test_reconcile_dead_job_no_effect(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """No job + all merge-set files present + chain unchanged → 'failure'.
+
+    With a pre-commit baseline, agreement is quantitative: the post-hoc
+    chain length (conftest default: 1) equals the baseline, corroborating
+    that the job died without effect.
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    with patch("os.path.exists", return_value=True):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1], chain_length_before=1
+        )
+    assert outcome == "failure"
+
+
+# ── 6. test_reconcile_contradictory_evidence_inconclusive ──────────────────
+
+
+def test_reconcile_contradictory_evidence_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Partial deletion (one file gone, one present) → 'inconclusive'."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+
+    def _exists(path) -> bool:
+        return str(path).endswith("snap1.qcow2")  # snap1 present, snap2 gone
+
+    with patch("os.path.exists", side_effect=_exists):
+        outcome = core._reconcile_commit_outcome(vm, "vda", Path(_BASE_IMG_BC), [snap1, snap2])
+    assert outcome == "inconclusive"
+
+
+# ── 6b. Chain-length agreement: files gone but chain NOT shorter ───────────
+
+
+def test_reconcile_files_gone_but_chain_unchanged_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All merge-set files absent BUT the chain length did not shrink by the
+    merge-set size → the file check and the chain-length check disagree →
+    'inconclusive' (commit-reconciliation spec: classification requires the
+    two checks to agree).  Conftest measures post-hoc length 1; a baseline
+    of 1 with a 1-snapshot merge set gives delta 0 != 1."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    with patch("os.path.exists", return_value=False):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1], chain_length_before=1
+        )
+    assert outcome == "inconclusive"
+
+
+# ── 6c. Chain-length agreement: files present but chain shrunk ─────────────
+
+
+def test_reconcile_files_present_but_chain_shrunk_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All merge-set files present BUT the chain length changed → the two
+    checks disagree → 'inconclusive' (a definitive 'failure' requires an
+    unchanged chain length).  Conftest measures post-hoc length 1; a
+    baseline of 2 disagrees."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    with patch("os.path.exists", return_value=True):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1], chain_length_before=2
+        )
+    assert outcome == "inconclusive"
+
+
+# ── 7. test_reconcile_probe_failure_inconclusive ───────────────────────────
+
+
+def test_reconcile_probe_failure_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Probe call failure → fail closed as 'inconclusive'."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: failed to get job info for disk vda",
+            returncode=1,
+            error="failed to get job info",
+        )
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    outcome = core._reconcile_commit_outcome(vm, "vda", Path(_BASE_IMG_BC), [snap1])
+    assert outcome == "inconclusive"
+
+
+# ── 8. test_late_success_converges_state_continues ─────────────────────────
+
+
+def test_late_success_converges_state_continues(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Unknown → reconcile 'late_success' → state converges and the VM
+    pipeline continues (no exception, no deferred entry)."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    with patch.object(core, "_reconcile_commit_outcome", return_value="late_success"):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ── 9. test_job_active_defers_disk_vm_not_failed ───────────────────────────
+
+
+def test_job_active_defers_disk_vm_not_failed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Unknown → reconcile 'job_active' → the disk is deferred with reason
+    blockjob_active; the VM is NOT failed."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    # Simulate the pre-commit intent write performed by _blockcommit_one_disk.
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+    with patch.object(core, "_reconcile_commit_outcome", return_value="job_active"):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "blockjob_active"
+    assert deferred[0].snapshots == ["snap1"]
+    # Intent kept until a later reconciliation decides.
+    intents = mock_state.get_commit_in_progress("testvm")
+    assert len(intents) == 1 and intents[0].disk == "vda"
+
+
+# ── 10. test_inconclusive_defers_fail_closed ───────────────────────────────
+
+
+def test_inconclusive_defers_fail_closed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Unknown → reconcile 'inconclusive' → fail-closed deferral with reason
+    vm_state_unknown; the intent is kept."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    # Simulate the pre-commit intent write performed by _blockcommit_one_disk.
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+    with patch.object(core, "_reconcile_commit_outcome", return_value="inconclusive"):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "vm_state_unknown"
+    assert deferred[0].snapshots == ["snap1"]
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+
+
+# ── 11. test_reconcile_failure_aborts_with_hint ────────────────────────────
+
+
+def test_reconcile_failure_aborts_with_hint(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Unknown → reconcile 'failure' → VM aborts with a diagnostic hint."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    unknown = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="Command timed out after 1800s",
+        outcome="unknown",
+    )
+    with (
+        caplog.at_level(logging.ERROR),
+        patch.object(core, "_reconcile_commit_outcome", return_value="failure"),
+        pytest.raises(RuntimeError) as excinfo,
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+
+    assert "The block job died without effect" in str(excinfo.value)
+    assert "`virsh blockjob`" in str(excinfo.value)
+    # Intent cleared on definitive failure.
+    assert mock_state.get_commit_in_progress("testvm") == []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# harden-blockcommit-races — commit intent journal (×7)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_intent_precedes_manager_call(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """The commit-intent record is written BEFORE the irreversible manager call."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    events: list[str] = []
+    manager = mock_factory._lifecycle_manager
+    original_intent = mock_state.set_commit_in_progress
+    original_commit = manager.blockcommit
+
+    def _record_intent(*args, **kwargs):
+        events.append("intent")
+        return original_intent(*args, **kwargs)
+
+    def _record_commit(*args, **kwargs):
+        events.append("commit")
+        return original_commit(*args, **kwargs)
+
+    with (
+        patch.object(mock_state, "set_commit_in_progress", side_effect=_record_intent),
+        patch.object(manager, "blockcommit", side_effect=_record_commit),
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert events == ["intent", "commit"], f"unexpected order: {events}"
+
+
+def test_success_outcome_intent_cleared_last(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """On success the intent is cleared LAST — after last_commit_ts write and
+    snapshot removal — so a crash mid-convergence stays observable."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    events: list[str] = []
+    for method, tag in (
+        ("set_last_commit_ts", "last_ts"),
+        ("remove_snapshot", "remove"),
+        ("clear_commit_in_progress", "clear_intent"),
+    ):
+        original = getattr(mock_state, method)
+
+        def _make(tag=tag, original=original):
+            def _rec(*args, **kwargs):
+                events.append(tag)
+                return original(*args, **kwargs)
+
+            return _rec
+
+        patch.object(mock_state, method, side_effect=_make()).start()
+
+    try:
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+    finally:
+        patch.stopall()
+
+    assert events[-1] == "clear_intent", f"intent not cleared last: {events}"
+    assert events == ["last_ts", "remove", "clear_intent"], f"unexpected order: {events}"
+
+
+def test_definitive_failure_clears_intent(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A definitive failure clears the intent before classification."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    failure = CommitResult(
+        success=False, committed_snapshot="", error="virsh blockcommit failed", outcome="failure"
+    )
+    with (
+        patch.object(manager, "blockcommit", return_value=failure),
+        pytest.raises(RuntimeError),
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert mock_state.get_commit_in_progress("testvm") == []
+
+
+def test_unknown_keeps_intent_until_finalized(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """An unknown outcome keeps the intent until reconciliation finalizes it."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    with (
+        patch.object(manager, "blockcommit", return_value=unknown),
+        patch.object(core, "_reconcile_commit_outcome", return_value="inconclusive"),
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    intents = mock_state.get_commit_in_progress("testvm")
+    assert len(intents) == 1 and intents[0].disk == "vda"
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1 and deferred[0].reason == "vm_state_unknown"
+
+
+def test_stale_intent_completed_job_self_heals(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A stale intent whose job completed (files gone, chain shorter) converges
+    state and clears the intent at step 0."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", return_value=False),
+    ):
+        core._recover_commit_intents(vm)
+
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert "completed after previous run timed out" in caplog.text
+    assert "state synced" in caplog.text
+
+
+def test_stale_intent_live_job_defers(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A stale intent with a still-live job keeps the intent and defers the
+    disk (reason: blockjob_active) — the job is never aborted."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        core._recover_commit_intents(vm)
+
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "blockjob_active"
+    assert deferred[0].snapshots == ["snap1"]
+    assert "keeping intent and deferring commit" in caplog.text
+    assert not any("blockjob --abort" in c for c in mock_shell.call_history)
+
+
+def test_stale_intent_no_effect_discarded(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A stale intent with no observed effect (files present, chain unchanged)
+    is discarded with a WARNING; state is left untouched."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", return_value=True),
+    ):
+        core._recover_commit_intents(vm)
+
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert [s.name for s in mock_state.get_snapshots("testvm")] == ["snap1"]
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert "no effect observed" in caplog.text
+
+
+def test_stale_intent_probe_error_defers_vm_state_unknown(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Step-0 recovery, probe-error branch: a failed blockjob probe fails
+    closed — the intent is kept and the disk deferred vm_state_unknown."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: failed to get job info for disk vda",
+            returncode=1,
+            error="failed to get job info",
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        core._recover_commit_intents(vm)
+
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "vm_state_unknown"
+    assert deferred[0].snapshots == ["snap1"]
+    assert "blockjob probe failed during intent recovery" in caplog.text
+
+
+def test_stale_intent_inconclusive_defers_vm_state_unknown(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Step-0 recovery, inconclusive branch: contradictory evidence (partial
+    deletion) keeps the intent and defers the disk vm_state_unknown."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    mock_state.set_commit_in_progress(
+        "testvm", "vda", ["snap1", "snap2"], _BASE_IMG_BC, "20260808T160000"
+    )
+
+    # snap1 present, snap2 gone → partial deletion → inconclusive.
+    def _exists(path) -> bool:
+        return str(path).endswith("snap1.qcow2")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", side_effect=_exists),
+    ):
+        core._recover_commit_intents(vm)
+
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "vm_state_unknown"
+    assert "outcome inconclusive during intent recovery" in caplog.text
+
+
+def test_stale_intent_recovery_dry_run_writes_nothing(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Dry-run step-0 recovery predicts but never writes: a stale intent that
+    would converge (late success) is left in place together with all state."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    core.dry_run = True
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", return_value=False),
+    ):
+        core._recover_commit_intents(vm)
+
+    # Nothing was written or cleared — every mutation is dry-run guarded.
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+    assert [s.name for s in mock_state.get_snapshots("testvm")] == ["snap1"]
+    assert mock_state.get_last_commit_ts("testvm", "vda") is None
+    assert mock_state.get_deferred_operations("testvm") == []
+    # The predicted action is still announced.
+    assert "state synced" in caplog.text
+
+
+def test_stale_intent_live_job_does_not_duplicate_deferred(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """'Add/refresh' semantics: recovery does NOT append a duplicate deferred
+    entry when an equivalent one (same disk + snapshot set) is queued already,
+    and repeated runs keep the queue at exactly one entry."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+    # An equivalent entry is already queued (e.g. from an earlier drain).
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    # Two consecutive runs with a persistent foreign job.
+    core._recover_commit_intents(vm)
+    core._recover_commit_intents(vm)
+
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1, f"duplicate deferred entries accumulated: {deferred}"
+    assert deferred[0].snapshots == ["snap1"]
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# harden-blockcommit-races — blockjob protocol (×10)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_probe_no_job_returns_none(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Idle disk → probe classifies 'none'; the exact command and timeout are
+    verified against the shell spy."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        result = core._probe_blockjob(vm, "vda")
+
+    assert result == "none"
+    assert shell_spy.call_args.args[0] == [
+        "virsh",
+        "blockjob",
+        "--domain",
+        "testvm",
+        "--path",
+        "vda",
+    ]
+    assert shell_spy.call_args.kwargs["timeout"] == 30
+
+
+def test_probe_active_job_returns_active(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Job-describing output (libvirt's real block-job report format) →
+    'active' — not just the literal 'Active block job exists' phrase."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Block job: type=blockcommit\nBandwidth limit: 0 B/s\nJob: 1048576/2097152\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    assert core._probe_blockjob(vm, "vda") == "active"
+
+
+def test_probe_call_failure_returns_error(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A failed probe call → 'error' (fail closed downstream)."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: failed to get job info for disk vda",
+            returncode=1,
+            error="failed to get job info",
+        )
+    )
+    assert core._probe_blockjob(vm, "vda") == "error"
+
+
+def test_unknown_active_job_defers_commit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """An unknown active job (libvirt's 'Active block job exists' wording)
+    blocks a NEW commit: deferred blockjob_active, no manager call, WARNING
+    naming the VM and disk."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    _script_running_virsh_domblklist(mock_shell, active_path=str(snap2.path))
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=["snap2"], remove=["snap1"]))
+
+    bc_spy.assert_not_called()
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "blockjob_active"
+    assert deferred[0].snapshots == ["snap1"]
+    assert "testvm" in caplog.text and "vda" in caplog.text
+    assert not any("virsh blockcommit" in c for c in mock_shell.call_history)
+
+
+def test_own_zombie_job_reconciled_not_clobbered(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """An active job WITH our own intent record is reconciled, not clobbered:
+    no competing commit is started; the disk is deferred blockjob_active."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    _script_running_virsh_domblklist(mock_shell, active_path=str(snap2.path))
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    # Our own zombie: an intent record exists for this disk.
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+
+    manager = mock_factory._lifecycle_manager
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        _run_commit_for(core, vm, RetentionResult(keep=["snap2"], remove=["snap1"]))
+
+    # No new commit was started (no clobbering of the live job).
+    bc_spy.assert_not_called()
+    assert not any("virsh blockcommit" in c for c in mock_shell.call_history)
+    # Reconciled: deferred with blockjob_active, intent kept.
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1 and deferred[0].reason == "blockjob_active"
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+
+
+def test_commit_probe_error_fails_closed(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A failed pre-commit probe fails closed: deferred vm_state_unknown and
+    no commit issued."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    _script_running_virsh_domblklist(mock_shell, active_path=str(snap2.path))
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: failed to get job info for disk vda",
+            returncode=1,
+            error="failed to get job info",
+        )
+    )
+
+    manager = mock_factory._lifecycle_manager
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        _run_commit_for(core, vm, RetentionResult(keep=["snap2"], remove=["snap1"]))
+
+    bc_spy.assert_not_called()
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "vm_state_unknown"
+    assert deferred[0].snapshots == ["snap1"]
+
+
+def test_active_job_defers_snapshot_creation(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """An active job before snapshot creation skips the snapshot: WARNING, no
+    baseline update, and NO deferred queue entry (the next run retries)."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(
+            snapshot_provider, "create_multi", wraps=snapshot_provider.create_multi
+        ) as create_spy,
+    ):
+        core._execute_snapshot_steps(vm)
+
+    create_spy.assert_not_called()
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_last_allocation("testvm", "vda") is None
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert "skipping snapshot creation this run" in caplog.text
+
+
+def test_all_disks_clear_snapshot_proceeds(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """All disks report 'none' → snapshot creation proceeds for every disk."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        disks=[
+            DiskConfig(target="vda", base_image=Path(_BASE_IMG_BC)),
+            DiskConfig(target="vdb", base_image=Path("/var/lib/libvirt/images/testvm-disk2.qcow2")),
+        ],
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider, "create_multi", wraps=snapshot_provider.create_multi
+    ) as create_spy:
+        core._execute_snapshot_steps(vm)
+
+    create_spy.assert_called_once()
+    specs = create_spy.call_args.args[1]
+    assert {s.disk for s in specs} == {"vda", "vdb"}
+    assert {s.disk for s in mock_state.get_snapshots("testvm")} == {"vda", "vdb"}
+
+
+def test_stopped_vm_skips_probe(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A stopped VM skips the pre-snapshot probe entirely and snapshots
+    proceed (dominfo reports shut off)."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh dominfo").returns(
+        ShellResult(
+            success=True,
+            stdout="Id: 1\nName: testvm\nState: shut off\n",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    snapshot_provider = mock_factory._snapshot_provider
+    with patch.object(
+        snapshot_provider, "create_multi", wraps=snapshot_provider.create_multi
+    ) as create_spy:
+        core._execute_snapshot_steps(vm)
+
+    create_spy.assert_called_once()
+    assert not any("virsh blockjob" in c for c in mock_shell.call_history), (
+        "No block-job probe should run for a stopped VM"
+    )
+
+
+def test_zombie_job_never_aborted(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """A zombie/unknown job is deferred — qsnap never issues
+    `virsh blockjob --abort` across any probe/defer path."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    _script_running_virsh_domblklist(mock_shell, active_path=str(snap2.path))
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _run_commit_for(core, vm, RetentionResult(keep=["snap2"], remove=["snap1"]))
+
+    assert not any("blockjob --abort" in c for c in mock_shell.call_history)
+    assert "testvm" in caplog.text and "vda" in caplog.text
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1 and deferred[0].reason == "blockjob_active"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# harden-blockcommit-races — core orchestrator (×7)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_success_path_state_write_order(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Full success-path state-write ordering across the whole commit step:
+    intent → manager call → last_commit_ts → remove_snapshot → clear intent."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    events: list[str] = []
+    manager = mock_factory._lifecycle_manager
+    original_commit = manager.blockcommit
+
+    def _make_recorder(method: str, tag: str):
+        original = getattr(mock_state, method)
+
+        def _rec(*args, **kwargs):
+            events.append(tag)
+            return original(*args, **kwargs)
+
+        return _rec
+
+    def _record_commit(*args, **kwargs):
+        events.append("commit")
+        return original_commit(*args, **kwargs)
+
+    with (
+        patch.object(
+            mock_state,
+            "set_commit_in_progress",
+            side_effect=_make_recorder("set_commit_in_progress", "intent"),
+        ),
+        patch.object(
+            mock_state,
+            "set_last_commit_ts",
+            side_effect=_make_recorder("set_last_commit_ts", "last_ts"),
+        ),
+        patch.object(
+            mock_state, "remove_snapshot", side_effect=_make_recorder("remove_snapshot", "remove")
+        ),
+        patch.object(
+            mock_state,
+            "clear_commit_in_progress",
+            side_effect=_make_recorder("clear_commit_in_progress", "clear_intent"),
+        ),
+        patch.object(manager, "blockcommit", side_effect=_record_commit),
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert events == ["intent", "commit", "last_ts", "remove", "clear_intent"], (
+        f"unexpected state-write order: {events}"
+    )
+
+
+def test_unknown_path_keeps_intent_pre_reconciliation(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Unknown outcome → intent kept while reconciliation defers the disk."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    with (
+        patch.object(manager, "blockcommit", return_value=unknown),
+        patch.object(core, "_reconcile_commit_outcome", return_value="job_active"),
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert len(mock_state.get_commit_in_progress("testvm")) == 1
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1 and deferred[0].reason == "blockjob_active"
+
+
+def test_timeout_unknown_no_abort_late_success(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """A commit that exceeds the timeout is NOT an abort: the manager reports
+    unknown, the reconcile pass observes the merge-set files gone (the job
+    completed after the client died) and converges state to late success."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+    snap_file = snap_dir / "snap1.qcow2"
+    snap_file.write_text("")
+    snap1 = SnapshotInfo(
+        name="snap1",
+        path=snap_file,
+        timestamp=datetime(2025, 7, 13, 8, 0),
+        allocation=1000,
+        disk="vda",
+    )
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=str(tmp_path / "other.qcow2"))
+
+    manager = mock_factory._lifecycle_manager
+
+    def _timeout_but_successful(
+        vm_config, snapshots_to_merge, *, disk, base_image, deep_verify=False, timeout=1800
+    ):
+        # The real job actually completed and --delete removed the overlays,
+        # but the client timed out before learning that.
+        for s in snapshots_to_merge:
+            s.path.unlink(missing_ok=True)
+        return CommitResult(
+            success=False,
+            committed_snapshot="",
+            error="Command timed out after 1800s",
+            outcome="unknown",
+        )
+
+    with (
+        patch.object(manager, "blockcommit", side_effect=_timeout_but_successful),
+        # Chain-length agreement (commit-reconciliation spec): the pre-commit
+        # baseline measures 2 layers; the post-timeout measurement sees the
+        # shortened chain (1 layer) — delta 1 == merge-set size → late success.
+        patch.object(core, "_get_chain_length", side_effect=[2, 1]),
+    ):
+        # Must NOT raise — late success is not an abort.  NOTE: no
+        # os.path.exists patch here — the merge-set file really exists
+        # before the commit and really is gone during reconciliation.
+        core._blockcommit_snapshots(vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+    assert mock_state.get_deferred_operations("testvm") == []
+
+
+def test_probe_active_no_intent_defers_commit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Full pipeline: an active job with no intent record defers the commit —
+    the VM run still succeeds."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    _script_running_virsh_domblklist(mock_shell, active_path=str(snap2.path))
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+    mock_factory._retention_engine = MockRetentionEngine(keep=["snap2"], remove=["snap1"])
+
+    with patch("os.path.exists", return_value=True):
+        result = core.snapshot()
+
+    assert result.success is True
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1 and deferred[0].reason == "blockjob_active"
+    assert mock_state.get_commit_in_progress("testvm") == []
+
+
+def test_snapshot_creation_skipped_job_active(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Full pipeline: snapshot creation is skipped while a job is active and
+    the VM run succeeds without recording anything."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = core.snapshot()
+
+    assert result.success is True
+    assert mock_state.get_snapshots("testvm") == []
+    assert mock_state.get_deferred_operations("testvm") == []
+    assert "skipping snapshot creation this run" in caplog.text
+
+
+def test_configured_timeout_reaches_manager(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """GlobalConfig.blockcommit_timeout is passed through as timeout= to the
+    lifecycle manager and appears in the [blockcommit] INFO line."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=900,
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        caplog.at_level(logging.INFO),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    assert bc_spy.called
+    assert bc_spy.call_args.kwargs["timeout"] == 900
+    assert "timeout=900s" in caplog.text
+
+
+def test_stale_intent_resolved_before_commit_eval(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Step-0 intent recovery resolves a stale intent BEFORE the commit step
+    evaluates: the blockcommit manager never sees the already-converged
+    snapshot."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    # Stale intent: the previous run's commit for snap1 actually completed.
+    mock_state.set_commit_in_progress("testvm", "vda", ["snap1"], _BASE_IMG_BC, "20260808T160000")
+
+    # snap1's file is gone (late success); snap2's file exists.
+    def _exists(path) -> bool:
+        return str(path).endswith("snap2.qcow2")
+
+    mock_factory._retention_engine = MockRetentionEngine(keep=[], remove=["snap1", "snap2"])
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+    manager = mock_factory._lifecycle_manager
+
+    with (
+        patch("os.path.exists", side_effect=_exists),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
+    ):
+        core.snapshot()
+
+    # Recovery ran first: snap1 was converged away, so the commit manager
+    # only ever saw snap2 — the stale intent was resolved BEFORE commit eval.
+    assert bc_spy.called
+    merged = [s.name for s in bc_spy.call_args.args[1]]
+    assert merged == ["snap2"], f"stale-intent snapshot leaked into commit: {merged}"
+    assert mock_state.get_commit_in_progress("testvm") == []
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# harden-blockcommit-races — commit observability (×2)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_intent_info_log_precedes_commit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """The [blockcommit] intent INFO line precedes every commit attempt and
+    carries mode/timeout; the merge-completion line follows it."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    with caplog.at_level(logging.INFO):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    intent_lines = [
+        r.message
+        for r in caplog.records
+        if "[blockcommit]" in r.message and "committing 1 snapshot(s)" in r.message
+    ]
+    assert len(intent_lines) == 1
+    assert "testvm/vda" in intent_lines[0]
+    assert "mode=qemu-img" in intent_lines[0]
+    assert "timeout=1800s" in intent_lines[0]
+    assert "/var/lib/libvirt/images/testvm.qcow2" in intent_lines[0]
+
+    merged_lines = [
+        r.message for r in caplog.records if "[blockcommit]" in r.message and "merged" in r.message
+    ]
+    assert len(merged_lines) == 1
+    # The intent line precedes the completion line.
+    assert caplog.records.index(
+        next(r for r in caplog.records if r.message == intent_lines[0])
+    ) < caplog.records.index(next(r for r in caplog.records if r.message == merged_lines[0]))
+
+
+def test_reconciliation_outcomes_logged(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Every reconciliation outcome is distinguishable in the log."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+
+    # late_success
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(core, "_reconcile_commit_outcome", return_value="late_success"),
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+    assert "blockcommit completed after client timeout" in caplog.text
+    caplog.clear()
+
+    # job_active
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(core, "_reconcile_commit_outcome", return_value="job_active"),
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+    assert "block job still active after timeout" in caplog.text
+    caplog.clear()
+
+    # inconclusive
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(core, "_reconcile_commit_outcome", return_value="inconclusive"),
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+    assert "commit outcome inconclusive after timeout" in caplog.text
+    caplog.clear()
+
+    # failure (aborts)
+    with (
+        caplog.at_level(logging.ERROR),
+        patch.object(core, "_reconcile_commit_outcome", return_value="failure"),
+        pytest.raises(RuntimeError),
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1],
+            unknown,
+            chain_length_before=2,
+            effective_mode="virsh",
+        )
+    assert "The block job died without effect" in caplog.text

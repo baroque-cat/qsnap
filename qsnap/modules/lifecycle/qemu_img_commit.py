@@ -51,6 +51,7 @@ class QemuImgCommitManager(ILifecycleManager):
         disk: str,
         base_image: Path,
         deep_verify: bool = False,
+        timeout: int = 1800,
     ) -> CommitResult:
         """Merge snapshots of one disk into that disk's base image.
 
@@ -58,6 +59,10 @@ class QemuImgCommitManager(ILifecycleManager):
         *base_image* is this disk's base qcow2 path.  The ``-b`` commit and
         rebase targets are taken from *base_image* (not a single VM-level
         base image).
+
+        *timeout* is the maximum wall-clock time in seconds (default 1800).
+        When the ``qemu-img commit`` call exceeds *timeout*, it is killed
+        and the outcome is classified as ``"unknown"``.
 
         1. If the list is empty → no-op success.
         2. For each snapshot (oldest first): ``qemu-img commit
@@ -67,9 +72,10 @@ class QemuImgCommitManager(ILifecycleManager):
         3. When *deep_verify* is True, run ``qemu-img check`` on
            *base_image* after a successful commit.
         """
-        # Step 1: Empty list → no-op
+        # Step 1: Empty list → no-op success (lifecycle-manager spec:
+        # outcome="success" — success=True SHALL imply outcome="success").
         if not snapshots_to_merge:
-            return CommitResult(success=True, committed_snapshot="", error=None)
+            return CommitResult(success=True, committed_snapshot="", error=None, outcome="success")
 
         # Resolve the scan directory for child discovery: the disk's own
         # snapshot_dir override, or the VM-level default.
@@ -87,15 +93,24 @@ class QemuImgCommitManager(ILifecycleManager):
                 str(base_image),
                 str(snapshot.path),
             ]
-            result = self._shell.run(cmd, timeout=3600)
+            result = self._shell.run(cmd, timeout=timeout)
             if not result.success:
                 mac_result = self._mac_failure(result.stderr, result.error)
                 if mac_result is not None:
                     return mac_result
+                # Timeout / kill → unknown outcome.
+                if result.error and "timed out" in result.error:
+                    return CommitResult(
+                        success=False,
+                        committed_snapshot="",
+                        error=result.error,
+                        outcome="unknown",
+                    )
                 return CommitResult(
                     success=False,
                     committed_snapshot=snapshot.name,
                     error=result.error,
+                    outcome="failure",
                 )
 
             # 2b: Child discovery — find the overlay whose backing file
@@ -148,7 +163,7 @@ class QemuImgCommitManager(ILifecycleManager):
 
         # Deep verify: run qemu-img check on the disk's base image after commit
         if deep_verify:
-            fail = deep_verify_base_image(self._shell, base_image)
+            fail = deep_verify_base_image(self._shell, base_image, timeout=timeout)
             if fail is not None:
                 return fail
 
@@ -156,6 +171,7 @@ class QemuImgCommitManager(ILifecycleManager):
             success=True,
             committed_snapshot=last_merged,
             error=None,
+            outcome="success",
         )
 
     @staticmethod

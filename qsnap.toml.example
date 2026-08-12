@@ -112,6 +112,13 @@ state_dir = "/var/lib/qsnap/state"
 # snapshot existence).  Inherited by VM and target levels.
 # backup_create = "always"
 
+# Maximum wall-clock time in seconds for a single blockcommit
+# (virsh blockcommit --wait or qemu-img commit).  When exceeded, the
+# command is killed and the outcome is classified as "unknown" (never
+# as a definitive failure) — qsnap then reconciles against observed
+# reality.  Default 1800 s (30 min).
+# blockcommit_timeout = 1800
+
 # ── Proactive free-space gate before backup transfers ──────────────────
 #
 # Before every FULL or incremental transfer, qsnap estimates the required

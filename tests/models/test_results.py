@@ -470,15 +470,120 @@ def test_backup_info_is_full_defaults_false():
 
 
 def test_commit_result_success():
-    """A successful CommitResult carries all fields."""
+    """A successful CommitResult carries all fields.
+
+    ``success=True`` requires ``outcome="success"`` (enforced invariant).
+    """
     result = CommitResult(
         success=True,
         committed_snapshot="snap1",
         error=None,
+        outcome="success",
     )
     assert result.success is True
     assert result.committed_snapshot == "snap1"
     assert result.error is None
+
+
+# ── CommitResult.outcome (harden-blockcommit-races result-types spec) ────
+
+
+def test_commit_result_success_outcome():
+    """A successful blockcommit carries outcome='success'.
+
+    Producers set ``outcome`` explicitly.  The three-valued outcome
+    classification (result-types spec) guarantees ``success=True``
+    implies ``outcome="success"`` — a success result must never be
+    classified as a failure or as an unknown/indeterminate outcome.
+    """
+    result = CommitResult(
+        success=True,
+        committed_snapshot="snap1",
+        error=None,
+        outcome="success",
+    )
+    # The success path carries all fields.
+    assert result.success is True
+    assert result.committed_snapshot == "snap1"
+    assert result.error is None
+
+    # outcome is "success" when set explicitly.
+    assert result.outcome == "success"
+
+    # success=True implies outcome="success" (semantic invariant).
+    assert not (result.success and result.outcome != "success")
+    assert result.outcome != "failure"
+    assert result.outcome != "unknown"
+
+
+def test_commit_result_unknown_outcome():
+    """A timeout/kill maps to outcome='unknown', NOT a definitive failure.
+
+    ``"unknown"`` denotes an indeterminate outcome (command timed out or
+    was killed): the real state of the chain is unknown and MUST be
+    reconciled before anything is treated as failed (result-types spec).
+    """
+    result = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="Command timed out after 1800s",
+        outcome="unknown",
+    )
+    assert result.success is False
+    assert result.outcome == "unknown"
+    assert result.error == "Command timed out after 1800s"
+
+    # Unknown is not a definitive failure — reconciliation must decide.
+    assert result.outcome != "failure"
+
+
+def test_commit_result_outcome_defaults_failure():
+    """Legacy constructor calls without outcome keep outcome='failure'.
+
+    The field defaults to ``"failure"`` so every existing constructor
+    call keeps working unchanged (result-types spec: "Default outcome
+    preserves legacy constructors").  The field is frozen like the rest
+    of the dataclass.
+    """
+    result = CommitResult(
+        success=False,
+        committed_snapshot="snap1",
+        error="virsh blockcommit failed",
+    )
+    assert result.outcome == "failure"
+
+    # The outcome field is declared with the documented default.
+    outcome_field = next(f for f in dataclasses.fields(CommitResult) if f.name == "outcome")
+    assert outcome_field.default == "failure"
+
+    # Verify the dataclass is declared frozen.
+    assert result.__dataclass_params__.frozen is True
+
+    # Mutation of outcome raises FrozenInstanceError.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.outcome = "unknown"
+
+
+def test_commit_result_success_requires_outcome_success_invariant():
+    """The ``success=True ⇒ outcome="success"`` invariant is enforced.
+
+    result-types spec: "success=True SHALL imply outcome='success'".
+    Construction violating the invariant raises ``ValueError`` — this
+    catches C1-class bugs (a successful result defaulting to
+    ``outcome="failure"``) at construction time instead of letting Core
+    mis-dispatch them as definitive failures.
+    """
+    # success=True with the default outcome ("failure") violates the invariant.
+    with pytest.raises(ValueError, match="invariant"):
+        CommitResult(success=True, committed_snapshot="", error=None)
+
+    # success=True with an explicit non-success outcome also violates it.
+    with pytest.raises(ValueError, match="invariant"):
+        CommitResult(success=True, committed_snapshot="s1", error=None, outcome="unknown")
+
+    # success=False keeps every outcome freely constructible.
+    for outcome in ("success", "failure", "unknown"):
+        CommitResult(success=False, committed_snapshot="", error="x", outcome=outcome)
 
 
 def test_retention_result_keep_remove():

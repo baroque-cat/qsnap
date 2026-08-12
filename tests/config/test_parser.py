@@ -438,3 +438,85 @@ def test_invalid_backup_stall_timeout_raises_config_error(tmp_path: Path) -> Non
 
     with pytest.raises(ConfigError, match="backup_stall_timeout"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# harden-blockcommit-races: blockcommit_timeout in [global] (config-model)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_parse_blockcommit_timeout_override(tmp_path: Path) -> None:
+    """A [global] blockcommit_timeout = 900 override reaches GlobalConfig.
+
+    config-model scenario "TOML override is parsed": setting the option
+    inside the ``[global]`` section (which is unwrapped into the
+    top-level table) produces ``GlobalConfig.blockcommit_timeout == 900``.
+    """
+    config_text = (
+        "[global]\n"
+        "blockcommit_timeout = 900\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "global_blockcommit_timeout.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+
+    assert global_cfg.blockcommit_timeout == 900
+
+
+@pytest.mark.unit
+def test_parse_blockcommit_timeout_top_level_override(tmp_path: Path) -> None:
+    """A top-level blockcommit_timeout = 600 override reaches GlobalConfig."""
+    config_text = (
+        "blockcommit_timeout = 600\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+    config_file = tmp_path / "top_level_blockcommit_timeout.toml"
+    config_file.write_text(config_text)
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().blockcommit_timeout == 600
+
+
+@pytest.mark.unit
+def test_parse_blockcommit_timeout_default_when_absent(tmp_path: Path) -> None:
+    """Absent blockcommit_timeout keeps the 1800 default (no regression)."""
+    config_file = tmp_path / "no_blockcommit_timeout.toml"
+    config_file.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/var/lib/libvirt/snapshots/testvm"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/var/lib/libvirt/images/testvm.qcow2"\n'
+        "\n"
+        "[[vm.target]]\n"
+        'path = "/mnt/backup/testvm"\n'
+    )
+
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().blockcommit_timeout == 1800

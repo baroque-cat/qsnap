@@ -152,6 +152,35 @@ def test_global_config_snapshot_preserve_min_immutable():
 
 
 # ---------------------------------------------------------------------------
+# Scenario: GlobalConfig.blockcommit_timeout (config-model spec)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_blockcommit_timeout_default_1800():
+    """GlobalConfig().blockcommit_timeout defaults to 1800 (30 min).
+
+    config-model scenario "Default blockcommit timeout is 1800": a
+    GlobalConfig created without the field carries the wall-clock
+    ceiling of 1800 seconds for a single commit command.
+    """
+    cfg = GlobalConfig()
+    assert cfg.blockcommit_timeout == 1800
+
+
+def test_global_config_blockcommit_timeout_immutable():
+    """Mutating GlobalConfig().blockcommit_timeout raises FrozenInstanceError.
+
+    config-model scenario "Field is immutable": the field is part of the
+    frozen dataclass, so assignment must raise a frozen-dataclass error.
+    """
+    cfg = GlobalConfig(blockcommit_timeout=900)
+    assert cfg.blockcommit_timeout == 900
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.blockcommit_timeout = 60  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # Scenario 9: GlobalConfig chain_length defaults are 24/168/2
 # ---------------------------------------------------------------------------
 

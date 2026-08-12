@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from qsnap.interfaces.state import IStateManager
-from qsnap.models.results import DeferredBlockcommit, FullBackupInfo, SnapshotInfo
+from qsnap.models.results import CommitIntent, DeferredBlockcommit, FullBackupInfo, SnapshotInfo
 from qsnap.utils.parsing import parse_disk_from_snapshot_name
 
 
@@ -43,6 +43,7 @@ class InMemoryStateManager(IStateManager):
         self._full_backups: dict[str, list[FullBackupInfo]] = {}
         self._dependencies: dict[str, dict[str, list[str]]] = {}
         self._target_state: dict[str, dict[str, int]] = {}
+        self._commit_intents: dict[tuple[str, str], CommitIntent] = {}
 
     def get_last_allocation(self, vm_name: str, disk: str) -> int | None:
         vm_state = self._state.get(vm_name)
@@ -268,7 +269,17 @@ class InMemoryStateManager(IStateManager):
     # ── Bulk state reset (restore support) ───────────────────────────
 
     def reset_vm_state(self, vm_name: str) -> None:
-        """Clear all per-VM state: snapshots, last_allocation, deferred_operations."""
+        """Clear all per-VM state: snapshots, last_allocation, deferred_operations.
+
+        Also clears every commit-intent record for the VM (mock parity for
+        the intent journal — a full VM reset must not leave a stale intent
+        behind; see harden-blockcommit-races test plan).
+        """
+        self._commit_intents = {
+            (vm, disk): intent
+            for (vm, disk), intent in self._commit_intents.items()
+            if vm != vm_name
+        }
         vm_state = self._state.get(vm_name)
         if vm_state is None:
             return
@@ -289,8 +300,11 @@ class InMemoryStateManager(IStateManager):
 
         Mirrors :meth:`JsonStateManager.reset_vm_disk_state`: removes the
         snapshots, ``last_allocation`` entry, and deferred operations that
-        belong to *disk*; state of the VM's other disks is preserved.
+        belong to *disk*; state of the VM's other disks is preserved.  In
+        addition, the commit-intent record for ``(vm_name, disk)`` is
+        cleared (harden-blockcommit-races intent journal).
         """
+        self._commit_intents.pop((vm_name, disk), None)
         vm_state = self._state.get(vm_name)
         if vm_state is None:
             return
@@ -390,3 +404,37 @@ class InMemoryStateManager(IStateManager):
         markers: dict[str, str] = existing if isinstance(existing, dict) else {}
         markers[disk] = timestamp
         self._state[vm_name]["last_commit_ts"] = markers
+
+    # ── Commit intent journal (harden-blockcommit-races) ──────────────
+
+    def set_commit_in_progress(
+        self,
+        vm_name: str,
+        disk: str,
+        snapshots: list[str],
+        base: str,
+        started_ts: str,
+    ) -> None:
+        """Upsert the commit-intent record for (*vm_name*, *disk*).
+
+        At most one record exists per disk — a second call with the same
+        *disk* replaces the previous record (upsert semantics, mirroring
+        :meth:`JsonStateManager.set_commit_in_progress`).
+        """
+        self._commit_intents[(vm_name, disk)] = CommitIntent(
+            disk=disk,
+            snapshots=list(snapshots),
+            base=base,
+            started_ts=started_ts,
+        )
+
+    def get_commit_in_progress(self, vm_name: str) -> list[CommitIntent]:
+        """Return all commit-intent records for *vm_name*."""
+        return [intent for (vm, _disk), intent in self._commit_intents.items() if vm == vm_name]
+
+    def clear_commit_in_progress(self, vm_name: str, disk: str) -> None:
+        """Remove the commit-intent record for (*vm_name*, *disk*).
+
+        No-op when no record exists for this disk.
+        """
+        self._commit_intents.pop((vm_name, disk), None)

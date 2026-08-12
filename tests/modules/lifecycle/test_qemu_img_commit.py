@@ -6,11 +6,13 @@ The manager does NOT inherit from Core (design D1) and takes only ``IShell``
 as a constructor dependency.
 
 Rewired for design D4 (no ``-d`` flag) — per-snapshot algorithm (oldest first):
-  1. ``qemu-img commit -b <base> <snap>``
+  1. ``qemu-img commit -b <base> <snap>`` (with the injected ``timeout``,
+     default 1800 — harden-blockcommit-races)
   2. child discovery (find + qemu-img info scan)
   3. ``qemu-img rebase -u -F qcow2 -b <base> <child>`` (if child exists)
   4. ``rm -f <snap>`` (only after successful rebase, or when no child)
-Short-circuit on ANY step failure.  ``deep_verify`` runs ``qemu-img check``.
+Short-circuit on ANY step failure.  ``deep_verify`` runs ``qemu-img check``
+on the disk's ``base_image`` (not a VM-level base).
 """
 
 from __future__ import annotations
@@ -32,19 +34,29 @@ from tests.mocks.mock_shell import MockShell
 
 
 class CountingShell(IShell):
-    """Wrapper around an ``IShell`` that records every command passed to ``run()``.
+    """Wrapper around an ``IShell`` that records every command passed to it.
 
     Delegates actual execution to the inner shell (typically ``MockShell``)
-    while capturing the full command list for post-call assertions such as
-    call-count verification and flag inspection.
+    while capturing the full command list plus per-call kwargs for
+    post-call assertions such as call-count verification and timeout
+    inspection.
+
+    ``run_with_heartbeat`` is implemented for interface conformance
+    (``IShell`` gained the abstract method) and delegates to the inner
+    shell; the qemu-img offline executor itself only uses ``run()``.
     """
 
     def __init__(self, inner: IShell) -> None:
         self._inner = inner
         self.calls: list[list[str]] = []
+        # (cmd, timeout, check) for every run() invocation.
+        self.run_calls: list[tuple[list[str], int, bool]] = []
+        # (cmd, timeout, heartbeat_seconds) for every run_with_heartbeat() call.
+        self.heartbeat_calls: list[tuple[list[str], int, int]] = []
 
     def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
         self.calls.append(list(cmd))
+        self.run_calls.append((list(cmd), timeout, check))
         return self._inner.run(cmd, timeout, check)
 
     def run_with_stall_detection(
@@ -57,6 +69,24 @@ class CountingShell(IShell):
         self.calls.append(list(cmd))
         return self._inner.run_with_stall_detection(
             cmd, output_file=output_file, stall_timeout=stall_timeout, check=check
+        )
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat,
+        check: bool = False,
+    ) -> ShellResult:
+        self.calls.append(list(cmd))
+        self.heartbeat_calls.append((list(cmd), timeout, heartbeat_seconds))
+        return self._inner.run_with_heartbeat(
+            cmd,
+            timeout=timeout,
+            heartbeat_seconds=heartbeat_seconds,
+            on_heartbeat=on_heartbeat,
+            check=check,
         )
 
 
@@ -101,6 +131,17 @@ def _assert_call_order(
     assert found_positions == sorted(found_positions), (
         f"{msg}: found at {found_positions}, expected increasing order"
     )
+
+
+def _commit_runs(
+    shell: CountingShell,
+) -> list[tuple[list[str], int, bool]]:
+    """Extract the recorded ``qemu-img commit`` run() calls (cmd, timeout, check)."""
+    return [c for c in shell.run_calls if "qemu-img commit" in " ".join(c[0])]
+
+
+def _success() -> ShellResult:
+    return ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -165,21 +206,19 @@ def test_qemu_img_commit_requires_shell():
 def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
     """A successful commit with no child overlay (D4 algorithm).
 
-    - ``qemu-img commit -b <base> <snap>`` returns exit 0.
+    - ``qemu-img commit -b <base> <snap>`` returns exit 0 with the default
+      ``timeout=1800``.
     - find returns empty (no child overlay — conftest fixture default).
     - No rebase needed.
     - ``rm -f <snap>`` deletes the committed file.
-    - Result: ``CommitResult(success=True, committed_snapshot=<snap.name>)``.
+    - Result: ``CommitResult(success=True, committed_snapshot=<snap.name>,
+      outcome="success")``.
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
+    mock_shell.expect("rm -f").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
@@ -192,6 +231,7 @@ def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
     assert result.success is True
     assert result.committed_snapshot == snap.name
     assert result.error is None
+    assert result.outcome == "success"
 
     # Verify command sequence: commit → find → rm (no rebase).
     cmds = _cmd_strings(shell.calls)
@@ -201,6 +241,12 @@ def test_qemu_img_commit_success(mock_shell: MockShell, make_vm_config):
         "D4 commit sequence",
     )
     assert not any("rebase" in c for c in cmds), "rebase was called unexpectedly"
+
+    # The qemu-img commit call carries the default 1800 s timeout.
+    commit_runs = _commit_runs(shell)
+    assert len(commit_runs) == 1
+    _, commit_timeout, _check = commit_runs[0]
+    assert commit_timeout == 1800
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -212,7 +258,7 @@ def test_qemu_img_commit_fails(mock_shell: MockShell, make_vm_config):
     """A failed ``qemu-img commit`` yields ``CommitResult(success=False)``.
 
     - ``qemu-img commit`` returns non-zero exit code with an error message.
-    - Result: ``CommitResult(success=False, error=<virsh error>)``.
+    - Result: ``CommitResult(success=False, outcome="failure")``.
     - ``committed_snapshot`` reflects the snapshot that failed.
     """
     vm_config = make_vm_config()
@@ -240,6 +286,83 @@ def test_qemu_img_commit_fails(mock_shell: MockShell, make_vm_config):
     assert result.success is False
     assert result.error == error_msg
     assert result.committed_snapshot == snap.name
+    assert result.outcome == "failure"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6a. Injected timeout is honored for qemu-img commit
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_qemu_img_commit_injected_timeout_honored(mock_shell: MockShell, make_vm_config):
+    """The ``timeout=`` kwarg reaches the ``qemu-img commit`` call.
+
+    The caller (Core) passes ``GlobalConfig.blockcommit_timeout`` through
+    to the manager; the offline commit must use that value (was
+    hard-coded 3600 before harden-blockcommit-races).
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("qemu-img commit").returns(_success())
+    mock_shell.expect("rm -f").returns(_success())
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image, timeout=900
+    )
+
+    assert result.success is True
+
+    commit_runs = _commit_runs(shell)
+    assert len(commit_runs) == 1
+    _, commit_timeout, _check = commit_runs[0]
+    assert commit_timeout == 900
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 6b. qemu-img commit timeout maps to outcome="unknown"
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_qemu_img_commit_timeout_returns_unknown(mock_shell: MockShell, make_vm_config):
+    """A timed-out ``qemu-img commit`` is classified ``outcome="unknown"``.
+
+    The merge may have completed on disk after the client was killed, so
+    the outcome is indeterminate (never a definitive ``"failure"``).
+    """
+    vm_config = make_vm_config()
+    snap = _make_snapshot()
+
+    mock_shell.expect("qemu-img commit").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="",
+            returncode=-1,
+            error="Command timed out after 1800s",
+        )
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
+    )
+
+    assert isinstance(result, CommitResult)
+    assert result.success is False
+    assert result.error == "Command timed out after 1800s"
+    assert "timed out" in result.error
+    assert result.outcome == "unknown"
+    assert result.outcome != "failure"
+    assert result.committed_snapshot == ""
+
+    # Short-circuit: no find/rm follows the failed commit.
+    assert not any("rm -f" in c for c in _cmd_strings(shell.calls))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -272,9 +395,7 @@ def test_qemu_img_commit_pivots_child_and_deletes(mock_shell: MockShell, make_vm
     # --- Set up mocks ---
 
     # Step a: commit s1 into base
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
 
     # Step b: child discovery — find returns s2 path
     mock_shell.expect_first(r"find.*maxdepth.*1.*-name.*\.qcow2").returns(
@@ -294,14 +415,10 @@ def test_qemu_img_commit_pivots_child_and_deletes(mock_shell: MockShell, make_vm
     )
 
     # Step c: rebase s2 onto base
-    mock_shell.expect("qemu-img rebase").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img rebase").returns(_success())
 
     # Step d: delete s1
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("rm -f").returns(_success())
 
     # --- Execute ---
     shell = CountingShell(mock_shell)
@@ -315,6 +432,7 @@ def test_qemu_img_commit_pivots_child_and_deletes(mock_shell: MockShell, make_vm
     assert result.success is True
     assert result.committed_snapshot == s1.name
     assert result.error is None
+    assert result.outcome == "success"
 
     cmds = _cmd_strings(shell.calls)
     _assert_call_order(
@@ -358,12 +476,8 @@ def test_qemu_img_commit_no_child_skips_rebase(mock_shell: MockShell, make_vm_co
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
+    mock_shell.expect("rm -f").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
@@ -432,6 +546,7 @@ def test_qemu_img_commit_failure_no_delete_short_circuit(mock_shell: MockShell, 
     assert result.success is False
     assert result.committed_snapshot == s1.name
     assert result.error == error_msg
+    assert result.outcome == "failure"
 
     cmds = _cmd_strings(shell.calls)
 
@@ -467,9 +582,7 @@ def test_qemu_img_rebase_failure_keeps_file(mock_shell: MockShell, make_vm_confi
     s2_path = "/var/lib/libvirt/snapshots/testvm/s2.20250101T010000.qcow2"
 
     # Commit succeeds
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
 
     # Child discovery: find returns s2
     mock_shell.expect_first(r"find.*maxdepth.*1.*-name.*\.qcow2").returns(
@@ -643,14 +756,10 @@ def test_qemu_img_commit_deep_verify(
     snap = _make_snapshot()
 
     # Commit succeeds
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
     # find returns empty (no child) — conftest default
     # rm succeeds
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("rm -f").returns(_success())
     # qemu-img check output
     mock_shell.expect("qemu-img check").returns(
         ShellResult(
@@ -685,6 +794,63 @@ def test_qemu_img_commit_deep_verify(
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# A.7b: Deep verify targets the disk's base image (not a VM-level base)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_qemu_img_commit_deep_verify_targets_disk_base(mock_shell: MockShell, make_vm_config):
+    """With a multi-disk VM, deep verify checks the disk's own base image.
+
+    Committing a ``vdb`` snapshot with ``base_image=vdb.qcow2`` must run
+    ``qemu-img check`` on vdb's base — never vda's.
+    """
+    from qsnap.models.config import DiskConfig
+
+    vda_disk = DiskConfig(target="vda", base_image=Path("/tmp/vda.qcow2"))
+    vdb_disk = DiskConfig(
+        target="vdb",
+        base_image=Path("/tmp/vdb.qcow2"),
+        snapshot_dir=Path("/var/lib/libvirt/snapshots/testvm"),
+    )
+    vm_config = make_vm_config(disks=[vda_disk, vdb_disk])
+
+    snap = _make_snapshot(
+        name="testvm.20250101T000000_vdb",
+        path="/var/lib/libvirt/snapshots/testvm/testvm.20250101T000000_vdb.qcow2",
+        disk="vdb",
+    )
+
+    # Commit succeeds; find returns empty (conftest default) → no rebase.
+    mock_shell.expect("qemu-img commit").returns(_success())
+    mock_shell.expect("rm -f").returns(_success())
+    # qemu-img check returns clean.
+    mock_shell.expect("qemu-img check").returns(
+        ShellResult(
+            success=True,
+            stdout='{"corruptions":0, "errors":0, "leaks":0}',
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [snap], disk="vdb", base_image=vdb_disk.base_image, deep_verify=True
+    )
+
+    assert result.success is True
+    assert result.committed_snapshot == snap.name
+    assert result.outcome == "success"
+
+    check_cmd = next(" ".join(c[0]) for c in shell.run_calls if "qemu-img check" in " ".join(c[0]))
+    assert str(vdb_disk.base_image) in check_cmd
+    assert str(vda_disk.base_image) not in check_cmd
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Phase-5: _find_child disk pre-filter (multi-disk isolation)
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -700,8 +866,6 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
     qemu-img info is called.  Only the vda candidate should be inspected,
     and since its backing file matches, it is returned as the child.
     """
-    from pathlib import Path
-
     from qsnap.models.config import DiskConfig
 
     snap_dir = "/var/lib/libvirt/snapshots/testvm"
@@ -722,9 +886,7 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
     vdb_candidate = f"{snap_dir}/vm.20250101T010000_vdb_bbb222.qcow2"
 
     # Commit succeeds.
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
 
     # find returns both files intermixed.
     find_out = vda_child + "\n" + vdb_candidate + "\n"
@@ -746,14 +908,10 @@ def test_find_child_skips_other_disk_candidates(mock_shell: MockShell, make_vm_c
     )
 
     # rebase vda_child
-    mock_shell.expect("qemu-img rebase").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img rebase").returns(_success())
 
     # rm
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("rm -f").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
@@ -785,8 +943,6 @@ def test_find_child_still_inspects_unparseable_names(mock_shell: MockShell, make
     may be the child overlay we are looking for (e.g. if the child was
     created or renamed outside of qsnap).
     """
-    from pathlib import Path
-
     from qsnap.models.config import DiskConfig
 
     snap_dir = "/var/lib/libvirt/snapshots/testvm"
@@ -801,9 +957,7 @@ def test_find_child_still_inspects_unparseable_names(mock_shell: MockShell, make
     unparseable = f"{snap_dir}/random.qcow2"
 
     # Commit succeeds.
-    mock_shell.expect("qemu-img commit").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("qemu-img commit").returns(_success())
 
     # find returns the unparseable file.
     mock_shell.expect_first(r"find.*maxdepth.*1.*-name.*\.qcow2").returns(
@@ -823,9 +977,7 @@ def test_find_child_still_inspects_unparseable_names(mock_shell: MockShell, make
     )
 
     # No child found → no rebase, just rm.
-    mock_shell.expect("rm -f").returns(
-        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
-    )
+    mock_shell.expect("rm -f").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = QemuImgCommitManager(shell=shell)
@@ -843,3 +995,34 @@ def test_find_child_still_inspects_unparseable_names(mock_shell: MockShell, make
     assert "random.qcow2" in info_calls[0], (
         f"qemu-img info should include random.qcow2, got: {info_calls[0]}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Empty snapshot list — nothing to merge
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_qemu_img_commit_empty_list_no_op(mock_shell: MockShell, make_vm_config):
+    """An empty snapshot list is a no-op with ``outcome="success"``.
+
+    lifecycle-manager spec "Empty snapshot list": the manager returns
+    ``CommitResult(success=True, committed_snapshot="",
+    outcome="success")`` immediately — ``success=True`` SHALL imply
+    ``outcome="success"`` (result-types invariant).
+    """
+    vm_config = make_vm_config()
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(
+        vm_config, [], disk="vda", base_image=vm_config.disks[0].base_image
+    )
+
+    assert result.success is True
+    assert result.committed_snapshot == ""
+    assert result.error is None
+    assert result.outcome == "success"
+
+    # No shell commands should have been executed at all.
+    assert len(shell.calls) == 0
