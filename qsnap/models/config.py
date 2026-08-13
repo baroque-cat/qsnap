@@ -86,8 +86,10 @@ class GlobalConfig:
     compression_type: str = "zstd"
     # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
     convert_parallel: int = 4
-    # ``qemu-img convert -W`` flag (out-of-order writes).  ``True``
-    # optimizes for HDDs; ``False`` for in-order writes (some SSDs).
+    # ``qemu-img convert -W`` flag (allow out-of-order writes — multiple
+    # write requests may be in flight and complete out of order).  QEMU
+    # recommends ``-W`` only for preallocated/raw block-device targets;
+    # on growable qcow2 targets it may scatter allocation.
     convert_out_of_order: bool = True
     # Stall detection timeout for data-transfer commands (``qemu-img
     # convert``).  Duration string (e.g. ``"30m"``, ``"1h"``)
@@ -297,8 +299,10 @@ class VMConfig:
     # ``qemu-img convert -m`` flag (parallel coroutines, range 1-8).
     # VM-level override of global default; inherited by targets.
     convert_parallel: int = 4
-    # ``qemu-img convert -W`` flag (out-of-order writes).  ``True``
-    # optimizes for HDDs; ``False`` for in-order writes (some SSDs).
+    # ``qemu-img convert -W`` flag (allow out-of-order writes — multiple
+    # write requests may be in flight and complete out of order).  QEMU
+    # recommends ``-W`` only for preallocated/raw block-device targets;
+    # on growable qcow2 targets it may scatter allocation.
     # VM-level override of global default; inherited by targets.
     convert_out_of_order: bool = True
     # Stall detection timeout for data-transfer commands (``qemu-img
