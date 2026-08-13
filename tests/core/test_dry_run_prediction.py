@@ -11,7 +11,7 @@ Uses MockShell, MockVMModuleFactory, InMemoryStateManager, MockConfigFacade.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1625,4 +1625,264 @@ def test_delta_prediction_uses_incremental_size_estimate(
     assert len(delta_logs) >= 1, "Delta prediction must be logged"
     assert "since checkpoint" in delta_logs[0], (
         f"Delta log should name the checkpoint, got: {delta_logs[0]}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hysteresis retention dry-run prediction (hysteresis-snapshot-retention)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _seed_hysteresis_snapshots(
+    mock_state: InMemoryStateManager,
+    tmp_path: Path,
+    *,
+    count: int,
+    prefix: str = "snap",
+    disk: str = "vda",
+) -> None:
+    """Record *count* snapshot files + state records (oldest-first names)."""
+    snap_dir = tmp_path / "snapshots" / "testvm"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    base = datetime(2025, 8, 1, 12, 0, 0)
+    for i in range(1, count + 1):
+        name = f"{prefix}{i}"
+        path = snap_dir / f"{name}.qcow2"
+        path.touch()  # stale guard must see a real file
+        mock_state.record_snapshot(
+            "testvm",
+            SnapshotInfo(
+                name=name,
+                path=path,
+                timestamp=base + timedelta(hours=i),
+                allocation=65536 * i,
+                disk=disk,
+            ),
+        )
+
+
+def _hysteresis_vm(
+    *,
+    threshold: int,
+    floor: int,
+    vm_kwargs: dict[str, object] | None = None,
+) -> VMConfig:
+    """A hysteresis-mode VM with onchange gate closed to keep N exact.
+
+    ``snapshot_create="onchange"`` with the mock change detector reporting
+    no change means dry-run never simulates a snapshot, so the retention
+    evaluation sees exactly the pre-recorded snapshot count.
+    """
+    kwargs: dict[str, object] = {
+        "snapshot_retention_mode": "hysteresis",
+        "snapshot_chain_length": threshold,
+        "snapshot_preserve_min": floor,
+        "snapshot_create": "onchange",
+    }
+    if vm_kwargs:
+        kwargs.update(vm_kwargs)
+    return _make_vm(name="testvm", **kwargs)
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_hysteresis_grow_phase_predicts_no_commits(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Grow phase (N <= threshold H, no persisted phase) predicts NO commits.
+
+    The chain is below the trigger threshold, so retention keeps
+    everything: no ``blockcommit`` and no ``snapshot_delete`` predictions.
+    The grow-phase INFO line names the disk, N, and the threshold, and the
+    dry-run never writes the ``collapse_in_progress`` key (state is
+    byte-identical).
+    """
+    from copy import deepcopy
+
+    # H=8, L=2, N=5 → grow phase.
+    vm = _hysteresis_vm(threshold=8, floor=2)
+    _seed_hysteresis_snapshots(mock_state, tmp_path, count=5)
+    mock_factory.change_detector.changed = False  # onchange gate closed
+
+    state_before = deepcopy(mock_state._state)
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+
+    with caplog.at_level(logging.INFO, logger="qsnap.core"):
+        result = core.run()
+
+    # Grow phase: nothing to commit, no deletions predicted.
+    bc_preds = [p for p in result.predictions if p.action == "blockcommit"]
+    sd_preds = [p for p in result.predictions if p.action == "snapshot_delete"]
+    assert bc_preds == [], f"Grow phase must predict no blockcommit, got {bc_preds}"
+    assert sd_preds == [], f"Grow phase must predict no snapshot_delete, got {sd_preds}"
+
+    # The grow-phase INFO log format:
+    #   [dry-run] {vm}/{disk}: grow phase (N={N} <= threshold {H}) — no commits
+    assert "[dry-run] testvm/vda: grow phase (N=5 <= threshold 8) — no commits" in caplog.text, (
+        f"Expected the grow-phase dry-run log line, got: {caplog.text}"
+    )
+
+    # Zero-mutation: the phase key was read but never written.
+    assert mock_state.get_collapse_in_progress("testvm") == []
+    assert deepcopy(mock_state._state) == state_before, (
+        "Dry-run must leave the state byte-identical in the grow phase"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_hysteresis_collapse_prediction_capped_oldest(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Collapse above the threshold predicts exactly min(N−L, cap) OLDEST
+    snapshots; the newest L snapshots never appear in any prediction.
+
+    N=10, H=8, L=2, cap=3 → the predicted blockcommit entry names exactly
+    the 3 oldest snapshots (``snap1, snap2, snap3``) and the dry-run never
+    writes the ``collapse_in_progress`` key (state byte-identical).
+    """
+    from copy import deepcopy
+
+    vm = _hysteresis_vm(threshold=8, floor=2)
+    _seed_hysteresis_snapshots(mock_state, tmp_path, count=10)
+    mock_factory.change_detector.changed = False
+
+    # Hysteresis collapse invokes the pure engine with floor L: mark every
+    # snapshot removable so the postprocess + cap selects the oldest N−L.
+    all_names = [f"snap{i}" for i in range(1, 11)]
+    mock_factory._retention_engine = MockRetentionEngine(keep=[], remove=all_names)
+
+    global_config = GlobalConfig(max_commits_per_run=3)
+    state_before = deepcopy(mock_state._state)
+    core = _build_core(
+        vm=vm,
+        mock_factory=mock_factory,
+        mock_state=mock_state,
+        mock_shell=mock_shell,
+        global_config=global_config,
+    )
+
+    with (
+        caplog.at_level(logging.INFO, logger="qsnap.core"),
+        patch.object(
+            mock_state, "set_collapse_in_progress", wraps=mock_state.set_collapse_in_progress
+        ) as set_phase_spy,
+        patch.object(
+            mock_state, "clear_collapse_in_progress", wraps=mock_state.clear_collapse_in_progress
+        ) as clear_phase_spy,
+    ):
+        result = core.run()
+
+    # Exactly one blockcommit prediction naming the OLDEST cap=3 snapshots.
+    bc_preds = [p for p in result.predictions if p.action == "blockcommit"]
+    assert len(bc_preds) == 1, (
+        f"Expected exactly one blockcommit prediction, got {len(bc_preds)}: "
+        f"{[(p.action, p.name) for p in result.predictions]}"
+    )
+    assert bc_preds[0].disk == "vda"
+    assert bc_preds[0].name == "snap1, snap2, snap3", (
+        f"Blockcommit prediction must name exactly the oldest min(N-L, cap) "
+        f"snapshots, got: {bc_preds[0].name!r}"
+    )
+
+    # One snapshot_delete prediction per committed snapshot — the oldest 3.
+    sd_preds = [p for p in result.predictions if p.action == "snapshot_delete"]
+    assert {p.name for p in sd_preds} == {"snap1", "snap2", "snap3"}, (
+        f"Expected snapshot_delete for the oldest 3 snapshots, got: "
+        f"{[p.name for p in sd_preds]}"
+    )
+
+    # The newest L snapshots are never named by any prediction.
+    all_pred_names = {p.name for p in result.predictions}
+    for newest in ("snap9", "snap10"):
+        assert newest not in all_pred_names, (
+            f"Floor snapshot {newest} must never appear in a prediction, got {all_pred_names}"
+        )
+
+    # Dry-run announces the collapse start but writes nothing.
+    assert "collapse phase would start" in caplog.text, (
+        f"Dry-run must announce the collapse start, got: {caplog.text}"
+    )
+    set_phase_spy.assert_not_called()
+    clear_phase_spy.assert_not_called()
+    assert mock_state.get_collapse_in_progress("testvm") == []
+    assert deepcopy(mock_state._state) == state_before, (
+        "Dry-run must leave the state byte-identical during collapse prediction"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.mock
+def test_hysteresis_phase_drives_prediction_below_threshold(
+    mock_factory: MockVMModuleFactory,
+    mock_state: InMemoryStateManager,
+    mock_shell: MockShell,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A persisted collapse phase drives the prediction BELOW the trigger
+    threshold: N=5 <= H=8 with ``collapse_in_progress=[vda]`` still commits
+    the oldest N−L snapshots.
+
+    The phase key is READ (drives the collapse) but never written, extended,
+    or cleared — dry-run zero-mutation (state byte-identical).
+    """
+    from copy import deepcopy
+
+    vm = _hysteresis_vm(threshold=8, floor=2)
+    _seed_hysteresis_snapshots(mock_state, tmp_path, count=5)
+    mock_factory.change_detector.changed = False
+
+    # Persisted collapse phase: the previous (real) run crossed H and died.
+    mock_state.set_collapse_in_progress("testvm", "vda")
+
+    all_names = [f"snap{i}" for i in range(1, 6)]
+    mock_factory._retention_engine = MockRetentionEngine(keep=[], remove=all_names)
+
+    state_before = deepcopy(mock_state._state)
+    core = _build_core(
+        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
+    )
+
+    with (
+        caplog.at_level(logging.INFO, logger="qsnap.core"),
+        patch.object(
+            mock_state, "set_collapse_in_progress", wraps=mock_state.set_collapse_in_progress
+        ) as set_phase_spy,
+        patch.object(
+            mock_state, "clear_collapse_in_progress", wraps=mock_state.clear_collapse_in_progress
+        ) as clear_phase_spy,
+    ):
+        result = core.run()
+
+    # Even though N <= H, the persisted phase keeps collapsing: the oldest
+    # N−L = 3 snapshots are predicted for commit.
+    bc_preds = [p for p in result.predictions if p.action == "blockcommit"]
+    assert len(bc_preds) == 1, (
+        f"Persisted phase must drive a blockcommit prediction below the "
+        f"threshold, got {[(p.action, p.name) for p in result.predictions]}"
+    )
+    assert bc_preds[0].name == "snap1, snap2, snap3", (
+        f"Expected the oldest 3 snapshots, got: {bc_preds[0].name!r}"
+    )
+
+    # Phase read but never written/extended/cleared.
+    assert "collapse phase would continue" in caplog.text, (
+        f"Dry-run must announce the continuing collapse, got: {caplog.text}"
+    )
+    set_phase_spy.assert_not_called()
+    clear_phase_spy.assert_not_called()
+    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
+    assert deepcopy(mock_state._state) == state_before, (
+        "Dry-run must leave the state byte-identical (phase key untouched)"
     )

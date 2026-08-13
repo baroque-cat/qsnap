@@ -1,9 +1,10 @@
-"""E2E test: restore a snapshot to the base image with the 48 floor active.
+"""E2E test: restore a snapshot to the base image with the default retention.
 
-Verifies the restore path is unchanged when ``snapshot_preserve_min``
-defaults to 48: snapshots are preserved (the floor keeps the chain deep),
-yet ``qsnap restore`` still flattens the chain into a standalone qcow2,
-replaces the base image, and the VM boots afterwards.
+Verifies the restore path is unchanged under the default hysteresis mode
+(trigger threshold H=72, collapse floor L=24): a single snapshot is far
+below the threshold, so the grow phase never commits it (the chain stays
+deep), yet ``qsnap restore`` still flattens the chain into a standalone
+qcow2, replaces the base image, and the VM boots afterwards.
 
 Marked ``@pytest.mark.e2e`` — requires a libvirt environment with a
 disposable test VM.
@@ -32,7 +33,7 @@ def _qemu_img_check_ok(shell: SubprocessShell, path: Path) -> bool:
 @pytest.mark.e2e
 @pytest.mark.timeout(3600)
 def test_restore_backup_to_new_vm(e2e_vm):
-    """Restore still succeeds with the default 48-snapshot floor active."""
+    """Restore still succeeds with the default hysteresis retention active."""
     shell: SubprocessShell = e2e_vm["shell"]
     vm_name: str = e2e_vm["vm_name"]
     config_path: Path = e2e_vm["config_path"]
@@ -53,9 +54,10 @@ def test_restore_backup_to_new_vm(e2e_vm):
 
     snap_files = sorted(snapshot_dir.glob("*.qcow2"))
     assert len(snap_files) >= 1, f"Expected at least one snapshot, got {len(snap_files)}"
-    # The floor (48) preserved the snapshot — it was not blockcommitted.
+    # Default hysteresis mode: N=1 is far below the H=72 trigger, so the
+    # grow phase preserved the snapshot — it was not blockcommitted.
     for p in snap_files:
-        assert p.exists(), f"Snapshot must be preserved by the 48 floor: {p}"
+        assert p.exists(), f"Snapshot must be preserved by the hysteresis threshold: {p}"
 
     # Stop the VM — restore requires a stopped domain.
     shell.run(["virsh", "destroy", vm_name], timeout=30)

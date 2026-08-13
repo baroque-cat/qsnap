@@ -152,7 +152,7 @@ def test_global_config_snapshot_preserve_min_immutable():
 
 
 # ---------------------------------------------------------------------------
-# Scenario: GlobalConfig.blockcommit_timeout (config-model spec)
+# GlobalConfig.blockcommit_timeout (config-model spec)
 # ---------------------------------------------------------------------------
 
 
@@ -181,24 +181,114 @@ def test_global_config_blockcommit_timeout_immutable():
 
 
 # ---------------------------------------------------------------------------
-# Scenario 9: GlobalConfig chain_length defaults are 24/168/2
+# GlobalConfig.max_commits_per_run (hysteresis-snapshot-retention config-model)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_max_commits_per_run_default_12():
+    """GlobalConfig().max_commits_per_run defaults to 12.
+
+    config-model scenario "Default cap": the option absent resolves to 12
+    (bounds per-run snapshot commits in BOTH retention modes).
+    """
+    cfg = GlobalConfig()
+    assert cfg.max_commits_per_run == 12
+
+
+def test_global_config_max_commits_per_run_immutable():
+    """Mutating GlobalConfig().max_commits_per_run raises FrozenInstanceError.
+
+    The field is part of the frozen dataclass — assignment must raise a
+    frozen-dataclass error (config-model frozen-field contract).
+    """
+    cfg = GlobalConfig(max_commits_per_run=4)
+    assert cfg.max_commits_per_run == 4
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.max_commits_per_run = 12  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# GlobalConfig/VMConfig.snapshot_retention_mode (hysteresis-snapshot-retention)
+# ---------------------------------------------------------------------------
+
+
+def test_global_config_snapshot_retention_mode_default_hysteresis():
+    """GlobalConfig().snapshot_retention_mode defaults to 'hysteresis'.
+
+    config-model scenario "Default mode is hysteresis": the hysteresis
+    grow-to-threshold / collapse-to-floor behavior is the default.
+    """
+    cfg = GlobalConfig()
+    assert cfg.snapshot_retention_mode == "hysteresis"
+
+
+def test_global_config_snapshot_retention_mode_immutable():
+    """Mutating GlobalConfig().snapshot_retention_mode raises FrozenInstanceError."""
+    cfg = GlobalConfig(snapshot_retention_mode="hysteresis")
+    assert cfg.snapshot_retention_mode == "hysteresis"
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.snapshot_retention_mode = "steady"  # type: ignore[misc]
+
+
+def test_vm_config_snapshot_retention_mode_default_hysteresis():
+    """VMConfig().snapshot_retention_mode defaults to 'hysteresis'."""
+    vm = VMConfig(
+        name="testvm",
+        disks=[DiskConfig(target="vda", base_image=Path("/images/testvm.qcow2"))],
+    )
+    assert vm.snapshot_retention_mode == "hysteresis"
+
+
+def test_vm_config_snapshot_retention_mode_immutable():
+    """Mutating VMConfig().snapshot_retention_mode raises FrozenInstanceError."""
+    vm = VMConfig(
+        name="testvm",
+        disks=[DiskConfig(target="vda", base_image=Path("/images/testvm.qcow2"))],
+        snapshot_retention_mode="hysteresis",
+    )
+    assert vm.snapshot_retention_mode == "hysteresis"
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        vm.snapshot_retention_mode = "steady"  # type: ignore[misc]
+
+
+def test_make_global_config_accepts_hysteresis_kwargs(make_global_config):
+    """make_global_config fixture forwards snapshot_retention_mode and
+    max_commits_per_run kwargs (defaults 'hysteresis'/12)."""
+    cfg = make_global_config(
+        snapshot_retention_mode="hysteresis",
+        max_commits_per_run=0,
+    )
+    assert cfg.snapshot_retention_mode == "hysteresis"
+    assert cfg.max_commits_per_run == 0
+
+    defaults = make_global_config()
+    assert defaults.snapshot_retention_mode == "hysteresis"
+    assert defaults.max_commits_per_run == 12
+
+
+# ---------------------------------------------------------------------------
+# Scenario 9: GlobalConfig chain_length defaults are 72/168/2
 # ---------------------------------------------------------------------------
 
 
 def test_global_chain_length_defaults_are_sensible():
-    """GlobalConfig().snapshot_chain_length is 24, target_chain_length is 168,
-    target_keep_generations is 2, snapshot_preserve_min is 48 (active floor)."""
+    """GlobalConfig().snapshot_chain_length is 72, target_chain_length is 168,
+    target_keep_generations is 2, snapshot_preserve_min is 24 (active floor)."""
     cfg = GlobalConfig()
-    assert cfg.snapshot_chain_length == 24
+    assert cfg.snapshot_chain_length == 72
     assert cfg.target_chain_length == 168
     assert cfg.target_keep_generations == 2
-    assert cfg.snapshot_preserve_min == 48
+    assert cfg.snapshot_preserve_min == 24
 
 
 def test_global_config_snapshot_preserve_min_default():
-    """GlobalConfig().snapshot_preserve_min defaults to 48 (active preservation floor —
-    ~2 days of hourly snapshots).  Explicit 0 disables the floor."""
-    assert GlobalConfig().snapshot_preserve_min == 48
+    """GlobalConfig().snapshot_preserve_min defaults to 24 (active preservation floor —
+    ~1 day of hourly snapshots / the hysteresis collapse floor L).
+    Explicit 0 disables the floor."""
+    assert GlobalConfig().snapshot_preserve_min == 24
 
 
 def test_global_config_preserve_min_zero_disables():
@@ -935,15 +1025,15 @@ def test_target_config_convert_out_of_order_overrides():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig default chain lengths: 24 / 168 / 2
+# GlobalConfig default chain lengths: 72 / 168 / 2
 # ---------------------------------------------------------------------------
 
 
-def test_globalconfig_default_chain_lengths_24_168_2():
-    """GlobalConfig() with no args has snapshot_chain_length=24,
+def test_globalconfig_default_chain_lengths_72_168_2():
+    """GlobalConfig() with no args has snapshot_chain_length=72,
     target_chain_length=168, target_keep_generations=2."""
     cfg = GlobalConfig()
-    assert cfg.snapshot_chain_length == 24
+    assert cfg.snapshot_chain_length == 72
     assert cfg.target_chain_length == 168
     assert cfg.target_keep_generations == 2
 

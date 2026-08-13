@@ -493,6 +493,157 @@ def test_stale_intent_real_recovery_converges_state(test_vm, caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Test 4b: Real partial-prefix reconciliation converges the prefix
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_partial_prefix_reconciliation_real_chain(test_vm, caplog):
+    """Partial-prefix convergence against a REAL chain (design D6).
+
+    Deterministic simulation of a multi-snapshot commit that died between
+    two per-snapshot jobs (no virsh kill race needed): the intent records
+    all three snapshots, but only the OLDEST overlay was actually merged.
+
+    1. Start VM, create 3 external snapshots s1..s3; record a pre-commit
+       intent ``[s1, s2, s3]`` in the real JSON state.
+    2. Manually converge s1: ``qemu-img commit`` on the oldest overlay,
+       ``qemu-img rebase -u`` s2 onto the base image, delete s1's file
+       (and refresh the domain XML's stale ``<backingStore>`` chain so
+       libvirt re-probes on start).
+    3. Run step-0 intent recovery.
+    4. Assert: ``late_success`` for the verified prefix ``[s1]`` —
+       ``remove_snapshot`` called exactly once (s1), intent rewritten to
+       ``[s2, s3]`` (suffix retried next run), WARNING names both the
+       converged and the pending snapshots, ``last_commit_ts`` written,
+       VM not failed.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+
+    _start_vm(shell, vm_name)
+    core, vm_config, state = _build_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, tmpdir / "state"
+    )
+
+    # ── Phase 1: a real 3-snapshot chain with a pre-commit intent ─────
+    snapshots = _create_snapshots(core, vm_config, 3)
+    s1, s2, s3 = snapshots[0], snapshots[1], snapshots[2]
+    assert s1.path.exists() and s2.path.exists() and s3.path.exists()
+    assert _backing_chain_length(s3.path, shell) == 4, (
+        "Chain must be base ← s1 ← s2 ← s3 (length 4)"
+    )
+
+    state.set_commit_in_progress(
+        vm_name,
+        "vda",
+        [s1.name, s2.name, s3.name],
+        str(base_image),
+        "20260813T000000",
+    )
+    assert len(state.get_commit_in_progress(vm_name)) == 1
+
+    # ── Phase 2: manually converge the OLDEST overlay only ────────────
+    # Simulates "the first per-snapshot job completed, the client died":
+    # s1's data is merged into the base, s2 is repointed at the base, and
+    # s1's file is gone — s2/s3 remain untouched.
+    stop = shell.run(["virsh", "destroy", vm_name], timeout=30)
+    assert stop.success, f"virsh destroy failed: {stop.error}"
+    time.sleep(1)
+    domstate = shell.run(["virsh", "domstate", "--domain", vm_name], timeout=30)
+    assert domstate.success and "shut off" in domstate.stdout.lower(), (
+        "VM must be shut off for the offline commit"
+    )
+
+    commit = shell.run(
+        ["qemu-img", "commit", "-f", "qcow2", str(s1.path)],
+        timeout=60,
+    )
+    assert commit.success, f"qemu-img commit s1 failed: {commit.error}"
+
+    rebase = shell.run(
+        ["qemu-img", "rebase", "-u", "-b", str(base_image), "-F", "qcow2", str(s2.path)],
+        timeout=60,
+    )
+    assert rebase.success, f"qemu-img rebase s2 failed: {rebase.error}"
+
+    s1.path.unlink()
+
+    # The inactive domain XML still caches the pre-convergence backing
+    # chain (<backingStore> → s1); strip it so libvirt re-probes the
+    # (shortened) chain on start (design D8).
+    core._refresh_domain_backing_store(vm_config)
+
+    start_again = shell.run(["virsh", "start", vm_name], timeout=30)
+    assert start_again.success, f"virsh start after convergence failed: {start_again.error}"
+    time.sleep(2)
+    assert _vm_is_running(shell, vm_name), "VM must be running for the probe"
+
+    # Chain is now base ← s2 ← s3 (3 entries).
+    assert _backing_chain_length(s3.path, shell) == 3, (
+        "Chain must shrink to base ← s2 ← s3 after converging s1"
+    )
+
+    # ── Phase 3: step-0 intent recovery ───────────────────────────────
+    remove_calls: list[str] = []
+    orig_remove = state.remove_snapshot
+
+    def _spy_remove(vm: str, name: str) -> bool:
+        remove_calls.append(name)
+        return orig_remove(vm, name)
+
+    state.remove_snapshot = _spy_remove  # type: ignore[method-assign]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        core._recover_commit_intents(vm_config)
+
+    # (a) WARNING names both the converged prefix and the pending suffix.
+    partial = [r for r in caplog.records if "partially completed" in r.message]
+    assert partial, f"Expected partial-completion WARNING, got: {[r.message for r in caplog.records]}"
+    message = partial[0].message
+    assert s1.name in message, f"WARNING must name the converged snapshot: {message}"
+    assert s2.name in message and s3.name in message, (
+        f"WARNING must name the pending snapshots: {message}"
+    )
+
+    # (b) remove_snapshot called exactly once — for the verified s1.
+    assert remove_calls == [s1.name], f"remove_snapshot calls: {remove_calls}"
+
+    # (c) State converged: s1 gone, s2/s3 remain.
+    remaining = {s.name for s in state.get_snapshots(vm_name)}
+    assert s1.name not in remaining, "s1 must be removed from state"
+    assert s2.name in remaining and s3.name in remaining, (
+        f"s2/s3 must stay in state, got {remaining}"
+    )
+
+    # (d) Intent rewritten to the suffix [s2, s3] — NOT cleared.
+    intents = state.get_commit_in_progress(vm_name)
+    assert len(intents) == 1, f"Expected exactly one intent, got {intents}"
+    assert intents[0].disk == "vda"
+    assert intents[0].snapshots == [s2.name, s3.name], (
+        f"Intent must be rewritten to the pending suffix, got {intents[0].snapshots}"
+    )
+    assert intents[0].base == str(base_image)
+    assert intents[0].started_ts == "20260813T000000", (
+        "Intent rewrite must preserve the original started_ts"
+    )
+
+    # (e) last_commit_ts written for the late success.
+    assert state.get_last_commit_ts(vm_name, "vda") is not None, (
+        "Recovery must write last_commit_ts for the verified prefix"
+    )
+
+    # (f) VM not failed: still running after recovery.
+    assert _vm_is_running(shell, vm_name), "VM must not be failed by recovery"
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Test 5: Active foreign blockjob defers (never clobber, never abort)
 # ──────────────────────────────────────────────────────────────────────
 

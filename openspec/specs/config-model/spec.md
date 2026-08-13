@@ -6,11 +6,11 @@ Immutable frozen dataclasses representing all qsnap configuration: global defaul
 ## Requirements
 
 ### Requirement: GlobalConfig default values
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=48` (snapshot preservation floor; the newest 48 snapshots per disk are never blockcommitted by default; explicit 0 = inactive), free-space gate controls (`free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, convert parallelism, and backup stall timeout.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=24` (hysteresis collapse floor / snapshot preservation floor; the newest 24 snapshots per disk are never blockcommitted; explicit 0 = inactive), `snapshot_retention_mode="hysteresis"` (retention mode: hysteresis is the default, steady is opt-in), `max_commits_per_run=12` (per-run commit cap, 0 = unlimited), free-space gate controls (`free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, convert parallelism, and backup stall timeout.
 
 #### Scenario: GlobalConfig default values
 - **WHEN** a `GlobalConfig` is created with only required fields
-- **THEN** optional fields have documented defaults: `state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `snapshot_chain_length=24`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=48`, `free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`, `compress=True`, `compression_type="zstd"`, `convert_parallel=4`, `convert_out_of_order=True`, `backup_stall_timeout="30m"`, `auto_cleanup=True`, `state_backup_count=2`, `chain_verify_before_commit=True`, `chain_verify_after_commit=True`, `deep_check_schedule="off"`, `full_verify_after_create="check"`, `full_verify_before_delete="check"`, `transaction_log=None`, `backup_create="always"`
+- **THEN** optional fields have documented defaults: `state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=24`, `snapshot_retention_mode="hysteresis"`, `max_commits_per_run=12`, `free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`, `compress=True`, `compression_type="zstd"`, `convert_parallel=4`, `convert_out_of_order=True`, `backup_stall_timeout="30m"`, `auto_cleanup=True`, `state_backup_count=2`, `chain_verify_before_commit=True`, `chain_verify_after_commit=True`, `deep_check_schedule="off"`, `full_verify_after_create="check"`, `full_verify_before_delete="check"`, `transaction_log=None`, `backup_create="always"`
 
 ### Requirement: compression_type field in GlobalConfig
 `GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. The field is immutable (frozen dataclass).
@@ -347,11 +347,11 @@ There SHALL be NO `full_verify_before_rebase` field on `GlobalConfig`. It was pa
 - **THEN** `TargetConfig.target_chain_length` resolves to `336`
 
 ### Requirement: GlobalConfig snapshot_preserve_min field
-`GlobalConfig` SHALL include a `snapshot_preserve_min: int = 48` field. The default `48` keeps the newest 48 snapshots of each disk uncommitted (with the default `snapshot_chain_length=24`, the floor dominates effective retention). Setting the field to `0` explicitly disables the preservation floor. The field is immutable.
+`GlobalConfig` SHALL include a `snapshot_preserve_min: int = 24` field. The default `24` keeps the newest 24 snapshots of each disk uncommitted (in hysteresis mode this is the collapse floor L, with the default `snapshot_chain_length=72` as the trigger threshold H; in steady mode a larger `snapshot_preserve_min` dominates the keep count). Setting the field to `0` explicitly disables the preservation floor. The field is immutable.
 
-#### Scenario: GlobalConfig default snapshot_preserve_min is 48
+#### Scenario: GlobalConfig default snapshot_preserve_min is 24
 - **WHEN** a `GlobalConfig` is created with only required fields
-- **THEN** `snapshot_preserve_min` defaults to `48`
+- **THEN** `snapshot_preserve_min` defaults to `24`
 
 #### Scenario: Explicit zero disables the floor
 - **WHEN** a `GlobalConfig` is created with `snapshot_preserve_min=0`
@@ -367,6 +367,38 @@ There SHALL be NO `full_verify_before_rebase` field on `GlobalConfig`. It was pa
 #### Scenario: VM overrides global snapshot_preserve_min
 - **WHEN** global sets `snapshot_preserve_min = 24` and VM sets `snapshot_preserve_min = 48`
 - **THEN** `VMConfig.snapshot_preserve_min` resolves to `48`
+
+### Requirement: snapshot_retention_mode option
+
+The global config section SHALL support `snapshot_retention_mode` (string, values `"steady"` or `"hysteresis"`, default `"hysteresis"`), inheritable by VMs via the standard inheritance chain (explicit VM value overrides the global value). `VMConfig` SHALL expose the resolved mode as a frozen field. Any other value SHALL raise `ConfigError`. When hysteresis mode is active for a VM, ConfigFacade SHALL validate the resolved values satisfy `snapshot_chain_length > snapshot_preserve_min ≥ 1` and raise `ConfigError` naming both values otherwise.
+
+#### Scenario: Default mode is hysteresis
+- **WHEN** the option is absent everywhere
+- **THEN** every VM resolves `snapshot_retention_mode = "hysteresis"`
+
+#### Scenario: VM override wins
+- **WHEN** global sets `"hysteresis"` and one VM sets `"steady"`
+- **THEN** that VM resolves `"steady"` and all other VMs resolve `"hysteresis"`
+
+#### Scenario: Invalid mode value rejected
+- **WHEN** the option is set to `"weekly"`
+- **THEN** config loading fails with `ConfigError`
+
+#### Scenario: Invalid hysteresis bounds rejected
+- **WHEN** a VM resolves hysteresis mode with `snapshot_chain_length = 24` and `snapshot_preserve_min = 48`
+- **THEN** config loading fails with `ConfigError` mentioning both resolved values
+
+### Requirement: max_commits_per_run option
+
+The global config section SHALL support `max_commits_per_run` (integer ≥ 0, default 12, 0 = unlimited). It caps per-disk per-run snapshot commits in both retention modes. Non-integer or negative values SHALL raise `ConfigError`. The option SHALL NOT affect target/backup retention.
+
+#### Scenario: Default cap
+- **WHEN** the option is absent
+- **THEN** `max_commits_per_run` resolves to 12
+
+#### Scenario: Negative value rejected
+- **WHEN** the option is set to -1
+- **THEN** config loading fails with `ConfigError`
 
 ### Requirement: GlobalConfig transaction_log field
 `GlobalConfig` SHALL include a `transaction_log: str | None = None` field. When `None`, no transaction log is written.

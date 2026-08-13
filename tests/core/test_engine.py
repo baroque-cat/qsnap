@@ -1593,7 +1593,13 @@ def test_backup_probe_behavior_unchanged(
 
     Design D6 refactored the backup probe onto ``_probe_blockjob`` (the
     same helper the commit path uses); the observable contract is unchanged.
+    ``_probe_blockjob`` in turn delegates classification to the shared pure
+    helper ``qsnap.utils.blockjob.classify_blockjob_output``, and the probe
+    command addresses the disk by its libvirt TARGET name (``--path vda``),
+    never a base-image path (blockjob-protocol spec).
     """
+    from qsnap.utils.blockjob import classify_blockjob_output
+
     target = make_target(backup_create="onchange")
     vm = make_vm_config(name="testvm", targets=[target])
     config = MockConfigFacade(vms=[vm])
@@ -1622,6 +1628,10 @@ def test_backup_probe_behavior_unchanged(
 
     with (
         patch.object(core, "_probe_blockjob", wraps=core._probe_blockjob) as probe_spy,
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy,
+        patch(
+            "qsnap.core.classify_blockjob_output", wraps=classify_blockjob_output
+        ) as classifier_spy,
         patch.object(backup_provider, "run_backup", wraps=backup_provider.run_backup) as run_spy,
     ):
         # Not a failure: the deferral returns normally (False == no backup
@@ -1633,6 +1643,30 @@ def test_backup_probe_behavior_unchanged(
     assert probe_spy.call_args.args[0] is vm
     assert probe_spy.call_args.args[1] == "vda"
 
+    # _probe_blockjob delegates classification to the shared pure helper.
+    assert classifier_spy.called, (
+        "_probe_blockjob must delegate to qsnap.utils.blockjob.classify_blockjob_output"
+    )
+
+    # The probe command addresses the disk by its libvirt TARGET name.
+    probe_calls = [
+        call.args[0]
+        for call in shell_spy.call_args_list
+        if call.args and call.args[0][:2] == ["virsh", "blockjob"]
+    ]
+    assert probe_calls, "Expected at least one virsh blockjob probe call"
+    assert probe_calls[0] == [
+        "virsh",
+        "blockjob",
+        "--domain",
+        "testvm",
+        "--path",
+        "vda",
+    ], f"Probe must use --path <target>, got: {probe_calls[0]}"
+    assert not any(str(vm.disks[0].base_image) in str(c) for c in probe_calls), (
+        "Probe command must never address a base-image path"
+    )
+
     # Same deferral as before the refactor: no transfer, INFO log, and the
     # onchange baseline is NOT advanced (gate stays open).
     assert not run_spy.called, (
@@ -1641,3 +1675,86 @@ def test_backup_probe_behavior_unchanged(
     assert "blockjob active on disk vda" in caplog.text
     assert mock_state.get_last_backup_allocation(str(target.path), "vda") is None
     assert "backup deferred" in caplog.text.lower()
+
+
+# ── test_probe_command_uses_target_name_only (hysteresis-snapshot-retention) ─
+
+
+def test_probe_command_uses_target_name_only(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """The block-job probe addresses the disk by libvirt TARGET name only.
+
+    ``Core._probe_blockjob(vm_config, disk)`` runs
+    ``virsh blockjob --domain <vm> --path <disk TARGET>`` — the ``disk``
+    parameter is the target device name (``vda``).  The command must NEVER
+    carry a base-image path, even when the disk's base image differs from
+    the default (blockjob-protocol spec: external-snapshot domains resolve
+    the probe by target name).
+    """
+    distinctive_base = "/srv/images/testvm-custom.qcow2"
+    vm = make_vm_config(
+        name="testvm",
+        base_image=distinctive_base,
+        snapshot_dir="/var/lib/libvirt/snapshots/testvm",
+    )
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # Conftest default blockjob expectation reports an idle disk → "none".
+    with patch.object(mock_shell, "run", wraps=mock_shell.run) as shell_spy:
+        result = core._probe_blockjob(vm, "vda")
+
+    assert result == "none"
+    probe_calls = [
+        call.args[0]
+        for call in shell_spy.call_args_list
+        if call.args and call.args[0][:2] == ["virsh", "blockjob"]
+    ]
+    assert len(probe_calls) == 1, f"Expected exactly one probe call, got {probe_calls}"
+    cmd = probe_calls[0]
+    # The disk is addressed by its target name, not by any file path.
+    assert "--path" in cmd
+    assert cmd[cmd.index("--path") + 1] == "vda"
+    assert not any(distinctive_base in str(part) for part in cmd), (
+        f"Probe command must never contain a base-image path, got: {cmd}"
+    )
+
+
+# ── test_probe_call_failure_returns_error (hysteresis-snapshot-retention) ───
+
+
+def test_probe_call_failure_returns_error(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """A failed probe call → ``"error"`` (fail closed downstream)."""
+    vm = make_vm_config(name="testvm")
+    config = MockConfigFacade(vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: failed to get job info for disk vda",
+            returncode=1,
+            error="failed to get job info",
+        )
+    )
+    assert core._probe_blockjob(vm, "vda") == "error"

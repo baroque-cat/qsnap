@@ -394,9 +394,9 @@ The system SHALL provide an `IConfigFacade` ABC with methods `get_global() → G
 - **WHEN** the config omits all three free-space fields
 - **THEN** `free_space_check == "strict"`, `free_space_reserve == 0`, `free_space_factor == 1.0`
 
-#### Scenario: snapshot_preserve_min default resolves to 48
+#### Scenario: snapshot_preserve_min default resolves to 24
 - **WHEN** the config omits `snapshot_preserve_min` at all levels
-- **THEN** `VMConfig.snapshot_preserve_min` resolves to `48` via inheritance from the global default
+- **THEN** `VMConfig.snapshot_preserve_min` resolves to `24` via inheritance from the global default
 
 #### Scenario: Explicit zero preserve_min still honored
 - **WHEN** the global section sets `snapshot_preserve_min = 0` and the VM omits it

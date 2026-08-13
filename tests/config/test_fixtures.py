@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from qsnap.config.facade import ConfigFacade
+from qsnap.config.facade import ConfigError, ConfigFacade
 from qsnap.models.config import GlobalConfig, TargetConfig
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "configs"
@@ -85,7 +85,7 @@ def test_make_global_config_chain_length_defaults(
 
     NOTE: the fixture pins snapshot_preserve_min=0 EXPLICITLY (its factory
     parameter default) — this is NOT the GlobalConfig dataclass default,
-    which is 48.  Tests using the fixture get the floor disabled unless
+    which is 24.  Tests using the fixture get the floor disabled unless
     they pass snapshot_preserve_min explicitly."""
     cfg = make_global_config()
     assert cfg.snapshot_chain_length is None
@@ -127,11 +127,11 @@ def test_example_config_parseable() -> None:
 
     # Verify global defaults.
     global_cfg = facade.get_global()
-    # Count-based retention fields — defaults are 24/168/2 when commented out.
-    assert global_cfg.snapshot_chain_length == 24
+    # Count-based retention fields — defaults are 72/168/2 when commented out.
+    assert global_cfg.snapshot_chain_length == 72
     assert global_cfg.target_chain_length == 168
     assert global_cfg.target_keep_generations == 2
-    assert global_cfg.snapshot_preserve_min == 48
+    assert global_cfg.snapshot_preserve_min == 24
     # Free-space gate fields — defaults are strict/0/1.0 when commented out.
     assert global_cfg.free_space_check == "strict"
     assert global_cfg.free_space_reserve == 0
@@ -145,11 +145,11 @@ def test_example_config_parseable() -> None:
     assert target.path == Path("/mnt/backup/debiantest")
     # Defaults.
     assert target.compress is True
-    # Count-based retention fields — inherited from global defaults (24/168/2).
-    assert vm.snapshot_chain_length == 24
+    # Count-based retention fields — inherited from global defaults (72/168/2).
+    assert vm.snapshot_chain_length == 72
     assert vm.target_chain_length == 168
     assert vm.target_keep_generations == 2
-    assert vm.snapshot_preserve_min == 48
+    assert vm.snapshot_preserve_min == 24
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -715,3 +715,40 @@ def test_make_vm_config_forwards_engine_option_kwargs(make_vm_config) -> None:
     assert vm.convert_out_of_order is False
     assert vm.backup_stall_timeout == "1h"
     assert vm.verify == "compare"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TOML fixtures: hysteresis_mode.toml / hysteresis_invalid.toml
+# (hysteresis-snapshot-retention)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_hysteresis_mode_fixture_parses() -> None:
+    """hysteresis_mode.toml parses: global H=72/L=24 + a cap, and a VM
+    overriding the mode back to 'steady'."""
+    facade = ConfigFacade(FIXTURES / "hysteresis_mode.toml")
+
+    global_cfg = facade.get_global()
+    assert global_cfg.snapshot_retention_mode == "hysteresis"
+    assert global_cfg.snapshot_chain_length == 72
+    assert global_cfg.snapshot_preserve_min == 24
+    assert global_cfg.max_commits_per_run == 4
+
+    # hyst_vm inherits the global hysteresis mode with valid H/L.
+    hyst_vm = facade.get_vm("hyst_vm")
+    assert hyst_vm.snapshot_retention_mode == "hysteresis"
+    assert hyst_vm.snapshot_chain_length == 72
+    assert hyst_vm.snapshot_preserve_min == 24
+
+    # steady_vm overrides the global mode back to "steady".
+    steady_vm = facade.get_vm("steady_vm")
+    assert steady_vm.snapshot_retention_mode == "steady"
+
+
+@pytest.mark.unit
+def test_hysteresis_invalid_fixture_rejected() -> None:
+    """hysteresis_invalid.toml (H=24/L=48) is rejected with a ConfigError
+    naming both resolved values."""
+    with pytest.raises(ConfigError, match="snapshot_chain_length=24"):
+        ConfigFacade(FIXTURES / "hysteresis_invalid.toml")

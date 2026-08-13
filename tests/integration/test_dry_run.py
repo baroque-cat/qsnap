@@ -26,6 +26,7 @@ from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
 from qsnap.models.results import ShellResult, SnapshotInfo
 from qsnap.modules.snapshot.external import ExternalSnapshotProvider
 from qsnap.shell.subprocess_shell import SubprocessShell
+from qsnap.state.json_manager import JsonStateManager
 from qsnap.utils.nbd import is_libvirt_new_enough, is_vm_running
 from tests.mocks.mock_config import MockConfigFacade
 from tests.mocks.mock_state import InMemoryStateManager
@@ -117,6 +118,50 @@ def _build_core(
     )
     config = MockConfigFacade(
         global_config=GlobalConfig(state_dir="/var/tmp"),
+        vms=[vm_config],
+        config_path=target_dir / "test_dry_run.toml",
+    )
+    factory = DefaultFactory(shell=shell, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=shell)
+    return core, vm_config, state
+
+
+def _build_hysteresis_core(
+    shell: SubprocessShell,
+    vm_name: str,
+    base_image: Path,
+    snapshot_dir: Path,
+    target_dir: Path,
+    state_dir: Path,
+    *,
+    h: int = 8,
+    floor: int = 3,
+    cap: int = 2,
+) -> tuple[Core, VMConfig, JsonStateManager]:
+    """Build a Core with hysteresis retention and a JSON-backed state manager.
+
+    The JSON state manager persists the ``collapse_in_progress`` phase on
+    disk so the zero-mutation test can compare state-file bytes.
+    """
+    state = JsonStateManager(state_dir)
+    vm_config = VMConfig(
+        name=vm_name,
+        disks=[DiskConfig(target="vda", base_image=base_image)],
+        snapshot_dir=snapshot_dir,
+        snapshot_chain_length=h,
+        snapshot_preserve_min=floor,
+        snapshot_retention_mode="hysteresis",
+        lifecycle_mode="virsh",
+        targets=[
+            TargetConfig(
+                path=target_dir,
+                compress=False,
+                verify="off",
+            )
+        ],
+    )
+    config = MockConfigFacade(
+        global_config=GlobalConfig(max_commits_per_run=cap, state_dir="/var/tmp"),
         vms=[vm_config],
         config_path=target_dir / "test_dry_run.toml",
     )
@@ -797,3 +842,124 @@ def test_dry_run_shell_calls_are_all_read_only(test_vm):
             f"Commands outside read-only allowlist found during dry-run "
             f"({len(bad_commands)}):\n" + "\n".join(f"  - {c}" for c in bad_strs)
         )
+
+
+# ── Test 8: Hysteresis collapse dry-run is zero-mutation ──────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_dry_run_hysteresis_collapse_zero_mutation(test_vm):
+    """Dry-run with a persisted hysteresis collapse phase mutates nothing.
+
+    1. Start VM; with hysteresis H=8, L=3, cap=2 create 9 snapshots and
+       run ONE real capped prune so the ``collapse_in_progress`` phase is
+       persisted (``["vda"]``) and the chain sits above the floor (N=7).
+    2. Run the pipeline in dry-run mode against the same state file.
+    3. Assert: the state file and every snapshot file are byte-identical
+       after; the dry run predicts the capped merge batch (the oldest
+       ``min(N-L, cap)`` snapshots); no lifecycle manager is created and
+       no ``virsh blockcommit`` executes.
+    """
+    import json
+
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+    tmpdir: Path = test_vm["tmpdir"]
+    state_dir = tmpdir / "state"
+
+    # Start VM
+    start = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start.success:
+        pytest.skip(f"virsh start failed: {start.error}")
+    time.sleep(1)
+    if not is_vm_running(shell, vm_name):
+        pytest.skip("VM did not reach running state")
+
+    core, vm_config, state = _build_hysteresis_core(
+        shell, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3, cap=2
+    )
+
+    # Create 9 snapshots and run one REAL capped prune: N=7, phase on disk.
+    for i in range(9):
+        results = core._create_snapshot(vm_config)
+        assert len(results) >= 1, f"Snapshot {i + 1} creation returned no results"
+        assert results[0].success, f"Snapshot {i + 1} failed: {results[0].error}"
+        time.sleep(1.1)
+    real = core.prune(vm_name)
+    assert real.results[0].success, f"real prune failed: {real.results[0].error}"
+    snaps = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
+    assert len(snaps) == 7, f"Expected N=7 after capped prune, got {len(snaps)}"
+
+    state_file = state_dir / f"{vm_name}.json"
+    raw = json.loads(state_file.read_text())
+    assert "vda" in raw.get("collapse_in_progress", []), (
+        "Test precondition: collapse_in_progress must be persisted"
+    )
+
+    state_bytes_before = state_file.read_bytes()
+    snap_bytes_before = {p.name: p.read_bytes() for p in snapshot_dir.glob("*.qcow2")}
+    assert len(snap_bytes_before) == 7
+
+    # Dry-run on a fresh Core over the same state file, with a recording shell.
+    recording = RecordingShell(shell)
+    core2, vm_config2, state2 = _build_hysteresis_core(
+        recording, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3, cap=2
+    )
+
+    lifecycle_calls: list[str] = []
+    factory = core2._factory
+    orig_create_lifecycle = factory.create_lifecycle_manager
+
+    def _spy_create_lifecycle(mode: str = "virsh"):
+        lifecycle_calls.append(mode)
+        return orig_create_lifecycle(mode)
+
+    factory.create_lifecycle_manager = _spy_create_lifecycle  # type: ignore[method-assign]
+
+    core2.dry_run = True
+    result = core2.run(vm_name)
+
+    # (a) Zero executed actions, predictions present.
+    assert result.actions == [], f"Expected no executed actions, got: {result.actions}"
+    assert result.dry_run is True, f"Expected dry_run=True, got {result.dry_run}"
+    assert len(result.predictions) > 0, "Expected >0 predictions in dry-run"
+
+    # (b) State file byte-identical (phase read, never written/cleared).
+    assert state_file.read_bytes() == state_bytes_before, (
+        "State file must be byte-identical after the hysteresis dry-run"
+    )
+
+    # (c) Snapshot files byte-identical (no blockcommit executed).
+    snap_bytes_after = {p.name: p.read_bytes() for p in snapshot_dir.glob("*.qcow2")}
+    assert snap_bytes_after == snap_bytes_before, (
+        "Snapshot files must be byte-identical after the hysteresis dry-run"
+    )
+
+    # (d) No virsh blockcommit was executed.
+    blockcommit_cmds = [c for c in recording.commands if "blockcommit" in c]
+    assert blockcommit_cmds == [], f"Dry-run must not execute blockcommit: {blockcommit_cmds}"
+
+    # (e) No lifecycle manager call executes.
+    assert lifecycle_calls == [], (
+        f"Dry-run must never create a lifecycle manager, got {lifecycle_calls}"
+    )
+
+    # (f) The predicted blockcommit batch names exactly the oldest
+    #     min(N-L, cap) = 2 snapshots.
+    preds = [p for p in result.predictions if p.action == "blockcommit"]
+    assert len(preds) == 1, f"Expected one blockcommit prediction, got {len(preds)}"
+    expected_names = [s.name for s in snaps[:2]]
+    for name in expected_names:
+        assert name in preds[0].name, (
+            f"Predicted batch must name the oldest 2 snapshots; "
+            f"{name!r} missing from {preds[0].name!r}"
+        )
+
+    # (g) The persisted phase is unchanged.
+    assert "vda" in state2.get_collapse_in_progress(vm_name), (
+        "Dry-run must not clear the persisted collapse phase"
+    )

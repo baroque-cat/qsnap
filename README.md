@@ -8,6 +8,7 @@ qsnap manages external disk-only snapshots via `virsh`, detects whether a VM dis
 
 - **External snapshots** — disk-only, no-metadata snapshots via `virsh snapshot-create-as`, one per disk.
 - **Change detection** — skip snapshot creation when a disk hasn't changed (`onchange` mode); independent source-disk-based gate for backup transfers (`backup_create="onchange"`).
+- **Hysteresis retention (default)** — grow-to-threshold / collapse-to-floor: the chain grows with no commits while `N ≤ H`, then collapses down to floor `L`. Opt into steady count-based mode via `snapshot_retention_mode = "steady"`.
 - **Snapshot preservation floor** — `snapshot_preserve_min` guarantees the newest N snapshots are never blockcommitted.
 - **Incremental backups** — NBD bitmap dirty-block transfer to targets, proportional to dirtied data.
 - **Full backups** — standalone qcow2 via `qemu-img convert`, with optional zstd/zlib compression.
@@ -54,10 +55,10 @@ poetry install
 ```toml
 state_dir = "/var/lib/qsnap/state"
 
-snapshot_chain_length = 24      # blockcommit after 24 snapshots per disk
+snapshot_chain_length = 72      # hysteresis trigger threshold H (grow to 72)
 target_chain_length = 168       # new FULL after 168 incrementals per disk
 target_keep_generations = 2     # keep 2 FULL chains per target
-snapshot_preserve_min = 24      # never blockcommit the newest 24 snapshots
+snapshot_preserve_min = 24      # hysteresis collapse floor L (keep newest 24)
 
 [[vm]]
 name = "debiantest"
@@ -145,10 +146,12 @@ Configuration is TOML. Keys are organized in four levels: **global** (top-level)
 |---|---|---|---|
 | `state_dir` | string | `/var/lib/qsnap/state` | Directory for JSON state files |
 | `lockfile` | string | none | Lockfile path to prevent concurrent runs (unset = no locking) |
-| `snapshot_chain_length` | int | `24` | Max snapshots per disk before blockcommit triggers |
+| `snapshot_chain_length` | int | `72` | Hysteresis trigger threshold H (grow to N before collapsing); steady-mode keep count |
 | `target_chain_length` | int | `168` | Max incremental backups per disk before a new FULL |
 | `target_keep_generations` | int | `2` | FULL backup generations (chains) to keep per target |
-| `snapshot_preserve_min` | int | `0` | Newest N snapshots never blockcommitted. `0` = inactive |
+| `snapshot_preserve_min` | int | `24` | Hysteresis collapse floor L (newest N never blockcommitted). `0` = inactive |
+| `snapshot_retention_mode` | string | `"hysteresis"` | `"hysteresis"` (grow-to-threshold / collapse-to-floor, default) or `"steady"` (count-based keep) |
+| `max_commits_per_run` | int | `12` | Max snapshots blockcommitted per disk per run (both retention modes). `0` = unlimited |
 | `compress` | bool | `true` | Compress FULL backups via `qemu-img convert -c` |
 | `compression_type` | string | `"zstd"` | `"zstd"` (fast) or `"zlib"` (smaller). Only when `compress = true` |
 | `convert_parallel` | int | `4` | `qemu-img convert -m` parallel coroutines (1-8) |
@@ -174,6 +177,7 @@ Configuration is TOML. Keys are organized in four levels: **global** (top-level)
 | `target_chain_length` | int | inherits global | VM-specific target chain length |
 | `target_keep_generations` | int | inherits global | VM-specific FULL generations to keep |
 | `snapshot_preserve_min` | int | inherits global | VM-specific snapshot preservation floor |
+| `snapshot_retention_mode` | string | inherits global | VM-specific retention mode: `"steady"` or `"hysteresis"` |
 | `snapshot_quiesce` | bool | `false` | Use `--quiesce` for filesystem-consistent snapshots (requires qemu-guest-agent) |
 | `lifecycle_mode` | string | `"virsh"` | `"virsh"` (live blockcommit while running, offline commit when shut off) or `"qemu-img"` (offline-only) |
 | `change_detection_mode` | string | `"allocation-map"` | `"allocation-map"` (compare `qemu-img map` regions) or `"allocation-size"` (compare `qemu-img info` actual-size) |
@@ -227,14 +231,46 @@ Every pipeline stage is keyed by disk target. For a VM with disks `vda` and `vdb
 
 ## Retention Policy Guide
 
-qsnap uses count-based retention. Four keys control chain length:
+qsnap's snapshot retention is **hysteresis** by default (`snapshot_retention_mode =
+"hysteresis"`); the older steady count-based mode is opt-in. Four keys control
+retention:
 
-- **`snapshot_chain_length`** — max snapshots per disk before blockcommit merges the oldest into the base image.
-- **`snapshot_preserve_min`** — the newest N snapshots are never blockcommitted, even when the chain length is exceeded. Applied after the oldest-prefix filter. `0` disables.
+- **`snapshot_chain_length`** — in hysteresis mode the trigger threshold **H** (the chain grows with no commits while `N ≤ H`); in steady mode the keep count (blockcommit the excess).
+- **`snapshot_preserve_min`** — in hysteresis mode the collapse floor **L** (a collapse merges down to the newest `L`); in steady mode the newest N snapshots are never blockcommitted. `0` disables the floor.
 - **`target_chain_length`** — max incrementals per disk before the next backup creates a new FULL.
 - **`target_keep_generations`** — FULL chains to keep per target. A FULL plus its incrementals is one generation.
 
-Rule of thumb: **keep the newest N, remove the oldest.** For snapshots the newest N are kept and older ones are committed; for backups the newest N FULL generations are kept.
+### Hysteresis mode (the default)
+
+Hysteresis mode implements a **grow-to-threshold / collapse-to-floor** band
+instead of committing on every run:
+
+- `snapshot_chain_length` is the trigger threshold **H**: while the snapshot
+  count `N ≤ H` no commits happen (the chain just grows).
+- `snapshot_preserve_min` is the collapse floor **L**: once `N > H`, the oldest
+  `N − L` snapshots are merged down to the floor. The newest `L` are always kept.
+- The collapse is a persisted per-disk phase: once triggered it continues across
+  subsequent runs until `N ≤ L`, then the chain grows again.
+- `max_commits_per_run` caps how many snapshots one run may merge (default `12`,
+  `0` = unlimited).
+
+Validation requires `H > L ≥ 1`. The default band is `snapshot_chain_length = 72`,
+`snapshot_preserve_min = 24`: keep hourly snapshots for the last 24 hours and
+collapse older layers only occasionally (when the chain reaches 72).
+
+**Migration note:** a VM already holding a deep chain (say `N` snapshots above
+the floor) converges gradually over `ceil((N − L) / max_commits_per_run)` runs,
+not in one giant batch.
+
+### Steady mode (`snapshot_retention_mode = "steady"`)
+
+Opting into steady mode restores the pre-existing count-based policy: keep the
+newest `snapshot_chain_length` and blockcommit the excess every run
+(`snapshot_preserve_min` still floors the newest N when it exceeds the chain
+length).
+
+Rule of thumb: **keep the newest N, remove the oldest.** For backups the newest
+N FULL generations are kept.
 
 Preview the schedule before running:
 

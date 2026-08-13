@@ -90,9 +90,10 @@ def test_global_chain_length_parsed(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_valid_chain_length_accepted(tmp_path: Path) -> None:
-    """chain_length=1 is accepted (minimum valid value)."""
+    """chain_length=1 is accepted (minimum valid value) in steady mode."""
     config_file = tmp_path / "config.toml"
     config_file.write_text(
+        'snapshot_retention_mode = "steady"\n'
         "snapshot_chain_length = 1\n"
         "\n"
         "[[vm]]\n"
@@ -759,15 +760,15 @@ def test_free_space_fields_absent_use_defaults(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_preserve_min_default_resolves_to_48() -> None:
+def test_preserve_min_default_resolves_to_24() -> None:
     """preserve_min_default.toml omits snapshot_preserve_min at all levels;
-    both GlobalConfig and VMConfig resolve to the default 48."""
+    both GlobalConfig and VMConfig resolve to the default 24."""
     facade = ConfigFacade(FIXTURES / "preserve_min_default.toml")
     global_cfg = facade.get_global()
     vm = facade.get_vm("testvm")
 
-    assert global_cfg.snapshot_preserve_min == 48
-    assert vm.snapshot_preserve_min == 48
+    assert global_cfg.snapshot_preserve_min == 24
+    assert vm.snapshot_preserve_min == 24
 
 
 @pytest.mark.unit
@@ -838,3 +839,153 @@ def test_blockcommit_timeout_invalid_values_rejected(tmp_path: Path, bad_value) 
     )
     with pytest.raises(ConfigError, match="blockcommit_timeout"):
         ConfigFacade(config_file)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# hysteresis-snapshot-retention: snapshot_retention_mode / max_commits_per_run
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_single_disk_toml(
+    tmp_path: Path,
+    global_lines: str = "",
+    vm_extra_lines: str = "",
+) -> Path:
+    """Write a minimal single-disk TOML config with optional global/VM lines."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        f"{global_lines}"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        f"{vm_extra_lines}"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    return config_file
+
+
+@pytest.mark.unit
+def test_snapshot_retention_mode_default_hysteresis(tmp_path: Path) -> None:
+    """config-model scenario "Default mode is hysteresis": the option absent
+    everywhere resolves to ``"hysteresis"`` on the global config and on every VM."""
+    config_file = _write_single_disk_toml(tmp_path)
+    facade = ConfigFacade(config_file)
+
+    assert facade.get_global().snapshot_retention_mode == "hysteresis"
+    assert facade.get_vm("testvm").snapshot_retention_mode == "hysteresis"
+
+
+@pytest.mark.unit
+def test_snapshot_retention_mode_invalid_value_rejected(tmp_path: Path) -> None:
+    """config-model scenario "Invalid mode value rejected": ``"weekly"``
+    fails with a ConfigError naming the valid values."""
+    config_file = _write_single_disk_toml(
+        tmp_path, global_lines='snapshot_retention_mode = "weekly"\n'
+    )
+    with pytest.raises(ConfigError, match="steady, hysteresis"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_hysteresis_invalid_bounds_rejected_naming_values(tmp_path: Path) -> None:
+    """config-model scenario "Invalid hysteresis bounds rejected": a VM
+    resolving hysteresis with chain_length=24 and preserve_min=48 fails
+    with a ConfigError mentioning BOTH resolved values."""
+    config_file = _write_single_disk_toml(
+        tmp_path,
+        global_lines=(
+            'snapshot_retention_mode = "hysteresis"\n'
+            "snapshot_chain_length = 24\n"
+            "snapshot_preserve_min = 48\n"
+        ),
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(config_file)
+
+    message = str(exc_info.value)
+    assert "hysteresis" in message
+    assert "snapshot_chain_length=24" in message, message
+    assert "snapshot_preserve_min=48" in message, message
+
+
+@pytest.mark.unit
+def test_hysteresis_floor_above_threshold_rejected_names_both_values(
+    tmp_path: Path,
+) -> None:
+    """hysteresis-retention "Floor above threshold is rejected": the
+    validation runs AFTER inheritance — a VM overriding the threshold below
+    the inherited floor is rejected naming the VM and both resolved values."""
+    config_file = _write_single_disk_toml(
+        tmp_path,
+        global_lines=(
+            'snapshot_retention_mode = "hysteresis"\n'
+            "snapshot_chain_length = 72\n"
+            "snapshot_preserve_min = 48\n"
+        ),
+        # VM override: threshold drops to 24 while the inherited floor
+        # stays 48 → H <= L, rejected.
+        vm_extra_lines="snapshot_chain_length = 24\n",
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(config_file)
+
+    message = str(exc_info.value)
+    assert "'testvm'" in message, message
+    assert "snapshot_chain_length=24" in message, message
+    assert "snapshot_preserve_min=48" in message, message
+
+
+@pytest.mark.unit
+def test_hysteresis_zero_floor_rejected(tmp_path: Path) -> None:
+    """hysteresis-retention "Zero floor is rejected": the floor must be
+    >= 1 in hysteresis mode even when explicitly set to 0 (disabling the
+    floor is only valid in steady mode)."""
+    config_file = _write_single_disk_toml(
+        tmp_path,
+        global_lines=(
+            'snapshot_retention_mode = "hysteresis"\n'
+            "snapshot_chain_length = 72\n"
+            "snapshot_preserve_min = 0\n"
+        ),
+    )
+    with pytest.raises(ConfigError, match="snapshot_preserve_min >= 1"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_max_commits_per_run_negative_rejected(tmp_path: Path) -> None:
+    """config-model "Negative value rejected": ``max_commits_per_run = -1``
+    fails with a ConfigError naming the option."""
+    config_file = _write_single_disk_toml(
+        tmp_path, global_lines="max_commits_per_run = -1\n"
+    )
+    with pytest.raises(ConfigError, match="max_commits_per_run must be >= 0"):
+        ConfigFacade(config_file)
+
+
+@pytest.mark.unit
+def test_max_commits_per_run_zero_accepted(tmp_path: Path) -> None:
+    """``max_commits_per_run = 0`` is accepted (0 = unlimited) — the escape
+    hatch for migration on healthy hosts (test-plan risk: "Default cap slows
+    migration")."""
+    config_file = _write_single_disk_toml(
+        tmp_path, global_lines="max_commits_per_run = 0\n"
+    )
+    facade = ConfigFacade(config_file)
+    assert facade.get_global().max_commits_per_run == 0
+
+
+@pytest.mark.unit
+def test_max_commits_per_run_non_integer_rejected(tmp_path: Path) -> None:
+    """Non-integer ``max_commits_per_run`` values are rejected with a clear
+    ConfigError naming the option."""
+    for bad_value in ('"abc"', "1.5", "true"):
+        config_file = _write_single_disk_toml(
+            tmp_path, global_lines=f"max_commits_per_run = {bad_value}\n"
+        )
+        with pytest.raises(ConfigError, match="max_commits_per_run must be an integer"):
+            ConfigFacade(config_file)

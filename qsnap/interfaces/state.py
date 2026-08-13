@@ -298,3 +298,32 @@ class IStateManager(ABC):
         ``"20260808T160000"``).
         """
         ...
+
+    # ── Hysteresis collapse phase (hysteresis-snapshot-retention) ────────
+
+    @abstractmethod
+    def get_collapse_in_progress(self, vm_name: str) -> list[str]:
+        """Return the disk names currently in the hysteresis collapse phase.
+
+        The returned list holds libvirt target device names (e.g.
+        ``"vda"``).  A missing ``collapse_in_progress`` key reads as an
+        empty list (no phase).
+        """
+        ...
+
+    @abstractmethod
+    def set_collapse_in_progress(self, vm_name: str, disk: str) -> None:
+        """Mark *disk* as collapsing for *vm_name*.
+
+        Idempotent: a second call with an already-marked disk is a no-op.
+        Persisted atomically.
+        """
+        ...
+
+    @abstractmethod
+    def clear_collapse_in_progress(self, vm_name: str, disk: str) -> None:
+        """Remove *disk* from the collapse phase for *vm_name*.
+
+        No-op when the disk is not currently marked.
+        """
+        ...

@@ -1,0 +1,16 @@
+# Invalid hysteresis retention config: floor L=48 exceeds threshold H=24.
+# ConfigFacade must reject this with a ConfigError naming BOTH resolved values.
+snapshot_retention_mode = "hysteresis"
+snapshot_chain_length = 24
+snapshot_preserve_min = 48
+
+[[vm]]
+name = "testvm"
+snapshot_dir = "/var/lib/libvirt/snapshots/testvm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/testvm.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/testvm"

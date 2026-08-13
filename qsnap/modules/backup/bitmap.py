@@ -106,6 +106,7 @@ from qsnap.models.results import (
     NbdExtent,
     ShellResult,
 )
+from qsnap.utils.blockjob import classify_blockjob_output
 from qsnap.utils.extents import overlap_with_allocation, unify_extents
 from qsnap.utils.nbd import (
     is_vm_running,
@@ -292,19 +293,36 @@ class BitmapBackupProvider(IBackupProvider):
                 kind="delta",
             )
 
-        # 5. Blockjob probe (design D9): when an active blockjob is
-        #    present on the disk, defer the backup for this run.
+        # 5. Blockjob probe (design D9 / blockjob-protocol): when an active
+        #    blockjob is present on the disk, defer the backup for this run.
+        #    The probe addresses the disk by its libvirt TARGET device name
+        #    (``vda``), NEVER the base-image path: with external snapshots
+        #    the domain XML resolves only the active overlay, so a base
+        #    path raises "disk ... not found in domain" on every run.
+        #    Classification via the shared classifier: ``active`` defers,
+        #    ``none`` proceeds, ``error`` logs a WARNING and PROCEEDS
+        #    (fail-open — a broken probe must not silently disable all
+        #    backups; the dangerous commit-over-job direction is guarded
+        #    fail-closed on the commit side).
         if running:
-            blockjob_cmd = [
-                "virsh",
-                "blockjob",
-                "--domain",
-                vm_config.name,
-                "--path",
-                str(disk.base_image),
-            ]
-            blockjob_result = self._shell.run(blockjob_cmd, timeout=30, check=True)
-            if blockjob_result.success and "No current block job" not in blockjob_result.stdout:
+            blockjob_result = self._shell.run(
+                [
+                    "virsh",
+                    "blockjob",
+                    "--domain",
+                    vm_config.name,
+                    "--path",
+                    disk_target,
+                ],
+                timeout=30,
+                check=True,
+            )
+            blockjob_state = classify_blockjob_output(
+                blockjob_result.stdout,
+                stderr=blockjob_result.stderr,
+                success=blockjob_result.success,
+            )
+            if blockjob_state == "active":
                 logger.info(
                     "[backup] %s: blockjob active on disk %s — backup deferred for this run",
                     vm_config.name,
@@ -320,6 +338,14 @@ class BitmapBackupProvider(IBackupProvider):
                     disk=disk_target,
                     deferred=True,
                     kind="delta",
+                )
+            if blockjob_state == "error":
+                logger.warning(
+                    "[backup] %s: blockjob probe failed for disk %s (error: %s) — "
+                    "proceeding with backup (fail-open)",
+                    vm_config.name,
+                    disk_target,
+                    blockjob_result.error or "unclassifiable output",
                 )
 
         # 6. Determine backup kind.

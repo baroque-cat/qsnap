@@ -31,7 +31,7 @@ from qsnap.cli.commands import _format_pipeline_result
 from qsnap.cli.errors import EXIT_SUCCESS
 from qsnap.cli.summary import _LEGEND_LINES
 from qsnap.core import BackupAbortError, Core
-from qsnap.models.config import GlobalConfig
+from qsnap.models.config import GlobalConfig, VMConfig
 from qsnap.models.results import (
     BackupResult,
     BaselineAssessment,
@@ -1070,3 +1070,152 @@ def test_recovered_delta_audit_and_summary_kind(
     assert any(symbol == "rrr" and "recovered-delta" in desc for symbol, desc in _LEGEND_LINES), (
         f"Summary legend must render recovered-delta, got: {_LEGEND_LINES}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step-0 intent recovery — partial-prefix convergence (design D6,
+# hysteresis-snapshot-retention)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_BASE_IMG = "/var/lib/libvirt/images/testvm.qcow2"
+_SNAP_DIR = "/var/lib/libvirt/snapshots/testvm"
+
+
+def _step0_vm(make_vm_config, name: str = "testvm") -> VMConfig:
+    """A single-disk VM wired for the commit-intent recovery path."""
+    return make_vm_config(
+        name=name,
+        base_image=_BASE_IMG,
+        snapshot_dir=_SNAP_DIR,
+    )
+
+
+def _step0_snapshot(name: str, ts: datetime) -> SnapshotInfo:
+    """A snapshot record under the standard testvm snapshot paths."""
+    return SnapshotInfo(
+        name=name,
+        path=Path(f"{_SNAP_DIR}/{name}.qcow2"),
+        timestamp=ts,
+        allocation=1000,
+        disk="vda",
+    )
+
+
+def test_step0_recovery_partial_prefix_converges_suffix_retried(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Step-0 crash recovery applies the partial-prefix protocol with NO
+    pre-commit baseline (design D6).
+
+    A stale intent [s1,s2,s3] whose OLDEST snapshot (s1) is gone while
+    s2/s3 remain converges ONLY the verified prefix: ``remove_snapshot``
+    runs once for s1, the intent is REWRITTEN to [s2,s3] (not cleared),
+    ``last_commit_ts`` is written, and the WARNING names both the converged
+    and the still-pending snapshots.
+    """
+    vm = _step0_vm(make_vm_config)
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1 = _step0_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _step0_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    snap3 = _step0_snapshot("snap3", datetime(2025, 7, 13, 10, 0))
+    for sn in (snap1, snap2, snap3):
+        mock_state.record_snapshot(vm.name, sn)
+    mock_state.set_commit_in_progress(
+        vm.name, "vda", ["snap1", "snap2", "snap3"], _BASE_IMG, "20260808T160000"
+    )
+
+    # Only the OLDEST merge-set file is gone (conftest idle probe + the
+    # conftest single-file chain measurement corroborate the no-baseline
+    # partial-prefix classification).
+    def _exists(path) -> bool:
+        return not str(path).endswith("snap1.qcow2")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", side_effect=_exists),
+    ):
+        core._recover_commit_intents(vm)
+
+    # Only the verified prefix was converged away.
+    assert [s.name for s in mock_state.get_snapshots(vm.name)] == ["snap2", "snap3"]
+
+    # The intent was REWRITTEN to the remaining suffix — never cleared.
+    intents = mock_state.get_commit_in_progress(vm.name)
+    assert len(intents) == 1
+    assert intents[0].snapshots == ["snap2", "snap3"], (
+        f"Intent must be rewritten to the pending suffix, got {intents[0].snapshots}"
+    )
+
+    assert mock_state.get_last_commit_ts(vm.name, "vda") is not None
+    assert mock_state.get_deferred_operations(vm.name) == []
+
+    # WARNING names both the converged and the still-pending snapshots.
+    assert "converged: snap1" in caplog.text, (
+        f"WARNING must name the converged snapshot, got: {caplog.text}"
+    )
+    assert "still pending: snap2, snap3" in caplog.text, (
+        f"WARNING must name the still-pending snapshots, got: {caplog.text}"
+    )
+
+
+def test_step0_recovery_single_snapshot_byte_identical(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Step-0 crash recovery for an n=1 merge set is byte-identical to the
+    pre-change all-or-nothing rules (design D6 regression lock).
+
+    With no pre-commit baseline: a single snapshot whose file is gone
+    classifies as full-set ``late_success`` — state converges completely,
+    ``last_commit_ts`` is written, and the intent is CLEARED (the full-set
+    branch, not the partial-prefix rewrite).
+    """
+    vm = _step0_vm(make_vm_config)
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snap1 = _step0_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot(vm.name, snap1)
+    mock_state.set_commit_in_progress(vm.name, "vda", ["snap1"], _BASE_IMG, "20260808T160000")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("os.path.exists", return_value=False),
+    ):
+        core._recover_commit_intents(vm)
+
+    # Full-set convergence: state empty, intent cleared, marker written.
+    assert mock_state.get_snapshots(vm.name) == []
+    assert mock_state.get_commit_in_progress(vm.name) == []
+    assert mock_state.get_last_commit_ts(vm.name, "vda") is not None
+    assert mock_state.get_deferred_operations(vm.name) == []
+    assert "state synced" in caplog.text

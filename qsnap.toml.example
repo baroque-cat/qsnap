@@ -31,10 +31,12 @@ state_dir = "/var/lib/qsnap/state"
 # lockfile = "/run/qsnap.lock"
 
 # Default snapshot chain length for all VMs (applies unless overridden
-# at the VM level).  When the snapshot chain exceeds this count, qsnap
-# triggers a blockcommit to merge snapshots back into the base image.
-# Set to a positive integer. Minimum: 1. Default: 24.
-# snapshot_chain_length = 168
+# at the VM level).  In the default hysteresis mode this is the trigger
+# threshold H: the chain grows with no commits while N <= H, then the
+# oldest N − L snapshots are merged down to the floor L
+# (snapshot_preserve_min).  Set to a positive integer. Minimum: 1.
+# Default: 72.
+# snapshot_chain_length = 72
 
 # Default target chain length for all backup targets (applies unless
 # overridden at the VM or target level).  When the incremental backup
@@ -46,13 +48,36 @@ state_dir = "/var/lib/qsnap/state"
 # removed.  Minimum: 1.
 # target_keep_generations = 2
 
-# Snapshot preservation floor — guarantees the newest N snapshots are
-# never blockcommitted, even when snapshot_chain_length is exceeded.
-# Default: 48 (with the default snapshot_chain_length=24, this means ~2
-# days of hourly snapshots are always kept uncommitted).  Set to 0 to
-# disable the floor (use only chain_length for retention).  When
-# preserve_min > chain_length, the floor dominates effective retention.
-# snapshot_preserve_min = 48
+# Snapshot preservation floor / hysteresis collapse floor L — the newest
+# N snapshots are never blockcommitted.  In hysteresis mode a collapse
+# merges down to the newest N.  In steady mode the floor guarantees the
+# newest N snapshots are never blockcommitted even when chain_length is
+# exceeded.  Set to 0 to disable the floor.  Default: 24.
+# snapshot_preserve_min = 24
+
+# Snapshot retention mode (global default, VM-overridable):
+#   "hysteresis" (default) — grow-to-threshold / collapse-to-floor.  The
+#                chain grows with no commits while N <= snapshot_chain_length
+#                (the trigger threshold H); once N > H the oldest N − L
+#                snapshots are merged down to the floor L, where L =
+#                snapshot_preserve_min.  Collapse is a persisted per-disk
+#                phase: once triggered it continues across runs until
+#                N <= L.  Validation requires H > L >= 1.
+#                Default band: H = 72, L = 24 → hourly snapshots for the
+#                last 24 h are kept, older layers collapse occasionally.
+#   "steady"     — keep the newest snapshot_chain_length snapshots and
+#                blockcommit the excess every run (the pre-existing
+#                count-based policy).
+# snapshot_retention_mode = "hysteresis"
+
+# Per-run commit cap (snapshot world, BOTH retention modes): at most this
+# many snapshots per disk are blockcommitted in one run.  Bounds run
+# duration and makes first-time migration from a deep steady-state chain
+# gradual.  Default 12; 0 = unlimited (supervised one-shot collapse).
+#   Migration note for existing deep chains: switching a VM to hysteresis
+#   with N snapshots above the floor converges over
+#   ceil((N − snapshot_preserve_min) / max_commits_per_run) runs.
+# max_commits_per_run = 12
 
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.
@@ -212,6 +237,12 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # when unset).  0 = inactive (default), positive N = keep newest N snapshots.
 # snapshot_preserve_min = 24
 
+# Override snapshot retention mode for this VM (inherits from global when
+# unset): "hysteresis" (default) or "steady".  In hysteresis mode this VM's
+# snapshot_chain_length becomes the trigger threshold H and
+# snapshot_preserve_min the collapse floor L (H > L >= 1 required).
+# snapshot_retention_mode = "steady"
+
 # ── Fault-tolerance & safety controls (per-VM) ──────────────────────────
 # T2: Heavy operations, OFF by default — enable per-VM for critical VMs.
 
@@ -312,7 +343,7 @@ snapshot_dir = "/var/lib/libvirt/snapshots/debiantest"
 # name = "critical-db"
 # snapshot_dir = "/var/lib/libvirt/snapshots/critical-db"
 # snapshot_create = "onchange"
-# snapshot_preserve_min = 48       # always keep newest 48 snapshots
+# snapshot_preserve_min = 24       # collapse floor L — always keep newest 24 snapshots
 # snapshot_quiesce = true
 # blockcommit_deep_verify = true
 #

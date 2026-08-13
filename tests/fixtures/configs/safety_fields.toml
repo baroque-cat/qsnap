@@ -2,6 +2,7 @@
 # Used by config-parsing tests to verify ConfigFacade parses them correctly.
 
 state_dir = "/var/lib/qsnap/state"
+snapshot_retention_mode = "steady"
 snapshot_chain_length = 24
 target_chain_length = 72
 target_keep_generations = 1

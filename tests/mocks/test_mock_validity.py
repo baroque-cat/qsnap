@@ -68,6 +68,43 @@ def test_inmemory_state_manager_intent_methods_present():
     assert mgr.get_commit_in_progress("testvm") == []
 
 
+def test_inmemory_state_manager_collapse_methods_present():
+    """InMemoryStateManager implements the collapse-phase abstract methods.
+
+    The hysteresis collapse-phase methods
+    (``get_collapse_in_progress`` / ``set_collapse_in_progress`` /
+    ``clear_collapse_in_progress``) are abstract on ``IStateManager``
+    (state-management spec); the mock must provide all three, remain an
+    ``IStateManager`` instance, and never return ``None`` from the
+    result-bearing getter (TESTING.md §2).
+    """
+    from qsnap.interfaces.state import IStateManager
+    from tests.mocks.mock_state import InMemoryStateManager
+
+    mgr = InMemoryStateManager()
+    assert isinstance(mgr, IStateManager), "InMemoryStateManager must be an IStateManager"
+
+    for method in (
+        "get_collapse_in_progress",
+        "set_collapse_in_progress",
+        "clear_collapse_in_progress",
+    ):
+        assert hasattr(mgr, method), f"InMemoryStateManager must define {method}()"
+        assert callable(getattr(mgr, method)), f"{method} must be callable"
+
+    # The result-bearing getter never returns None — always a list.
+    phase = mgr.get_collapse_in_progress("testvm")
+    assert phase is not None, "get_collapse_in_progress must never return None"
+    assert isinstance(phase, list)
+    assert phase == []
+
+    # Sanity: the methods actually work.
+    mgr.set_collapse_in_progress("testvm", "vda")
+    assert mgr.get_collapse_in_progress("testvm") == ["vda"]
+    mgr.clear_collapse_in_progress("testvm", "vda")
+    assert mgr.get_collapse_in_progress("testvm") == []
+
+
 def _make_vm_config() -> VMConfig:
     """A minimal two-disk VMConfig for mock validity checks."""
     return VMConfig(

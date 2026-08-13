@@ -8609,7 +8609,13 @@ def test_reconcile_contradictory_evidence_inconclusive(
     mock_state,
     mock_shell,
 ):
-    """Partial deletion (one file gone, one present) → 'inconclusive'."""
+    """Non-contiguous deletion pattern (s1 present, s2 absent) → 'inconclusive'.
+
+    The commit-reconciliation protocol's step 3/8 rule: a deletion pattern
+    that is NOT a contiguous OLDEST prefix of the merge set is a
+    contradiction — an older file present while a newer one is absent —
+    and fails closed as 'inconclusive'.
+    """
     core, vm = _make_commit_core(
         make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
     )
@@ -8673,6 +8679,194 @@ def test_reconcile_files_present_but_chain_shrunk_inconclusive(
     with patch("os.path.exists", return_value=True):
         outcome = core._reconcile_commit_outcome(
             vm, "vda", Path(_BASE_IMG_BC), [snap1], chain_length_before=2
+        )
+    assert outcome == "inconclusive"
+
+
+# ── 6d. Single-snapshot merge set is byte-identical to the legacy rules ────
+
+
+@pytest.mark.parametrize(
+    ("probe_state", "file_exists", "expected"),
+    [
+        # No job + merge-set file gone → late_success (full set verified).
+        ("idle", False, "late_success"),
+        # Active job → job_active (probe wins, no file/chain inspection).
+        ("active", True, "job_active"),
+        # No job + merge-set file present → failure (job died without effect).
+        ("idle", True, "failure"),
+        # Probe call failure → fail closed as inconclusive.
+        ("error", True, "inconclusive"),
+    ],
+    ids=["late_success", "job_active", "failure", "inconclusive"],
+)
+def test_single_snapshot_reconcile_byte_identical_to_legacy(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    probe_state,
+    file_exists,
+    expected,
+):
+    """For an n=1 merge set the reconciliation protocol is byte-identical to
+    the pre-change all-or-nothing rules (design D6 regression lock).
+
+    With no pre-commit baseline:
+    - file gone → ``late_success``,
+    - active job → ``job_active``,
+    - file present → ``failure``,
+    - probe failure → ``inconclusive``.
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+
+    if probe_state == "active":
+        mock_shell.expect_first("virsh blockjob").returns(
+            ShellResult(
+                success=True,
+                stdout="Active block job exists",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+    elif probe_state == "error":
+        mock_shell.expect_first("virsh blockjob").returns(
+            ShellResult(
+                success=False,
+                stdout="",
+                stderr="error: failed to get job info for disk vda",
+                returncode=1,
+                error="failed to get job info",
+            )
+        )
+    elif probe_state == "idle":
+        mock_shell.expect_first("virsh blockjob").returns(
+            ShellResult(
+                success=True,
+                stdout="No current block job",
+                stderr="",
+                returncode=0,
+                error=None,
+            )
+        )
+
+    with patch("os.path.exists", return_value=file_exists):
+        outcome = core._reconcile_commit_outcome(vm, "vda", Path(_BASE_IMG_BC), [snap1])
+    assert outcome == expected
+
+
+# ── 6e. Partial oldest-prefix late success ──────────────────────────────────
+
+
+def test_reconcile_partial_oldest_prefix_late_success(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """Merge set [s1,s2,s3] with ONLY the oldest (s1) verified → 'late_success'
+    (partial): a multi-snapshot commit died between two per-snapshot jobs.
+
+    The chain shrank by exactly the verified prefix size (1), so the
+    partial-prefix protocol (0 < k < n + chain delta == k) classifies the
+    outcome as late success for the OLDEST prefix only.
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    snap3 = _bc_snapshot("snap3", datetime(2025, 7, 13, 10, 0))
+
+    def _exists(path) -> bool:
+        return not str(path).endswith("snap1.qcow2")  # only s1 gone
+
+    with (
+        patch("os.path.exists", side_effect=_exists),
+        patch.object(core, "_get_chain_length", return_value=2),
+    ):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1, snap2, snap3], chain_length_before=3
+        )
+        verified = core._verified_merge_prefix([snap1, snap2, snap3])
+
+    assert outcome == "late_success"
+    assert [s.name for s in verified] == ["snap1"]
+
+
+# ── 6f. Prefix size disagrees with the chain delta → inconclusive ───────────
+
+
+def test_reconcile_prefix_size_disagrees_with_delta_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """s1+s2 gone (k=2) but the chain shrank by only 1 → 'inconclusive'.
+
+    The file-existence signal (2 verified) and the chain-length signal
+    (delta 1) disagree, so the commit-reconciliation protocol fails closed.
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    snap3 = _bc_snapshot("snap3", datetime(2025, 7, 13, 10, 0))
+
+    def _exists(path) -> bool:
+        return str(path).endswith("snap3.qcow2")  # s1 and s2 gone, s3 present
+
+    with (
+        patch("os.path.exists", side_effect=_exists),
+        patch.object(core, "_get_chain_length", return_value=2),
+    ):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1, snap2, snap3], chain_length_before=3
+        )
+    assert outcome == "inconclusive"
+
+
+# ── 6g. Partial prefix but chain delta disagrees → inconclusive ─────────────
+
+
+def test_reconcile_partial_prefix_chain_delta_disagrees_inconclusive(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """s1 gone (k=1) but the chain is UNCHANGED → 'inconclusive'.
+
+    The file check says one snapshot was merged while the chain-length
+    check says nothing happened — the two signals disagree, so the
+    outcome fails closed instead of attributing the deletion to the job.
+    """
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    snap3 = _bc_snapshot("snap3", datetime(2025, 7, 13, 10, 0))
+
+    def _exists(path) -> bool:
+        return not str(path).endswith("snap1.qcow2")  # only s1 gone
+
+    with (
+        patch("os.path.exists", side_effect=_exists),
+        patch.object(core, "_get_chain_length", return_value=3),
+    ):
+        outcome = core._reconcile_commit_outcome(
+            vm, "vda", Path(_BASE_IMG_BC), [snap1, snap2, snap3], chain_length_before=3
         )
     assert outcome == "inconclusive"
 
@@ -8741,6 +8935,80 @@ def test_late_success_converges_state_continues(
     assert mock_state.get_commit_in_progress("testvm") == []
     assert mock_state.get_last_commit_ts("testvm", "vda") is not None
     assert mock_state.get_deferred_operations("testvm") == []
+
+
+# ── 8b. Partial late success converges the prefix and keeps the suffix ──────
+
+
+def test_partial_late_success_rewrites_intent_to_suffix(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """Unknown → reconcile 'late_success' with a PARTIAL verified prefix →
+    only the verified oldest prefix converges; the intent is REWRITTEN to the
+    remaining suffix (never cleared) and a WARNING names both the converged
+    and still-pending snapshots (design D6 partial-prefix protocol)."""
+    core, vm = _make_commit_core(
+        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
+    snap3 = _bc_snapshot("snap3", datetime(2025, 7, 13, 10, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
+    mock_state.record_snapshot("testvm", snap3)
+    # Pre-commit intent covering the full merge set.
+    mock_state.set_commit_in_progress(
+        "testvm", "vda", ["snap1", "snap2", "snap3"], _BASE_IMG_BC, "20260808T160000"
+    )
+
+    unknown = CommitResult(
+        success=False, committed_snapshot="", error="timed out", outcome="unknown"
+    )
+    # Only the OLDEST merge-set file is gone → verified prefix == [snap1].
+    def _exists(path) -> bool:
+        return not str(path).endswith("snap1.qcow2")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(core, "_reconcile_commit_outcome", return_value="late_success"),
+        patch("os.path.exists", side_effect=_exists),
+    ):
+        core._dispatch_commit_outcome(
+            vm,
+            "vda",
+            Path(_BASE_IMG_BC),
+            [snap1, snap2, snap3],
+            unknown,
+            chain_length_before=3,
+            effective_mode="virsh",
+        )
+
+    # Only the verified prefix (snap1) was removed from state.
+    assert [s.name for s in mock_state.get_snapshots("testvm")] == ["snap2", "snap3"]
+
+    # The intent was REWRITTEN to the remaining suffix — never cleared.
+    intents = mock_state.get_commit_in_progress("testvm")
+    assert len(intents) == 1
+    assert intents[0].snapshots == ["snap2", "snap3"], (
+        f"Intent must be rewritten to the pending suffix, got {intents[0].snapshots}"
+    )
+
+    # The commit marker is written once for the verified prefix.
+    assert mock_state.get_last_commit_ts("testvm", "vda") is not None
+    assert mock_state.get_deferred_operations("testvm") == []
+
+    # WARNING names BOTH the converged and the still-pending snapshots.
+    assert "converged: snap1" in caplog.text, (
+        f"WARNING must name the converged snapshot, got: {caplog.text}"
+    )
+    assert "still pending: snap2, snap3" in caplog.text, (
+        f"WARNING must name the still-pending snapshots, got: {caplog.text}"
+    )
 
 
 # ── 9. test_job_active_defers_disk_vm_not_failed ───────────────────────────
@@ -9770,7 +10038,12 @@ def test_probe_active_no_intent_defers_commit(
     """Full pipeline: an active job with no intent record defers the commit —
     the VM run still succeeds."""
     core, vm = _make_commit_core(
-        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        snapshot_retention_mode="steady",
     )
     snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
     snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
@@ -9874,7 +10147,12 @@ def test_stale_intent_resolved_before_commit_eval(
     evaluates: the blockcommit manager never sees the already-converged
     snapshot."""
     core, vm = _make_commit_core(
-        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        snapshot_retention_mode="steady",
     )
     snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
     snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))

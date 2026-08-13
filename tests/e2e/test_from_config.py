@@ -1,13 +1,14 @@
-"""E2E tests: full pipeline from a TOML config file (default 48 floor).
+"""E2E tests: full pipeline from a TOML config file (hysteresis defaults).
 
 ``test_full_pipeline_from_config`` runs the complete qsnap pipeline twice
-via the real CLI, driven by a TOML config file with NO explicit
-``snapshot_preserve_min`` (so the facade resolves the global default 48),
-verifying:
+via the real CLI, driven by a TOML config file with NO explicit retention
+settings (so the facade resolves the global defaults: hysteresis mode with
+trigger threshold H=72 and collapse floor L=24), verifying:
 
 - 2 snapshot runs produce exactly 2 snapshot files
-- NO blockcommit occurs under the 48-snapshot floor (chain_length
-  default 24 would otherwise remove snapshots)
+- NO blockcommit occurs because N=2 is far below the H=72 trigger
+  (grow phase — the hysteresis default commits nothing until the chain
+  crosses the threshold)
 - ``qsnap check`` passes on the backing chain
 - 2 runs produce exactly 2 backups (1 FULL + 1 delta) and exit 0
 
@@ -41,7 +42,7 @@ from tests.e2e.test_restore import _qemu_img_check_ok
 @pytest.mark.e2e
 @pytest.mark.timeout(3600)
 def test_full_pipeline_from_config(e2e_vm):
-    """Run ``qsnap run`` twice from a default TOML; no commit under 48."""
+    """Run ``qsnap run`` twice from a default TOML; grow phase below H=72."""
     shell: SubprocessShell = e2e_vm["shell"]
     vm_name: str = e2e_vm["vm_name"]
     config_path: Path = e2e_vm["config_path"]
@@ -66,10 +67,11 @@ def test_full_pipeline_from_config(e2e_vm):
         f"{[p.name for p in snap_files]}"
     )
 
-    # Default floor (48) dominates chain_length (24): NO blockcommit, so
-    # both snapshot files still exist (the floor is the whole point).
+    # Default hysteresis mode: N=2 is far below the H=72 trigger, so the
+    # grow phase commits nothing and both snapshot files still exist
+    # (the threshold is the whole point of hysteresis retention).
     for p in snap_files:
-        assert p.exists(), f"Snapshot file must survive the 48 floor: {p}"
+        assert p.exists(), f"Snapshot file must survive the 72-snapshot threshold: {p}"
 
     # The second run must not duplicate the first run's transfer work:
     # exactly one FULL plus one delta appear on the target.

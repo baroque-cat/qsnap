@@ -42,16 +42,16 @@ def test_mock_config_global_carries_fault_tolerance_defaults():
     """MockConfigFacade's default GlobalConfig carries the fault-tolerance
     defaults (fault-tolerance-hardening change).
 
-    Core tests rely on the mock's global carrying ``snapshot_preserve_min=48``
-    (active preservation floor) and the free-space gate defaults
-    (``free_space_check="strict"``, ``free_space_reserve=0``,
+    Core tests rely on the mock's global carrying ``snapshot_preserve_min=24``
+    (active preservation floor / hysteresis collapse floor) and the free-space
+    gate defaults (``free_space_check="strict"``, ``free_space_reserve=0``,
     ``free_space_factor=1.0``) so that pipeline behavior matches production
     defaults without per-test configuration.
     """
     facade = MockConfigFacade()
     global_cfg = facade.get_global()
 
-    assert global_cfg.snapshot_preserve_min == 48
+    assert global_cfg.snapshot_preserve_min == 24
     assert global_cfg.free_space_check == "strict"
     assert global_cfg.free_space_reserve == 0
     assert global_cfg.free_space_factor == 1.0

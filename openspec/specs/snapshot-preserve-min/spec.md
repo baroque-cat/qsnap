@@ -8,7 +8,7 @@ Configurable snapshot preservation floor — guarantees the newest N snapshots o
 
 ### Requirement: Per-disk snapshot preserve_min post-processing filter
 
-Within `_evaluate_disk_retention`, after the retention engine produces keep/remove lists and the oldest-prefix post-processing filter has been applied for one disk's snapshots, Core SHALL apply a `preserve_min` filter that guarantees the newest N snapshots of that disk are never blockcommitted. The filter SHALL work as follows: if `len(final_remove) > len(disk_snapshots) - preserve_min`, Core SHALL trim `final_remove` to the oldest `max(0, len(disk_snapshots) - preserve_min)` items and SHALL move the trimmed (newest excess) items from `remove` to `keep`. The default value of `preserve_min` is `48` (inherited from `GlobalConfig.snapshot_preserve_min`), so the floor is ACTIVE by default. When `preserve_min` is explicitly set to 0, the filter SHALL be inactive (no trimming). When `preserve_min` exceeds `snapshot_chain_length`, the floor dominates: effective retention keeps at least `preserve_min` newest snapshots per disk.
+Within `_evaluate_disk_retention`, after the retention engine produces keep/remove lists and the oldest-prefix post-processing filter has been applied for one disk's snapshots, Core SHALL apply a `preserve_min` filter that guarantees the newest N snapshots of that disk are never blockcommitted. The filter SHALL work as follows: if `len(final_remove) > len(disk_snapshots) - preserve_min`, Core SHALL trim `final_remove` to the oldest `max(0, len(disk_snapshots) - preserve_min)` items and SHALL move the trimmed (newest excess) items from `remove` to `keep`. The default value of `preserve_min` is `24` (inherited from `GlobalConfig.snapshot_preserve_min`), so the floor is ACTIVE by default. When `preserve_min` is explicitly set to 0, the filter SHALL be inactive (no trimming). When `preserve_min` exceeds `snapshot_chain_length` in steady mode, the floor dominates: effective retention keeps at least `preserve_min` newest snapshots per disk. In `"hysteresis"` mode `preserve_min` additionally serves as the collapse floor **L** of the `hysteresis-retention` capability (collapse removes down to the newest `preserve_min` snapshots); the trimming filter itself still applies and can never contradict the floor.
 
 #### Scenario: preserve_min inactive when explicitly zero
 
@@ -18,16 +18,16 @@ Within `_evaluate_disk_retention`, after the retention engine produces keep/remo
 - **AND** the preserve_min filter does not trim (0 = inactive)
 - **AND** all 28 snapshots are eligible for blockcommit
 
-#### Scenario: default preserve_min 48 keeps newest 48
-- **WHEN** no `snapshot_preserve_min` is configured anywhere (default `48`)
-- **AND** one disk has 100 snapshots with the default `chain_length=24`
-- **THEN** the retention engine produces keep=24, remove=76
-- **AND** `max_removable = max(0, 100 - 48) = 52`
-- **AND** the preserve_min filter trims remove to the oldest 52 items
-- **AND** final keep = 48 (newest), final remove = 52 (oldest)
+#### Scenario: default preserve_min 24 with default chain_length 72
+- **WHEN** no `snapshot_preserve_min` is configured anywhere (default `24`)
+- **AND** one disk has 100 snapshots with the default `chain_length=72` in steady mode
+- **THEN** the retention engine produces keep=72, remove=28
+- **AND** `max_removable = max(0, 100 - 24) = 76`
+- **AND** since 28 <= 76, the preserve_min filter does not trim
+- **AND** final keep = 72 (newest), final remove = 28 (oldest)
 
-#### Scenario: default floor dominates chain_length
-- **WHEN** defaults apply (`preserve_min=48`, `chain_length=24`) and one disk has 30 snapshots
+#### Scenario: floor dominates chain_length when explicitly configured
+- **WHEN** `preserve_min = 48` and `chain_length = 24` (steady mode) and one disk has 30 snapshots
 - **THEN** `max_removable = max(0, 30 - 48) = 0`
 - **AND** no snapshot is eligible for blockcommit
 - **AND** all 30 snapshots are preserved
@@ -80,6 +80,12 @@ Within `_evaluate_disk_retention`, after the retention engine produces keep/remo
 - **THEN** vda: `max_removable = 100 - 24 = 76`, remove=28 (all eligible since 28 <= 76)
 - **AND** vdb: `max_removable = max(0, 30 - 24) = 6`, remove trimmed from 24 to 6
 - **AND** each disk's preserve_min operates on its own snapshot count
+
+#### Scenario: Hysteresis collapse respects the floor
+
+- **WHEN** hysteresis mode with `preserve_min = 24` collapses a disk with 73 snapshots
+- **THEN** the collapse marks at most the oldest 49 snapshots
+- **AND** the newest 24 snapshots remain uncommitted regardless of the cap
 
 ### Requirement: preserve_min ordering — trim from newest end of remove list
 

@@ -326,16 +326,19 @@ def test_preserve_min_exceeds_total_no_blockcommit_integration(test_vm, caplog):
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
 def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
-    """Default ``snapshot_preserve_min=48`` blocks blockcommit under 48 snaps.
+    """Steady-mode ``snapshot_preserve_min=48`` blocks blockcommit under 48 snaps.
 
-    D13: the global default is 48.  With 30 snapshots and the default
-    ``snapshot_chain_length=24``, the preserve_min floor dominates —
-    ``core.prune()`` must perform ZERO blockcommits and delete nothing.
-    Flipping ``snapshot_preserve_min=0`` (explicit opt-out) restores the
-    old behavior: prune then commits the 6 oldest snapshots.
+    D13: with the retention mode explicitly pinned to ``"steady"`` (the
+    hysteresis default would treat chain_length as a trigger threshold,
+    not a keep count), the preservation floor dominates.  With 30
+    snapshots and ``snapshot_chain_length=24``, the preserve_min floor
+    dominates — ``core.prune()`` must perform ZERO blockcommits and
+    delete nothing.  Flipping ``snapshot_preserve_min=0`` (explicit
+    opt-out) restores the old behavior: prune then commits the 6 oldest
+    snapshots.
 
     1. Start VM, create 30 snapshots via ``Core._create_snapshot`` with
-       the facade-resolved defaults (chain_length=24, preserve_min=48).
+       steady mode and explicit values (chain_length=24, preserve_min=48).
     2. Run ``core.prune()`` — verify zero blockcommits: all 30 files
        still exist, state still holds 30 snapshots, deferred queue empty.
     3. Rebuild Core with ``snapshot_preserve_min=0`` and prune again —
@@ -355,9 +358,9 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
     time.sleep(1)
     assert _vm_is_running(shell, vm_name), "VM should be running"
 
-    # ── Phase 1: default floor (preserve_min=48) ──────────────────────
-    # These are the values ConfigFacade resolves when the TOML omits
-    # snapshot_preserve_min and snapshot_chain_length (D13).
+    # ── Phase 1: preservation floor (preserve_min=48) in steady mode ──
+    # These are the count-based semantics the facade used to resolve as
+    # defaults before the hysteresis change; steady mode pins them.
     state = InMemoryStateManager()
     vm_config = VMConfig(
         name=vm_name,
@@ -365,6 +368,7 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=24,
         snapshot_preserve_min=48,
+        snapshot_retention_mode="steady",
         lifecycle_mode="virsh",
         targets=[
             TargetConfig(
@@ -396,7 +400,7 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
     retention = core._evaluate_snapshot_retention(vm_config)
     assert retention is not None, "Retention result should not be None"
     assert len(retention.remove) == 0, (
-        f"Expected empty remove list under default preserve_min=48 "
+        f"Expected empty remove list under steady preserve_min=48 "
         f"(30 < 48), got {len(retention.remove)}: {retention.remove}"
     )
     assert len(retention.keep) == 30, f"Expected all 30 snapshots kept, got {len(retention.keep)}"
@@ -408,11 +412,11 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
     for snap in snapshots:
         path = snap_paths_before[snap.name]
         assert path.exists(), (
-            f"Snapshot file must NOT be deleted under default preserve_min=48: {path}"
+            f"Snapshot file must NOT be deleted under steady preserve_min=48: {path}"
         )
     remaining = state.get_snapshots(vm_name)
     assert len(remaining) == 30, (
-        f"State must still hold 30 snapshots after default-floor prune, got {len(remaining)}"
+        f"State must still hold 30 snapshots after floor-blocked prune, got {len(remaining)}"
     )
     assert state.get_deferred_operations(vm_name) == [], (
         "No deferred blockcommit entries may be created by a floor-blocked prune"
@@ -431,6 +435,7 @@ def test_default_preserve_min_48_real_blockcommit(test_vm, caplog):
         snapshot_dir=snapshot_dir,
         snapshot_chain_length=24,
         snapshot_preserve_min=0,
+        snapshot_retention_mode="steady",
         lifecycle_mode="virsh",
         targets=[
             TargetConfig(

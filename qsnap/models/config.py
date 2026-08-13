@@ -43,26 +43,29 @@ class GlobalConfig:
     ``target_keep_generations``) are resolved by ``ConfigFacade`` via
     option inheritance (global → VM → target).
 
-    Default retention values: ``snapshot_chain_length=24`` (hourly
-    snapshots, ~1 day of history), ``target_chain_length=168`` (hourly
-    incrementals, ~1 week of history), ``target_keep_generations=2``
-    (keep 2 FULL chains on targets).
+    Default retention values: ``snapshot_chain_length=72`` (the
+    hysteresis trigger threshold H — ~3 days of hourly snapshots before a
+    collapse triggers), ``target_chain_length=168`` (hourly incrementals,
+    ~1 week of history), ``target_keep_generations=2`` (keep 2 FULL chains
+    on targets).
 
-    ``snapshot_preserve_min`` defaults to 48 — a safe floor keeping
-    ~2 days of hourly snapshots uncommitted.  When preserve_min exceeds
+    ``snapshot_preserve_min`` defaults to 24 — the hysteresis collapse
+    floor L (the newest ~1 day of hourly snapshots is always kept).  In
+    steady mode it is the preservation floor: when preserve_min exceeds
     chain_length, the floor dominates effective retention.  Explicit
     ``snapshot_preserve_min = 0`` still disables the floor (design D13).
     """
 
     state_dir: str = "/var/lib/qsnap/state"
     lockfile: str | None = None
-    snapshot_chain_length: int | None = 24
+    snapshot_chain_length: int | None = 72
     target_chain_length: int | None = 168
     target_keep_generations: int | None = 2
-    # Snapshot preservation floor — active by default (48 = ~2 days of
-    # hourly snapshots).  Explicit 0 disables; when > chain_length, the
-    # floor dominates effective retention (design D13).
-    snapshot_preserve_min: int = 48
+    # Snapshot preservation floor / hysteresis collapse floor L — active
+    # by default (24 = ~1 day of hourly snapshots).  Explicit 0 disables;
+    # in steady mode, when > chain_length, the floor dominates effective
+    # retention (design D13).
+    snapshot_preserve_min: int = 24
     deferred_warn_count: str = "5"
     deferred_crit_count: str = "10"
     deferred_warn_age: str = "7d"
@@ -137,6 +140,17 @@ class GlobalConfig:
     # exceeded the command is killed and the outcome is classified as
     # ``"unknown"`` (never as ``"failure"``).  Default 1800 s (30 min).
     blockcommit_timeout: int = 1800
+    # Snapshot retention mode (global default, VM-overridable):
+    # ``"hysteresis"`` (default — grow-to-threshold / collapse-to-floor)
+    # or ``"steady"`` (count-based keep).  In hysteresis mode
+    # ``snapshot_chain_length`` is the trigger threshold H and
+    # ``snapshot_preserve_min`` the collapse floor L.
+    snapshot_retention_mode: str = "hysteresis"
+    # Per-run commit cap for the snapshot world (applies in BOTH retention
+    # modes): at most this many snapshots per disk per run are
+    # blockcommitted.  ``0`` = unlimited.  Default 12 bounds run duration
+    # and makes first-time migration from a deep chain gradual.
+    max_commits_per_run: int = 12
 
 
 @dataclass(frozen=True)
@@ -263,6 +277,9 @@ class VMConfig:
     target_chain_length: int | None = None
     target_keep_generations: int | None = None
     snapshot_preserve_min: int | None = None
+    # Resolved snapshot retention mode (global → VM inheritance):
+    # ``"hysteresis"`` (default) or ``"steady"``.
+    snapshot_retention_mode: str = "hysteresis"
     snapshot_quiesce: bool = False
     lifecycle_mode: str = "virsh"
     change_detection_mode: str = "allocation-map"

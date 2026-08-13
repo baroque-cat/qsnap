@@ -2524,6 +2524,188 @@ def test_active_blockjob_defers_run_backup(
     assert not any("checkpoint-delete" in cmd for cmd in all_run_cmds)
     assert list(target.path.glob("*.qcow2")) == []
 
+    # Probe addressing (blockjob-protocol / backup-provider): the pre-backup
+    # probe must address the disk by its libvirt TARGET device name (vda),
+    # NEVER the base-image path — with external snapshot chains a base path
+    # raises "disk '...' not found in domain" from libvirtd.
+    blockjob_cmds = [cmd for cmd in mock_shell.call_history if "virsh blockjob" in cmd]
+    assert len(blockjob_cmds) >= 1, (
+        f"pre-backup probe must run virsh blockjob, got none in: {mock_shell.call_history}"
+    )
+    assert all("--path vda" in cmd for cmd in blockjob_cmds), (
+        f"blockjob probe must use --path <target device name> (vda), got: {blockjob_cmds}"
+    )
+    assert all("--domain testvm" in cmd for cmd in blockjob_cmds), (
+        f"blockjob probe must name the VM domain, got: {blockjob_cmds}"
+    )
+    base_image_path = str(vm_config.disks[0].base_image)
+    assert all(base_image_path not in cmd for cmd in blockjob_cmds), (
+        f"blockjob probe must NEVER pass the base-image path as --path "
+        f"({base_image_path!r}), got: {blockjob_cmds}"
+    )
+    # The probe runs with the bounded 30s shell timeout (blockjob-protocol).
+    probe_calls = [
+        c
+        for c in run_spy.call_args_list
+        if " ".join(c.args[0]).startswith("virsh blockjob")
+    ]
+    assert probe_calls, "no virsh blockjob call captured by the run spy"
+    assert probe_calls[0].kwargs.get("timeout") == 30, (
+        f"blockjob probe must use the 30s bounded timeout, got: {probe_calls[0].kwargs}"
+    )
+
+
+def test_probe_error_logs_warning_and_proceeds(
+    mock_shell, make_vm_config, make_target, tmp_path, caplog
+):
+    """Probe command exits non-zero → WARNING naming VM and disk, then the
+    backup PROCEEDS (fail-open): not deferred, VM not marked failed."""
+    vm_config = make_vm_config()
+    target = make_target(path=str(tmp_path / "target"), verify="off")
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    # No prior checkpoint → FULL decision; conftest dominfo → running.
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    # The probe command FAILS (non-zero exit) → classified "error" → fail-open.
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=False,
+            stdout="",
+            stderr="error: probe failed",
+            returncode=1,
+            error="probe failed",
+        )
+    )
+    # The backup proceeds as if no block job were active (FULL path).
+    mock_shell.expect("rm -f").returns(_ok())  # stale socket + finally cleanups
+    mock_shell.expect("backup-begin").returns(_ok())
+    mock_shell.expect("domjobabort").returns(_ok())
+
+    with (
+        patch.object(BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+    ):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.run_backup(vm_config, target, vm_config.disks[0])
+
+    # Backup proceeds — success, NOT deferred, VM not marked failed.
+    assert result.success is True
+    assert result.deferred is False, "probe error must fail open, not defer"
+    assert result.disk == "vda"
+    assert result.kind == "full"
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    assert any("backup-begin" in cmd for cmd in all_run_cmds), (
+        f"backup must proceed after a probe error (fail-open), got: {all_run_cmds}"
+    )
+    assert not any("checkpoint-delete" in cmd for cmd in all_run_cmds)
+
+    # WARNING names the VM and disk and carries the fail-open marker.
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "WARNING" and "blockjob probe failed" in rec.getMessage()
+    ]
+    assert len(warnings) >= 1, "probe failure must log a WARNING"
+    msg = warnings[0].getMessage()
+    assert "[backup]" in msg, f"WARNING must carry the [backup] prefix, got: {msg}"
+    assert "testvm" in msg, f"WARNING must name the VM, got: {msg}"
+    assert "vda" in msg, f"WARNING must name the disk, got: {msg}"
+    assert "probe failed" in msg, f"WARNING must include the probe error, got: {msg}"
+    assert "proceeding with backup (fail-open)" in msg, (
+        f"WARNING must be fail-open, got: {msg}"
+    )
+
+
+@pytest.mark.parametrize(
+    "probe_result, expected_err",
+    [
+        # Unclassifiable output: command succeeded but stdout is unrecognized.
+        (
+            ShellResult(
+                success=True,
+                stdout="garbage\n",
+                stderr="",
+                returncode=0,
+                error=None,
+            ),
+            "unclassifiable output",
+        ),
+        # Probe timeout: shell converts the 30s expiry into success=False.
+        (
+            ShellResult(
+                success=False,
+                stdout="",
+                stderr="",
+                returncode=-1,
+                error="Command timed out after 30s",
+            ),
+            "Command timed out after 30s",
+        ),
+    ],
+)
+def test_probe_unclassifiable_and_timeout_warns_proceeds(
+    mock_shell,
+    make_vm_config,
+    make_target,
+    tmp_path,
+    caplog,
+    probe_result,
+    expected_err,
+):
+    """Probe timeout / unclassifiable output → WARNING + proceed (fail-open):
+    the probe is a safety gate only — a broken probe must not silently
+    disable backups nor abort the VM."""
+    vm_config = make_vm_config()
+    target = make_target(path=str(tmp_path / "target"), verify="off")
+    target.path.mkdir(parents=True, exist_ok=True)
+
+    mock_shell.expect("checkpoint-list").returns(
+        ShellResult(success=True, stdout="", stderr="", returncode=0, error=None)
+    )
+    mock_shell.expect_first("virsh blockjob").returns(probe_result)
+    # The backup proceeds as if no block job were active (FULL path).
+    mock_shell.expect("rm -f").returns(_ok())
+    mock_shell.expect("backup-begin").returns(_ok())
+    mock_shell.expect("domjobabort").returns(_ok())
+
+    with (
+        patch.object(BitmapBackupProvider, "_full_pull_lifecycle", return_value=(None, 65536)),
+        patch.object(mock_shell, "run", wraps=mock_shell.run) as run_spy,
+    ):
+        provider = BitmapBackupProvider(mock_shell, nbd=None)
+        result = provider.run_backup(vm_config, target, vm_config.disks[0])
+
+    # Fail-open: backup proceeds, not deferred, VM not failed.
+    assert result.success is True
+    assert result.deferred is False, (
+        f"probe error ({expected_err}) must fail open, not defer"
+    )
+    assert result.disk == "vda"
+
+    all_run_cmds = [" ".join(c.args[0]) for c in run_spy.call_args_list]
+    assert any("backup-begin" in cmd for cmd in all_run_cmds), (
+        f"backup must proceed after an unclassifiable/timed-out probe, got: {all_run_cmds}"
+    )
+
+    # WARNING names the VM and disk, cites the error, and fails open.
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "WARNING" and "blockjob probe failed" in rec.getMessage()
+    ]
+    assert len(warnings) >= 1, "probe failure must log a WARNING"
+    msg = warnings[0].getMessage()
+    assert "[backup]" in msg, f"WARNING must carry the [backup] prefix, got: {msg}"
+    assert "testvm" in msg, f"WARNING must name the VM, got: {msg}"
+    assert "vda" in msg, f"WARNING must name the disk, got: {msg}"
+    assert expected_err in msg, f"WARNING must cite {expected_err!r}, got: {msg}"
+    assert "proceeding with backup (fail-open)" in msg, (
+        f"WARNING must be fail-open, got: {msg}"
+    )
+
 
 def test_run_backup_stopped_vm_returns_error_never_happens(
     mock_shell, make_vm_config, make_target, tmp_path, success_result

@@ -53,6 +53,7 @@ from qsnap.models.results import (
     SnapshotSpec,
     StateCheckResult,
 )
+from qsnap.utils.blockjob import classify_blockjob_output
 from qsnap.utils.convert import convert_with_retry, verify_standalone_image
 from qsnap.utils.nbd import is_vm_running
 from qsnap.utils.nbd_client import MISSING_LIBNBD_ERROR, is_libnbd_available
@@ -4201,19 +4202,49 @@ class Core:
             )
 
             if outcome == "late_success":
-                logger.warning(
-                    "VM %s disk %s: commit completed after previous run timed "
-                    "out — state synced (snapshots: %s)",
-                    vm_config.name,
-                    disk,
-                    ", ".join(s.name for s in snapshots),
-                )
-                if not self._dry_run:
-                    commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-                    self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
-                    for sn in snapshots:
-                        self._state.remove_snapshot(vm_config.name, sn.name)
-                    self._state.clear_commit_in_progress(vm_config.name, disk)
+                verified = self._verified_merge_prefix(snapshots)
+                if len(verified) == len(snapshots):
+                    # Full merge set verified — converge everything.
+                    logger.warning(
+                        "VM %s disk %s: commit completed after previous run timed "
+                        "out — state synced (snapshots: %s)",
+                        vm_config.name,
+                        disk,
+                        ", ".join(s.name for s in snapshots),
+                    )
+                    if not self._dry_run:
+                        commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+                        self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
+                        for sn in snapshots:
+                            self._state.remove_snapshot(vm_config.name, sn.name)
+                        self._state.clear_commit_in_progress(vm_config.name, disk)
+                else:
+                    # Partial completion: converge the verified oldest
+                    # prefix and rewrite the intent to the remaining
+                    # suffix so it is retried next run (design D6).
+                    pending = snapshots[len(verified):]
+                    logger.warning(
+                        "VM %s disk %s: commit partially completed after "
+                        "previous run timed out — converged: %s; still "
+                        "pending: %s",
+                        vm_config.name,
+                        disk,
+                        ", ".join(s.name for s in verified),
+                        ", ".join(s.name for s in pending),
+                    )
+                    if not self._dry_run:
+                        commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+                        self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
+                        for sn in verified:
+                            self._state.remove_snapshot(vm_config.name, sn.name)
+                        # Rewrite the intent to the suffix (NOT cleared).
+                        self._state.set_commit_in_progress(
+                            vm_config.name,
+                            disk,
+                            [s.name for s in pending],
+                            intent.base,
+                            intent.started_ts,
+                        )
                 continue
 
             if outcome == "failure":
@@ -4418,8 +4449,10 @@ class Core:
 
         final_keep: list[str] = []
         final_remove: list[str] = []
-        for disk_snaps in by_disk.values():
-            keep, remove = self._evaluate_disk_retention(disk_snaps, policy, engine)
+        for disk, disk_snaps in by_disk.items():
+            keep, remove = self._evaluate_disk_retention(
+                disk_snaps, policy, engine, vm_config=vm_config, disk=disk
+            )
             final_keep.extend(keep)
             final_remove.extend(remove)
 
@@ -4430,15 +4463,45 @@ class Core:
         snapshots: list[SnapshotInfo],
         policy: RetentionPolicy,
         engine: Any,
+        *,
+        vm_config: VMConfig,
+        disk: str,
     ) -> tuple[list[str], list[str]]:
         """Evaluate retention for one disk's snapshot chain.
 
-        Returns ``(keep_names, remove_names)`` after applying the
-        oldest-prefix and preserve-min post-processing filters.
+        Branches on the VM's resolved ``snapshot_retention_mode``:
+
+        - ``"steady"`` — the pre-existing count-based logic (byte-identical
+          decision), then the shared ``max_commits_per_run`` cap.
+        - ``"hysteresis"`` — grow-to-threshold / collapse-to-floor (see
+          :meth:`_evaluate_disk_retention_hysteresis`).
+
+        Returns ``(keep_names, remove_names)``.  ``remove`` is ordered
+        oldest-first after the oldest-prefix + preserve-min filters and the
+        per-run cap.
         """
+        if vm_config.snapshot_retention_mode == "hysteresis":
+            return self._evaluate_disk_retention_hysteresis(vm_config, disk, snapshots)
+
+        # Steady mode — unchanged count-based evaluation.
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         result = engine.evaluate(items, policy, datetime.now())
+        keep, remove = self._postprocess_retention(snapshots, result, policy.preserve_min)
+        return keep, self._apply_commit_cap(remove)
 
+    def _postprocess_retention(
+        self,
+        snapshots: list[SnapshotInfo],
+        result: RetentionResult,
+        preserve_min: int,
+    ) -> tuple[list[str], list[str]]:
+        """Apply the oldest-prefix filter and preserve-min floor trim.
+
+        Shared by the steady and hysteresis branches (specs
+        ``snapshot-oldest-prefix`` and ``snapshot-preserve-min``).
+        Returns ``(keep_names, remove_names)`` with ``remove`` ordered
+        oldest-first.
+        """
         # Oldest-prefix post-processing (spec: snapshot-oldest-prefix).
         sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
         original_remove = set(result.remove)
@@ -4461,7 +4524,6 @@ class Core:
         # chain_length is exceeded.  Trims from the newest end of the
         # remove list (moves newest excess items to keep) so the oldest
         # snapshots remain eligible for blockcommit.
-        preserve_min = policy.preserve_min
         if preserve_min > 0:
             max_removable = max(0, len(snapshots) - preserve_min)
             if len(final_remove) > max_removable:
@@ -4472,6 +4534,153 @@ class Core:
                 final_keep.extend(excess)
 
         return final_keep, final_remove
+
+    def _apply_commit_cap(self, remove: list[str]) -> list[str]:
+        """Truncate *remove* to the OLDEST ``max_commits_per_run`` entries.
+
+        ``max_commits_per_run = 0`` means unlimited.  Applied AFTER the
+        preserve-min floor trim (in both retention modes), so the newest
+        ``preserve_min`` snapshots are never marked — the floor invariant
+        holds regardless of the cap.
+        """
+        cap = self._config.get_global().max_commits_per_run
+        if cap > 0 and len(remove) > cap:
+            return remove[:cap]
+        return remove
+
+    def _evaluate_disk_retention_hysteresis(
+        self,
+        vm_config: VMConfig,
+        disk: str,
+        snapshots: list[SnapshotInfo],
+    ) -> tuple[list[str], list[str]]:
+        """Hysteresis retention for one disk (grow-to-threshold / collapse).
+
+        ``snapshot_chain_length`` is the trigger threshold H and
+        ``snapshot_preserve_min`` the collapse floor L.  While the chain
+        is below H (and no collapse phase is persisted) nothing is
+        committed; once it crosses H the oldest ``N − L`` snapshots are
+        merged, bounded per run by ``max_commits_per_run``, and the phase
+        persists until ``N ≤ L``.
+        """
+        H = vm_config.snapshot_chain_length
+        L = vm_config.snapshot_preserve_min or 0
+        N = len(snapshots)
+        phase = self._state.get_collapse_in_progress(vm_config.name)
+        phase_active = disk in phase
+
+        # Defensive clear: phase active but reality already at/below the
+        # floor (operator restore / stale-entry healing shrank the chain).
+        if phase_active and N <= L:
+            if not self._dry_run:
+                self._state.clear_collapse_in_progress(vm_config.name, disk)
+            logger.info(
+                "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
+                vm_config.name,
+                disk,
+                N,
+                L,
+            )
+            return [s.name for s in snapshots], []
+
+        # Grow phase: below the trigger threshold with no persisted phase —
+        # no commits; the chain grows until it crosses H.
+        if not phase_active and (H is None or N <= H):
+            if self._dry_run:
+                logger.info(
+                    "[dry-run] %s/%s: grow phase (N=%d <= threshold %s) — no commits",
+                    vm_config.name,
+                    disk,
+                    N,
+                    H,
+                )
+            else:
+                logger.debug(
+                    "[retention] %s/%s: grow phase (N=%d <= threshold %s) — no commits",
+                    vm_config.name,
+                    disk,
+                    N,
+                    H,
+                )
+            return [s.name for s in snapshots], []
+
+        # Collapse (triggered N > H, or continuing phase_active with N > L):
+        # invoke the SAME pure engine with effective keep-count = L (floor).
+        policy = RetentionPolicy(chain_length=L, keep_generations=1, preserve_min=L)
+        engine = self._factory.create_retention_engine(policy)
+        items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
+        result = engine.evaluate(items, policy, datetime.now())
+        keep, remove = self._postprocess_retention(snapshots, result, L)
+        remove = self._apply_commit_cap(remove)
+
+        # Defensive clear when the phase is active, the chain is back within
+        # the band (N <= H), and nothing remains removable (all remaining
+        # snapshots are deferred — active layer etc.).  Gives up the phase so
+        # the chain can grow again instead of oscillating mid-band forever.
+        if phase_active and H is not None and N <= H and not remove:
+            if not self._dry_run:
+                self._state.clear_collapse_in_progress(vm_config.name, disk)
+            logger.info(
+                "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
+                vm_config.name,
+                disk,
+                N,
+                L,
+            )
+            return keep, []
+
+        # Persist the phase BEFORE the commit step (evaluation precedes the
+        # blockcommit — design D2).  Dry-run reads the phase but never
+        # writes or clears it.
+        total_to_merge = N - L
+        if not self._dry_run:
+            if not phase_active:
+                self._state.set_collapse_in_progress(vm_config.name, disk)
+                logger.info(
+                    "[retention] %s/%s: collapse phase started "
+                    "(N=%d, merging %d, floor=%d)",
+                    vm_config.name,
+                    disk,
+                    N,
+                    total_to_merge,
+                    L,
+                )
+            elif remove:
+                logger.info(
+                    "[retention] %s/%s: collapse phase active "
+                    "(N=%d, committing %d of %d, floor=%d)",
+                    vm_config.name,
+                    disk,
+                    N,
+                    len(remove),
+                    total_to_merge,
+                    L,
+                )
+        elif remove:
+            # Dry-run prediction observability (D7): predict, do not write.
+            if not phase_active:
+                logger.info(
+                    "[dry-run] %s/%s: collapse phase would start "
+                    "(N=%d, merging %d, floor=%d)",
+                    vm_config.name,
+                    disk,
+                    N,
+                    total_to_merge,
+                    L,
+                )
+            else:
+                logger.info(
+                    "[dry-run] %s/%s: collapse phase would continue "
+                    "(N=%d, committing %d of %d, floor=%d)",
+                    vm_config.name,
+                    disk,
+                    N,
+                    len(remove),
+                    total_to_merge,
+                    L,
+                )
+
+        return keep, remove
 
     def _verify_backing_chain(self, vm_config: VMConfig, disk: str) -> ChainVerifyResult:
         """Verify backing chain integrity of one disk's active image.
@@ -4752,24 +4961,24 @@ class Core:
         """Probe the block-job state of one disk.
 
         Runs ``virsh blockjob --domain <vm> --path <disk>`` with a
-        30-second timeout and classifies the result:
+        30-second timeout and classifies the result via the shared
+        :func:`qsnap.utils.blockjob.classify_blockjob_output` helper:
 
-        - ``"none"`` — no active block job (output contains "No current
-          block job" or is empty).
-        - ``"active"`` — any job-describing output.
-        - ``"error"`` — the probe call failed (non-zero exit, timeout, or
-          missing binary).
+        - ``"none"`` — no active block job.
+        - ``"active"`` — a job is reported for the disk.
+        - ``"error"`` — the probe call failed or the output is unclassifiable.
+
+        The ``<disk>`` argument is the libvirt TARGET device name (e.g.
+        ``vda``), never a base-image path (blockjob-protocol spec).
         """
         result = self._shell.run(
             ["virsh", "blockjob", "--domain", vm_config.name, "--path", disk],
             timeout=30,
             check=True,
         )
-        if not result.success:
-            return "error"
-        if "No current block job" in result.stdout or not result.stdout.strip():
-            return "none"
-        return "active"
+        return classify_blockjob_output(
+            result.stdout, stderr=result.stderr, success=result.success
+        )
 
     def _reconcile_commit_outcome(
         self,
@@ -4786,24 +4995,26 @@ class Core:
 
         1. Probe ``virsh blockjob`` (30 s).  Active job → ``"job_active"``;
            probe failure → ``"inconclusive"``.
-        2. With no active job, inspect the merge set (oldest first):
-           file existence plus backing-chain length.
-        3. All merge-set files absent AND the chain length decreased
-           accordingly → ``"late_success"`` (the job completed after the
-           client died; ``--delete`` removed the files).
-        4. All files present AND the chain length unchanged → ``"failure"``
-           (the job died without effect).
-        5. Any contradiction (partial deletion, chain length inconsistent
-           with file presence, measurement failure) → ``"inconclusive"``.
+        2. With no active job, measure the backing-chain length; a failed
+           measurement → ``"inconclusive"`` (fail closed).
+        3. Compute ``k``: the largest contiguous OLDEST prefix of the merge
+           set whose files are ALL gone.  A deletion pattern that is not an
+           oldest prefix (an older file present while a newer one is absent)
+           is a contradiction → ``"inconclusive"``.
+        4. ``k == n`` and the chain shrank by ``n`` (or no baseline) →
+           ``"late_success"`` (full merge set verified).
+        5. ``0 < k < n`` and the chain shrank by exactly ``k`` (or no
+           baseline) → ``"late_success"`` (the oldest ``k`` verified — a
+           multi-snapshot commit died between two per-snapshot jobs).
+        6. ``k == 0`` and the chain unchanged (or no baseline) →
+           ``"failure"`` (the job died without effect).
+        7. Any disagreement (chain delta inconsistent with ``k``) →
+           ``"inconclusive"``.
 
-        Classification requires the file check and the chain-length check
-        to agree (commit-reconciliation spec).  When *chain_length_before*
-        is provided (post-timeout dispatch path), agreement is enforced
-        quantitatively: ``late_success`` demands the chain shrank by
-        exactly the merge-set size, ``failure`` demands an unchanged
-        length, and any mismatch yields ``"inconclusive"``.  When it is
-        ``None`` (step-0 crash recovery has no pre-commit baseline), the
-        file evidence is corroborated by chain measurability alone.
+        For a single-snapshot merge set (``n == 1``) this is byte-identical
+        to the pre-change all-or-nothing rules.  The verified oldest prefix
+        is obtained separately via :meth:`_verified_merge_prefix` by the
+        callers that converge state.
         """
         probe = self._probe_blockjob(vm_config, disk)
         if probe == "active":
@@ -4818,24 +5029,48 @@ class Core:
         if chain_length is None:
             return "inconclusive"
 
-        files_gone = sum(1 for s in snapshots if not os.path.exists(str(s.path)))
-        if files_gone == len(snapshots):
+        n = len(snapshots)
+        # k = largest contiguous oldest prefix whose files are ALL gone.
+        k = 0
+        while k < n and not os.path.exists(str(snapshots[k].path)):
+            k += 1
+        # A file gone beyond the prefix (an older file present while a
+        # newer one is absent) is a non-contiguous deletion pattern.
+        for i in range(k + 1, n):
+            if not os.path.exists(str(snapshots[i].path)):
+                return "inconclusive"
+
+        if k == n:
             # All merge-set files absent.  With a pre-commit baseline the
-            # chain MUST have shrunk by exactly the merge-set size; a
-            # different delta contradicts the file evidence.
-            if chain_length_before is not None and chain_length_before - chain_length != len(
-                snapshots
-            ):
+            # chain MUST have shrunk by exactly the merge-set size.
+            if chain_length_before is not None and chain_length_before - chain_length != n:
                 return "inconclusive"
             return "late_success"
-        if files_gone == 0:
-            # All files present.  With a pre-commit baseline the chain
-            # MUST be unchanged; a changed length contradicts the file
-            # evidence.
+        if k == 0:
+            # No merge-set files absent.  With a pre-commit baseline the
+            # chain MUST be unchanged.
             if chain_length_before is not None and chain_length != chain_length_before:
                 return "inconclusive"
             return "failure"
-        return "inconclusive"
+        # Partial prefix (0 < k < n).  With a pre-commit baseline the chain
+        # MUST have shrunk by exactly k; without one, file evidence is
+        # corroborated by chain measurability alone.
+        if chain_length_before is not None and chain_length_before - chain_length != k:
+            return "inconclusive"
+        return "late_success"
+
+    def _verified_merge_prefix(self, snapshots: list[SnapshotInfo]) -> list[SnapshotInfo]:
+        """Return the contiguous OLDEST prefix of *snapshots* whose files are gone.
+
+        Only meaningful when :meth:`_reconcile_commit_outcome` returned
+        ``"late_success"`` (the gone set is then known to be a valid oldest
+        prefix).  For a single-snapshot merge set this returns the full set
+        when the file is gone — the full merge-set case.
+        """
+        k = 0
+        while k < len(snapshots) and not os.path.exists(str(snapshots[k].path)):
+            k += 1
+        return list(snapshots[:k])
 
     def _refresh_domain_backing_store(self, vm_config: VMConfig) -> None:
         """Strip stale ``<backingStore>`` elements from the domain XML.
@@ -5299,14 +5534,51 @@ class Core:
                 chain_length_before=chain_length_before,
             )
             if reconciled == "late_success":
-                logger.warning(
-                    "VM %s disk %s: blockcommit completed after client timeout "
-                    "— state synced (snapshots: %s)",
-                    vm_config.name,
-                    disk,
-                    ", ".join(s.name for s in committable),
-                )
-                outcome = "success"
+                verified = self._verified_merge_prefix(committable)
+                if len(verified) == len(committable):
+                    # Full merge set verified — converge everything below.
+                    logger.warning(
+                        "VM %s disk %s: blockcommit completed after client timeout "
+                        "— state synced (snapshots: %s)",
+                        vm_config.name,
+                        disk,
+                        ", ".join(s.name for s in committable),
+                    )
+                    outcome = "success"
+                else:
+                    # Partial completion: converge the verified oldest prefix
+                    # and rewrite the intent to the remaining suffix (D6).
+                    pending = committable[len(verified):]
+                    logger.warning(
+                        "VM %s disk %s: blockcommit partially completed after "
+                        "client timeout — converged: %s; still pending: %s",
+                        vm_config.name,
+                        disk,
+                        ", ".join(s.name for s in verified),
+                        ", ".join(s.name for s in pending),
+                    )
+                    commit_ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+                    self._state.set_last_commit_ts(vm_config.name, disk, commit_ts)
+                    for sn in verified:
+                        self._actions.append(
+                            ActionRecord(
+                                action="snapshot_delete",
+                                vm_name=vm_config.name,
+                                name=sn.name,
+                                path=sn.path,
+                                disk=disk,
+                            )
+                        )
+                        self._state.remove_snapshot(vm_config.name, sn.name)
+                    # Rewrite the intent to the suffix (NOT cleared).
+                    self._state.set_commit_in_progress(
+                        vm_config.name,
+                        disk,
+                        [s.name for s in pending],
+                        str(base_image),
+                        commit_ts,
+                    )
+                    return
             elif reconciled == "job_active":
                 self._state.add_deferred_blockcommit(
                     vm_config.name,
@@ -5413,6 +5685,26 @@ class Core:
         # Clear intent LAST — a crash anywhere above still leaves the
         # intent record for the next run to reconcile (design D4).
         self._state.clear_commit_in_progress(vm_config.name, disk)
+
+        # Hysteresis collapse phase convergence: after a successful commit,
+        # re-read the disk's snapshot count and clear the phase once the
+        # floor is reached.  Deferred/failed commits never reach here, so
+        # their phase stays intact for retry by the next run (design D2).
+        if vm_config.snapshot_retention_mode == "hysteresis":
+            remaining = [
+                s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
+            ]
+            n_after = len(remaining)
+            floor = vm_config.snapshot_preserve_min or 0
+            if n_after <= floor:
+                self._state.clear_collapse_in_progress(vm_config.name, disk)
+                logger.info(
+                    "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
+                    vm_config.name,
+                    disk,
+                    n_after,
+                    floor,
+                )
 
         # Offline commits deleted overlay files that the (inactive) domain
         # XML may still reference in <backingStore> chains — refresh the

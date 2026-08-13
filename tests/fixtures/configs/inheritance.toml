@@ -1,6 +1,7 @@
 # Inheritance config — option cascading (global, VM override, target override, target inherit)
 
 # Global defaults
+snapshot_retention_mode = "steady"
 snapshot_chain_length = 24
 target_chain_length = 30
 

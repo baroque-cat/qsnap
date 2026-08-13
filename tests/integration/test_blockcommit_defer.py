@@ -924,6 +924,109 @@ def test_dry_run_deferred_drain_prediction(test_vm):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Test 5b: Real probe resolves by TARGET name on an external chain
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(3600)
+def test_external_snapshot_chain_probe_resolves_by_target_name(test_vm):
+    """Real ``virsh blockjob`` probe must address the disk by TARGET name.
+
+    blockjob-protocol spec (hysteresis-snapshot-retention): once external
+    disk-only snapshots exist, the domain's disk source becomes the newest
+    overlay — the base-image path is no longer a domain disk.  A probe
+    that uses the base-image path fails with ``disk '...' not found in
+    domain``, so the probe MUST use the libvirt target device name.
+
+    1. Start VM, create 2 external disk-only snapshots (real chain, active
+       overlay as domain source).
+    2. Probe ``virsh blockjob --domain <vm> --path vda`` through the REAL
+       ``Core._probe_blockjob``: classifies ``"none"`` (idle disk) and
+       stderr contains NO ``disk '...' not found in domain``.
+    3. Probing the base-image path FAILS with the not-found error —
+       documenting the bug being fixed.
+    """
+    shell: SubprocessShell = test_vm["shell"]
+    vm_name: str = test_vm["vm_name"]
+    base_image: Path = test_vm["base_image"]
+    snapshot_dir: Path = test_vm["snapshot_dir"]
+    target_dir: Path = test_vm["target_dir"]
+
+    # Start VM
+    start_result = shell.run(["virsh", "start", vm_name], timeout=30)
+    if not start_result.success:
+        pytest.skip(f"virsh start failed: {start_result.error}")
+    time.sleep(1)
+    assert _vm_is_running(shell, vm_name), "VM should be running"
+
+    # Create 2 real external disk-only snapshots.  --no-metadata (exactly
+    # what qsnap's provider uses in production) keeps the fixture teardown
+    # clean: no libvirt snapshot metadata is left behind.
+    for i in range(2):
+        snap_result = shell.run(
+            [
+                "virsh",
+                "snapshot-create-as",
+                "--domain",
+                vm_name,
+                "--name",
+                f"probe-ext-snap{i + 1}",
+                "--disk-only",
+                "--atomic",
+                "--no-metadata",
+            ],
+            timeout=60,
+        )
+        assert snap_result.success, (
+            f"virsh snapshot-create-as {i + 1} failed: {snap_result.error}"
+        )
+        time.sleep(0.5)
+
+    # The domain's active source is now the newest overlay, NOT the base.
+    active = _get_active_layer(shell, vm_name)
+    assert active is not None, "domblklist should return the active layer"
+    assert os.path.realpath(active) != os.path.realpath(str(base_image)), (
+        "The active layer must be an overlay after external snapshots"
+    )
+
+    core, vm_config, _state = _build_core(
+        shell,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        lifecycle_mode="virsh",
+    )
+
+    # (a) The raw target-name probe succeeds with NO not-found error.
+    raw = shell.run(["virsh", "blockjob", "--domain", vm_name, "--path", "vda"], timeout=30)
+    assert raw.success, f"virsh blockjob by target name failed: {raw.error}"
+    assert "not found in domain" not in (raw.stderr or "").lower(), (
+        f"Target-name probe must not report a missing disk, stderr={raw.stderr!r}"
+    )
+
+    # (b) Core's real probe classifies the idle disk as "none".
+    assert core._probe_blockjob(vm_config, "vda") == "none", (
+        "Core's probe must classify the real idle external-snapshot disk as 'none'"
+    )
+
+    # (c) Probing the BASE-IMAGE path fails with the not-found error —
+    #     the bug being fixed (the old addressing used the base-image path).
+    raw_base = shell.run(
+        ["virsh", "blockjob", "--domain", vm_name, "--path", str(base_image)],
+        timeout=30,
+    )
+    assert not raw_base.success, (
+        "Probing the base-image path must fail once the active source is an overlay"
+    )
+    assert "not found in domain" in (raw_base.stderr or ""), (
+        "Base-image-path probe must report 'disk ... not found in domain', "
+        f"got stderr={raw_base.stderr!r}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Test 6: Offline-commit ENOSPC defers (reason "enospc"), then drains
 # ──────────────────────────────────────────────────────────────────────
 

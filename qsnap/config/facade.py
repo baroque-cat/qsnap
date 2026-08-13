@@ -65,6 +65,8 @@ _GLOBAL_KEYS: frozenset[str] = frozenset(
         "free_space_check",
         "free_space_reserve",
         "free_space_factor",
+        "snapshot_retention_mode",
+        "max_commits_per_run",
         # Deprecated-but-tolerated global keys (warn-and-ignore).
         "snapshot_preserve",
         "target_preserve",
@@ -87,6 +89,7 @@ _VM_KEYS: frozenset[str] = frozenset(
         "target_keep_generations",
         "snapshot_preserve_min",
         "snapshot_quiesce",
+        "snapshot_retention_mode",
         "lifecycle_mode",
         "change_detection_mode",
         "blockcommit_deep_verify",
@@ -337,6 +340,19 @@ class ConfigFacade(IConfigFacade):
         if "free_space_factor" in raw:
             global_kwargs["free_space_factor"] = float(raw["free_space_factor"])
 
+        # Snapshot retention mode (global default, VM-overridable).
+        if "snapshot_retention_mode" in raw:
+            global_kwargs["snapshot_retention_mode"] = str(raw["snapshot_retention_mode"])
+
+        # Per-run commit cap (global only; snapshot world, both modes).
+        if "max_commits_per_run" in raw:
+            raw_value = raw["max_commits_per_run"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                raise ConfigError(
+                    f"max_commits_per_run must be an integer, got {raw_value!r}"
+                )
+            global_kwargs["max_commits_per_run"] = int(raw_value)
+
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate count-based retention fields (when set).
@@ -429,6 +445,20 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError(
                 f"blockcommit_timeout must be a positive integer, "
                 f"got {self._global.blockcommit_timeout!r}"
+            )
+
+        # Validate snapshot_retention_mode (global default).
+        if self._global.snapshot_retention_mode not in ("steady", "hysteresis"):
+            raise ConfigError(
+                f"Invalid snapshot_retention_mode: "
+                f"{self._global.snapshot_retention_mode!r}. "
+                f"Must be one of: steady, hysteresis"
+            )
+
+        # Validate max_commits_per_run (>= 0; 0 = unlimited).
+        if self._global.max_commits_per_run < 0:
+            raise ConfigError(
+                f"max_commits_per_run must be >= 0, got {self._global.max_commits_per_run}"
             )
 
         # Validate FULL verification tiers.
@@ -545,6 +575,18 @@ class ConfigFacade(IConfigFacade):
         else:
             snapshot_preserve_min = global_cfg.snapshot_preserve_min
 
+        # snapshot_retention_mode: VM overrides global.
+        snapshot_retention_mode: str
+        if "snapshot_retention_mode" in vm_raw:
+            snapshot_retention_mode = str(vm_raw["snapshot_retention_mode"])
+        else:
+            snapshot_retention_mode = global_cfg.snapshot_retention_mode
+        if snapshot_retention_mode not in ("steady", "hysteresis"):
+            raise ConfigError(
+                f"VM {name!r}: invalid snapshot_retention_mode="
+                f"{snapshot_retention_mode!r}. Must be one of: steady, hysteresis."
+            )
+
         # free-space gate fields: VM overrides global.
         free_space_check: str
         if "free_space_check" in vm_raw:
@@ -588,6 +630,23 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError("target_keep_generations must be >= 1")
         if snapshot_preserve_min is not None and snapshot_preserve_min < 0:
             raise ConfigError(f"snapshot_preserve_min must be >= 0, got {snapshot_preserve_min}")
+
+        # Hysteresis bounds validation (AFTER inheritance): the trigger
+        # threshold H (chain_length) must strictly exceed the collapse
+        # floor L (preserve_min), and the floor must be >= 1.  A None
+        # threshold cannot satisfy H > L and is rejected.
+        if snapshot_retention_mode == "hysteresis" and (
+            snapshot_chain_length is None
+            or snapshot_preserve_min is None
+            or snapshot_preserve_min < 1
+            or snapshot_chain_length <= snapshot_preserve_min
+        ):
+            raise ConfigError(
+                f"VM {name!r}: hysteresis retention requires "
+                f"snapshot_chain_length > snapshot_preserve_min >= 1, got "
+                f"snapshot_chain_length={snapshot_chain_length!r}, "
+                f"snapshot_preserve_min={snapshot_preserve_min!r}"
+                )
 
         # backup_create: VM overrides global (target may override VM).
         vm_backup_create: str
@@ -754,6 +813,7 @@ class ConfigFacade(IConfigFacade):
             target_chain_length=target_chain_length,
             target_keep_generations=target_keep_generations,
             snapshot_preserve_min=snapshot_preserve_min,
+            snapshot_retention_mode=snapshot_retention_mode,
             snapshot_quiesce=snapshot_quiesce,
             lifecycle_mode=lifecycle_mode,
             change_detection_mode=change_detection_mode,

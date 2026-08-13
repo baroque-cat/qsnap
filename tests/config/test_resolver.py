@@ -302,9 +302,15 @@ def test_vm_overrides_snapshot_preserve_min(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_vm_sets_snapshot_preserve_min_to_zero(tmp_path: Path) -> None:
-    """Global snapshot_preserve_min=24, VM sets 0 → resolves to 0 (disables floor)."""
+    """Global snapshot_preserve_min=24, VM sets 0 in steady mode → resolves to 0 (disables floor).
+
+    ``snapshot_preserve_min = 0`` is a steady-mode-only concept — hysteresis
+    validation requires ``snapshot_preserve_min >= 1``, so the config must
+    opt into steady mode explicitly.
+    """
     config_file = tmp_path / "config.toml"
     config_file.write_text(
+        'snapshot_retention_mode = "steady"\n'
         "snapshot_preserve_min = 24\n"
         "\n"
         "[[vm]]\n"
@@ -668,3 +674,100 @@ def test_target_inherits_vm_convert_out_of_order(tmp_path: Path) -> None:
     assert vm.convert_out_of_order is False
     assert len(vm.targets) == 1
     assert vm.targets[0].convert_out_of_order is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# hysteresis-snapshot-retention: snapshot_retention_mode inheritance
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_snapshot_retention_mode_vm_override_wins(tmp_path: Path) -> None:
+    """config-model scenario "VM override wins": global sets 'steady' and one
+    VM sets 'hysteresis' with valid H/L — that VM resolves 'hysteresis'
+    while all other VMs resolve 'steady'."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'snapshot_retention_mode = "steady"\n'
+        "snapshot_chain_length = 72\n"
+        "snapshot_preserve_min = 24\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "hyst_vm"\n'
+        'snapshot_dir = "/tmp/snaps_hyst"\n'
+        'snapshot_retention_mode = "hysteresis"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/hyst.qcow2"\n'
+        "\n"
+        "[[vm]]\n"
+        'name = "steady_vm"\n'
+        'snapshot_dir = "/tmp/snaps_steady"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/steady.qcow2"\n'
+    )
+    facade = ConfigFacade(config_file)
+
+    assert facade.get_global().snapshot_retention_mode == "steady"
+    hyst_vm = facade.get_vm("hyst_vm")
+    assert hyst_vm.snapshot_retention_mode == "hysteresis"
+    # The hysteresis VM inherits the global H/L that validate its bounds.
+    assert hyst_vm.snapshot_chain_length == 72
+    assert hyst_vm.snapshot_preserve_min == 24
+    # Other VMs resolve the global default.
+    assert facade.get_vm("steady_vm").snapshot_retention_mode == "steady"
+
+
+@pytest.mark.unit
+def test_max_commits_per_run_is_global_only(tmp_path: Path) -> None:
+    """max_commits_per_run is global-only: it resolves on GlobalConfig, has
+    no VM or target-level effect, and placing it in a [[vm]] section raises
+    ConfigError with a cross-level hint."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "max_commits_per_run = 5\n"
+        "\n"
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+        "\n"
+        "  [[vm.target]]\n"
+        '  path = "/mnt/backup/testvm"\n'
+    )
+    facade = ConfigFacade(config_file)
+
+    # Global-only: the cap resolves at the global level.
+    assert facade.get_global().max_commits_per_run == 5
+
+    # No VM- or target-level attribute exists (no effect on either level).
+    vm = facade.get_vm("testvm")
+    assert not hasattr(vm, "max_commits_per_run")
+    assert len(vm.targets) == 1
+    assert not hasattr(vm.targets[0], "max_commits_per_run")
+
+    # Placing the key in a [[vm]] section is rejected with a hint to [global].
+    from qsnap.config.facade import ConfigError
+
+    bad_config = tmp_path / "bad.toml"
+    bad_config.write_text(
+        "[[vm]]\n"
+        'name = "testvm"\n'
+        'snapshot_dir = "/tmp/snaps"\n'
+        "max_commits_per_run = 3\n"
+        "\n"
+        "  [[vm.disk]]\n"
+        '  target = "vda"\n'
+        '  base_image = "/tmp/test.qcow2"\n'
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(bad_config)
+    message = str(exc_info.value)
+    assert "max_commits_per_run" in message
+    assert "[global]" in message, message

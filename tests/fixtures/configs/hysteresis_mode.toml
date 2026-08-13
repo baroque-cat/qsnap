@@ -1,0 +1,29 @@
+# Valid hysteresis retention config: global threshold H=72, floor L=24,
+# a per-run commit cap, and one VM overriding back to "steady".
+snapshot_retention_mode = "hysteresis"
+snapshot_chain_length = 72
+snapshot_preserve_min = 24
+max_commits_per_run = 4
+
+[[vm]]
+name = "hyst_vm"
+snapshot_dir = "/var/lib/libvirt/snapshots/hyst_vm"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/hyst_vm.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/hyst_vm"
+
+[[vm]]
+name = "steady_vm"
+snapshot_dir = "/var/lib/libvirt/snapshots/steady_vm"
+snapshot_retention_mode = "steady"
+
+  [[vm.disk]]
+  target = "vda"
+  base_image = "/var/lib/libvirt/images/steady_vm.qcow2"
+
+  [[vm.target]]
+  path = "/mnt/backup/steady_vm"
