@@ -396,16 +396,12 @@ def test_default_preserve_min_48_keeps_newest_48(
 
     The default floor dominates the chain length: retention's 76 removals
     are trimmed to the oldest 52, keeping the newest 48 uncommitted
-    (snapshot-preserve-min scenario 2).
-
-    The per-run commit cap (``max_commits_per_run``, default 12) applies in
-    steady mode too, so the cap is pinned OFF here to exercise the pure
-    preserve-min trim; a second Core built with the default cap shows the
-    capped result (the 12 OLDEST of the 52).
+    (snapshot-preserve-min scenario 2).  The per-run commit cap no longer
+    exists — the remove list is the full preserve-min-trimmed set.
     """
     vm = make_vm_config(name="testvm", snapshot_chain_length=24, snapshot_preserve_min=48)
     config = MockConfigFacade(
-        global_config=GlobalConfig(max_commits_per_run=0),
+        global_config=GlobalConfig(),
         vms=[vm],
     )
     core = Core(
@@ -442,30 +438,6 @@ def test_default_preserve_min_48_keeps_newest_48(
         f"default preserve_min=48 should trim remove to 52, got {len(result.remove)}"
     )
     assert len(result.keep) == 48, f"the newest 48 snapshots must be kept, got {len(result.keep)}"
-
-    # Optional pin: with the DEFAULT cap (12), the same 52-item remove list
-    # truncates to the 12 OLDEST entries — the cap applies in steady mode too.
-    capped_core = Core(
-        config=MockConfigFacade(vms=[vm]),
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-    with patch.object(
-        mock_factory._retention_engine,
-        "evaluate",
-        return_value=RetentionResult(keep=keep_names, remove=remove_names),
-    ):
-        capped_result = capped_core._evaluate_snapshot_retention(vm)
-
-    assert capped_result is not None
-    assert len(capped_result.remove) == 12, (
-        f"default cap 12 should truncate the 52-item remove list, "
-        f"got {len(capped_result.remove)}"
-    )
-    assert set(capped_result.remove) == set(remove_names[:12]), (
-        "the cap must keep the 12 OLDEST entries of the remove list"
-    )
 
 
 # ── test_default_floor_dominates_chain_length ─────────────────────────────
@@ -577,13 +549,13 @@ def test_preserve_min_no_trim_when_within_limit(
 ):
     """100 snapshots, chain_length=72, preserve_min=24 → 28 <= 76, no trim.
 
-    The per-run commit cap (default 12) would truncate the 28-item remove
-    list, so it is pinned OFF here to exercise the pure preserve-min
-    "no trim" semantics (test-plan pinning fix).
+    The per-run commit cap no longer exists, so the 28-item remove list
+    reaches ``_blockcommit_snapshots`` whole (pure preserve-min "no trim"
+    semantics).
     """
     vm = make_vm_config(name="testvm", snapshot_chain_length=72, snapshot_preserve_min=24)
     config = MockConfigFacade(
-        global_config=GlobalConfig(max_commits_per_run=0),
+        global_config=GlobalConfig(),
         vms=[vm],
     )
     core = Core(
@@ -618,65 +590,6 @@ def test_preserve_min_no_trim_when_within_limit(
     # max_removable = 100 - 24 = 76; len(remove) = 28 <= 76 → no trim.
     assert len(result.remove) == 28
     assert len(result.keep) == 72
-
-
-def test_steady_mode_cap_truncates_remove_list(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Steady mode: remove 28, default cap 12 → the 12 OLDEST remain.
-
-    The shared ``max_commits_per_run`` cap applies in steady mode too: the
-    (floor-trimmed, oldest-first) remove list truncates to the oldest 12,
-    and the newest floor entries stay untouched in keep.
-    """
-    vm = make_vm_config(name="testvm", snapshot_chain_length=72, snapshot_preserve_min=24)
-    config = MockConfigFacade(vms=[vm])  # default cap: max_commits_per_run=12
-    core = Core(
-        config=config,
-        factory=mock_factory,
-        state=mock_state,
-        shell=mock_shell,
-    )
-
-    base = datetime(2025, 7, 13, 10, 0)
-    for i in range(100):
-        snap = SnapshotInfo(
-            name=f"snap{i + 1:03d}",
-            path=Path(f"/tmp/snap{i + 1:03d}.qcow2"),
-            timestamp=base + timedelta(hours=i),
-            allocation=1000,
-            disk="vda",
-        )
-        mock_state.record_snapshot("testvm", snap)
-
-    # Engine returns: keep=72 newest, remove=28 oldest.
-    keep_names = [f"snap{i:03d}" for i in range(29, 101)]
-    remove_names = [f"snap{i:03d}" for i in range(1, 29)]
-    with patch.object(
-        mock_factory._retention_engine,
-        "evaluate",
-        return_value=RetentionResult(keep=keep_names, remove=remove_names),
-    ):
-        result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    # max_removable = 100 - 24 = 76; len(remove) = 28 <= 76 → no preserve-min
-    # trim; the default cap 12 then truncates to the 12 OLDEST entries.
-    assert len(result.remove) == 12, (
-        f"default cap 12 must truncate the 28-item remove list, "
-        f"got {len(result.remove)}"
-    )
-    assert result.remove == remove_names[:12], (
-        "the cap must keep exactly the 12 OLDEST entries of the remove list"
-    )
-    # The newest floor entries are untouched and remain in keep.
-    assert result.keep == keep_names
-    assert all(s in result.keep for s in keep_names)
-    assert len(result.keep) == 72
-    assert set(result.remove).isdisjoint(set(keep_names))
 
 
 def test_preserve_min_equals_total_no_blockcommit(

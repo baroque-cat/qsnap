@@ -350,54 +350,25 @@ def test_inmemory_reset_vm_state_clears_all_intents() -> None:
     assert other[0].disk == "vda"
 
 
-# ── hysteresis collapse phase (hysteresis-snapshot-retention) ─────────────
-# Mock parity for the JsonStateManager collapse-phase tests in
-# tests/state/test_manager.py (state-management spec scenarios): missing key
-# reads empty, set is idempotent, clear removes one disk, and resets clear
-# the whole list / remove one disk.
+# ── removed collapse-phase API: mock parity (bulk-collapse-blockcommit) ─────
+# bulk-collapse-blockcommit (state-management REMOVED requirement): the
+# collapse-phase methods were removed from ``IStateManager``; the mock must
+# mirror the interface shrinkage — none of the three methods may exist.
 
 
-def test_inmemory_collapse_in_progress_round_trip() -> None:
-    """set → get → clear round-trips; set is idempotent; clear is a no-op
-    when the disk is not marked (mock parity)."""
+def test_inmemory_state_manager_has_no_collapse_methods() -> None:
+    """InMemoryStateManager no longer implements the collapse-phase methods.
+
+    None of ``get_collapse_in_progress`` / ``set_collapse_in_progress`` /
+    ``clear_collapse_in_progress`` may exist on the mock (mock parity for
+    the ``IStateManager`` shrinkage, TESTING.md paradigm table).
+    """
     mgr = InMemoryStateManager()
-
-    # Missing key reads as an empty list.
-    assert mgr.get_collapse_in_progress("testvm") == []
-
-    mgr.set_collapse_in_progress("testvm", "vda")
-    # Idempotent: re-marking the same disk must not duplicate it.
-    mgr.set_collapse_in_progress("testvm", "vda")
-    assert mgr.get_collapse_in_progress("testvm") == ["vda"]
-
-    mgr.set_collapse_in_progress("testvm", "vdb")
-    assert sorted(mgr.get_collapse_in_progress("testvm")) == ["vda", "vdb"]
-
-    # Clear removes one disk; clearing an absent disk is a no-op.
-    mgr.clear_collapse_in_progress("testvm", "vda")
-    assert mgr.get_collapse_in_progress("testvm") == ["vdb"]
-    mgr.clear_collapse_in_progress("testvm", "vdz")
-    assert mgr.get_collapse_in_progress("testvm") == ["vdb"]
-
-
-def test_inmemory_reset_vm_state_clears_collapse_in_progress() -> None:
-    """reset_vm_state clears the whole collapse-phase list (mock parity)."""
-    mgr = InMemoryStateManager()
-    mgr.set_collapse_in_progress("testvm", "vda")
-    mgr.set_collapse_in_progress("testvm", "vdb")
-    assert sorted(mgr.get_collapse_in_progress("testvm")) == ["vda", "vdb"]
-
-    mgr.reset_vm_state("testvm")
-
-    assert mgr.get_collapse_in_progress("testvm") == []
-
-
-def test_inmemory_reset_vm_disk_state_removes_one_disk() -> None:
-    """reset_vm_disk_state removes exactly the reset disk (mock parity)."""
-    mgr = InMemoryStateManager()
-    mgr.set_collapse_in_progress("testvm", "vda")
-    mgr.set_collapse_in_progress("testvm", "vdb")
-
-    mgr.reset_vm_disk_state("testvm", "vda")
-
-    assert mgr.get_collapse_in_progress("testvm") == ["vdb"]
+    for name in (
+        "get_collapse_in_progress",
+        "set_collapse_in_progress",
+        "clear_collapse_in_progress",
+    ):
+        assert not hasattr(mgr, name), (
+            f"InMemoryStateManager must not define {name}() — phase API removed"
+        )

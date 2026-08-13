@@ -3645,120 +3645,25 @@ def test_reset_target_disk_state_keeps_new_fields_coherent(tmp_path: Path) -> No
     assert manager.get_full_backups("/mnt/backup/shared") == []
 
 
-# ── hysteresis collapse phase: collapse_in_progress key ───────────────────
-# hysteresis-snapshot-retention (state-management spec): per-VM state gains
-# the additive ``collapse_in_progress`` key — a list of disk names currently
-# in the hysteresis collapse phase.  A missing key reads as an empty list;
-# the key is persisted atomically like all other state writes; resets clear
-# it (whole VM) or remove a single disk (per-disk reset); unknown extra keys
-# are tolerated on read (old/new code compatibility).
+# ── stale collapse_in_progress key (removed phase API) ────────────────────
+# bulk-collapse-blockcommit (state-management REMOVED requirement): the
+# hysteresis ``collapse_in_progress`` phase key is gone — no reader or
+# writer exists anymore (the collapse is a single uncapped bulk blockcommit
+# per run).  A stale key persisted by an older qsnap version is tolerated
+# on load (existing state intact, no rewrite on read) and survives
+# ``reset_vm_state`` / ``reset_vm_disk_state`` untouched (nothing reads or
+# writes the key anymore).
 
 
-def test_collapse_in_progress_missing_key_reads_empty(tmp_path: Path) -> None:
-    """A missing ``collapse_in_progress`` key reads as an empty list.
+def test_stale_collapse_in_progress_key_tolerated_on_load(tmp_path: Path) -> None:
+    """A stale ``collapse_in_progress`` key loads cleanly and is never read.
 
-    state-management scenario "Missing key reads as empty": neither a VM
-    with no state file at all nor a pre-change state file that simply
-    lacks the key may raise — readers observe an empty phase list.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-
-    # No state file at all → empty list.
-    assert manager.get_collapse_in_progress("never_seen") == []
-
-    # A state file written without the key → empty list.
-    manager.set_last_allocation("testvm", "vda", 4096)
-    assert manager.get_collapse_in_progress("testvm") == []
-
-    # No rewrite happens on read: the on-disk file has no key.
-    with open(tmp_path / "testvm.json", encoding="utf-8") as fh:
-        assert "collapse_in_progress" not in json.load(fh)
-
-
-def test_collapse_in_progress_round_trip_atomic(tmp_path: Path) -> None:
-    """The marker round-trips through an atomic write; set is idempotent.
-
-    state-management scenario "Marker survives atomic write": the list is
-    persisted under the top-level ``collapse_in_progress`` key of
-    ``{vm}.json`` via the same tmp+replace atomic write as all other state;
-    re-setting an already-marked disk is a no-op; clearing removes exactly
-    one disk; clearing an absent disk is a no-op; a fresh manager instance
-    observes the persisted phase.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-
-    assert manager.get_collapse_in_progress("testvm") == []
-
-    manager.set_collapse_in_progress("testvm", "vda")
-    manager.set_collapse_in_progress("testvm", "vdb")
-    # Idempotent: re-marking an already-marked disk must not duplicate it.
-    manager.set_collapse_in_progress("testvm", "vda")
-
-    assert sorted(manager.get_collapse_in_progress("testvm")) == ["vda", "vdb"]
-
-    # Clear removes one disk; clearing an absent disk is a no-op.
-    manager.clear_collapse_in_progress("testvm", "vda")
-    assert manager.get_collapse_in_progress("testvm") == ["vdb"]
-    manager.clear_collapse_in_progress("testvm", "vdz")
-    assert manager.get_collapse_in_progress("testvm") == ["vdb"]
-
-    # Atomic write: key persisted on disk, no .tmp file lingers.
-    state_file = tmp_path / "testvm.json"
-    assert state_file.exists()
-    assert not (tmp_path / "testvm.json.tmp").exists()
-    with open(state_file, encoding="utf-8") as fh:
-        data = json.load(fh)
-    assert data["collapse_in_progress"] == ["vdb"]
-
-    # Round-trip through a fresh manager instance.
-    manager2 = JsonStateManager(state_dir=tmp_path)
-    assert manager2.get_collapse_in_progress("testvm") == ["vdb"]
-
-
-def test_reset_vm_state_clears_collapse_in_progress(tmp_path: Path) -> None:
-    """reset_vm_state clears the whole ``collapse_in_progress`` list.
-
-    state-management scenario "Reset clears the marker": after a full VM
-    reset the key is cleared both through the API and on disk.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-    manager.set_collapse_in_progress("testvm", "vda")
-    manager.set_collapse_in_progress("testvm", "vdb")
-    assert sorted(manager.get_collapse_in_progress("testvm")) == ["vda", "vdb"]
-
-    manager.reset_vm_state("testvm")
-
-    assert manager.get_collapse_in_progress("testvm") == []
-    with open(tmp_path / "testvm.json", encoding="utf-8") as fh:
-        assert json.load(fh)["collapse_in_progress"] == []
-
-
-def test_reset_vm_disk_state_removes_one_disk(tmp_path: Path) -> None:
-    """reset_vm_disk_state removes exactly the reset disk from the phase.
-
-    Per-disk counterpart of the reset scenario: resetting ``vda`` while
-    ``collapse_in_progress = ["vda", "vdb"]`` leaves ``vdb`` marked, both
-    through the API and on disk.
-    """
-    manager = JsonStateManager(state_dir=tmp_path)
-    manager.set_collapse_in_progress("testvm", "vda")
-    manager.set_collapse_in_progress("testvm", "vdb")
-
-    manager.reset_vm_disk_state("testvm", "vda")
-
-    assert manager.get_collapse_in_progress("testvm") == ["vdb"]
-    with open(tmp_path / "testvm.json", encoding="utf-8") as fh:
-        assert json.load(fh)["collapse_in_progress"] == ["vdb"]
-
-
-def test_collapse_in_progress_key_tolerated_on_load(tmp_path: Path) -> None:
-    """Unknown extra keys — including the new phase key — load cleanly.
-
-    state-management scenario "Old code tolerates the new key": a state
-    file written by a different (newer/older) qsnap version may carry the
+    bulk-collapse-blockcommit (state-management REMOVED requirement): a
+    state file written by an older qsnap version may carry the
     ``collapse_in_progress`` key and other unknown keys; loading must
     succeed, existing state must stay intact, and reads must not rewrite
-    the file (no migration pass).
+    the file (no migration pass).  There is NO reader method for the key
+    anymore — it is never read back.
     """
     state_file = tmp_path / "testvm.json"
     state_file.write_text(
@@ -3767,7 +3672,7 @@ def test_collapse_in_progress_key_tolerated_on_load(tmp_path: Path) -> None:
                 "last_allocation": {"vda": 4096},
                 "snapshots": [],
                 "deferred_operations": [],
-                # Written by code that understands the phase key.
+                # Written by an older version that understood the phase key.
                 "collapse_in_progress": ["vda"],
                 # A hypothetical future key — must be tolerated too.
                 "some_future_key": {"nested": True},
@@ -3780,10 +3685,84 @@ def test_collapse_in_progress_key_tolerated_on_load(tmp_path: Path) -> None:
 
     manager = JsonStateManager(state_dir=tmp_path)
 
-    # Existing state intact; the phase key is readable; no error raised.
+    # Existing state intact; no error raised.
     assert manager.get_last_allocation("testvm", "vda") == 4096
-    assert manager.get_collapse_in_progress("testvm") == ["vda"]
+
+    # No reader method exists — the key is never read back.
+    assert not hasattr(manager, "get_collapse_in_progress"), (
+        "the collapse-phase reader was removed from JsonStateManager"
+    )
 
     # Reads must not rewrite the file (no migration pass).
     with open(state_file, encoding="utf-8") as fh:
         assert fh.read() == original_raw
+
+
+def test_reset_vm_state_leaves_stale_collapse_key_untouched(tmp_path: Path) -> None:
+    """Stale ``collapse_in_progress`` keys survive both state resets untouched.
+
+    bulk-collapse-blockcommit (state-management REMOVED requirement):
+    ``reset_vm_state`` / ``reset_vm_disk_state`` stop touching the
+    ``collapse_in_progress`` key — a stale persisted key survives the
+    reset byte-for-byte because nothing reads or writes the key anymore.
+    """
+    state_file = tmp_path / "testvm.json"
+    # Seed with the same formatting the manager's atomic save produces
+    # (``indent=2``) so the byte-for-byte fragment check is exact.
+    state_file.write_text(
+        json.dumps(
+            {
+                "last_allocation": {"vda": 4096, "vdb": 8192},
+                "snapshots": [],
+                "deferred_operations": [],
+                "collapse_in_progress": ["vda"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    stale_fragment = '"collapse_in_progress": [\n    "vda"\n  ]'
+
+    manager = JsonStateManager(state_dir=tmp_path)
+
+    # ── whole-VM reset ────────────────────────────────────────────────
+    manager.reset_vm_state("testvm")
+
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["collapse_in_progress"] == ["vda"], (
+        "reset_vm_state must leave the stale collapse_in_progress value intact"
+    )
+    with open(state_file, encoding="utf-8") as fh:
+        assert stale_fragment in fh.read(), (
+            "the stale key's serialized form must survive reset_vm_state byte-for-byte"
+        )
+
+    # ── per-disk reset ─────────────────────────────────────────────────
+    # Re-seed (the whole-VM reset above rewrote the other fields) and
+    # verify the per-disk reset also leaves the key untouched.
+    state_file.write_text(
+        json.dumps(
+            {
+                "last_allocation": {"vda": 4096, "vdb": 8192},
+                "snapshots": [],
+                "deferred_operations": [],
+                "collapse_in_progress": ["vda", "vdb"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    stale_fragment_multi = '"collapse_in_progress": [\n    "vda",\n    "vdb"\n  ]'
+
+    manager.reset_vm_disk_state("testvm", "vda")
+
+    with open(state_file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    assert data["collapse_in_progress"] == ["vda", "vdb"], (
+        "reset_vm_disk_state must leave the stale collapse_in_progress value intact"
+    )
+    with open(state_file, encoding="utf-8") as fh:
+        assert stale_fragment_multi in fh.read(), (
+            "the stale key's serialized form must survive reset_vm_disk_state byte-for-byte"
+        )

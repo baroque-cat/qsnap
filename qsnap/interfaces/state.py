@@ -204,6 +204,10 @@ class IStateManager(ABC):
           *disk* (deferred operations for other disks are kept);
         - every commit-intent record (``commit_in_progress``) whose
           ``disk`` equals *disk* (intents for other disks are kept).
+
+        The removed ``collapse_in_progress`` phase key is left untouched:
+        a stale key from an older version survives the per-disk reset
+        (nothing reads or writes the key anymore).
         """
         ...
 
@@ -296,34 +300,5 @@ class IStateManager(ABC):
 
         *timestamp* is an ISO-8601 compact string (e.g.
         ``"20260808T160000"``).
-        """
-        ...
-
-    # ── Hysteresis collapse phase (hysteresis-snapshot-retention) ────────
-
-    @abstractmethod
-    def get_collapse_in_progress(self, vm_name: str) -> list[str]:
-        """Return the disk names currently in the hysteresis collapse phase.
-
-        The returned list holds libvirt target device names (e.g.
-        ``"vda"``).  A missing ``collapse_in_progress`` key reads as an
-        empty list (no phase).
-        """
-        ...
-
-    @abstractmethod
-    def set_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Mark *disk* as collapsing for *vm_name*.
-
-        Idempotent: a second call with an already-marked disk is a no-op.
-        Persisted atomically.
-        """
-        ...
-
-    @abstractmethod
-    def clear_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Remove *disk* from the collapse phase for *vm_name*.
-
-        No-op when the disk is not currently marked.
         """
         ...

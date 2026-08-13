@@ -27,8 +27,13 @@ Test scenarios (per lifecycle-manager/spec.md + harden-blockcommit-races):
 6. **Heartbeat callback** -- ``on_heartbeat`` is invoked during the wait;
    heartbeat log lines appear during a long commit; a fast commit produces
    no heartbeat lines.
-7. **Multiple snapshots sequential** (design D4) -- snapshots merged one at
-   a time, oldest first; short-circuits on first failure.
+7. **Bulk segment command** (design D1) -- the ENTIRE merge set is merged
+   with ONE ``virsh blockcommit`` segment command; ``--top`` is the newest
+   snapshot in the set (``snapshots_to_merge[-1]``) and the command carries
+   ``--delete --verbose --wait``.  A single-snapshot merge set degenerates
+   to the same segment command.  The manager forwards its ``timeout``
+   argument verbatim into ``run_with_heartbeat`` (the ``x len(merge set)``
+   scaling happens in Core).
 8. **MAC denial** -- AppArmor/SELinux denials are definitive failures with
    ``outcome="failure"``.
 9. **Deep verify** -- ``qemu-img check`` targets the disk's ``base_image``
@@ -127,6 +132,26 @@ def _make_snapshot(
     )
 
 
+def _make_snapshot_set(n: int = 49) -> list[SnapshotInfo]:
+    """Build an oldest-first merge set of *n* snapshots (default 49).
+
+    Names/paths encode the 0-based index (``testvm.20250101T{i:02d}0000``),
+    one minute apart, so assertions can pin the newest snapshot
+    (``snaps[-1]``) and the per-snapshot processing order precisely.
+    """
+    snaps: list[SnapshotInfo] = []
+    for i in range(n):
+        name = f"testvm.20250101T{i:02d}0000"
+        snaps.append(
+            _make_snapshot(
+                name=name,
+                path=f"/snapshots/{name}.qcow2",
+                timestamp=datetime(2025, 1, 1, 0, i, 0),
+            )
+        )
+    return snaps
+
+
 def _blockcommit_calls(shell: CountingShell) -> list[list[str]]:
     """Extract only the blockcommit commands from recorded calls."""
     return [c for c in shell.calls if "blockcommit" in " ".join(c)]
@@ -155,6 +180,9 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     - Result: ``CommitResult(success=True, outcome="success")``.
     - The blockcommit command contains ``--base``, ``--top``, ``--delete``,
       ``--verbose``, ``--wait``.
+    - Degenerate case (lifecycle-manager spec): a one-snapshot merge set
+      collapses to the SAME segment command as a bulk set — the executed
+      command's ``--top`` is the snapshot's own path.
     - The commit is executed via ``run_with_heartbeat`` with the default
       ``timeout=1800`` and ``heartbeat_seconds=60``.
     - No ``virsh domblklist`` call is made (disk is keyword-only).
@@ -192,6 +220,7 @@ def test_blockcommit_single_snapshot_success(mock_shell: MockShell, make_vm_conf
     base_idx = cmd.index("--base")
     assert cmd[base_idx + 1] == str(vm_config.disks[0].base_image)
     top_idx = cmd.index("--top")
+    # Degenerate single-snapshot merge set: --top == the snapshot's own path.
     assert cmd[top_idx + 1] == str(snap.path)
 
     # The command went through run_with_heartbeat with the default timeout.
@@ -362,7 +391,8 @@ def test_blockcommit_heartbeat_callback_elapsed(mock_shell: MockShell, make_vm_c
 
     The mock shell scripts a single heartbeat (``heartbeats=1``); the
     manager's callback must log a progress line carrying the elapsed
-    seconds.
+    seconds.  With a one-snapshot merge set the line names 1 layer
+    (the callback logs the merge-set size, not per-snapshot progress).
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
@@ -378,20 +408,58 @@ def test_blockcommit_heartbeat_callback_elapsed(mock_shell: MockShell, make_vm_c
         )
 
     assert result.success is True
-    expected_line = f"[blockcommit] testvm/vda: still merging {snap.name} into base (60s elapsed)"
+    expected_line = "[blockcommit] testvm/vda: still collapsing 1 layer into base (60s elapsed)"
     assert any(expected_line in rec.message for rec in caplog.records)
 
 
 def test_heartbeat_lines_during_long_commit(mock_shell: MockShell, make_vm_config, caplog):
-    """Heartbeat log lines appear during a long commit.
+    """Heartbeat log lines appear during a long bulk collapse.
 
-    Two scripted heartbeats (at 60s and 120s) produce two
-    ``[blockcommit] ... still merging ...`` INFO lines.
+    A 49-layer merge set scripted with two heartbeats (at 60s and 120s)
+    produces exactly two ``[blockcommit] ... still collapsing ...`` INFO
+    lines, each naming the VM, disk, and the layer count of the merge set
+    (commit-observability spec).
+    """
+    vm_config = make_vm_config()
+    snaps = _make_snapshot_set(49)
+
+    mock_shell.expect("virsh blockcommit").returns(_success(), heartbeats=2)
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    with caplog.at_level(logging.INFO, logger="qsnap.modules.lifecycle.blockcommit_manager"):
+        result = manager.blockcommit(
+            vm_config, snaps, disk="vda", base_image=vm_config.disks[0].base_image
+        )
+
+    assert result.success is True
+    heartbeat_lines = [
+        rec.message
+        for rec in caplog.records
+        if "[blockcommit]" in rec.message and "still collapsing" in rec.message
+    ]
+    assert len(heartbeat_lines) == 2
+    assert heartbeat_lines[0] == (
+        "[blockcommit] testvm/vda: still collapsing 49 layers into base (60s elapsed)"
+    )
+    assert heartbeat_lines[1] == (
+        "[blockcommit] testvm/vda: still collapsing 49 layers into base (120s elapsed)"
+    )
+
+
+def test_fast_commit_no_heartbeat_lines(mock_shell: MockShell, make_vm_config, caplog):
+    """A fast collapse produces no heartbeat lines.
+
+    With ``heartbeats=0`` (the default) the mock shell never invokes the
+    callback, so no ``[blockcommit] ... still collapsing ...`` progress
+    lines are logged — a sub-60s job must not emit heartbeats and the
+    result is logged normally (commit-observability spec).
     """
     vm_config = make_vm_config()
     snap = _make_snapshot()
 
-    mock_shell.expect("virsh blockcommit").returns(_success(), heartbeats=2)
+    mock_shell.expect("virsh blockcommit").returns(_success())
 
     shell = CountingShell(mock_shell)
     manager = BlockCommitManager(shell=shell)
@@ -405,69 +473,29 @@ def test_heartbeat_lines_during_long_commit(mock_shell: MockShell, make_vm_confi
     heartbeat_lines = [
         rec.message
         for rec in caplog.records
-        if "[blockcommit]" in rec.message and "still merging" in rec.message
+        if "[blockcommit]" in rec.message and "still collapsing" in rec.message
     ]
-    assert len(heartbeat_lines) == 2
-    assert " (60s elapsed)" in heartbeat_lines[0]
-    assert " (120s elapsed)" in heartbeat_lines[1]
-
-
-def test_fast_commit_no_heartbeat_lines(mock_shell: MockShell, make_vm_config, caplog):
-    """A fast commit produces no heartbeat lines.
-
-    With ``heartbeats=0`` (the default) the mock shell never invokes the
-    callback, so no ``[blockcommit]`` progress lines are logged.
-    """
-    vm_config = make_vm_config()
-    snap = _make_snapshot()
-
-    mock_shell.expect("virsh blockcommit").returns(_success())
-
-    shell = CountingShell(mock_shell)
-    manager = BlockCommitManager(shell=shell)
-
-    with caplog.at_level(logging.INFO, logger="qsnap.modules.lifecycle.blockcommit_manager"):
-        result = manager.blockcommit(
-            vm_config, [snap], disk="vda", base_image=vm_config.disks[0].base_image
-        )
-
-    assert result.success is True
-    heartbeat_lines = [rec.message for rec in caplog.records if "[blockcommit]" in rec.message]
     assert heartbeat_lines == []
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 7. Multiple snapshots merged sequentially (design D4)
+# 7. Bulk segment commit — the ENTIRE merge set in ONE virsh blockcommit
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_vm_config):
-    """Multiple snapshots are merged one at a time (design D4).
+def test_bulk_blockcommit_single_segment_command(mock_shell: MockShell, make_vm_config):
+    """A 49-snapshot merge set collapses with exactly ONE segment command.
 
-    Success path:
-    - ``[snap1, snap2]`` -> blockcommit called for snap1, then snap2.
-    - Result: ``CommitResult(success=True, committed_snapshot=snap2.name)``.
-    - blockcommit is called exactly twice (oldest first).
-
-    Failure path (short-circuit, design D4):
-    - If blockcommit for snap1 fails, snap2 is NOT attempted.
-    - Result: ``CommitResult(success=False, committed_snapshot=snap1.name)``.
-    - blockcommit is called exactly once (for snap1 only).
+    - ``snapshots_to_merge`` contains 49 snapshots (oldest first).
+    - Exactly ONE ``virsh blockcommit`` process is spawned (no per-snapshot
+      loop) via ``run_with_heartbeat``.
+    - ``--top`` is the 49th/newest snapshot's path and ``--delete
+      --verbose --wait`` are present.
+    - Result: ``CommitResult(success=True, committed_snapshot=<newest name>,
+      outcome="success")``.
     """
     vm_config = make_vm_config()
-    snap1 = _make_snapshot(
-        name="testvm.20250101T000000",
-        path="/snapshots/testvm.20250101T000000.qcow2",
-        timestamp=datetime(2025, 1, 1, 0, 0, 0),
-    )
-    snap2 = _make_snapshot(
-        name="testvm.20250102T000000",
-        path="/snapshots/testvm.20250102T000000.qcow2",
-        timestamp=datetime(2025, 1, 2, 0, 0, 0),
-        allocation=131072,
-    )
-
-    # ── Success path: both snapshots merged ───────────────────────────
+    snaps = _make_snapshot_set(49)
 
     mock_shell.expect("virsh blockcommit").returns(_success())
 
@@ -475,52 +503,111 @@ def test_blockcommit_multiple_snapshots_sequential(mock_shell: MockShell, make_v
     manager = BlockCommitManager(shell=shell)
 
     result = manager.blockcommit(
-        vm_config, [snap1, snap2], disk="vda", base_image=vm_config.disks[0].base_image
+        vm_config, snaps, disk="vda", base_image=vm_config.disks[0].base_image
     )
 
+    assert isinstance(result, CommitResult)
     assert result.success is True
-    assert result.committed_snapshot == snap2.name  # last merged
+    assert result.committed_snapshot == snaps[-1].name
     assert result.error is None
     assert result.outcome == "success"
 
-    # blockcommit called exactly twice (once per snapshot, oldest first).
+    # Exactly ONE virsh blockcommit process for the whole segment.
     bc_calls = _blockcommit_calls(shell)
-    assert len(bc_calls) == 2
+    assert len(bc_calls) == 1, f"expected 1 blockcommit, got {len(bc_calls)}"
 
-    # First call targets snap1 (oldest), second targets snap2.
-    assert str(snap1.path) in bc_calls[0]
-    assert str(snap2.path) in bc_calls[1]
+    cmd = bc_calls[0]
+    assert "--domain" in cmd
+    assert "--path" in cmd
+    assert "--base" in cmd
+    assert "--top" in cmd
+    assert "--delete" in cmd
+    assert "--verbose" in cmd
+    assert "--wait" in cmd
 
-    # ── Failure path: short-circuit on first failure (design D4) ──────
-    # If the first blockcommit fails, the second is NOT executed.
+    # --top is the NEWEST merged snapshot (snapshots_to_merge[-1]).
+    top_idx = cmd.index("--top")
+    assert cmd[top_idx + 1] == str(snaps[-1].path)
 
-    fail_shell = CountingShell(MockShell())
-    fail_error = "error: blockcommit failed for snap1"
-    fail_shell._inner.expect("virsh blockcommit").returns(
-        ShellResult(
-            success=False,
-            stdout="",
-            stderr=fail_error,
-            returncode=1,
-            error=fail_error,
-        )
+    # The command went through run_with_heartbeat exactly once.
+    assert len(shell.heartbeat_calls) == 1
+
+
+def test_bulk_segment_command_top_is_newest(mock_shell: MockShell, make_vm_config):
+    """argv-exact contract for the multi-snapshot segment command.
+
+    The single executed command MUST be exactly:
+    ``virsh blockcommit --domain testvm --path vda --base <base> --top
+    <snap49.path> --delete --verbose --wait`` — no extra flags, no
+    per-snapshot loop (test-plan Notes #2).
+    """
+    vm_config = make_vm_config()
+    snaps = _make_snapshot_set(49)
+    base = vm_config.disks[0].base_image
+
+    mock_shell.expect("virsh blockcommit").returns(_success())
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, snaps, disk="vda", base_image=base)
+
+    assert result.success is True
+    assert result.committed_snapshot == snaps[-1].name
+
+    bc_calls = _blockcommit_calls(shell)
+    assert len(bc_calls) == 1
+
+    # argv-exact: the entire command is pinned, --top is snap49 (the newest).
+    assert bc_calls[0] == [
+        "virsh",
+        "blockcommit",
+        "--domain",
+        vm_config.name,
+        "--path",
+        "vda",
+        "--base",
+        str(base),
+        "--top",
+        str(snaps[-1].path),
+        "--delete",
+        "--verbose",
+        "--wait",
+    ]
+    assert len(shell.heartbeat_calls) == 1
+
+
+def test_bulk_blockcommit_scaled_timeout_forwarded(mock_shell: MockShell, make_vm_config):
+    """The manager forwards the timeout it was GIVEN, verbatim.
+
+    The ``timeout x len(merge set)`` scaling happens in Core (design D4):
+    for a 49-layer set with ``blockcommit_timeout = 1800`` Core passes
+    ``88200`` (= 1800 x 49) to the manager.  The manager must hand that
+    value through to ``run_with_heartbeat`` unchanged — it must NOT
+    re-scale internally (which would yield 1800 x 49 x 49).
+    """
+    vm_config = make_vm_config()
+    snaps = _make_snapshot_set(49)
+
+    mock_shell.expect("virsh blockcommit").returns(_success())
+
+    shell = CountingShell(mock_shell)
+    manager = BlockCommitManager(shell=shell)
+
+    # Simulate Core's scaled budget: 1800 (per layer) x 49 (merge set).
+    result = manager.blockcommit(
+        vm_config,
+        snaps,
+        disk="vda",
+        base_image=vm_config.disks[0].base_image,
+        timeout=88200,
     )
 
-    fail_manager = BlockCommitManager(shell=fail_shell)
-
-    fail_result = fail_manager.blockcommit(
-        vm_config, [snap1, snap2], disk="vda", base_image=vm_config.disks[0].base_image
-    )
-
-    assert fail_result.success is False
-    assert fail_result.committed_snapshot == snap1.name  # the one that failed
-    assert fail_result.error == fail_error
-    assert fail_result.outcome == "failure"
-
-    # Only one blockcommit call (for snap1); snap2 was NOT attempted.
-    fail_bc_calls = _blockcommit_calls(fail_shell)
-    assert len(fail_bc_calls) == 1
-    assert str(snap1.path) in fail_bc_calls[0]
+    assert result.success is True
+    assert len(shell.heartbeat_calls) == 1
+    _, timeout_kwarg, hb_seconds = shell.heartbeat_calls[0]
+    assert timeout_kwarg == 88200
+    assert hb_seconds == 60
 
 
 # ──────────────────────────────────────────────────────────────────────────

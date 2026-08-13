@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1219,3 +1219,75 @@ def test_step0_recovery_single_snapshot_byte_identical(
     assert mock_state.get_last_commit_ts(vm.name, "vda") is not None
     assert mock_state.get_deferred_operations(vm.name) == []
     assert "state synced" in caplog.text
+
+
+def test_bulk_timeout_routes_to_reconcile_deferral(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    caplog,
+):
+    """RISK #336 (test-plan.md): all-or-nothing bulk semantics — a timed-out
+    bulk job keeps its intent; the next run's step-0 reconciliation probes
+    ``virsh blockjob``, sees the job still active, and defers with reason
+    ``blockjob_active``, re-queuing the FULL merge set (never a truncated
+    subset, never a definitive failure)."""
+    vm = _step0_vm(make_vm_config)
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    # A 49-snapshot bulk set whose client timed out — the intent survived.
+    snaps = [
+        _step0_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot(vm.name, sn)
+    mock_state.set_commit_in_progress(
+        vm.name, "vda", [s.name for s in snaps], _BASE_IMG, "20260808T160000"
+    )
+
+    # The QEMU block job is still running after the client timed out.
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        core._recover_commit_intents(vm)
+
+    # The intent is KEPT — reconciliation deferred, nothing converged away.
+    intents = mock_state.get_commit_in_progress(vm.name)
+    assert len(intents) == 1
+    assert intents[0].snapshots == [s.name for s in snaps], (
+        "the timed-out bulk intent must be preserved in full"
+    )
+
+    # The FULL set is re-queued for the deferred drain.
+    deferred = mock_state.get_deferred_operations(vm.name)
+    assert len(deferred) == 1
+    assert deferred[0].reason == "blockjob_active"
+    assert deferred[0].snapshots == [s.name for s in snaps], (
+        "deferral must re-queue the full merge set, never a truncated subset"
+    )
+
+    # State untouched; no convergence marker written (no last_commit_ts).
+    assert len(mock_state.get_snapshots(vm.name)) == 49
+    assert mock_state.get_last_commit_ts(vm.name, "vda") is None
+    assert "active block job detected during intent recovery" in caplog.text

@@ -326,23 +326,25 @@ def test_risk_deferred_count_visible_in_list(
     assert names == {"snap1", "snap2"}
 
 
-# ── test_risk_deferred_queue_grows_across_runs ────────────────────────────
+# ── test_deferred_queue_dedupes_identical_work_across_runs ────────────────
 
 
-def test_risk_deferred_queue_grows_across_runs(
+def test_deferred_queue_dedupes_identical_work_across_runs(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Deferred entries accumulate across runs when VM is running.
+    """Identical pending work is deduplicated across runs (no unbounded growth).
 
     Run 1: no deferred ops. Retention removes "snap1". VM is running →
-    blockcommit deferred with reason "vm_running" (entry 1).
-    Run 2: 1 deferred op exists, VM still running → skipped during
-    _check_deferred_operations.  Retention removes "snap1" again →
-    blockcommit deferred again (entry 2).
-    Verify queue grew from 0 → 1 → 2.
+    blockcommit deferred with reason "vm_running" (queue 0 → 1).
+    Run 2: same blocking condition persists (VM still running) and the
+    SAME disk + snapshot set ["snap1"] is deferred again →
+    ``_queue_deferred_once`` must NOT add a duplicate — queue stays at 1.
+
+    Pins the fix for unbounded deferred-queue growth while a blocking
+    condition persists across runs.
     """
     vm = make_vm_config(
         name="testvm",
@@ -399,12 +401,18 @@ def test_risk_deferred_queue_grows_across_runs(
         assert len(after_run1) == 1
         assert after_run1[0].reason == "vm_running"
 
-        # Run 2: deferred op exists, VM running → skipped.
+        # Run 2: deferred op exists, VM running → skipped. Same disk +
+        # same snapshot set → _queue_deferred_once dedupes → no new entry.
         core.snapshot()
 
-        # After run 2: 2 deferred entries (queue grew).
+        # After run 2: still 1 deferred entry (queue did NOT grow).
         after_run2 = mock_state.get_deferred_operations("testvm")
-        assert len(after_run2) == 2
+        assert len(after_run2) == 1
+        # The surviving entry is the SAME entry, not a replacement: reason,
+        # snapshots, and disk all match run 1's entry.
+        assert after_run2[0].reason == "vm_running"
+        assert after_run2[0].snapshots == ["snap1"]
+        assert after_run2[0].disk == after_run1[0].disk
 
     # Blockcommit was never called — VM running → deferred before blockcommit.
     assert bc_spy.call_count == 0
@@ -1505,6 +1513,71 @@ def test_live_commit_enospc_defers(
     assert len(mock_state.get_snapshots("testvm")) == 1
 
 
+def test_bulk_enospc_error_classified_enospc_deferral(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """RISK #338 (test-plan.md): a LIVE bulk blockcommit hitting an ENOSPC
+    pattern ("No space left on device" from virsh) defers with reason
+    "enospc" — never a definitive abort, never a truncated set.  The FULL
+    bulk merge set stays queued for retry (intent preserved at the operation
+    level) and the disk-full exit-code flag is set."""
+    global_cfg = make_global_config(
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
+    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+    core = Core(
+        config=config,
+        factory=mock_factory,
+        state=mock_state,
+        shell=mock_shell,
+    )
+
+    snaps = [
+        SnapshotInfo(
+            name=f"snap{i}",
+            path=Path(f"/var/lib/libvirt/snapshots/testvm/snap{i}.qcow2"),
+            timestamp=datetime(2025, 7, 13, 8, 0) + timedelta(hours=i),
+            allocation=1000,
+            disk="vda",
+        )
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    _set_vm_state(mock_shell, "running")
+    # domblklist points to a NEWER file → all 49 are below the active layer
+    _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
+
+    enospc = CommitResult(
+        success=False,
+        committed_snapshot="",
+        error="virsh blockcommit failed: No space left on device",
+        outcome="failure",
+    )
+
+    with patch.object(mock_factory._lifecycle_manager, "blockcommit", return_value=enospc):
+        # Must NOT raise — ENOSPC is a deferral, not a definitive failure.
+        core._blockcommit_one_disk(vm, "vda", snaps)
+
+    remaining = mock_state.get_deferred_operations("testvm")
+    assert len(remaining) == 1
+    assert remaining[0].reason == "enospc"
+    # The FULL bulk set is re-queued — nothing truncated.
+    assert remaining[0].snapshots == [s.name for s in snaps]
+
+    # Snapshot state records preserved — the merge is retried intact.
+    assert len(mock_state.get_snapshots("testvm")) == 49
+
+    # Exit-code tracking: blockcommit space errors set the disk-full flag.
+    assert "blockcommit:testvm:vda" in core._space_limited_targets
+
+
 def test_deferred_enospc_drained_later(
     make_vm_config,
     make_global_config,
@@ -1679,7 +1752,8 @@ def test_drain_path_logs_intent_line(
     """The deferred-drain commit mirrors the main commit path: intent written
     BEFORE the drain commit, the ``[blockcommit] ... (mode=..., timeout=...)``
     INFO line emitted, the pre-commit block-job probe issued (live path), and
-    the intent cleared on success."""
+    the intent cleared on success.  On the live drain path the timeout is the
+    SCALED bulk budget (1800 × 2 = 3600)."""
     vm = make_vm_config(name="testvm", lifecycle_mode="virsh")
     config = MockConfigFacade(vms=[vm])
     core = Core(
@@ -1690,9 +1764,11 @@ def test_drain_path_logs_intent_line(
     )
 
     _add_snapshot(mock_state, "testvm", "snap1")
-    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1"], "apparmor")
+    _add_snapshot(mock_state, "testvm", "snap2")
+    mock_state.add_deferred_blockcommit("testvm", "vda", ["snap1", "snap2"], "apparmor")
     _set_vm_state(mock_shell, "running")
-    # domblklist returns a DIFFERENT (newer) file → snap1 is below active layer
+    # domblklist returns a DIFFERENT (newer) file → both snapshots are below
+    # the active layer → the full 2-item set is committable in one bulk job
     _set_domblklist(mock_shell, "/tmp/newer_active.qcow2")
 
     lifecycle_manager = mock_factory._lifecycle_manager
@@ -1718,6 +1794,9 @@ def test_drain_path_logs_intent_line(
     # Intent precedes the drain commit; the queue is drained.
     assert events == ["intent", "commit"], f"unexpected drain order: {events}"
     assert bc_spy.called
+    assert bc_spy.call_args.kwargs["timeout"] == 3600, (
+        "the live drain path must apply the scaled bulk budget (1800 × 2)"
+    )
     assert mock_state.get_deferred_operations("testvm") == []
     assert mock_state.get_commit_in_progress("testvm") == []
     assert mock_state.get_last_commit_ts("testvm", "vda") is not None
@@ -1727,10 +1806,11 @@ def test_drain_path_logs_intent_line(
         "pre-commit block-job probe must run before the live drain commit"
     )
 
-    # Observability: the [blockcommit] intent line carries mode/timeout.
+    # Observability: the [blockcommit] intent line carries mode + the SCALED
+    # timeout (design D9 wording `collapsing` on the drain path too).
     assert (
-        "[blockcommit] testvm/vda: committing 1 snapshot(s) into "
-        "/var/lib/libvirt/images/testvm.qcow2 (mode=virsh, timeout=1800s)"
+        "[blockcommit] testvm/vda: collapsing 2 snapshot(s) into "
+        "/var/lib/libvirt/images/testvm.qcow2 (mode=virsh, timeout=3600s)"
     ) in caplog.text
 
 

@@ -389,7 +389,7 @@ def test_live_commit_non_active_while_running_integration(test_vm, caplog):
     # (i) Observability (design D9): a [blockcommit] intent INFO line
     #     preceded the commit.
     commit_lines = [r.message for r in caplog.records if "[blockcommit]" in r.message]
-    assert any("committing" in m and "mode=virsh" in m for m in commit_lines), (
+    assert any("collapsing" in m and "mode=virsh" in m for m in commit_lines), (
         f"Expected a [blockcommit] intent line before the commit, got: {commit_lines}"
     )
 
@@ -672,7 +672,7 @@ def test_deferred_blockcommit_executes_after_shutdown_integration(test_vm, caplo
 
     # (g) Design D9: the drain emitted the [blockcommit] intent INFO line.
     commit_lines = [r.message for r in caplog.records if "[blockcommit]" in r.message]
-    assert any("committing" in m and "mode=qemu-img" in m for m in commit_lines), (
+    assert any("collapsing" in m and "mode=qemu-img" in m for m in commit_lines), (
         f"Expected a [blockcommit] intent line from the drain, got: {commit_lines}"
     )
 
@@ -978,9 +978,7 @@ def test_external_snapshot_chain_probe_resolves_by_target_name(test_vm):
             ],
             timeout=60,
         )
-        assert snap_result.success, (
-            f"virsh snapshot-create-as {i + 1} failed: {snap_result.error}"
-        )
+        assert snap_result.success, f"virsh snapshot-create-as {i + 1} failed: {snap_result.error}"
         time.sleep(0.5)
 
     # The domain's active source is now the newest overlay, NOT the base.

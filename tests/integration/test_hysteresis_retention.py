@@ -3,22 +3,22 @@
 Validates against a disposable test VM (``test_vm`` fixture) what the
 mock-based core suite can only approximate:
 
-- ``test_hysteresis_multi_run_collapse_real_chain`` — end-to-end
-  grow-to-threshold / collapse-to-floor with the per-run commit cap on a
-  real backing chain: exactly ``cap`` commits per run, the persisted
-  ``collapse_in_progress`` phase observable in the JSON state file after
-  each capped run, convergence to the floor ``L`` after
-  ``ceil((N-L)/cap)`` runs, backing-chain integrity, and re-trigger after
-  the chain grows past ``H`` again.
+- ``test_hysteresis_single_run_bulk_collapse_real_chain`` — end-to-end
+  grow-to-threshold / collapse-to-floor with the single-shot bulk
+  blockcommit (design D1) on a real backing chain: exactly ONE
+  ``virsh blockcommit`` segment command per prune, the chain shrinks by
+  exactly ``N − L`` in one run, the floor ``L`` files survive, and the
+  VM keeps running.
 - ``test_hysteresis_default_mode_no_phase_below_threshold_real_chain`` —
   the default ``"hysteresis"`` mode below the trigger threshold grows:
-  no blockcommit happens and the state file NEVER contains the
-  ``collapse_in_progress`` key.
-- ``test_hysteresis_dry_run_zero_mutation_real_chain`` — dry-run with a
-  persisted phase + deep chain: state-file and snapshot-file bytes are
-  identical before/after, no ``virsh blockcommit`` executes, no lifecycle
-  manager is created, and the predicted blockcommit batch names exactly
-  the oldest ``min(N-L, cap)`` snapshots.
+  no blockcommit happens and all snapshot files survive.  (The removed
+  ``collapse_in_progress`` phase key is no longer part of the state
+  schema at all — nothing to assert about it.)
+- ``test_hysteresis_dry_run_zero_mutation_real_chain`` — dry-run on a
+  deep chain: state-file and snapshot-file bytes are identical
+  before/after, no ``virsh blockcommit`` executes, no lifecycle manager
+  is created, and the predicted blockcommit batch names exactly the
+  FULL uncapped ``N − L`` oldest snapshots.
 
 All tests require a running libvirt daemon and are marked
 ``@pytest.mark.integration``.  Run only when explicitly requested::
@@ -61,13 +61,13 @@ def _build_core(
     mode: str | None = "hysteresis",
     h: int = 8,
     floor: int = 3,
-    cap: int = 2,
     steady_chain_length: int = 4,
 ) -> tuple[Core, VMConfig, JsonStateManager]:
     """Build a Core instance with a JSON-backed state manager.
 
-    The JSON state manager persists ``collapse_in_progress`` on disk so
-    the tests can assert the phase marker in the state file itself.
+    The collapse is a single uncapped bulk blockcommit — there is no
+    per-run commit cap and no persisted ``collapse_in_progress`` phase,
+    so ``GlobalConfig`` carries no ``max_commits_per_run``.
 
     ``mode=None`` builds the VM WITHOUT an explicit
     ``snapshot_retention_mode`` so the production default
@@ -111,7 +111,7 @@ def _build_core(
             ],
         )
     config = MockConfigFacade(
-        global_config=GlobalConfig(max_commits_per_run=cap),
+        global_config=GlobalConfig(),
         vms=[vm_config],
     )
     factory = DefaultFactory(shell=shell, state=state)
@@ -149,13 +149,6 @@ def _state_file(state_dir: Path, vm_name: str) -> Path:
     return state_dir / f"{vm_name}.json"
 
 
-def _collapse_phase_from_file(state_dir: Path, vm_name: str) -> list[str]:
-    """Return the ``collapse_in_progress`` list straight from the state file."""
-    path = _state_file(state_dir, vm_name)
-    data = json.loads(path.read_text())
-    return list(data.get("collapse_in_progress", []))
-
-
 def _committed_count(result) -> int:
     """Count the snapshot_delete actions (one per committed snapshot)."""
     return len([a for a in result.actions if a.action == "snapshot_delete"])
@@ -183,7 +176,8 @@ def _backing_chain_length(tip_path: Path, shell: SubprocessShell) -> int | None:
 class RecordingShell(IShell):
     """IShell wrapper that delegates to SubprocessShell and records commands.
 
-    Used to assert that dry-run mode never issues ``virsh blockcommit``.
+    Used to assert that a prune runs exactly ONE ``virsh blockcommit``
+    (and that dry-run mode never issues one at all).
     """
 
     def __init__(self, delegate: SubprocessShell) -> None:
@@ -224,23 +218,23 @@ class RecordingShell(IShell):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 1: Multi-run capped collapse converges to the floor
+# Test 1: Single-run bulk collapse converges to the floor
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
-def test_hysteresis_multi_run_collapse_real_chain(test_vm, caplog):
-    """End-to-end hysteresis collapse on a real VM with cap=2.
+def test_hysteresis_single_run_bulk_collapse_real_chain(test_vm, caplog):
+    """A single bulk blockcommit collapses the full ``N − L`` segment.
 
-    1. Start VM, create 9 snapshots (N=9 > H=8) with H=8, L=3, cap=2.
-    2. Run ``core.prune`` three times: each run commits exactly 2
-       (the cap), the state file's ``collapse_in_progress`` contains
-       ``vda`` after each capped run, and the chain converges to the
-       floor N==3 after ``ceil((9-3)/2) == 3`` further runs.
-    3. Verify backing-chain integrity with ``qemu-img check --force-share``
-       and ``qemu-img info --backing-chain``.
-    4. Grow the chain past H again and assert the collapse re-triggers.
+    1. Start VM, create 9 snapshots (N=9 > H=8) with H=8, L=3.
+    2. Run ``core.prune`` ONCE through a recording shell.
+    3. Assert: exactly ONE ``virsh blockcommit`` segment command (with
+       ``--top`` = the newest removable snapshot); the chain shrank by
+       exactly ``N − L = 6``; the oldest 6 overlay files are deleted;
+       the newest L=3 floor files survive; the VM keeps running; the
+       intent/success log lines use the ``collapsing``/``collapsed``
+       wording (design D9).
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -250,104 +244,100 @@ def test_hysteresis_multi_run_collapse_real_chain(test_vm, caplog):
     tmpdir: Path = test_vm["tmpdir"]
     state_dir = tmpdir / "state"
 
+    recording = RecordingShell(shell)
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3, cap=2
+        recording,
+        vm_name,
+        base_image,
+        snapshot_dir,
+        target_dir,
+        state_dir,
+        h=8,
+        floor=3,
     )
-    _start_vm(shell, vm_name)
+    _start_vm(recording, vm_name)
 
     # Grow past the threshold: N = 9 > H = 8.
     snaps = _create_snapshots(core, vm_config, 9)
     assert len(snaps) == 9
     assert len(state.get_snapshots(vm_name)) == 9
 
-    # ── Run 1: capped collapse 9 → 7 ─────────────────────────────────
+    # Chain length before: base + 9 overlays = 10.
+    chain_len_before = _backing_chain_length(snaps[-1].path, recording)
+    assert chain_len_before == 10, f"Expected chain base + 9 overlays, got {chain_len_before}"
+
+    # ── ONE prune collapses the whole segment ─────────────────────────
     caplog.clear()
     with caplog.at_level(logging.INFO):
         result = core.prune(vm_name)
-    assert result.results[0].success, f"prune run 1 failed: {result.results[0].error}"
-    committed = _committed_count(result)
-    assert committed <= 2, f"Cap violated: {committed} commits in one run"
-    assert committed == 2, f"Expected exactly cap=2 commits, got {committed}"
-    assert len(state.get_snapshots(vm_name)) == 7
-    phase = _collapse_phase_from_file(state_dir, vm_name)
-    assert "vda" in phase, f"collapse_in_progress must contain vda after capped run, got {phase}"
-    assert any("collapse phase started" in r.message for r in caplog.records), (
-        "Trigger must log the collapse start"
+    assert result.results[0].success, f"prune failed: {result.results[0].error}"
+
+    # (a) Exactly ONE virsh blockcommit segment command.
+    blockcommit_cmds = [c for c in recording.commands if "blockcommit" in c]
+    assert len(blockcommit_cmds) == 1, (
+        f"Bulk collapse must run exactly ONE virsh blockcommit, got {len(blockcommit_cmds)}: "
+        f"{blockcommit_cmds}"
+    )
+    cmd = blockcommit_cmds[0]
+    assert "--base" in cmd and "--top" in cmd and "--delete" in cmd, (
+        f"Segment command must carry --base/--top/--delete: {cmd}"
+    )
+    top_idx = cmd.index("--top")
+    assert cmd[top_idx + 1] == str(snaps[5].path), (
+        f"--top must be the newest removable snapshot (snap #6), got {cmd[top_idx + 1]}"
     )
 
-    # ── Run 2: capped collapse 7 → 5 ─────────────────────────────────
-    result = core.prune(vm_name)
-    assert result.results[0].success, f"prune run 2 failed: {result.results[0].error}"
-    assert _committed_count(result) == 2
-    assert len(state.get_snapshots(vm_name)) == 5
-    phase = _collapse_phase_from_file(state_dir, vm_name)
-    assert "vda" in phase, f"Phase must persist through capped run, got {phase}"
-
-    # ── Run 3: collapse completes at the floor 5 → 3 ─────────────────
-    result = core.prune(vm_name)
-    assert result.results[0].success, f"prune run 3 failed: {result.results[0].error}"
-    assert _committed_count(result) == 2
-    assert len(state.get_snapshots(vm_name)) == 3
-    assert any(
-        "collapse phase complete" in r.message for r in caplog.records
-    ) or _collapse_phase_from_file(state_dir, vm_name) == [], (
-        "Phase must be cleared once the floor is reached"
+    # (b) Chain shrank by exactly N − L = 6.
+    remaining = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
+    assert len(remaining) == 3, f"Expected the floor L=3 to survive, got {len(remaining)}"
+    chain_len_after = _backing_chain_length(remaining[-1].path, recording)
+    assert chain_len_after is not None, "qemu-img info --backing-chain must succeed"
+    assert chain_len_before - chain_len_after == 6, (
+        f"Chain must shrink by exactly N-L=6: before={chain_len_before}, after={chain_len_after}"
     )
 
-    # ── Backing-chain integrity ──────────────────────────────────────
-    snaps = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
-    assert len(snaps) == 3
-    tip = snaps[-1].path
-    assert tip.exists(), f"Tip snapshot must exist: {tip}"
-    check = shell.run(["qemu-img", "check", "--force-share", str(tip)], timeout=60)
-    assert check.success, f"qemu-img check failed: {check.error}"
-    assert "No errors" in check.stdout, f"Chain integrity errors: {check.stdout}"
+    # (c) The merge-set files are deleted; the floor files survive.
+    for sn in snaps[:6]:
+        assert not sn.path.exists(), f"Merged snapshot file must be deleted by --delete: {sn.path}"
+    for sn in snaps[6:]:
+        assert sn.path.exists(), f"Floor snapshot file must survive: {sn.path}"
 
-    # NOTE: the backing chain includes the base image, so its length is
-    # state_count + 1 (the test-plan formula "length == state count"
-    # omits the base entry).
-    chain_len = _backing_chain_length(tip, shell)
-    assert chain_len is not None, "qemu-img info --backing-chain must succeed"
-    assert chain_len == len(snaps) + 1, (
-        f"Backing chain length must equal state count + base image: "
-        f"chain={chain_len}, state={len(snaps)}"
+    # (d) The audit trail records one snapshot_delete per merged snapshot.
+    assert _committed_count(result) == 6, (
+        f"Expected 6 snapshot_delete action records, got {_committed_count(result)}"
     )
-    for sn in snaps:
-        assert sn.path.exists(), f"Floor snapshot file must exist: {sn.path}"
 
-    # ── Grow again past H → collapse re-triggers ─────────────────────
-    _create_snapshots(core, vm_config, 6)
-    assert len(state.get_snapshots(vm_name)) == 9, "Chain must regrow to N=9"
-    caplog.clear()
-    with caplog.at_level(logging.INFO):
-        result = core.prune(vm_name)
-    assert result.results[0].success
-    assert _committed_count(result) == 2
-    assert len(state.get_snapshots(vm_name)) == 7
-    phase = _collapse_phase_from_file(state_dir, vm_name)
-    assert "vda" in phase, f"Collapse must re-trigger after regrowth, got {phase}"
-    assert any("collapse phase started" in r.message for r in caplog.records), (
-        "Re-trigger must log the collapse start again"
+    # (e) VM still running.
+    assert _vm_is_running(recording, vm_name), "VM should still be running"
+
+    # (f) Observability wording (design D9): intent + success lines.
+    commit_lines = [r.message for r in caplog.records if "[blockcommit]" in r.message]
+    assert any("collapsing 6 snapshot(s)" in m and "mode=virsh" in m for m in commit_lines), (
+        f"Expected 'collapsing 6 snapshot(s)' intent line, got: {commit_lines}"
+    )
+    assert any("collapsed 6 snapshot(s)" in m for m in commit_lines), (
+        f"Expected 'collapsed 6 snapshot(s)' success line, got: {commit_lines}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 2: Default mode (hysteresis) below the threshold writes no phase
+# Test 2: Default mode (hysteresis) below the threshold grows
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
 def test_hysteresis_default_mode_no_phase_below_threshold_real_chain(test_vm):
-    """Default ``"hysteresis"`` mode below the trigger threshold writes no phase.
+    """Default ``"hysteresis"`` mode below the trigger threshold grows.
 
     1. Start VM, create 5 snapshots with ``snapshot_chain_length=8`` and
        ``snapshot_preserve_min=3``; NO explicit ``snapshot_retention_mode``
        is set, so the production default ``"hysteresis"`` applies.
     2. N=5 is below the threshold H=8 → ``core.prune`` runs in the grow
        phase: NO blockcommit happens and all 5 snapshots survive.
-    3. The state file NEVER contains the ``collapse_in_progress`` key
-       (the hysteresis phase is only written once the chain crosses H).
+    3. The removed ``collapse_in_progress`` phase key is not part of the
+       state schema anymore — the assertion surface is the absence of
+       any commit, not the absence of a phase marker.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -358,9 +348,9 @@ def test_hysteresis_default_mode_no_phase_below_threshold_real_chain(test_vm):
     state_dir = tmpdir / "state"
 
     # Default mode is "hysteresis"; H=8, L=3, N=5 → grow phase, no commits.
-    # max_commits_per_run=12 → the cap cannot be the reason nothing commits.
+    recording = RecordingShell(shell)
     core, vm_config, state = _build_core(
-        shell,
+        recording,
         vm_name,
         base_image,
         snapshot_dir,
@@ -369,9 +359,8 @@ def test_hysteresis_default_mode_no_phase_below_threshold_real_chain(test_vm):
         mode=None,
         h=8,
         floor=3,
-        cap=12,
     )
-    _start_vm(shell, vm_name)
+    _start_vm(recording, vm_name)
     assert vm_config.snapshot_retention_mode == "hysteresis", (
         "Default retention mode must be hysteresis"
     )
@@ -379,25 +368,16 @@ def test_hysteresis_default_mode_no_phase_below_threshold_real_chain(test_vm):
     _create_snapshots(core, vm_config, 5)
     assert len(state.get_snapshots(vm_name)) == 5
 
-    state_file = _state_file(state_dir, vm_name)
-    raw_before = json.loads(state_file.read_text())
-    assert "collapse_in_progress" not in raw_before, (
-        "State file must not contain the phase key before pruning in the grow phase"
-    )
-
     result = core.prune(vm_name)
     assert result.results[0].success, f"prune failed: {result.results[0].error}"
 
     # Grow phase below H: NO blockcommit happens, all 5 snapshots remain.
-    assert _committed_count(result) == 0, (
-        "Below the hysteresis threshold nothing may be committed"
-    )
+    assert _committed_count(result) == 0, "Below the hysteresis threshold nothing may be committed"
     assert len(state.get_snapshots(vm_name)) == 5
 
-    raw_after = json.loads(state_file.read_text())
-    assert "collapse_in_progress" not in raw_after, (
-        "State file must NEVER contain collapse_in_progress below the threshold"
-    )
+    # No virsh blockcommit command was ever issued.
+    blockcommit_cmds = [c for c in recording.commands if "blockcommit" in c]
+    assert blockcommit_cmds == [], f"Grow phase must not execute blockcommit: {blockcommit_cmds}"
 
     # All 5 snapshot overlay files are still on disk.
     assert len(list(snapshot_dir.glob("*.qcow2"))) == 5, (
@@ -407,31 +387,32 @@ def test_hysteresis_default_mode_no_phase_below_threshold_real_chain(test_vm):
     # Chain intact: base + 5 snapshots.
     snaps = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
     tip = snaps[-1].path
-    chain_len = _backing_chain_length(tip, shell)
+    chain_len = _backing_chain_length(tip, recording)
     assert chain_len == len(snaps) + 1, (
         f"Chain must be base + {len(snaps)} snapshots, got {chain_len}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 3: Dry-run with a persisted phase is zero-mutation
+# Test 3: Dry-run on a deep chain is zero-mutation and names the FULL set
 # ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 @pytest.mark.timeout(3600)
 def test_hysteresis_dry_run_zero_mutation_real_chain(test_vm):
-    """Dry-run with a persisted collapse phase mutates nothing.
+    """Dry-run on a deep hysteresis chain mutates nothing.
 
-    1. Start VM, create 9 snapshots; run one REAL capped prune so the
-       phase is persisted (``collapse_in_progress == ["vda"]``) and
-       N = 7.
-    2. Rebuild Core with a recording shell and ``dry_run = True``.
-    3. Assert: state-file bytes identical; every snapshot file
+    1. Start VM, create 9 snapshots (H=8, L=3, no cap) — the chain sits
+       above the trigger threshold.
+    2. Capture the exact bytes of the state file and every snapshot file.
+    3. Rebuild Core on the same state dir with a recording shell and
+       ``dry_run = True``; run ``core.prune``.
+    4. Assert: state-file bytes identical; every snapshot file
        byte-identical; no ``virsh blockcommit`` command; no lifecycle
        manager created; ``result.actions == []``; the predicted
-       blockcommit batch names exactly the oldest ``min(N-L, cap)``
-       snapshots; the phase key is read but never written/cleared.
+       blockcommit batch names exactly the FULL uncapped ``N − L = 6``
+       oldest snapshots.
     """
     shell: SubprocessShell = test_vm["shell"]
     vm_name: str = test_vm["vm_name"]
@@ -442,28 +423,23 @@ def test_hysteresis_dry_run_zero_mutation_real_chain(test_vm):
     state_dir = tmpdir / "state"
 
     core, vm_config, state = _build_core(
-        shell, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3, cap=2
+        shell, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3
     )
     _start_vm(shell, vm_name)
     _create_snapshots(core, vm_config, 9)
-
-    # One REAL capped run: N=7, phase persisted in the JSON state file.
-    result = core.prune(vm_name)
-    assert result.results[0].success, f"real prune failed: {result.results[0].error}"
     snaps = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
-    assert len(snaps) == 7
-    assert "vda" in _collapse_phase_from_file(state_dir, vm_name)
+    assert len(snaps) == 9
 
     # Capture the exact bytes of the state file and every snapshot file.
     state_file = _state_file(state_dir, vm_name)
     state_bytes_before = state_file.read_bytes()
     snap_bytes_before = {p.name: p.read_bytes() for p in snapshot_dir.glob("*.qcow2")}
-    assert len(snap_bytes_before) == 7
+    assert len(snap_bytes_before) == 9
 
     # Rebuild Core on the same state dir with a recording shell.
     recording = RecordingShell(shell)
-    core2, vm_config2, state2 = _build_core(
-        recording, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3, cap=2
+    core2, _, _ = _build_core(
+        recording, vm_name, base_image, snapshot_dir, target_dir, state_dir, h=8, floor=3
     )
 
     # Spy on the lifecycle manager: dry-run must never create one.
@@ -478,13 +454,15 @@ def test_hysteresis_dry_run_zero_mutation_real_chain(test_vm):
     factory.create_lifecycle_manager = _spy_create_lifecycle  # type: ignore[method-assign]
 
     core2.dry_run = True
-    result2 = core2.run(vm_name)
+    # ``prune`` (not ``run``) so no simulated snapshot is added: N stays
+    # 9 and the predicted batch is exactly the oldest N − L = 6.
+    result2 = core2.prune(vm_name)
 
     # (a) Zero executed actions.
     assert result2.dry_run is True, f"Expected dry_run=True, got {result2.dry_run}"
     assert result2.actions == [], f"Expected no executed actions, got {result2.actions}"
 
-    # (b) State file byte-identical (phase read but never written/cleared).
+    # (b) State file byte-identical (dry-run writes nothing).
     assert state_file.read_bytes() == state_bytes_before, (
         "State file must be byte-identical after a dry-run"
     )
@@ -504,20 +482,17 @@ def test_hysteresis_dry_run_zero_mutation_real_chain(test_vm):
         f"Dry-run must not create a lifecycle manager, got {lifecycle_calls}"
     )
 
-    # (f) Predicted blockcommit batch == exactly min(N-L, cap) oldest.
+    # (f) Predicted blockcommit batch == the FULL uncapped N − L set.
     preds = [p for p in result2.predictions if p.action == "blockcommit"]
     assert len(preds) == 1, f"Expected one blockcommit prediction per disk, got {len(preds)}"
-    expected_count = min(len(snaps) - 3, 2)
-    assert expected_count == 2, "Sanity: min(N-L, cap) must be 2 for this chain"
-    expected_names = [s.name for s in snaps[:expected_count]]
+    expected_names = [s.name for s in snaps[:6]]
     for name in expected_names:
         assert name in preds[0].name, (
-            f"Predicted blockcommit must name the oldest {expected_count} snapshots; "
+            f"Predicted blockcommit must name the full oldest N-L=6 set; "
             f"{name!r} missing from {preds[0].name!r}"
         )
-
-    # (g) The phase is unchanged after the dry-run.
-    assert "vda" in _collapse_phase_from_file(state_dir, vm_name), (
-        "Dry-run must not clear the persisted collapse phase"
-    )
-    assert "vda" in state2.get_collapse_in_progress(vm_name)
+    newest_names = [s.name for s in snaps[6:]]
+    for name in newest_names:
+        assert name not in preds[0].name, (
+            f"Prediction must NOT name a floor snapshot; {name!r} found in {preds[0].name!r}"
+        )

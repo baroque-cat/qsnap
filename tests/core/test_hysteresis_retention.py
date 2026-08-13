@@ -1,11 +1,13 @@
 """Core hysteresis snapshot retention tests (retention-unit group).
 
-Covers the ``hysteresis-snapshot-retention`` change: grow-to-threshold /
+Covers the ``bulk-collapse-blockcommit`` change: grow-to-threshold /
 collapse-to-floor retention in ``snapshot_retention_mode = "hysteresis"``
-with a persisted ``collapse_in_progress`` phase and the shared
-``max_commits_per_run`` per-run cap.
+with a SINGLE-RUN UNCAPPED bulk collapse — the persisted
+``collapse_in_progress`` phase and the ``max_commits_per_run`` per-run cap
+no longer exist.
 
-All tests drive the unit seam ``Core._evaluate_snapshot_retention`` with
+All tests drive the unit seam ``Core._evaluate_snapshot_retention`` (and
+``Core._blockcommit_snapshots`` for the merge-all-in-one-run test) with
 ``MockVMModuleFactory`` + ``InMemoryStateManager`` and a real
 ``TimeBasedRetention`` engine where count-based keep/remove decisions are
 required — zero real virsh/qemu-img calls (TESTING.md).
@@ -17,8 +19,6 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from qsnap.core import Core
 from qsnap.models.config import GlobalConfig, RetentionPolicy
@@ -40,15 +40,13 @@ def _hysteresis_vm(make_vm_config, H=72, L=24, **kwargs):
     )
 
 
-def _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=None):
-    """Build Core with a MockConfigFacade; ``max_commits_per_run=None`` uses the
-    default (12), an explicit int pins the cap (0 = unlimited)."""
-    global_cfg = (
-        GlobalConfig()
-        if max_commits_per_run is None
-        else GlobalConfig(max_commits_per_run=max_commits_per_run)
-    )
-    config = MockConfigFacade(global_config=global_cfg, vms=[vm])
+def _build_core(mock_factory, mock_state, mock_shell, vm, global_config=None):
+    """Build Core with a MockConfigFacade.
+
+    ``global_config`` defaults to ``GlobalConfig()`` — the removed
+    ``max_commits_per_run`` option does not exist on the model anymore.
+    """
+    config = MockConfigFacade(global_config=global_config or GlobalConfig(), vms=[vm])
     return Core(
         config=config,
         factory=mock_factory,
@@ -90,29 +88,37 @@ def _simulate_commit(mock_state, names, vm="testvm"):
         assert mock_state.remove_snapshot(vm, name), f"snapshot {name} not in state"
 
 
+def _state_has_no_collapse_key(mock_state) -> bool:
+    """True when no persisted ``collapse_in_progress`` key exists anywhere."""
+    return all(
+        "collapse_in_progress" not in vm_state
+        for vm_state in mock_state._state.values()
+        if isinstance(vm_state, dict)
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Hysteresis mode selection
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_default_hysteresis_mode_no_phase_state_written(
+def test_default_mode_is_hysteresis_single_run_collapse(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
     caplog,
 ):
-    """Default ``hysteresis`` mode: grow phase at the threshold, no collapse writes."""
-    # No explicit snapshot_retention_mode → resolves to the production
-    # default "hysteresis": chain_length is the trigger threshold H, and
-    # preserve_min the collapse floor L.
+    """Default ``snapshot_retention_mode`` is hysteresis: grow to H, then
+    collapse to L in a SINGLE run — no cap batching, no phase state."""
+    # No explicit snapshot_retention_mode → VMConfig default "hysteresis".
     vm = make_vm_config(
         name="testvm",
         snapshot_chain_length=8,
         snapshot_preserve_min=3,
     )
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 8)
 
     with caplog.at_level(logging.DEBUG, logger="qsnap.core"):
@@ -122,13 +128,17 @@ def test_default_hysteresis_mode_no_phase_state_written(
     # N == H (8): grow phase — nothing marked, every snapshot kept.
     assert result.remove == []
     assert result.keep == _names(1, 8)
-    # No collapse-phase state is ever written while growing.
-    assert mock_state.get_collapse_in_progress("testvm") == []
     assert "collapse phase" not in caplog.text
-    assert (
-        "[retention] testvm/vda: grow phase (N=8 <= threshold 8) — no commits"
-        in caplog.text
-    )
+    assert _state_has_no_collapse_key(mock_state)
+    assert "[retention] testvm/vda: grow phase (N=8 <= threshold 8) — no commits" in caplog.text
+
+    # Single-run collapse: N=9 > H=8 → all N-L=6 oldest marked at once.
+    _record_snapshots(mock_state, 1, start=9)
+    result = core._evaluate_snapshot_retention(vm)
+    assert result is not None
+    assert result.remove == _names(1, 6)
+    assert result.keep == _names(7, 9)
+    assert _state_has_no_collapse_key(mock_state)
 
 
 def test_hysteresis_mode_interprets_chain_length_as_threshold_floor(
@@ -140,11 +150,11 @@ def test_hysteresis_mode_interprets_chain_length_as_threshold_floor(
     """Hysteresis: chain_length is the trigger H, preserve_min is the floor L.
 
     With H=72, L=24 and N=73 the engine is invoked with effective keep-count
-    L (24) — NOT H — and N - L = 49 snapshots are marked (pre-cap).
+    L (24) — NOT H — and the full N - L = 49 snapshots are marked (uncapped).
     """
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
 
     with patch.object(
@@ -166,7 +176,7 @@ def test_hysteresis_mode_interprets_chain_length_as_threshold_floor(
     assert isinstance(floor_policy, RetentionPolicy)
     assert floor_policy.chain_length == 24  # L, not the H=72 threshold
     assert floor_policy.preserve_min == 24  # floor trim passes L through
-    # Oldest N - L = 49 marked for commit (pre-cap, cap pinned off).
+    # The FULL oldest N - L = 49 are marked — no cap truncation.
     assert result.remove == _names(1, 49)
     assert result.keep == _names(50, 73)
 
@@ -183,10 +193,10 @@ def test_chain_at_threshold_commits_nothing(
     mock_shell,
     caplog,
 ):
-    """N == H (72): grow phase — empty remove set, no phase, no blockcommit."""
+    """N == H (72): grow phase — empty remove set, no blockcommit."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 72)
 
     with caplog.at_level(logging.DEBUG, logger="qsnap.core"):
@@ -195,13 +205,10 @@ def test_chain_at_threshold_commits_nothing(
     assert result is not None
     assert result.remove == []
     assert result.keep == _names(1, 72)
-    assert mock_state.get_collapse_in_progress("testvm") == []
     # No blockcommit command was issued during evaluation.
     assert mock_shell.call_history == []
-    assert (
-        "[retention] testvm/vda: grow phase (N=72 <= threshold 72) — no commits"
-        in caplog.text
-    )
+    assert _state_has_no_collapse_key(mock_state)
+    assert "[retention] testvm/vda: grow phase (N=72 <= threshold 72) — no commits" in caplog.text
 
 
 def test_growth_phase_accumulates_without_commits(
@@ -220,14 +227,16 @@ def test_growth_phase_accumulates_without_commits(
     with caplog.at_level(logging.DEBUG, logger="qsnap.core"):
         for added in (0, 20, 22):  # N = 30 → 50 → 72
             if added:
-                _record_snapshots(mock_state, added, start=len(mock_state.get_snapshots("testvm")) + 1)
+                _record_snapshots(
+                    mock_state, added, start=len(mock_state.get_snapshots("testvm")) + 1
+                )
             n = len(mock_state.get_snapshots("testvm"))
             result = core._evaluate_snapshot_retention(vm)
             assert result is not None
             assert result.remove == [], f"run with N={n} must not commit"
             assert result.keep == _names(1, n)
-            assert mock_state.get_collapse_in_progress("testvm") == []
             assert "collapse phase" not in caplog.text
+            assert _state_has_no_collapse_key(mock_state)
             assert (
                 f"[retention] testvm/vda: grow phase (N={n} <= threshold 72) — no commits"
                 in caplog.text
@@ -239,11 +248,8 @@ def test_growth_phase_accumulates_without_commits(
         result = core._evaluate_snapshot_retention(vm)
     assert result is not None
     assert result.remove == []
-    assert mock_state.get_collapse_in_progress("testvm") == []
-    assert (
-        "[dry-run] testvm/vda: grow phase (N=72 <= threshold 72) — no commits"
-        in caplog.text
-    )
+    assert _state_has_no_collapse_key(mock_state)
+    assert "[dry-run] testvm/vda: grow phase (N=72 <= threshold 72) — no commits" in caplog.text
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -251,16 +257,16 @@ def test_growth_phase_accumulates_without_commits(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_trigger_marks_oldest_n_minus_l_before_cap(
+def test_trigger_marks_all_oldest_n_minus_l(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """N=73 > H=72, cap off: the oldest N - L = 49 are marked, newest 24 kept."""
+    """N=73 > H=72: the FULL oldest N - L = 49 are marked, newest 24 kept."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
 
     result = core._evaluate_snapshot_retention(vm)
@@ -268,7 +274,60 @@ def test_trigger_marks_oldest_n_minus_l_before_cap(
     assert result is not None
     assert result.remove == _names(1, 49)
     assert result.keep == _names(50, 73)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
+    assert _state_has_no_collapse_key(mock_state)
+
+
+def test_trigger_collapse_merges_all_49_in_one_run(
+    make_vm_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """N=73 > H=72: ``_blockcommit_snapshots`` drives ONE lifecycle-manager
+    call with the FULL 49-item merge set — a single bulk blockcommit."""
+    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
+    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
+    core = _build_core(
+        mock_factory,
+        mock_state,
+        mock_shell,
+        vm,
+        global_config=GlobalConfig(
+            chain_verify_before_commit=False,
+            chain_verify_after_commit=False,
+        ),
+    )
+    _record_snapshots(mock_state, 73)
+
+    result = core._evaluate_snapshot_retention(vm)
+    assert result is not None
+    assert result.remove == _names(1, 49)
+
+    with (
+        patch("os.path.exists", return_value=True),
+        patch.object(
+            mock_factory._lifecycle_manager,
+            "blockcommit",
+            wraps=mock_factory._lifecycle_manager.blockcommit,
+        ) as manager_spy,
+        patch.object(core, "_refresh_domain_backing_store"),
+    ):
+        core._blockcommit_snapshots(vm, result)
+
+    # Exactly ONE manager call carrying the whole uncapped merge set.
+    assert manager_spy.call_count == 1, (
+        f"the collapse must be a single bulk blockcommit, "
+        f"got {manager_spy.call_count} manager calls"
+    )
+    args, kwargs = manager_spy.call_args
+    merged = args[1]
+    assert [s.name for s in merged] == _names(1, 49), (
+        f"the single manager call must merge the full oldest N-L=49 set, "
+        f"got {len(merged)} snapshots"
+    )
+    assert kwargs["disk"] == "vda"
+    # The collapse converged to the floor: the newest 24 snapshots survive.
+    assert [s.name for s in mock_state.get_snapshots("testvm")] == _names(50, 73)
 
 
 def test_floor_snapshots_never_in_remove_set(
@@ -277,215 +336,50 @@ def test_floor_snapshots_never_in_remove_set(
     mock_state,
     mock_shell,
 ):
-    """The newest L snapshots are never marked, even when the cap truncates."""
+    """The newest L snapshots are never marked — the remove set is the FULL
+    N-L oldest set with the floor untouched."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
 
     result = core._evaluate_snapshot_retention(vm)
 
     assert result is not None
-    assert result.remove == _names(1, 12)
+    assert result.remove == _names(1, 49)  # full uncapped N - L set
     floor_snaps = set(_names(50, 73))
     assert set(result.remove).isdisjoint(floor_snaps)
     assert floor_snaps.issubset(set(result.keep))
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  Persisted collapse phase
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_phase_persists_after_capped_run_continues_next_run(
+def test_deferred_collapse_retriggers_naturally_without_phase(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """A capped run keeps the phase; the next run continues collapsing below H."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
-    _record_snapshots(mock_state, 100)
-
-    # Run 1: trigger fires, 12 oldest marked, phase persisted.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(1, 12)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    _simulate_commit(mock_state, result.remove)  # N → 88
-
-    # Run 2: phase active → collapse continues.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(13, 24)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    _simulate_commit(mock_state, result.remove)  # N → 76
-
-    # Run 3.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(25, 36)
-    _simulate_commit(mock_state, result.remove)  # N → 64
-
-    # Run 4: N=64 is BELOW the H=72 trigger, but the persisted phase keeps
-    # collapsing without requiring N > H.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert len(mock_state.get_snapshots("testvm")) == 64
-    assert result.remove == _names(37, 48)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-
-
-def test_phase_cleared_when_floor_reached(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """After the chain converges to the floor, the phase is cleared."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
-    _record_snapshots(mock_state, 100)
-
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(1, 76)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    _simulate_commit(mock_state, result.remove)  # N → 24 (floor)
-
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == []
-    assert result.keep == _names(77, 100)
-    assert mock_state.get_collapse_in_progress("testvm") == []
-    assert mock_shell.call_history == []  # nothing committed at/below the floor
-
-
-def test_phase_persisted_before_first_blockcommit(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """The phase marker is written during evaluation — before any commit command.
-
-    Evaluation precedes the blockcommit step (design D2); the marker must be
-    durable before the first ``virsh blockcommit`` is invoked.  Asserting the
-    shell saw zero commands while the phase is already persisted pins that
-    ordering at the unit seam.
-    """
+    """A deferred collapse leaves N > H; the next run re-marks the identical
+    oldest N - L set — no persisted phase is read or written."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
     core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
-    assert mock_shell.call_history == []
 
-    with patch.object(
-        mock_state,
-        "set_collapse_in_progress",
-        wraps=mock_state.set_collapse_in_progress,
-    ) as set_spy:
-        result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    set_spy.assert_called_once_with("testvm", "vda")
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    # No shell command (no blockcommit) was issued while the marker was set.
-    assert mock_shell.call_history == []
-
-
-def test_defensive_phase_clear_on_external_shrink(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """Phase active but N <= L (external shrink): phase cleared, nothing marked."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm)
-    mock_state.set_collapse_in_progress("testvm", "vda")
-    _record_snapshots(mock_state, 20)  # below the floor (operator restore / healing)
-
-    with caplog.at_level(logging.INFO, logger="qsnap.core"):
-        result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    assert result.remove == []
-    assert result.keep == _names(1, 20)
-    assert mock_state.get_collapse_in_progress("testvm") == []
-    assert (
-        "[retention] testvm/vda: collapse phase complete (N=20, floor=24)"
-        in caplog.text
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Per-run commit cap
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_cap_truncates_collapse_keeps_oldest(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Cap 12 over a 49-item remove set keeps the 12 OLDEST snapshots."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
-    _record_snapshots(mock_state, 73)
-
+    # Run 1: the trigger marks 49, but the commit is deferred — the
+    # snapshot state is untouched (N stays 73 > H=72).
     result = core._evaluate_snapshot_retention(vm)
-
     assert result is not None
-    assert result.remove == _names(1, 12)  # oldest prefix, capped
-    assert result.keep == _names(50, 73)  # newest floor entries untouched
+    assert result.remove == _names(1, 49)
+    assert len(mock_state.get_snapshots("testvm")) == 73
+    assert _state_has_no_collapse_key(mock_state)
 
-
-def test_cap_zero_unlimited(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """max_commits_per_run = 0 → all 49 marked in the same run."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
-    _record_snapshots(mock_state, 73)
-
+    # Run 2: N > H still holds → the identical oldest N - L set is marked
+    # again, purely from the trigger condition.
     result = core._evaluate_snapshot_retention(vm)
-
     assert result is not None
     assert result.remove == _names(1, 49)
     assert result.keep == _names(50, 73)
-
-
-def test_cap_never_breaks_floor(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Truncation keeps the floor invariant: the newest L are never marked."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
-    _record_snapshots(mock_state, 100)
-
-    result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    assert result.remove == _names(1, 12)
-    floor_snaps = set(_names(77, 100))
-    assert set(result.remove).isdisjoint(floor_snaps)
-    assert floor_snaps.issubset(set(result.keep))
+    assert _state_has_no_collapse_key(mock_state)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -493,14 +387,15 @@ def test_cap_never_breaks_floor(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_trigger_logs_collapse_start_info(
+def test_trigger_logs_collapse_initiation_info_line(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
     caplog,
 ):
-    """The trigger emits the collapse-started INFO line naming vm, disk, counts."""
+    """The trigger emits the collapse-initiation INFO line naming vm, disk,
+    merge count (49), current count (73), and floor (24)."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
     core = _build_core(mock_factory, mock_state, mock_shell, vm)
@@ -510,11 +405,10 @@ def test_trigger_logs_collapse_start_info(
         core._evaluate_snapshot_retention(vm)
 
     assert (
-        "[retention] testvm/vda: collapse phase started (N=73, merging 49, floor=24)"
-        in caplog.text
+        "[retention] testvm/vda: collapse triggered (N=73, merging 49, floor=24) "
+        "— single bulk blockcommit" in caplog.text
     )
-    assert "collapse phase active" not in caplog.text
-    assert "collapse phase complete" not in caplog.text
+    assert "collapse phase" not in caplog.text
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -522,7 +416,7 @@ def test_trigger_logs_collapse_start_info(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_hysteresis_uses_threshold_floor_phase_not_steady_rule(
+def test_hysteresis_uses_threshold_floor_not_steady_rule(
     make_vm_config,
     mock_factory,
     mock_state,
@@ -532,12 +426,12 @@ def test_hysteresis_uses_threshold_floor_phase_not_steady_rule(
     """Hysteresis does NOT apply the steady count-based rule mid-band.
 
     With H=72, L=24 and N=50 the steady rule (chain_length=24) would remove
-    26; hysteresis instead grows (empty remove) until the phase is active,
-    then collapses to the floor.
+    26; hysteresis instead grows (empty remove).  Above H the FULL N - L
+    collapse fires — the steady rule never applies.
     """
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 50)
 
     with caplog.at_level(logging.DEBUG, logger="qsnap.core"):
@@ -546,17 +440,15 @@ def test_hysteresis_uses_threshold_floor_phase_not_steady_rule(
     assert result is not None
     assert result.remove == []  # steady rule would remove 26 here
     assert result.keep == _names(1, 50)
-    assert (
-        "[retention] testvm/vda: grow phase (N=50 <= threshold 72) — no commits"
-        in caplog.text
-    )
+    assert "[retention] testvm/vda: grow phase (N=50 <= threshold 72) — no commits" in caplog.text
 
-    # Phase active → collapse to the floor despite N (50) being below H (72).
-    mock_state.set_collapse_in_progress("testvm", "vda")
+    # Above the threshold (N=73 > H=72): the FULL N - L = 49 collapse fires.
+    _record_snapshots(mock_state, 23, start=51)
     result = core._evaluate_snapshot_retention(vm)
     assert result is not None
-    assert result.remove == _names(1, 26)
-    assert result.keep == _names(27, 50)
+    assert result.remove == _names(1, 49)
+    assert result.keep == _names(50, 73)
+    assert _state_has_no_collapse_key(mock_state)
 
 
 def test_hysteresis_collapse_respects_floor(
@@ -568,7 +460,7 @@ def test_hysteresis_collapse_respects_floor(
     """Uncapped collapse marks N - L oldest; the newest L stay put."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 100)
 
     result = core._evaluate_snapshot_retention(vm)
@@ -584,7 +476,8 @@ def test_steady_mode_branch_identical_to_legacy(
     mock_state,
     mock_shell,
 ):
-    """Steady mode (cap off) reproduces the pre-change count-based result."""
+    """Steady mode reproduces the pre-change count-based result — the shared
+    cap is gone but the keep/remove decision is unchanged."""
     vm = make_vm_config(
         name="testvm",
         snapshot_retention_mode="steady",
@@ -592,7 +485,7 @@ def test_steady_mode_branch_identical_to_legacy(
         snapshot_preserve_min=0,
     )
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
 
     result = core._evaluate_snapshot_retention(vm)
@@ -601,21 +494,26 @@ def test_steady_mode_branch_identical_to_legacy(
     # Legacy: keep the newest chain_length=24, remove the oldest 49 excess.
     assert result.remove == _names(1, 49)
     assert result.keep == _names(50, 73)
-    # Steady mode never touches the collapse phase.
-    assert mock_state.get_collapse_in_progress("testvm") == []
+    # Steady mode never touches the (removed) collapse phase.
+    assert _state_has_no_collapse_key(mock_state)
 
 
-def test_collapse_evaluation_engine_floor_and_cap(
+def test_collapse_writes_no_phase_state(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
 ):
-    """Collapse evaluates via the pure engine with keep-count L, then caps."""
+    """The collapse evaluates via the engine with keep-count L, produces the
+    FULL N-L remove set, and never writes a ``collapse_in_progress`` key."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
+    core = _build_core(mock_factory, mock_state, mock_shell, vm)
     _record_snapshots(mock_state, 73)
+
+    from copy import deepcopy
+
+    state_before = deepcopy(mock_state._state)
 
     with patch.object(
         mock_factory,
@@ -625,26 +523,27 @@ def test_collapse_evaluation_engine_floor_and_cap(
         result = core._evaluate_snapshot_retention(vm)
 
     assert result is not None
-    # Outer VM policy + the collapse branch's floor policy.
-    assert engine_spy.call_count == 2
+    # The engine invoked for the decision uses keep-count = L (24).
     floor_policy = engine_spy.call_args_list[-1].args[0]
     assert isinstance(floor_policy, RetentionPolicy)
-    assert floor_policy.chain_length == 24  # effective keep-count = floor L
+    assert floor_policy.chain_length == 24
     assert floor_policy.preserve_min == 24
-    # Final remove set is the 12 oldest (cap applied after floor trim).
-    assert result.remove == _names(1, 12)
-    # Phase persisted for the commit step.
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
+    # The full uncapped N - L = 49 set is marked.
+    assert result.remove == _names(1, 49)
+    # Evaluation is read-only with respect to the collapse: the state is
+    # byte-identical and no phase key ever appears.
+    assert deepcopy(mock_state._state) == state_before
+    assert _state_has_no_collapse_key(mock_state)
 
 
-def test_below_threshold_inactive_phase_no_phase_write(
+def test_below_threshold_remove_set_empty(
     make_vm_config,
     mock_factory,
     mock_state,
     mock_shell,
     caplog,
 ):
-    """N < H with no phase: empty remove, no marker written, grow log only."""
+    """N < H: empty remove, grow log only — no phase marker, no commits."""
     vm = _hysteresis_vm(make_vm_config, H=72, L=24)
     mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
     core = _build_core(mock_factory, mock_state, mock_shell, vm)
@@ -656,220 +555,6 @@ def test_below_threshold_inactive_phase_no_phase_write(
     assert result is not None
     assert result.remove == []
     assert result.keep == _names(1, 50)
-    assert mock_state.get_collapse_in_progress("testvm") == []
     assert "collapse phase" not in caplog.text
-    assert (
-        "[retention] testvm/vda: grow phase (N=50 <= threshold 72) — no commits"
-        in caplog.text
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Collapse phase completion handling
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_collapse_complete_info_logged_at_floor(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """Floor reached: phase cleared and the collapse-complete INFO line emitted."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm)
-    mock_state.set_collapse_in_progress("testvm", "vda")
-    _record_snapshots(mock_state, 24)
-
-    with caplog.at_level(logging.INFO, logger="qsnap.core"):
-        result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    assert result.remove == []
-    assert result.keep == _names(1, 24)
-    assert mock_state.get_collapse_in_progress("testvm") == []
-    assert (
-        "[retention] testvm/vda: collapse phase complete (N=24, floor=24)"
-        in caplog.text
-    )
-
-
-def test_cap_reached_keeps_phase_logs_continuation(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    caplog,
-):
-    """Cap reached: phase stays and the continuation INFO line names the counts."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
-    mock_state.set_collapse_in_progress("testvm", "vda")
-    _record_snapshots(mock_state, 100)
-
-    with caplog.at_level(logging.INFO, logger="qsnap.core"):
-        result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    assert result.remove == _names(1, 12)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    assert (
-        "[retention] testvm/vda: collapse phase active "
-        "(N=100, committing 12 of 76, floor=24)" in caplog.text
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Risk coverage: migration, crash windows, deferred commits, matrix
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_migration_deep_chain_converges_over_capped_runs(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Migration from a deep chain: 74 snaps, H=72, L=24, cap=12 → floor in 5 runs.
-
-    Per-run cap is 12, progress is monotonic, the phase is held until the
-    floor, and the chain converges to N == L (50 merges total).
-    """
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=12)
-    _record_snapshots(mock_state, 74)
-
-    expected_counts = [12, 12, 12, 12, 2]
-    committed_total = 0
-    for run, expected in enumerate(expected_counts, start=1):
-        result = core._evaluate_snapshot_retention(vm)
-        assert result is not None
-        assert len(result.remove) == expected, (
-            f"run {run}: expected {expected} commits, got {len(result.remove)}"
-        )
-        # The remove set is always the OLDEST remaining prefix.
-        remaining = mock_state.get_snapshots("testvm")
-        assert result.remove == [s.name for s in remaining[:expected]]
-        _simulate_commit(mock_state, result.remove)
-        committed_total += expected
-        n_after = len(mock_state.get_snapshots("testvm"))
-        if n_after > 24:
-            assert mock_state.get_collapse_in_progress("testvm") == ["vda"], (
-                f"run {run}: phase must persist while N={n_after} > floor"
-            )
-
-    assert committed_total == 50
-    assert len(mock_state.get_snapshots("testvm")) == 24  # converged to the floor
-
-    # Floor reached: the next evaluation defensively clears the phase.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == []
-    assert mock_state.get_collapse_in_progress("testvm") == []
-
-
-def test_phase_resumes_after_crash_between_set_and_commit(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """A crash after the marker write but before commit resumes next run.
-
-    With the phase persisted and N=50 (< H=72), the collapse continues to the
-    floor on the next run — the phase drives evaluation, not N > H.
-    """
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
-    _record_snapshots(mock_state, 50)
-    # Crash window: marker written, blockcommit never executed, state unchanged.
-    mock_state.set_collapse_in_progress("testvm", "vda")
-
-    result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    assert result.remove == _names(1, 26)  # N - L = 26, cap pinned off
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    assert mock_shell.call_history == []  # evaluation alone performs no commits
-
-
-def test_phase_remains_after_deferred_commit(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-):
-    """Deferred/failed commits leave the phase intact for retry by the next run."""
-    vm = _hysteresis_vm(make_vm_config, H=72, L=24)
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=0)
-    mock_state.set_collapse_in_progress("testvm", "vda")
-    _record_snapshots(mock_state, 50)
-
-    # Run 1: collapse scheduled, but the commit is deferred (state unchanged).
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(1, 26)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-
-    # Run 2: nothing was committed; the phase is still active and retries.
-    result = core._evaluate_snapshot_retention(vm)
-    assert result is not None
-    assert result.remove == _names(1, 26)
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-
-
-@pytest.mark.parametrize("mode", ["steady", "hysteresis"])
-@pytest.mark.parametrize("phase_active", [False, True])
-@pytest.mark.parametrize("cap", [0, 12])
-def test_hysteresis_mode_phase_cap_matrix(
-    make_vm_config,
-    mock_factory,
-    mock_state,
-    mock_shell,
-    mode,
-    phase_active,
-    cap,
-):
-    """Mode × phase × cap is orthogonal: steady never reads the phase, hysteresis
-    collapses when the phase is active (even below H), and the cap truncates."""
-    vm = make_vm_config(
-        name="testvm",
-        snapshot_retention_mode=mode,
-        snapshot_chain_length=72,  # steady keep-count / hysteresis threshold H
-        snapshot_preserve_min=24,  # steady floor / hysteresis floor L
-    )
-    mock_factory._retention_engine = TimeBasedRetention(RetentionPolicy())
-    core = _build_core(mock_factory, mock_state, mock_shell, vm, max_commits_per_run=cap)
-    _record_snapshots(mock_state, 50)  # N=50: below H=72, above L=24
-    if phase_active:
-        mock_state.set_collapse_in_progress("testvm", "vda")
-
-    result = core._evaluate_snapshot_retention(vm)
-
-    assert result is not None
-    if mode == "steady":
-        # Steady keeps the newest 72 of 50 → nothing removed; phase untouched.
-        assert result.remove == []
-        assert result.keep == _names(1, 50)
-        assert mock_state.get_collapse_in_progress("testvm") == (["vda"] if phase_active else [])
-    elif phase_active:
-        # Hysteresis + active phase → collapse to the floor, then capped.
-        # The engine keeps exactly the newest L=24 floor entries; the cap
-        # truncates the remove list to the oldest entries, so the middle
-        # postponed items appear in neither list.
-        expected_remove = min(50 - 24, cap) if cap > 0 else 26
-        assert result.remove == _names(1, expected_remove)
-        assert result.keep == _names(27, 50)
-        assert len(result.keep) == 24
-        assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-    else:
-        # Hysteresis + inactive phase + N <= H → grow, no commits, no marker.
-        assert result.remove == []
-        assert result.keep == _names(1, 50)
-        assert mock_state.get_collapse_in_progress("testvm") == []
+    assert _state_has_no_collapse_key(mock_state)
+    assert "[retention] testvm/vda: grow phase (N=50 <= threshold 72) — no commits" in caplog.text

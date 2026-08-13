@@ -1391,7 +1391,7 @@ def test_snapshot_delete_info_log(
         core.run()
 
     assert "[blockcommit]" in caplog.text
-    assert "merged" in caplog.text
+    assert "collapsed" in caplog.text
     assert "testvm" in caplog.text
     assert "snap_old" in caplog.text
 

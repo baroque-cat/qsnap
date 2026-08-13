@@ -11,11 +11,12 @@ broken-file walk cap (design D8 of blockcommit-recovery): after removing
 a mid-chain overlay, the dynamic ``max(64, measured+2)`` walk bound must
 still identify the missing file.
 
-A second test (:func:`test_hysteresis_long_chain_capped_collapse`) proves
+A second test (:func:`test_hysteresis_long_chain_bulk_collapse`) proves
 the hysteresis-snapshot-retention migration path: a deep chain switched to
-hysteresis (H=64, L=48, cap=4) collapses over several capped prune cycles
-with the ``collapse_in_progress`` phase persisting between cycles until the
-chain reaches the floor (design "Migration Plan" step 2).
+hysteresis (H=64, L=48) collapses the ENTIRE oldest ``N − L`` segment in
+ONE run via a single bulk ``virsh blockcommit`` job — no per-run cap and
+no ``collapse_in_progress`` phase (bulk-collapse-blockcommit design D1/D5)
+— leaving the chain exactly at the floor (48 overlays).
 
 Marked ``@pytest.mark.stress`` — requires a libvirt environment with a
 disposable test VM.
@@ -26,14 +27,16 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from qsnap.core import Core
 from qsnap.factory.default import DefaultFactory
-from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
-from qsnap.models.results import CommitIntent
+from qsnap.interfaces.shell import IShell
+from qsnap.models.config import DiskConfig, TargetConfig, VMConfig
+from qsnap.models.results import CommitIntent, ShellResult
 from qsnap.shell.subprocess_shell import SubprocessShell
 from tests.helpers import snapshot_create
 from tests.mocks.mock_config import MockConfigFacade
@@ -51,18 +54,12 @@ _EXTRA_DEPTH = 18
 # ── Hysteresis long-chain collapse (hysteresis-snapshot-retention) ───────
 #: Deep-chain depth for the hysteresis migration proof — a "55+" chain that
 #: exceeds the H=64 trigger threshold (66 > 64), mirroring the production
-#: migration scenario (design "Migration Plan" step 2: N≈74 → capped runs).
+#: migration scenario (design "Migration Plan" step 2: N≈74 → one bulk run).
 _HYST_CHAIN_DEPTH = 66
 #: Hysteresis trigger threshold H (``snapshot_chain_length``).
 _HYST_THRESHOLD = 64
 #: Hysteresis collapse floor L (``snapshot_preserve_min``).
 _HYST_FLOOR = 48
-#: Per-run commit cap (``GlobalConfig.max_commits_per_run``).
-_HYST_CAP = 4
-#: Upper bound of prune cycles to attempt: ceil((N−L)/cap)+1 headroom.
-_HYST_MAX_CYCLES = (
-    (_HYST_CHAIN_DEPTH - _HYST_FLOOR + _HYST_CAP - 1) // _HYST_CAP + 1
-)
 
 
 class _IntentJournalState(InMemoryStateManager):
@@ -108,12 +105,62 @@ class _IntentJournalState(InMemoryStateManager):
         vm_state["commit_in_progress"] = [r for r in records if r.disk != disk]
 
 
-def _vm_is_running(shell: SubprocessShell, vm_name: str) -> bool:
+class RecordingShell(IShell):
+    """IShell proxy that records every command while delegating to the real shell.
+
+    The command is appended to :attr:`commands` BEFORE delegation, so a
+    long-running command (e.g. ``virsh blockcommit --wait``) is observable
+    while the underlying process is still running.  Used to assert that a
+    bulk collapse issues exactly ONE ``virsh blockcommit`` (design D1).
+    """
+
+    def __init__(self, delegate: IShell) -> None:
+        self._delegate = delegate
+        self._commands: list[list[str]] = []
+
+    @property
+    def commands(self) -> list[list[str]]:
+        """All commands issued so far, in execution order."""
+        return [list(cmd) for cmd in self._commands]
+
+    def blockcommit_commands(self) -> list[list[str]]:
+        """The subset of recorded commands that are ``virsh blockcommit``."""
+        return [cmd for cmd in self.commands if "blockcommit" in cmd]
+
+    def run(self, cmd: list[str], timeout: int, check: bool = False) -> ShellResult:
+        self._commands.append(list(cmd))
+        return self._delegate.run(cmd, timeout, check)
+
+    def run_with_stall_detection(
+        self,
+        cmd: list[str],
+        output_file: Path | None = None,
+        stall_timeout: int = 1800,
+        check: bool = False,
+    ) -> ShellResult:
+        self._commands.append(list(cmd))
+        return self._delegate.run_with_stall_detection(cmd, output_file, stall_timeout, check)
+
+    def run_with_heartbeat(
+        self,
+        cmd: list[str],
+        timeout: int,
+        heartbeat_seconds: int,
+        on_heartbeat: Callable[[int], None],
+        check: bool = False,
+    ) -> ShellResult:
+        self._commands.append(list(cmd))
+        return self._delegate.run_with_heartbeat(
+            cmd, timeout, heartbeat_seconds, on_heartbeat, check
+        )
+
+
+def _vm_is_running(shell: IShell, vm_name: str) -> bool:
     result = shell.run(["virsh", "domstate", "--domain", vm_name], timeout=30)
     return result.success and "running" in result.stdout.lower()
 
 
-def _qemu_img_check(shell: SubprocessShell, path: Path) -> bool:
+def _qemu_img_check(shell: IShell, path: Path) -> bool:
     """Return True when ``qemu-img check`` reports no errors on *path*."""
     result = shell.run(
         ["qemu-img", "check", "--force-share", str(path)],
@@ -320,24 +367,27 @@ def test_long_chain_default_preserve_min_48(stress_env):
 
 @pytest.mark.stress
 @pytest.mark.timeout(7200)
-def test_hysteresis_long_chain_capped_collapse(stress_env):
-    """Hysteresis migration-from-deep-chain proof: capped multi-cycle collapse.
+def test_hysteresis_long_chain_bulk_collapse(stress_env):
+    """Hysteresis migration-from-deep-chain proof: single-run bulk collapse.
 
-    This is the stress counterpart of the design's "Migration Plan" step 2:
-    a host with a deep chain flips ONE VM to ``hysteresis`` and watches the
-    collapse converge to the floor over several capped runs.
+    This is the stress counterpart of the design's "Migration Plan" step 2
+    updated for bulk-collapse-blockcommit (design D1/D5): a host with a
+    deep chain flips ONE VM to ``hysteresis`` and the FIRST prune run
+    collapses the WHOLE oldest ``N − L`` segment with ONE ``virsh
+    blockcommit`` job — no per-run cap and no ``collapse_in_progress``
+    phase.
 
     1. Build a 66-overlay chain (the "55+" depth) while steady, recorded
        per-disk as ``vda``.
-    2. Switch to hysteresis with H=64 (trigger threshold), L=48 (collapse
-       floor) and ``max_commits_per_run=4`` (per-run cap).
-    3. Run up to ``ceil((N−L)/cap)+1`` prune cycles; assert each cycle
-       commits exactly ``min(cap, N−L)`` snapshots (≤ 4), the
-       ``collapse_in_progress`` phase persists with ``vda`` while
-       ``N > L`` and clears at the floor.
-    4. The final chain sits at the floor (48 overlays), every committed
-       overlay file is gone, the newest 48 survive, ``qemu-img check``
-       passes on the active layer, and the VM is still running.
+    2. Switch to hysteresis with H=64 (trigger threshold) and L=48
+       (collapse floor); the retention engine must mark exactly the oldest
+       18 (N − L) snapshots for removal.
+    3. Run ONE prune: exactly ONE ``virsh blockcommit`` job is issued (no
+       per-snapshot loop), the chain drops 66 → 48 (chain delta exactly
+       18), every committed overlay file is gone, the newest 48 survive,
+       and the deferred queue stays empty.
+    4. The active layer passes ``qemu-img check`` and the VM is still
+       running after the live bulk segment commit.
     """
     shell: SubprocessShell = stress_env["shell"]
     vm_name: str = stress_env["vm_name"]
@@ -377,7 +427,11 @@ def test_hysteresis_long_chain_capped_collapse(stress_env):
     )
     snap_paths_before = {s.name: s.path for s in snapshots}
 
-    # 2. Switch to hysteresis H=64, L=48, cap=4.
+    # Wrap the real shell in a recording proxy so the collapse's external
+    # commands are observable (exactly ONE virsh blockcommit — design D1).
+    recording = RecordingShell(shell)
+
+    # 2. Switch to hysteresis H=64, L=48 — no cap, no phase.
     vm_config = VMConfig(
         name=vm_name,
         disks=[DiskConfig(target="vda", base_image=base_image)],
@@ -396,85 +450,73 @@ def test_hysteresis_long_chain_capped_collapse(stress_env):
     )
     config = MockConfigFacade(
         vms=[vm_config],
-        global_config=GlobalConfig(max_commits_per_run=_HYST_CAP),
         config_path=tmpdir / "hysteresis_long_chain.toml",
     )
-    factory = DefaultFactory(shell=shell, state=state)
-    core = Core(config=config, factory=factory, state=state, shell=shell)
+    factory = DefaultFactory(shell=recording, state=state)
+    core = Core(config=config, factory=factory, state=state, shell=recording)
 
-    # No collapse phase before the first trigger fires.
-    assert state.get_collapse_in_progress(vm_name) == [], (
-        "No collapse phase may exist before the first capped prune"
+    # Retention marks exactly the oldest N − L = 18 snapshots for removal
+    # (the full uncapped set — no cap truncation).
+    retention = core._evaluate_snapshot_retention(vm_config)
+    assert retention is not None, "Retention result should not be None"
+    assert len(retention.remove) == _HYST_CHAIN_DEPTH - _HYST_FLOOR, (
+        f"Expected exactly {_HYST_CHAIN_DEPTH - _HYST_FLOOR} removable snapshots "
+        f"(66 − 48 floor), got {len(retention.remove)}"
+    )
+    sorted_snaps = sorted(snapshots, key=lambda s: s.timestamp)
+    assert set(retention.remove) == {
+        s.name for s in sorted_snaps[: _HYST_CHAIN_DEPTH - _HYST_FLOOR]
+    }, "Only the OLDEST 18 snapshots may be removed (N − L, uncapped)"
+
+    # 3. ONE prune run collapses the whole segment.
+    result = core.prune(vm_name)
+    assert result.results[0].success, f"Prune failed: {result.results[0].error}"
+
+    # Exactly ONE virsh blockcommit process for the whole segment — the
+    # bulk job (design D1), not a per-snapshot loop.
+    blockcommits = recording.blockcommit_commands()
+    assert len(blockcommits) == 1, (
+        f"Exactly ONE virsh blockcommit job must collapse the whole segment, "
+        f"got {len(blockcommits)}: {blockcommits}"
     )
 
-    # 3. Capped collapse cycles: each commits min(cap, N−L) oldest
-    #    snapshots; the phase persists between cycles until the floor.
-    committed_total = 0
-    for cycle in range(1, _HYST_MAX_CYCLES + 1):
-        n_before = len(state.get_snapshots(vm_name))
-        if n_before <= _HYST_FLOOR:
-            break
-        result = core.prune(vm_name)
-        assert result.success, (
-            f"cycle {cycle}: prune failed: "
-            f"{result.results[0].error if result.results else 'no VM result'}"
-        )
-        committed = [a for a in result.actions if a.action == "snapshot_delete"]
-        expected = min(_HYST_CAP, n_before - _HYST_FLOOR)
-        assert len(committed) == expected, (
-            f"cycle {cycle}: expected exactly {expected} commit(s) "
-            f"(cap {_HYST_CAP}, N={n_before}, L={_HYST_FLOOR}), got {len(committed)}"
-        )
-        assert len(committed) <= _HYST_CAP, (
-            f"cycle {cycle}: per-run cap violated: {len(committed)} > {_HYST_CAP}"
-        )
-        committed_total += len(committed)
-
-        n_after = len(state.get_snapshots(vm_name))
-        phase = state.get_collapse_in_progress(vm_name)
-        if n_after > _HYST_FLOOR:
-            assert "vda" in phase, (
-                f"cycle {cycle}: collapse phase must persist while "
-                f"N={n_after} > L={_HYST_FLOOR}, phase={phase}"
-            )
-        else:
-            assert "vda" not in phase, (
-                f"cycle {cycle}: collapse phase must clear at the floor "
-                f"(N={n_after}), phase={phase}"
-            )
-
-    # 4. Final chain sits at the floor L=48.
+    # Chain delta is exactly N − L = 18: 66 overlays → 48.
     surviving = sorted(state.get_snapshots(vm_name), key=lambda s: s.timestamp)
     assert len(surviving) == _HYST_FLOOR, (
         f"Final chain must sit at the floor {_HYST_FLOOR}, got {len(surviving)}"
     )
-    assert committed_total == _HYST_CHAIN_DEPTH - _HYST_FLOOR, (
-        f"Total committed must be {_HYST_CHAIN_DEPTH - _HYST_FLOOR} "
-        f"(N−L), got {committed_total}"
-    )
 
-    for snap in snapshots[: _HYST_CHAIN_DEPTH - _HYST_FLOOR]:
+    newest_removable = sorted_snaps[_HYST_CHAIN_DEPTH - _HYST_FLOOR - 1]
+    for snap in sorted_snaps[: _HYST_CHAIN_DEPTH - _HYST_FLOOR]:
         assert not snap_paths_before[snap.name].exists(), (
             f"Collapsed overlay beyond the floor should be committed: "
             f"{snap_paths_before[snap.name]}"
         )
-    for snap in snapshots[_HYST_CHAIN_DEPTH - _HYST_FLOOR :]:
+    for snap in sorted_snaps[_HYST_CHAIN_DEPTH - _HYST_FLOOR :]:
         assert snap_paths_before[snap.name].exists(), (
             f"Newest {_HYST_FLOOR} snapshots must survive the collapse: "
             f"{snap_paths_before[snap.name]}"
         )
+    # The single job's --top must be the NEWEST removable snapshot
+    # (design D2 ordering contract: snapshots_to_merge[-1].path).
+    assert "--top" in blockcommits[0], f"blockcommit must carry --top: {blockcommits[0]}"
+    top_index = blockcommits[0].index("--top")
+    assert blockcommits[0][top_index + 1] == str(newest_removable.path), (
+        f"--top must be the newest removable snapshot {newest_removable.path}, "
+        f"got {blockcommits[0][top_index + 1]}"
+    )
 
-    # 5. Chain intact and VM healthy after the multi-cycle collapse.
+    # No deferred blockcommit entries may remain after the single-run
+    # bulk collapse.
+    assert state.get_deferred_operations(vm_name) == [], (
+        "No deferred blockcommit entries may remain after the bulk collapse"
+    )
+
+    # 4. Chain intact and VM healthy after the bulk collapse.
     active = surviving[-1].path
-    assert _qemu_img_check(shell, active), (
+    assert _qemu_img_check(recording, active), (
         f"qemu-img check must pass on the active layer after the collapse: {active}"
     )
-    assert _vm_is_running(shell, vm_name), "VM should still be running"
-    assert state.get_deferred_operations(vm_name) == [], (
-        "No deferred blockcommit entries may remain after the collapse"
-    )
-    assert state.get_collapse_in_progress(vm_name) == [], (
-        "Collapse phase must be cleared once the floor is reached"
-    )
+    assert _vm_is_running(recording, vm_name), "VM should still be running"
 
     shell.run(["virsh", "destroy", vm_name], timeout=30)

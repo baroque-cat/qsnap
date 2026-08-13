@@ -60,24 +60,19 @@ state_dir = "/var/lib/qsnap/state"
 #                chain grows with no commits while N <= snapshot_chain_length
 #                (the trigger threshold H); once N > H the oldest N − L
 #                snapshots are merged down to the floor L, where L =
-#                snapshot_preserve_min.  Collapse is a persisted per-disk
-#                phase: once triggered it continues across runs until
-#                N <= L.  Validation requires H > L >= 1.
+#                snapshot_preserve_min.  The whole collapse is a SINGLE
+#                uncapped bulk blockcommit completed within ONE run (one
+#                `virsh blockcommit --base … --top …` segment job); there is
+#                no per-run cap and no multi-run phase.  A long bulk job may
+#                hold the lockfile, so an overlapping hourly run exits with
+#                code 3 ("Lockfile is held by another qsnap instance") and
+#                retries on the next tick.  Validation requires H > L >= 1.
 #                Default band: H = 72, L = 24 → hourly snapshots for the
 #                last 24 h are kept, older layers collapse occasionally.
 #   "steady"     — keep the newest snapshot_chain_length snapshots and
 #                blockcommit the excess every run (the pre-existing
 #                count-based policy).
 # snapshot_retention_mode = "hysteresis"
-
-# Per-run commit cap (snapshot world, BOTH retention modes): at most this
-# many snapshots per disk are blockcommitted in one run.  Bounds run
-# duration and makes first-time migration from a deep steady-state chain
-# gradual.  Default 12; 0 = unlimited (supervised one-shot collapse).
-#   Migration note for existing deep chains: switching a VM to hysteresis
-#   with N snapshots above the floor converges over
-#   ceil((N − snapshot_preserve_min) / max_commits_per_run) runs.
-# max_commits_per_run = 12
 
 # Deferred blockcommit monitoring thresholds.  When the number or age of
 # deferred blockcommits exceeds these values, qsnap logs WARNING or CRITICAL.

@@ -791,6 +791,11 @@ class JsonStateManager(IStateManager):
         ``deferred_operations`` queue, and ``commit_in_progress`` intent
         journal for *vm_name*.  If the VM has no state file, no file is
         created (no-op).
+
+        The removed ``collapse_in_progress`` phase key is left untouched:
+        a stale key from an older version survives the reset (no reader or
+        writer exists for it anymore, and unknown keys are tolerated on
+        read).
         """
         path = self._state_path(vm_name)
         if not path.exists():
@@ -802,7 +807,10 @@ class JsonStateManager(IStateManager):
         data["last_allocation"] = {}
         data["deferred_operations"] = []
         data["commit_in_progress"] = []
-        data["collapse_in_progress"] = []
+        # NOTE: the removed ``collapse_in_progress`` phase key is NOT
+        # cleared here on purpose — a stale persisted key from an older
+        # version must survive a reset untouched (nothing reads or writes
+        # it anymore).
         self._save(vm_name, data)
 
     def reset_target_state(self, target_path: str) -> None:
@@ -861,6 +869,9 @@ class JsonStateManager(IStateManager):
         commit-intent record that belong to *disk*; state of the VM's
         other disks is preserved.  If the VM has no state file, no file is
         created (no-op).
+
+        The removed ``collapse_in_progress`` phase key is left untouched:
+        a stale key from an older version survives the per-disk reset.
         """
         path = self._state_path(vm_name)
         if not path.exists():
@@ -907,11 +918,9 @@ class JsonStateManager(IStateManager):
             intents = cast(list[dict[str, object]], raw_intents)
             data["commit_in_progress"] = [i for i in intents if i.get("disk") != disk]
 
-        # Collapse phase: remove *disk* from the marker list.
-        raw_collapse = data.get("collapse_in_progress", [])
-        if raw_collapse:
-            collapse = cast(list[str], raw_collapse)
-            data["collapse_in_progress"] = [d for d in collapse if d != disk]
+        # NOTE: the removed ``collapse_in_progress`` phase key is NOT
+        # filtered here on purpose — a stale persisted key from an older
+        # version must survive a per-disk reset untouched.
 
         self._save(vm_name, data)
 
@@ -1108,38 +1117,4 @@ class JsonStateManager(IStateManager):
         if len(new_list) == len(raw_list):
             return  # No record to clear — no-op (no save needed).
         data["commit_in_progress"] = new_list
-        self._save(vm_name, data)
-
-    # ── Hysteresis collapse phase (hysteresis-snapshot-retention) ────────
-
-    def get_collapse_in_progress(self, vm_name: str) -> list[str]:
-        """Return the disk names currently in the collapse phase.
-
-        A missing key (pre-change state files) reads as an empty list.
-        Unknown extra keys from newer/older code are tolerated on read.
-        """
-        data = self._load(vm_name)
-        raw = data.get("collapse_in_progress", [])
-        if not raw:
-            return []
-        return [str(d) for d in raw]  # type: ignore[union-attr]
-
-    def set_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Mark *disk* as collapsing for *vm_name* (idempotent)."""
-        data = self._load(vm_name)
-        current: list[str] = [str(d) for d in data.get("collapse_in_progress", [])]  # type: ignore[union-attr]
-        if disk in current:
-            return  # Already marked — no-op (no save needed).
-        current.append(disk)
-        data["collapse_in_progress"] = current
-        self._save(vm_name, data)
-
-    def clear_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Remove *disk* from the collapse phase for *vm_name*."""
-        data = self._load(vm_name)
-        current: list[str] = [str(d) for d in data.get("collapse_in_progress", [])]  # type: ignore[union-attr]
-        new_list = [d for d in current if d != disk]
-        if len(new_list) == len(current):
-            return  # Not marked — no-op (no save needed).
-        data["collapse_in_progress"] = new_list
         self._save(vm_name, data)

@@ -24,7 +24,7 @@ The system SHALL use a count-based retention policy with two integer fields: `ch
 #### Scenario: Hysteresis mode defers to the hysteresis capability
 
 - **WHEN** `snapshot_retention_mode` is `"hysteresis"`
-- **THEN** snapshot remove sets are determined by the `hysteresis-retention` capability (threshold/floor/phase/cap)
+- **THEN** snapshot remove sets are determined by the `hysteresis-retention` capability (threshold/floor, single-run uncapped bulk collapse)
 - **AND** the steady "excess beyond chain_length" rule does not apply to snapshots
 
 #### Scenario: Target chain length triggers new FULL

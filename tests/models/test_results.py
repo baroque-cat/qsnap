@@ -1198,7 +1198,7 @@ def test_chain_verify_result_broken_file_field():
 
     # 3. Verify the exact set of field names.
     field_names = {f.name for f in dataclasses.fields(ChainVerifyResult)}
-    assert field_names == {"success", "error", "broken_file", "disk"}
+    assert field_names == {"success", "error", "broken_file", "disk", "chain_length"}
 
     # 4. Verify the dataclass is frozen (immutable).
     assert result.__dataclass_params__.frozen is True
@@ -1210,3 +1210,26 @@ def test_chain_verify_result_broken_file_field():
         result.success = False
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.error = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.chain_length = 73
+
+
+def test_chain_verify_result_chain_length_field_default_none():
+    """ChainVerifyResult has an additive chain_length (int | None) field defaulting to None."""
+    # 1. chain_length defaults to None when not specified.
+    result = ChainVerifyResult(success=True, error=None)
+    assert result.chain_length is None
+
+    # 2. chain_length can be populated with a measured chain length.
+    result_with = ChainVerifyResult(success=True, error=None, chain_length=73)
+    assert result_with.chain_length == 73
+    assert isinstance(result_with.chain_length, int)
+
+    # 3. chain_length is placed after disk in field order (additive, non-breaking).
+    field_names = [f.name for f in dataclasses.fields(ChainVerifyResult)]
+    assert field_names == ["success", "error", "broken_file", "disk", "chain_length"]
+
+    # 4. The dataclass is frozen — assigning chain_length raises FrozenInstanceError.
+    assert result.__dataclass_params__.frozen is True
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.chain_length = 42

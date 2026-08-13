@@ -162,6 +162,7 @@ def test_vm(request):
     # problem across all subsequent runs.
     shell.run(["virsh", "destroy", vm_name], timeout=30)
     _cleanup_checkpoints(shell, vm_name)
+    _cleanup_snapshot_metadata(shell, vm_name)
     shell.run(["virsh", "undefine", vm_name], timeout=30)
 
     # Define the VM in libvirt
@@ -188,6 +189,7 @@ def test_vm(request):
         # First, clean up any leftover checkpoints to allow undefine.
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         _cleanup_checkpoints(shell, vm_name)
+        _cleanup_snapshot_metadata(shell, vm_name)
         shell.run(["virsh", "undefine", vm_name], timeout=30)
         # NBD sockets are created in /tmp by the source code (bitmap.py).
         shell.run(
@@ -293,6 +295,7 @@ def test_vm_multi_disk():
     # Pre-cleanup: destroy and undefine any stale domain
     shell.run(["virsh", "destroy", vm_name], timeout=30)
     _cleanup_checkpoints(shell, vm_name)
+    _cleanup_snapshot_metadata(shell, vm_name)
     shell.run(["virsh", "undefine", vm_name], timeout=30)
 
     # Define the VM in libvirt
@@ -326,6 +329,7 @@ def test_vm_multi_disk():
         # Teardown: destroy, undefine, and clean up all files.
         shell.run(["virsh", "destroy", vm_name], timeout=30)
         _cleanup_checkpoints(shell, vm_name)
+        _cleanup_snapshot_metadata(shell, vm_name)
         shell.run(["virsh", "undefine", vm_name], timeout=30)
         # NBD sockets
         shell.run(
@@ -349,3 +353,30 @@ def _cleanup_checkpoints(shell, vm_name: str) -> None:
                     ["virsh", "checkpoint-delete", "--domain", vm_name, cp, "--metadata"],
                     timeout=30,
                 )
+
+
+def _cleanup_snapshot_metadata(shell, vm_name: str) -> None:
+    """Delete all libvirt snapshot metadata for *vm_name* so ``virsh undefine`` can succeed.
+
+    A domain carrying snapshot metadata refuses ``undefine`` ("cannot
+    delete inactive domain with snapshots").  If a test crashes after
+    creating a snapshot, the poisoned domain makes the next
+    ``virsh define`` fail ("already exists with uuid") and the whole
+    suite cascades into skips — observed once in practice.  Best-effort
+    defensive cleanup: every failure is swallowed silently.
+    """
+    try:
+        result = shell.run(
+            ["virsh", "snapshot-list", "--name", vm_name],
+            timeout=30,
+        )
+        if result.success:
+            for line in result.stdout.strip().splitlines():
+                name = line.strip()
+                if name:
+                    shell.run(
+                        ["virsh", "snapshot-delete", vm_name, name, "--metadata"],
+                        timeout=30,
+                    )
+    except Exception:
+        pass

@@ -138,7 +138,10 @@ class GlobalConfig:
     # target).  Inherited by VM and target levels.
     backup_create: str = "always"
     # Maximum wall-clock time in seconds for a single blockcommit
-    # (``virsh blockcommit --wait`` or ``qemu-img commit``).  When
+    # (``virsh blockcommit --wait`` or ``qemu-img commit``), with
+    # "per merged layer" semantics: on the LIVE bulk path Core scales it
+    # to ``blockcommit_timeout × len(merge set)`` for the single segment
+    # job; the offline path keeps the unscaled per-layer budget.  When
     # exceeded the command is killed and the outcome is classified as
     # ``"unknown"`` (never as ``"failure"``).  Default 1800 s (30 min).
     blockcommit_timeout: int = 1800
@@ -146,13 +149,10 @@ class GlobalConfig:
     # ``"hysteresis"`` (default — grow-to-threshold / collapse-to-floor)
     # or ``"steady"`` (count-based keep).  In hysteresis mode
     # ``snapshot_chain_length`` is the trigger threshold H and
-    # ``snapshot_preserve_min`` the collapse floor L.
+    # ``snapshot_preserve_min`` the collapse floor L.  No per-run commit
+    # cap exists — a hysteresis collapse is a single uncapped bulk
+    # blockcommit per trigger.
     snapshot_retention_mode: str = "hysteresis"
-    # Per-run commit cap for the snapshot world (applies in BOTH retention
-    # modes): at most this many snapshots per disk per run are
-    # blockcommitted.  ``0`` = unlimited.  Default 12 bounds run duration
-    # and makes first-time migration from a deep chain gradual.
-    max_commits_per_run: int = 12
 
 
 @dataclass(frozen=True)

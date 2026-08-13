@@ -334,7 +334,6 @@ def make_global_config():
         backup_create: str = "always",
         blockcommit_timeout: int = 1800,
         snapshot_retention_mode: str = "hysteresis",
-        max_commits_per_run: int = 12,
     ) -> GlobalConfig:
         return GlobalConfig(
             state_dir=state_dir,
@@ -363,7 +362,6 @@ def make_global_config():
             backup_create=backup_create,
             blockcommit_timeout=blockcommit_timeout,
             snapshot_retention_mode=snapshot_retention_mode,
-            max_commits_per_run=max_commits_per_run,
         )
 
     return _make

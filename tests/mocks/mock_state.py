@@ -286,7 +286,6 @@ class InMemoryStateManager(IStateManager):
         vm_state["snapshots"] = []
         vm_state["last_allocation"] = {}
         vm_state["deferred_operations"] = []
-        vm_state["collapse_in_progress"] = []
 
     def reset_target_state(self, target_path: str) -> None:
         """Clear all per-target state: full_backups, dependencies, target_state."""
@@ -323,10 +322,6 @@ class InMemoryStateManager(IStateManager):
             vm_state["deferred_operations"] = [
                 d for d in deferred if getattr(d, "disk", None) != disk
             ]
-
-        collapse = vm_state.get("collapse_in_progress", [])
-        if isinstance(collapse, list):
-            vm_state["collapse_in_progress"] = [d for d in collapse if d != disk]
 
     def reset_target_disk_state(self, target_path: str, vm_name: str, disk: str) -> None:
         """Clear only the per-target state that belongs to (vm_name, disk).
@@ -443,36 +438,3 @@ class InMemoryStateManager(IStateManager):
         No-op when no record exists for this disk.
         """
         self._commit_intents.pop((vm_name, disk), None)
-
-    # ── Hysteresis collapse phase (hysteresis-snapshot-retention) ──────
-
-    def get_collapse_in_progress(self, vm_name: str) -> list[str]:
-        """Return the disk names currently in the collapse phase."""
-        vm_state = self._state.get(vm_name)
-        if vm_state is None:
-            return []
-        raw = vm_state.get("collapse_in_progress", [])
-        if not raw:
-            return []
-        return [str(d) for d in raw]
-
-    def set_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Mark *disk* as collapsing for *vm_name* (idempotent)."""
-        if vm_name not in self._state:
-            self._state[vm_name] = {}
-        current = [str(d) for d in self._state[vm_name].get("collapse_in_progress", [])]
-        if disk in current:
-            return
-        current.append(disk)
-        self._state[vm_name]["collapse_in_progress"] = current
-
-    def clear_collapse_in_progress(self, vm_name: str, disk: str) -> None:
-        """Remove *disk* from the collapse phase for *vm_name*."""
-        vm_state = self._state.get(vm_name)
-        if vm_state is None:
-            return
-        current = [str(d) for d in vm_state.get("collapse_in_progress", [])]
-        new_list = [d for d in current if d != disk]
-        if len(new_list) == len(current):
-            return
-        vm_state["collapse_in_progress"] = new_list

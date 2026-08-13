@@ -725,15 +725,17 @@ def test_make_vm_config_forwards_engine_option_kwargs(make_vm_config) -> None:
 
 @pytest.mark.unit
 def test_hysteresis_mode_fixture_parses() -> None:
-    """hysteresis_mode.toml parses: global H=72/L=24 + a cap, and a VM
-    overriding the mode back to 'steady'."""
+    """hysteresis_mode.toml parses: global H=72/L=24 (no cap — the removed
+    max_commits_per_run key is absent), and a VM overriding the mode back
+    to 'steady'."""
     facade = ConfigFacade(FIXTURES / "hysteresis_mode.toml")
 
     global_cfg = facade.get_global()
     assert global_cfg.snapshot_retention_mode == "hysteresis"
     assert global_cfg.snapshot_chain_length == 72
     assert global_cfg.snapshot_preserve_min == 24
-    assert global_cfg.max_commits_per_run == 4
+    # The per-run commit cap was removed — the attribute must not exist.
+    assert not hasattr(global_cfg, "max_commits_per_run")
 
     # hyst_vm inherits the global hysteresis mode with valid H/L.
     hyst_vm = facade.get_vm("hyst_vm")

@@ -32,11 +32,10 @@ import pytest
 
 from qsnap.core import Core
 from qsnap.models.config import DiskConfig, GlobalConfig, TargetConfig, VMConfig
-from qsnap.models.results import BaselineAssessment, SnapshotInfo
+from qsnap.models.results import BaselineAssessment
 from tests.mocks import (
     InMemoryStateManager,
     MockConfigFacade,
-    MockRetentionEngine,
     MockShell,
     MockVMModuleFactory,
 )
@@ -467,117 +466,3 @@ def test_dry_run_free_space_gate_uses_recovered_delta_estimate(
     )
     assert pred.size != full_estimate, "Gate must not use the FULL chain-sum estimate"
     assert pred.error is None, f"Sufficient gate must carry no error, got {pred.error}"
-
-
-# ── Test 6: dry-run intent recovery never writes the collapse phase ─────────
-
-
-@pytest.mark.unit
-@pytest.mark.mock
-def test_dry_run_intent_recovery_does_not_write_collapse_phase(
-    mock_factory: MockVMModuleFactory,
-    mock_state: InMemoryStateManager,
-    mock_shell: MockShell,
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Dry-run step-0 intent recovery never writes the ``collapse_in_progress``
-    phase key (hysteresis-snapshot-retention zero-mutation invariant, D2/D7).
-
-    A hysteresis-mode VM with a stale commit intent AND a persisted collapse
-    phase: the dry-run reads the phase to drive the below-threshold collapse
-    prediction and would clear the stale intent in a real run, but writes
-    NOTHING — the intent, snapshots, phase key, and the full state surface
-    stay byte-identical.
-    """
-    from copy import deepcopy
-
-    vm = _make_vm(
-        name="testvm",
-        targets=[],
-        snapshot_retention_mode="hysteresis",
-        snapshot_chain_length=4,  # threshold H
-        snapshot_preserve_min=1,  # floor L
-        snapshot_create="onchange",
-    )
-    mock_factory.change_detector.changed = False  # gate closed → N stays exact
-
-    # Two snapshots on disk + state (files must exist for the stale guard).
-    snap_dir = tmp_path / "snapshots" / "testvm"
-    snap_dir.mkdir(parents=True, exist_ok=True)
-    base = datetime(2025, 8, 1, 12, 0, 0)
-    for i in (1, 2):
-        name = f"snap{i}"
-        path = snap_dir / f"{name}.qcow2"
-        path.touch()
-        mock_state.record_snapshot(
-            "testvm",
-            SnapshotInfo(
-                name=name,
-                path=path,
-                timestamp=base.replace(hour=12 + i),
-                allocation=65536 * i,
-                disk="vda",
-            ),
-        )
-
-    # Stale commit intent: a previous run's commit for snap1 died mid-flight.
-    mock_state.set_commit_in_progress(
-        "testvm", "vda", ["snap1"], "/var/lib/libvirt/images/testvm.qcow2", "20260808T160000"
-    )
-    # Persisted collapse phase: the chain crossed H in an earlier real run.
-    mock_state.set_collapse_in_progress("testvm", "vda")
-
-    # Hysteresis collapse invokes the pure engine with floor L: mark both
-    # snapshots removable so the postprocess + preserve-min selects snap1.
-    mock_factory._retention_engine = MockRetentionEngine(keep=[], remove=["snap1", "snap2"])
-
-    state_before = deepcopy(mock_state._state)
-    core = _build_core(
-        vm=vm, mock_factory=mock_factory, mock_state=mock_state, mock_shell=mock_shell
-    )
-
-    with (
-        caplog.at_level(logging.INFO, logger="qsnap.core"),
-        patch.object(
-            mock_state, "set_collapse_in_progress", wraps=mock_state.set_collapse_in_progress
-        ) as set_phase_spy,
-        patch.object(
-            mock_state, "clear_collapse_in_progress", wraps=mock_state.clear_collapse_in_progress
-        ) as clear_phase_spy,
-    ):
-        result = core.run()
-
-    assert result.dry_run is True
-
-    # Intent recovery wrote nothing: the stale intent survives.
-    intents = mock_state.get_commit_in_progress("testvm")
-    assert len(intents) == 1 and intents[0].snapshots == ["snap1"], (
-        f"Dry-run must NOT clear or rewrite the stale intent, got {intents}"
-    )
-    assert [s.name for s in mock_state.get_snapshots("testvm")] == ["snap1", "snap2"]
-    assert mock_state.get_last_commit_ts("testvm", "vda") is None
-    assert mock_state.get_deferred_operations("testvm") == []
-
-    # The phase was READ (drives the collapse prediction below the
-    # threshold) but never written, extended, or cleared.
-    assert "collapse phase would continue" in caplog.text, (
-        f"Dry-run must read the persisted phase to predict the collapse, "
-        f"got: {caplog.text}"
-    )
-    set_phase_spy.assert_not_called()
-    clear_phase_spy.assert_not_called()
-    assert mock_state.get_collapse_in_progress("testvm") == ["vda"]
-
-    # The collapse prediction names the oldest N−L snapshot...
-    bc_preds = [p for p in result.predictions if p.action == "blockcommit"]
-    assert len(bc_preds) == 1 and bc_preds[0].name == "snap1", (
-        f"Expected the oldest removable snapshot predicted, got "
-        f"{[(p.action, p.name) for p in result.predictions]}"
-    )
-
-    # ...and the full state surface is byte-identical.
-    assert deepcopy(mock_state._state) == state_before, (
-        "Dry-run intent recovery must leave the state byte-identical "
-        "(collapse phase key untouched)"
-    )

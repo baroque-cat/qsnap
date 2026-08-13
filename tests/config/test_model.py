@@ -181,31 +181,27 @@ def test_global_config_blockcommit_timeout_immutable():
 
 
 # ---------------------------------------------------------------------------
-# GlobalConfig.max_commits_per_run (hysteresis-snapshot-retention config-model)
+# GlobalConfig.max_commits_per_run — removed (design D6, bulk-collapse-blockcommit)
 # ---------------------------------------------------------------------------
 
 
-def test_global_config_max_commits_per_run_default_12():
-    """GlobalConfig().max_commits_per_run defaults to 12.
+def test_global_config_defaults_without_cap_field():
+    """GlobalConfig() pins the documented defaults and has no
+    max_commits_per_run attribute.
 
-    config-model scenario "Default cap": the option absent resolves to 12
-    (bounds per-run snapshot commits in BOTH retention modes).
+    config-model scenario "GlobalConfig default values": the per-run
+    commit cap was removed (bulk-collapse-blockcommit design D6), so the
+    dataclass must carry the documented defaults (blockcommit_timeout,
+    retention mode/chain lengths, preserve floor) and no cap field.
     """
     cfg = GlobalConfig()
-    assert cfg.max_commits_per_run == 12
-
-
-def test_global_config_max_commits_per_run_immutable():
-    """Mutating GlobalConfig().max_commits_per_run raises FrozenInstanceError.
-
-    The field is part of the frozen dataclass — assignment must raise a
-    frozen-dataclass error (config-model frozen-field contract).
-    """
-    cfg = GlobalConfig(max_commits_per_run=4)
-    assert cfg.max_commits_per_run == 4
-
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        cfg.max_commits_per_run = 12  # type: ignore[misc]
+    assert cfg.blockcommit_timeout == 1800
+    assert cfg.snapshot_retention_mode == "hysteresis"
+    assert cfg.snapshot_chain_length == 72
+    assert cfg.target_chain_length == 168
+    assert cfg.target_keep_generations == 2
+    assert cfg.snapshot_preserve_min == 24
+    assert not hasattr(cfg, "max_commits_per_run")
 
 
 # ---------------------------------------------------------------------------
@@ -255,18 +251,17 @@ def test_vm_config_snapshot_retention_mode_immutable():
 
 
 def test_make_global_config_accepts_hysteresis_kwargs(make_global_config):
-    """make_global_config fixture forwards snapshot_retention_mode and
-    max_commits_per_run kwargs (defaults 'hysteresis'/12)."""
+    """make_global_config fixture forwards snapshot_retention_mode kwargs;
+    the removed max_commits_per_run cap is not part of GlobalConfig."""
     cfg = make_global_config(
         snapshot_retention_mode="hysteresis",
-        max_commits_per_run=0,
     )
     assert cfg.snapshot_retention_mode == "hysteresis"
-    assert cfg.max_commits_per_run == 0
+    assert not hasattr(cfg, "max_commits_per_run")
 
     defaults = make_global_config()
     assert defaults.snapshot_retention_mode == "hysteresis"
-    assert defaults.max_commits_per_run == 12
+    assert not hasattr(defaults, "max_commits_per_run")
 
 
 # ---------------------------------------------------------------------------

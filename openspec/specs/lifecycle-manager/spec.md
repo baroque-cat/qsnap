@@ -10,17 +10,17 @@ Backing chain lifecycle management via `virsh blockcommit` (live) and `qemu-img 
 
 The system SHALL provide two lifecycle managers implementing `ILifecycleManager`, each accepting `IShell` as its sole constructor dependency. Managers are stateless workers: they MUST NOT inspect VM power state, MUST NOT decide deferral, and MUST NOT access the deferred-operations queue — Core performs all state detection, splitting, and deferral (adaptive fork).
 
-`BlockCommitManager` is the **live executor**: Core invokes it only when the VM is running with `lifecycle_mode="virsh"` and only with snapshots that exclude the active layer. Its `blockcommit()` method SHALL accept keyword-only required arguments `disk: str` (the libvirt target device name, e.g. `"vda"`) and `base_image: Path` (the disk's base qcow2 path), and an additive keyword argument `timeout: int = 1800` (seconds). For each snapshot (oldest first) it SHALL run:
+`BlockCommitManager` is the **live executor**: Core invokes it only when the VM is running with `lifecycle_mode="virsh"` and only with snapshots that exclude the active layer. Its `blockcommit()` method SHALL accept keyword-only required arguments `disk: str` (the libvirt target device name, e.g. `"vda"`) and `base_image: Path` (the disk's base qcow2 path), and an additive keyword argument `timeout: int = 1800` (seconds). It SHALL merge the ENTIRE merge set with ONE segment command, where `--top` is the path of the NEWEST snapshot in the merge set (the merge-set ordering contract guarantees oldest-first order, so `snapshots_to_merge[-1]`):
 
 ```
-virsh blockcommit --domain <vm> --path {disk} --base {base_image} --top <snap.path> --delete --verbose --wait
+virsh blockcommit --domain <vm> --path {disk} --base {base_image} --top {snapshots_to_merge[-1].path} --delete --verbose --wait
 ```
 
-via `IShell.run_with_heartbeat(cmd, timeout=timeout, heartbeat_seconds=60, on_heartbeat=<callback>)`. The heartbeat callback SHALL log an INFO line naming the VM, disk, snapshot, and elapsed seconds. The manager SHALL NOT use `IShell.run` for this command and SHALL NOT hard-code any timeout value.
+via `IShell.run_with_heartbeat(cmd, timeout=timeout, heartbeat_seconds=60, on_heartbeat=<callback>)`. The manager SHALL issue exactly one `virsh blockcommit` process per non-empty merge set — it MUST NOT loop per snapshot. The heartbeat callback SHALL log an INFO line naming the VM, disk, the number of layers being collapsed, and elapsed seconds. The manager SHALL NOT use `IShell.run` for this command and SHALL NOT hard-code any timeout value. An empty merge set SHALL return no-op success without invoking the shell. A non-empty merge set whose ordering contract is violated cannot be detected from paths alone; the manager documents and relies on the oldest-first invariant and asserts only non-emptiness.
 
-The `--path` argument SHALL be the *disk* parameter (the libvirt target), NOT derived via `virsh domblklist` inside the manager. The `--base` argument SHALL be the *base_image* parameter (the disk's base image), NOT a VM-level base image. On any failure it SHALL short-circuit: remaining snapshots are NOT processed. When stderr matches MAC denial patterns (AppArmor: "Permission denied" / "apparmor"; SELinux: "Operation not permitted" / "AVC"), the module SHALL return `CommitResult(success=False, committed_snapshot="", error="blocked by apparmor|selinux", outcome="failure")` via the shared `detect_mac_denial` helper.
+The `--path` argument SHALL be the *disk* parameter (the libvirt target), NOT derived via `virsh domblklist` inside the manager. The `--base` argument SHALL be the *base_image* parameter (the disk's base image), NOT a VM-level base image. When stderr matches MAC denial patterns (AppArmor: "Permission denied" / "apparmor"; SELinux: "Operation not permitted" / "AVC"), the module SHALL return `CommitResult(success=False, committed_snapshot="", error="blocked by apparmor|selinux", outcome="failure")` via the shared `detect_mac_denial` helper.
 
-Outcome mapping: exit code 0 → `CommitResult(success=True, outcome="success")`; non-zero exit → `CommitResult(success=False, outcome="failure", error=<stderr>)`; timeout or killed process (shell error containing "timed out") → `CommitResult(success=False, outcome="unknown", error="Command timed out after {timeout}s")`. A timeout is an UNKNOWN outcome, never a definitive failure — reconciliation is Core's responsibility, not the manager's.
+Outcome mapping: exit code 0 → `CommitResult(success=True, committed_snapshot=<newest merged snapshot name>, outcome="success")`; non-zero exit → `CommitResult(success=False, outcome="failure", error=<stderr>)`; timeout or killed process (shell error containing "timed out") → `CommitResult(success=False, outcome="unknown", error="Command timed out after {timeout}s")`. A timeout is an UNKNOWN outcome, never a definitive failure — reconciliation is Core's responsibility, not the manager's. The segment commit is all-or-nothing: on success QEMU has rewired the child of `--top` to the base image and libvirt `--delete` has removed every intermediate file of the merge set; on failure or timeout no partial merge state is assumed by the manager.
 
 `QemuImgCommitManager` is the **offline executor**: Core invokes it only when the VM is shut off and only with snapshots that exclude the XML-referenced tip overlay. Its `blockcommit()` SHALL accept the same additive `timeout: int = 1800` keyword argument and use it for the `qemu-img commit` call (previously hard-coded 3600). For each snapshot (oldest first) it SHALL:
 
@@ -29,14 +29,20 @@ Outcome mapping: exit code 0 → `CommitResult(success=True, outcome="success")`
 3. If a child exists, pivot it via `qemu-img rebase -u -F qcow2 -b {base_image} {child}`.
 4. Delete the committed file (`rm -f {snap.path}`) — only after the pivot succeeded, or when no child exists.
 
-The manager SHALL NOT rely on `qemu-img commit -d` for deletion (a no-op on QEMU 11.0.2). On any step failure it SHALL short-circuit: no deletion, no further iterations, returning `CommitResult(success=False, committed_snapshot=<failing name>, error=..., outcome="failure")` with the chain left consistent for safe retry. A `qemu-img commit` timeout SHALL map to `outcome="unknown"` with the same semantics as the live executor.
+The offline executor keeps its per-snapshot loop because `qemu-img commit` has no segment mode; it receives the full uncapped remove set and converges the chain within one run. The manager SHALL NOT rely on `qemu-img commit -d` for deletion (a no-op on QEMU 11.0.2). On any step failure it SHALL short-circuit: no deletion, no further iterations, returning `CommitResult(success=False, committed_snapshot=<failing name>, error=..., outcome="failure")` with the chain left consistent for safe retry. A `qemu-img commit` timeout SHALL map to `outcome="unknown"` with the same semantics as the live executor.
 
 The `blockcommit()` method SHALL accept an optional keyword argument `deep_verify: bool = False`. When `True` and the commit succeeds, the manager SHALL call `deep_verify_base_image(self._shell, base_image)` — a shared verification helper that runs `qemu-img check --output=json` on the *disk's* base image, parses corruptions/errors/leaks, and returns a `CommitResult` on failure or `None` on success. The helper's internal `shell.run()` call SHALL NOT pass `check=True`.
 
-#### Scenario: Successful live blockcommit of a single snapshot
+#### Scenario: Successful live bulk collapse of a multi-snapshot segment
 
-- **WHEN** `virsh blockcommit --domain <vm> --path <disk> --base <base_image> --top <snap> --delete --verbose --wait` returns exit code 0
-- **THEN** `BlockCommitManager` returns `CommitResult(success=True, committed_snapshot=<snapshot.name>, outcome="success")`
+- **WHEN** `snapshots_to_merge` contains 49 snapshots (oldest first) and `virsh blockcommit --domain <vm> --path <disk> --base <base_image> --top <path of the 49th/newest> --delete --verbose --wait` returns exit code 0
+- **THEN** exactly ONE `virsh blockcommit` command was executed
+- **AND** `BlockCommitManager` returns `CommitResult(success=True, committed_snapshot=<name of the newest merged snapshot>, outcome="success")`
+
+#### Scenario: Single-snapshot merge set degenerates to the same command
+
+- **WHEN** `snapshots_to_merge` contains exactly one snapshot
+- **THEN** the single executed command uses that snapshot's path as `--top`
 
 #### Scenario: Live blockcommit fails — virsh returns error
 
@@ -72,7 +78,7 @@ The `blockcommit()` method SHALL accept an optional keyword argument `deep_verif
 
 #### Scenario: Blockcommit times out — unknown outcome
 
-- **WHEN** `virsh blockcommit` exceeds the injected timeout (default 1800 seconds)
+- **WHEN** `virsh blockcommit` exceeds the injected timeout
 - **THEN** the module returns `CommitResult(success=False, outcome="unknown")` with error containing "timed out"
 - **AND** the result is NOT classified as a definitive failure by the manager
 
@@ -83,8 +89,8 @@ The `blockcommit()` method SHALL accept an optional keyword argument `deep_verif
 
 #### Scenario: Heartbeat callback invoked during the wait
 
-- **WHEN** the shell simulates a live commit lasting longer than one heartbeat interval
-- **THEN** the `on_heartbeat` callback is invoked with increasing elapsed values and logs name the VM, disk, and snapshot
+- **WHEN** the shell simulates a live bulk commit lasting longer than one heartbeat interval
+- **THEN** the `on_heartbeat` callback is invoked with increasing elapsed values and logs name the VM, disk, and the number of layers being collapsed
 
 #### Scenario: Successful blockcommit with deep verify passing
 
@@ -110,14 +116,19 @@ The `blockcommit()` method SHALL accept an optional keyword argument `deep_verif
 
 ### Requirement: Blockcommit of multiple snapshots
 
-The system SHALL handle multiple snapshots for merging, executing blockcommit for each in order (nearest-to-base first). Each invocation SHALL use `--base {base_image}` (the disk's base) and `--top {snapshot.path}`.
+The system SHALL handle multiple snapshots for merging according to the executor. The LIVE executor (`BlockCommitManager`) SHALL merge the whole merge set with a single `virsh blockcommit` segment command using `--base {base_image}` and `--top {snapshots_to_merge[-1].path}` (the newest removable snapshot), relying on the oldest-first ordering contract of the retention output. The OFFLINE executor (`QemuImgCommitManager`) SHALL execute `qemu-img commit` for each snapshot in order (nearest-to-base first), each with `-b {base_image}`, because `qemu-img` offers no segment commit. Neither executor applies any per-run cap — the merge set arrives complete from Core.
 
-#### Scenario: Two snapshots merged sequentially per disk
+#### Scenario: Live path merges a multi-snapshot set in one job
 
-- **WHEN** `snapshots_to_merge` contains [snap1, snap2] for a single disk
-- **THEN** blockcommit is executed for snap1 first (closest to base)
-- **AND** then blockcommit for snap2
-- **AND** if the first blockcommit fails, the second is NOT executed
+- **WHEN** `snapshots_to_merge` contains [snap1, snap2, …, snap49] (oldest first) and the VM is running under `lifecycle_mode="virsh"`
+- **THEN** exactly one `virsh blockcommit` command is executed with `--top snap49.path`
+- **AND** on success all 49 intermediate files are gone and the chain length shrank by 49
+
+#### Scenario: Offline path merges sequentially without a cap
+
+- **WHEN** the VM is shut off and `snapshots_to_merge` contains 49 snapshots
+- **THEN** `QemuImgCommitManager` processes all 49 oldest-first within the same invocation
+- **AND** if the 10th commit fails, snapshots 11–49 are NOT processed and the first 9 deletions stand
 
 ### Requirement: QemuImgCommitManager scans per-disk snapshot directory
 

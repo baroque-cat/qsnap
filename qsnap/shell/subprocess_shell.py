@@ -222,11 +222,12 @@ class SubprocessShell(IShell):
         """Execute *cmd* with a hard *timeout* and periodic heartbeat callback.
 
         Runs the command via ``Popen`` with stdout/stderr pipes drained
-        continuously by daemon reader threads.  Polls the process every
-        *heartbeat_seconds*; on each poll expiry calls
-        ``on_heartbeat(elapsed)``.  When the total elapsed time reaches
-        *timeout*, the process is killed and a timeout
-        :class:`ShellResult` is returned.
+        continuously by daemon reader threads.  Waits in slices of at most
+        *heartbeat_seconds* (shortened to the remaining budget near the
+        deadline); each time a full heartbeat interval elapses while the
+        process is still running, calls ``on_heartbeat(elapsed)``.  When
+        the total elapsed time reaches *timeout*, the process is killed at
+        the deadline and a timeout :class:`ShellResult` is returned.
         """
         start = time.monotonic()
         logger.debug(
@@ -284,6 +285,7 @@ class SubprocessShell(IShell):
         stderr_thread.start()
 
         try:
+            next_heartbeat_at = float(heartbeat_seconds)
             while True:
                 elapsed = time.monotonic() - start
                 if elapsed >= timeout:
@@ -311,15 +313,26 @@ class SubprocessShell(IShell):
                     stderr_thread.join(timeout=5)
                     return result
 
+                # Wait in slices bounded by the remaining budget so the
+                # kill fires at the true deadline, not at the next
+                # heartbeat boundary.
+                slice_seconds = min(heartbeat_seconds, timeout - elapsed)
                 try:
-                    proc.wait(timeout=heartbeat_seconds)
+                    proc.wait(timeout=slice_seconds)
                 except subprocess.TimeoutExpired:
                     # Process still running — invoke heartbeat callback.
                     # Elapsed is measured AT CALLBACK TIME (after the
                     # slice wait expired), so the reported value matches
                     # wall-clock reality (~60s, ~120s, ...) rather than
-                    # lagging one slice behind (observability spec).
-                    on_heartbeat(int(time.monotonic() - start))
+                    # lagging one slice behind (observability spec).  The
+                    # final partial slice before the deadline stays silent.
+                    now = time.monotonic() - start
+                    if now >= next_heartbeat_at:
+                        on_heartbeat(int(now))
+                        # Re-anchor past the current time so a suspended
+                        # host does not trigger catch-up heartbeat bursts.
+                        while next_heartbeat_at <= now:
+                            next_heartbeat_at += heartbeat_seconds
                     continue
 
                 # Process finished normally.

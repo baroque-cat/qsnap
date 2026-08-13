@@ -397,12 +397,17 @@ class ChainVerifyResult:
     when the verification passes or the error is not file-specific.
     ``disk`` identifies the disk target whose chain was verified, when
     known (None in contexts without a specific disk).
+    ``chain_length`` is the measured number of files in the backing chain
+    (additive, populated from the ``qemu-img info --backing-chain`` scan),
+    or None when the scan failed or no length was measured — Core reuses
+    it as the pre-commit baseline instead of a second full chain walk.
     """
 
     success: bool
     error: str | None
     broken_file: Path | None = None
     disk: str | None = None
+    chain_length: int | None = None
 
 
 @dataclass(frozen=True)

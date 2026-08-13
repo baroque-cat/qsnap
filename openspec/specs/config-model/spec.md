@@ -6,11 +6,12 @@ Immutable frozen dataclasses representing all qsnap configuration: global defaul
 ## Requirements
 
 ### Requirement: GlobalConfig default values
-The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=24` (hysteresis collapse floor / snapshot preservation floor; the newest 24 snapshots per disk are never blockcommitted; explicit 0 = inactive), `snapshot_retention_mode="hysteresis"` (retention mode: hysteresis is the default, steady is opt-in), `max_commits_per_run=12` (per-run commit cap, 0 = unlimited), free-space gate controls (`free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, convert parallelism, and backup stall timeout.
+The system SHALL provide an immutable `GlobalConfig` dataclass with frozen fields representing global configuration options, including state directory, lockfile path, count-based retention defaults (`snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`), `snapshot_preserve_min=24` (hysteresis collapse floor / snapshot preservation floor; the newest 24 snapshots per disk are never blockcommitted; explicit 0 = inactive), `snapshot_retention_mode="hysteresis"` (retention mode: hysteresis is the default, steady is opt-in), free-space gate controls (`free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`), deferred monitoring thresholds, fault-tolerance safety controls, compression default, compression type, convert parallelism, and backup stall timeout. No per-run commit cap field exists.
 
 #### Scenario: GlobalConfig default values
 - **WHEN** a `GlobalConfig` is created with only required fields
-- **THEN** optional fields have documented defaults: `state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=24`, `snapshot_retention_mode="hysteresis"`, `max_commits_per_run=12`, `free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`, `compress=True`, `compression_type="zstd"`, `convert_parallel=4`, `convert_out_of_order=True`, `backup_stall_timeout="30m"`, `auto_cleanup=True`, `state_backup_count=2`, `chain_verify_before_commit=True`, `chain_verify_after_commit=True`, `deep_check_schedule="off"`, `full_verify_after_create="check"`, `full_verify_before_delete="check"`, `transaction_log=None`, `backup_create="always"`
+- **THEN** optional fields have documented defaults: `state_dir="/var/lib/qsnap/state"`, `lockfile=None`, `snapshot_chain_length=72`, `target_chain_length=168`, `target_keep_generations=2`, `snapshot_preserve_min=24`, `snapshot_retention_mode="hysteresis"`, `free_space_check="strict"`, `free_space_reserve=0`, `free_space_factor=1.0`, `compress=True`, `compression_type="zstd"`, `convert_parallel=4`, `convert_out_of_order=True`, `backup_stall_timeout="30m"`, `auto_cleanup=True`, `state_backup_count=2`, `chain_verify_before_commit=True`, `chain_verify_after_commit=True`, `deep_check_schedule="off"`, `full_verify_after_create="check"`, `full_verify_before_delete="check"`, `transaction_log=None`, `backup_create="always"`
+- **AND** `GlobalConfig` has no `max_commits_per_run` attribute
 
 ### Requirement: compression_type field in GlobalConfig
 `GlobalConfig` SHALL include a `compression_type: str = "zstd"` field. Valid values are `"zstd"` (default) and `"zlib"`. The field is immutable (frozen dataclass).
@@ -388,17 +389,19 @@ The global config section SHALL support `snapshot_retention_mode` (string, value
 - **WHEN** a VM resolves hysteresis mode with `snapshot_chain_length = 24` and `snapshot_preserve_min = 48`
 - **THEN** config loading fails with `ConfigError` mentioning both resolved values
 
-### Requirement: max_commits_per_run option
+### Requirement: Removed max_commits_per_run key is rejected loudly
 
-The global config section SHALL support `max_commits_per_run` (integer ≥ 0, default 12, 0 = unlimited). It caps per-disk per-run snapshot commits in both retention modes. Non-integer or negative values SHALL raise `ConfigError`. The option SHALL NOT affect target/backup retention.
+ConfigFacade SHALL raise `ConfigError` when the global section of a config file contains the key `max_commits_per_run`. The error message SHALL name the removed option and state that the hysteresis collapse is now a single uncapped bulk blockcommit per trigger (no per-run cap exists). Silent ignoring is forbidden: an old config line must not masquerade as working portioning.
 
-#### Scenario: Default cap
-- **WHEN** the option is absent
-- **THEN** `max_commits_per_run` resolves to 12
+#### Scenario: Legacy config line fails startup
 
-#### Scenario: Negative value rejected
-- **WHEN** the option is set to -1
-- **THEN** config loading fails with `ConfigError`
+- **WHEN** `/etc/qsnap/qsnap.toml` contains `max_commits_per_run = 12` in the global section
+- **THEN** config loading raises `ConfigError` whose message names `max_commits_per_run` and mentions its removal
+
+#### Scenario: Absent key loads normally
+
+- **WHEN** the config file does not mention `max_commits_per_run`
+- **THEN** config loading succeeds and no cap of any kind applies to snapshot commits
 
 ### Requirement: GlobalConfig transaction_log field
 `GlobalConfig` SHALL include a `transaction_log: str | None = None` field. When `None`, no transaction log is written.

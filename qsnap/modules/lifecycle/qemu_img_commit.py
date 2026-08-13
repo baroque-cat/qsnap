@@ -31,11 +31,12 @@ logger = logging.getLogger(__name__)
 class QemuImgCommitManager(ILifecycleManager):
     """Manages backing chain lifecycle via ``qemu-img commit``.
 
-    Snapshots are merged one at a time (design D4): safer to roll back
-    on error, clearer logging.  On the first failure, processing
-    short-circuits — the failing file is NOT deleted and remaining
-    snapshots are NOT merged.  The chain is left consistent, so the
-    next run can safely retry.
+    Offline executor (design D8): keeps its per-snapshot loop (``qemu-img
+    commit`` has no segment mode) but is UNCAPPED — it receives the full
+    merge set and converges the chain within one run.  On the first
+    failure, processing short-circuits — the failing file is NOT deleted
+    and remaining snapshots are NOT merged.  The chain is left consistent,
+    so the next run can safely retry.
     """
 
     def __init__(self, shell: IShell) -> None:

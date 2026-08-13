@@ -25,6 +25,16 @@ class ConfigError(Exception):
     """Raised when the configuration is invalid (malformed TOML, missing fields)."""
 
 
+# Message for the removed ``max_commits_per_run`` option (design D6): any
+# config still setting the removed per-run commit cap fails loudly instead
+# of silently ignoring the line.
+_REMOVED_CAP_MESSAGE = (
+    "max_commits_per_run has been removed — the hysteresis collapse is now "
+    "a single uncapped bulk blockcommit per trigger (no per-run cap exists). "
+    "Remove the max_commits_per_run option from your config."
+)
+
+
 def _is_valid_duration(raw: str) -> bool:
     """Check whether *raw* is a valid duration string like ``"2s"`` or ``"10s"``."""
     return bool(re.match(r"^\d+s$", raw))
@@ -66,7 +76,6 @@ _GLOBAL_KEYS: frozenset[str] = frozenset(
         "free_space_reserve",
         "free_space_factor",
         "snapshot_retention_mode",
-        "max_commits_per_run",
         # Deprecated-but-tolerated global keys (warn-and-ignore).
         "snapshot_preserve",
         "target_preserve",
@@ -219,11 +228,17 @@ class ConfigFacade(IConfigFacade):
                 raise ConfigError("[global] section must be a table")
             raw = {**global_section, **raw}
 
+        # Removed option rejection (design D6): reject BEFORE the generic
+        # unknown-key check so the message names the removed option and the
+        # new single-shot behavior (not "Unknown key").
+        if "max_commits_per_run" in raw:
+            raise ConfigError(_REMOVED_CAP_MESSAGE)
+
         # Validate top-level keys after [global] unwrap (design D3).
         _check_unknown_keys(raw, _GLOBAL_KEYS, "[global] / top-level")
 
         # Build global config from top-level keys.
-        global_kwargs: dict[str, str | int | bool | None] = {}
+        global_kwargs: dict[str, str | int | float | bool | None] = {}
         for key in (
             "state_dir",
             "lockfile",
@@ -344,15 +359,6 @@ class ConfigFacade(IConfigFacade):
         if "snapshot_retention_mode" in raw:
             global_kwargs["snapshot_retention_mode"] = str(raw["snapshot_retention_mode"])
 
-        # Per-run commit cap (global only; snapshot world, both modes).
-        if "max_commits_per_run" in raw:
-            raw_value = raw["max_commits_per_run"]
-            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
-                raise ConfigError(
-                    f"max_commits_per_run must be an integer, got {raw_value!r}"
-                )
-            global_kwargs["max_commits_per_run"] = int(raw_value)
-
         self._global = GlobalConfig(**global_kwargs)  # type: ignore[arg-type]
 
         # Validate count-based retention fields (when set).
@@ -455,12 +461,6 @@ class ConfigFacade(IConfigFacade):
                 f"Must be one of: steady, hysteresis"
             )
 
-        # Validate max_commits_per_run (>= 0; 0 = unlimited).
-        if self._global.max_commits_per_run < 0:
-            raise ConfigError(
-                f"max_commits_per_run must be >= 0, got {self._global.max_commits_per_run}"
-            )
-
         # Validate FULL verification tiers.
         valid_after_create = {"metadata", "check", "compare", "off"}
         # Deprecation: "hash" was replaced by "compare" (unify-nbd-transfer).
@@ -513,6 +513,15 @@ class ConfigFacade(IConfigFacade):
             raise ConfigError("Missing required VM field: 'name'")
 
         name = str(vm_raw["name"])
+
+        # Removed option rejection at the VM level (design D6): the key was
+        # only ever a [global] option; reject it here too with the [global]
+        # hint so a misplaced line fails loudly instead of being ignored.
+        if "max_commits_per_run" in vm_raw:
+            raise ConfigError(
+                _REMOVED_CAP_MESSAGE + " It was a [global] option; set no cap anywhere."
+            )
+
         snapshot_dir = Path(str(vm_raw["snapshot_dir"])) if "snapshot_dir" in vm_raw else None
 
         # snapshot_create: VM-level or default "always".
@@ -596,13 +605,23 @@ class ConfigFacade(IConfigFacade):
 
         free_space_reserve: int
         if "free_space_reserve" in vm_raw:
-            free_space_reserve = int(vm_raw["free_space_reserve"])
+            raw_value = vm_raw["free_space_reserve"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                raise ConfigError(
+                    f"VM {name!r}: free_space_reserve must be an integer, got {raw_value!r}"
+                )
+            free_space_reserve = raw_value
         else:
             free_space_reserve = global_cfg.free_space_reserve
 
         free_space_factor: float
         if "free_space_factor" in vm_raw:
-            free_space_factor = float(vm_raw["free_space_factor"])
+            raw_value = vm_raw["free_space_factor"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise ConfigError(
+                    f"VM {name!r}: free_space_factor must be a number, got {raw_value!r}"
+                )
+            free_space_factor = float(raw_value)
         else:
             free_space_factor = global_cfg.free_space_factor
 
@@ -646,7 +665,7 @@ class ConfigFacade(IConfigFacade):
                 f"snapshot_chain_length > snapshot_preserve_min >= 1, got "
                 f"snapshot_chain_length={snapshot_chain_length!r}, "
                 f"snapshot_preserve_min={snapshot_preserve_min!r}"
-                )
+            )
 
         # backup_create: VM overrides global (target may override VM).
         vm_backup_create: str
@@ -676,7 +695,12 @@ class ConfigFacade(IConfigFacade):
         # convert_parallel.
         vm_convert_parallel: int
         if "convert_parallel" in vm_raw:
-            vm_convert_parallel = int(vm_raw["convert_parallel"])
+            raw_value = vm_raw["convert_parallel"]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                raise ConfigError(
+                    f"VM {name!r}: convert_parallel must be an integer, got {raw_value!r}"
+                )
+            vm_convert_parallel = raw_value
         else:
             vm_convert_parallel = global_cfg.convert_parallel
 

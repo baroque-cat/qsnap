@@ -1847,9 +1847,11 @@ def test_post_commit_chain_shortened_as_expected(
 ):
     """Post-commit verification: chain shortened from 7→6 → passes silently.
 
-    Retention removes snap6.  Pre-commit queries snap6 (7 entries),
-    blockcommit succeeds, post-commit queries snap5 (6 entries).
-    Verifies that 6 < 7 and no CRITICAL log is emitted.
+    Retention removes snap6.  The pre-commit integrity scan measures 7
+    entries (design D7 — the scan IS the baseline), blockcommit succeeds,
+    post-commit queries snap5 (6 entries).  Verifies that 6 < 7 and no
+    CRITICAL log is emitted.  ``_get_chain_length`` runs exactly ONCE — the
+    post-commit walk; the pre-commit baseline is reused from the scan.
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=True,
@@ -1869,6 +1871,13 @@ def test_post_commit_chain_shortened_as_expected(
     )
 
     _add_snapshots_6_for_chain(mock_state, "testvm")
+
+    # The pre-commit integrity scan returns the 7-entry chain — its
+    # measured length becomes chain_length_before (design D7).
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
 
     retention = RetentionResult(
         keep=["snap1", "snap2", "snap3", "snap4", "snap5"],
@@ -1896,12 +1905,15 @@ def test_post_commit_chain_shortened_as_expected(
         patch.object(
             core,
             "_get_chain_length",
-            side_effect=[7, 6],
-        ),
+            side_effect=[6],  # post-commit walk ONLY — baseline comes from the scan
+        ) as chain_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
 
+    # Design D7: the pre-commit baseline was reused from the scan, so the
+    # dedicated chain walk ran exactly once (the post-commit measurement).
+    assert chain_spy.call_count == 1
     assert bc_spy.called, "blockcommit should proceed"
     # Verify no CRITICAL log — chain shortened as expected
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
@@ -1922,7 +1934,9 @@ def test_post_commit_chain_shortened_intermediate_removal(
     snap3--snap5 are removed from state before blockcommit (simulating
     ``virsh --delete`` removing them from disk).  After snap6 is merged,
     the most recent surviving snapshot is snap2 → 3 entries.
-    3 < 7 → passes.
+    3 < 7 → passes.  The pre-commit baseline (7) comes from the integrity
+    scan (design D7); ``_get_chain_length`` runs once for the post-commit
+    measurement only.
     """
     global_cfg = make_global_config(
         chain_verify_before_commit=True,
@@ -1946,6 +1960,13 @@ def test_post_commit_chain_shortened_intermediate_removal(
     mock_state.remove_snapshot("testvm", "snap3")
     mock_state.remove_snapshot("testvm", "snap4")
     mock_state.remove_snapshot("testvm", "snap5")
+
+    # The pre-commit integrity scan returns the 7-entry chain — its
+    # measured length becomes chain_length_before (design D7).
+    chain_7 = _load_fixture("backing_chain_7_entries.json")
+    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
+        ShellResult(success=True, stdout=chain_7, stderr="", returncode=0, error=None)
+    )
 
     retention = RetentionResult(
         keep=["snap1", "snap2", "snap6"],
@@ -1973,12 +1994,15 @@ def test_post_commit_chain_shortened_intermediate_removal(
         patch.object(
             core,
             "_get_chain_length",
-            side_effect=[7, 3],
-        ),
+            side_effect=[3],  # post-commit walk ONLY — baseline comes from the scan
+        ) as chain_spy,
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
         core._blockcommit_snapshots(vm, retention)
 
+    # Design D7: the pre-commit baseline was reused from the scan, so the
+    # dedicated chain walk ran exactly once (the post-commit measurement).
+    assert chain_spy.call_count == 1
     assert bc_spy.called, "blockcommit should proceed"
     critical_logs = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert not critical_logs, f"Expected no CRITICAL log, got: {[r.message for r in critical_logs]}"
@@ -8969,6 +8993,7 @@ def test_partial_late_success_rewrites_intent_to_suffix(
     unknown = CommitResult(
         success=False, committed_snapshot="", error="timed out", outcome="unknown"
     )
+
     # Only the OLDEST merge-set file is gone → verified prefix == [snap1].
     def _exists(path) -> bool:
         return not str(path).endswith("snap1.qcow2")
@@ -10110,8 +10135,11 @@ def test_configured_timeout_reaches_manager(
     mock_shell,
     caplog,
 ):
-    """GlobalConfig.blockcommit_timeout is passed through as timeout= to the
-    lifecycle manager and appears in the [blockcommit] INFO line."""
+    """GlobalConfig.blockcommit_timeout wiring (design D4): the live bulk
+    path scales the budget by the merge set (timeout=900 × n), the offline
+    path keeps the unscaled per-layer budget (timeout=900).  Both appear in
+    the [blockcommit] INFO line."""
+    # ── Offline path: unscaled per-layer budget ──────────────────────────
     core, vm = _make_commit_core(
         make_vm_config,
         make_global_config,
@@ -10121,7 +10149,9 @@ def test_configured_timeout_reaches_manager(
         blockcommit_timeout=900,
     )
     snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    snap2 = _bc_snapshot("snap2", datetime(2025, 7, 13, 9, 0))
     mock_state.record_snapshot("testvm", snap1)
+    mock_state.record_snapshot("testvm", snap2)
     _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
 
     manager = mock_factory._lifecycle_manager
@@ -10129,11 +10159,377 @@ def test_configured_timeout_reaches_manager(
         caplog.at_level(logging.INFO),
         patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy,
     ):
-        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1", "snap2"]))
 
     assert bc_spy.called
-    assert bc_spy.call_args.kwargs["timeout"] == 900
+    assert bc_spy.call_args.kwargs["timeout"] == 900, (
+        "offline path must keep the UNSCALED per-layer budget"
+    )
     assert "timeout=900s" in caplog.text
+    caplog.clear()
+
+    # ── Live path: scaled = timeout × len(merge set) ─────────────────────
+    core_live, vm_live = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=900,
+        lifecycle_mode="virsh",
+    )
+    snaps_live = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 4)
+    ]
+    for sn in snaps_live:
+        mock_state.record_snapshot("testvm", sn)
+    _script_running_virsh_domblklist(mock_shell, active_path=f"{_SNAP_DIR_BC}/active.qcow2")
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy_live,
+    ):
+        _run_commit_for(
+            core_live,
+            vm_live,
+            RetentionResult(keep=[], remove=[s.name for s in snaps_live]),
+        )
+
+    assert bc_spy_live.called
+    assert bc_spy_live.call_args.kwargs["timeout"] == 900 * 3, (
+        "live bulk path must scale the budget by the merge-set size"
+    )
+    assert "timeout=2700s" in caplog.text
+
+
+def test_live_collapse_timeout_scaled_by_merge_set(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """core-orchestrator "Budget scales with the merge set": with
+    ``blockcommit_timeout=1800`` and a 49-item committable set, the mock
+    lifecycle manager receives ``timeout=88200`` (1800 × 49) for the single
+    bulk job."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=1800,
+        lifecycle_mode="virsh",
+    )
+    snaps = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    _script_running_virsh_domblklist(mock_shell, active_path=f"{_SNAP_DIR_BC}/active.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=[s.name for s in snaps]))
+
+    assert bc_spy.called
+    assert len(bc_spy.call_args.args[1]) == 49, "one manager call with the full 49-item set"
+    assert bc_spy.call_args.kwargs["timeout"] == 88200, (
+        "live bulk collapse must receive timeout = blockcommit_timeout × len(committable)"
+    )
+
+
+def test_offline_collapse_timeout_unscaled_per_layer(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """core-orchestrator "Offline budget stays per layer": the same 49-item
+    set committed offline (qemu-img) receives the UNSCALED
+    ``blockcommit_timeout`` (1800) — each per-layer ``qemu-img commit`` keeps
+    its own budget (per-layer budget enforcement lives in
+    QemuImgCommitManager; the lifecycle-manager suite pins the per-call
+    timeout)."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=1800,
+    )
+    snaps = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    # shut-off default → offline path; tip points outside the merge set.
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=[s.name for s in snaps]))
+
+    assert bc_spy.called
+    assert len(bc_spy.call_args.args[1]) == 49
+    assert bc_spy.call_args.kwargs["timeout"] == 1800, (
+        "offline collapse must keep the unscaled per-layer budget"
+    )
+
+
+def _chain_json_73_entries() -> str:
+    """Generate a 73-file backing-chain JSON fixture (snap72 → snap1 → base).
+
+    Entry 0 is the top overlay (what the pre-commit scan queries); each
+    entry's ``backing-filename`` matches the next entry, so the scan's
+    consistency checks pass with the conftest ``test -f`` success default.
+    """
+    paths = [f"{_SNAP_DIR_BC}/snap{i}.qcow2" for i in range(72, 0, -1)] + [_BASE_IMG_BC]
+    entries: list[dict[str, object]] = []
+    for i, p in enumerate(paths):
+        item: dict[str, object] = {
+            "image": p,
+            "format": "qcow2",
+            "virtual-size": 21474836480,
+            "actual-size": 1048576,
+        }
+        if i + 1 < len(paths):
+            item["backing-filename"] = paths[i + 1]
+        entries.append(item)
+    return json.dumps(entries)
+
+
+def test_chain_length_baseline_reused_from_scan(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """core-orchestrator "Baseline reused from the scan" (design D7): with
+    ``chain_verify_before_commit=True`` the pre-commit integrity scan
+    returns ``chain_length=73`` and Core uses it as ``chain_length_before`` —
+    ``_get_chain_length`` is NOT called (no second backing-chain walk) and
+    the baseline 73 reaches reconciliation."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        chain_verify_before_commit=True,
+        chain_verify_after_commit=False,
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+
+    # The pre-commit integrity scan measures a 73-file chain.
+    mock_shell.expect_first("qemu-img info --force-share --backing-chain").returns(
+        ShellResult(
+            success=True,
+            stdout=_chain_json_73_entries(),
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        patch.object(
+            manager,
+            "blockcommit",
+            return_value=CommitResult(
+                success=False, committed_snapshot="", error="timed out", outcome="unknown"
+            ),
+        ),
+        patch.object(core, "_get_chain_length", wraps=core._get_chain_length) as chain_spy,
+        patch.object(core, "_reconcile_commit_outcome", return_value="job_active") as reconcile_spy,
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    # D7: the scan's measured length IS the baseline — no dedicated walk.
+    chain_spy.assert_not_called()
+    reconcile_spy.assert_called_once()
+    assert reconcile_spy.call_args.kwargs["chain_length_before"] == 73
+    # The full merge set is deferred (job_active) with the intent kept.
+    assert mock_state.get_deferred_operations("testvm")[0].reason == "blockjob_active"
+    assert mock_state.get_commit_in_progress("testvm") != []
+
+
+def test_chain_length_baseline_fallback_when_verify_disabled(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """core-orchestrator "Fallback when verification is disabled" (design D7):
+    with ``chain_verify_before_commit=False`` Core issues its OWN
+    ``qemu-img info --backing-chain`` walk via ``_get_chain_length`` and uses
+    that measured length as the baseline."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        chain_verify_before_commit=False,
+        chain_verify_after_commit=False,
+    )
+    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
+    mock_state.record_snapshot("testvm", snap1)
+    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    with (
+        patch.object(
+            manager,
+            "blockcommit",
+            return_value=CommitResult(
+                success=False, committed_snapshot="", error="timed out", outcome="unknown"
+            ),
+        ),
+        patch.object(core, "_get_chain_length", wraps=core._get_chain_length) as chain_spy,
+        patch.object(core, "_reconcile_commit_outcome", return_value="job_active") as reconcile_spy,
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+
+    # Fallback: Core ran its own dedicated backing-chain walk.
+    chain_spy.assert_called()
+    assert any(
+        "qemu-img info --force-share --backing-chain" in c for c in mock_shell.call_history
+    ), "the fallback must issue its own qemu-img info --backing-chain walk"
+    # Conftest default chain measures 1 file → baseline 1 reaches reconciliation.
+    reconcile_spy.assert_called_once()
+    assert reconcile_spy.call_args.kwargs["chain_length_before"] == 1
+
+
+def test_bulk_job_active_probe_defers_not_failure(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+):
+    """RISK #343 (test-plan.md): a live bulk commit whose pre-commit
+    ``virsh blockjob`` probe reports ``"active"`` defers with reason
+    ``blockjob_active`` — never a definitive failure, never a RuntimeError,
+    and the full 49-item set is re-queued."""
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        lifecycle_mode="virsh",
+    )
+    snaps = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    _script_running_virsh_domblklist(mock_shell, active_path=f"{_SNAP_DIR_BC}/active.qcow2")
+    mock_shell.expect_first("virsh blockjob").returns(
+        ShellResult(
+            success=True,
+            stdout="Active block job exists",
+            stderr="",
+            returncode=0,
+            error=None,
+        )
+    )
+
+    manager = mock_factory._lifecycle_manager
+    with patch.object(manager, "blockcommit", wraps=manager.blockcommit) as bc_spy:
+        # Must NOT raise — an active foreign block job is a deferral.
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=[s.name for s in snaps]))
+
+    bc_spy.assert_not_called()
+    deferred = mock_state.get_deferred_operations("testvm")
+    assert len(deferred) == 1
+    assert deferred[0].reason == "blockjob_active"
+    assert deferred[0].snapshots == [s.name for s in snaps], (
+        "the full bulk set must be re-queued, never truncated"
+    )
+    # No intent was written — the probe blocked before the journal write.
+    assert mock_state.get_commit_in_progress("testvm") == []
+
+
+def test_lock_held_during_bulk_commit(
+    make_vm_config,
+    make_global_config,
+    mock_factory,
+    mock_state,
+    mock_shell,
+    tmp_path,
+):
+    """RISK #335 (test-plan.md): a long bulk collapse holds the exclusive
+    lockfile window; a concurrent second run fails closed with the
+    documented exit-3 message ("Lockfile is held by another qsnap
+    instance")."""
+    from qsnap.cli.errors import EXIT_LOCKFILE
+    from qsnap.locking import LockManager
+
+    lockfile = tmp_path / "qsnap.lock"
+    outer = LockManager(lockfile)
+    assert outer.acquire() is True, "the first run must hold the exclusive lock"
+
+    core, vm = _make_commit_core(
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=1800,
+        lifecycle_mode="virsh",
+    )
+    snaps = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    _script_running_virsh_domblklist(mock_shell, active_path=f"{_SNAP_DIR_BC}/active.qcow2")
+
+    manager = mock_factory._lifecycle_manager
+    original_commit = manager.blockcommit
+    second_run_code: int | None = None
+    second_run_message = ""
+
+    def _bulk_commit(*args, **kwargs):
+        # While the bulk job is inside the exclusive-lock window, a second
+        # instance (hourly timer) runs the CLI gate and fails closed.
+        nonlocal second_run_code, second_run_message
+        contender = LockManager(lockfile)
+        if not contender.acquire():
+            second_run_code = EXIT_LOCKFILE
+            second_run_message = (
+                f"Error: Lockfile is held by another qsnap instance (lockfile: {lockfile})"
+            )
+        return original_commit(*args, **kwargs)
+
+    with patch.object(manager, "blockcommit", side_effect=_bulk_commit) as bc_spy:
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=[s.name for s in snaps]))
+
+    assert bc_spy.called, "the bulk commit must run inside the lock window"
+    assert second_run_code == EXIT_LOCKFILE, (
+        "a second run during the bulk job must fail with exit code 3"
+    )
+    assert "Lockfile is held by another qsnap instance" in second_run_message
+
+    outer.release()
+    # After the run completes and the lock is released, a new run acquires it.
+    fresh = LockManager(lockfile)
+    assert fresh.acquire() is True
+    fresh.release()
 
 
 def test_stale_intent_resolved_before_commit_eval(
@@ -10197,37 +10593,71 @@ def test_intent_info_log_precedes_commit(
     mock_shell,
     caplog,
 ):
-    """The [blockcommit] intent INFO line precedes every commit attempt and
-    carries mode/timeout; the merge-completion line follows it."""
+    """The [blockcommit] intent INFO line precedes the bulk commit attempt
+    and pins the exact D9 wording: ``collapsing {n} snapshot(s)`` with the
+    SCALED live timeout (1800 × 49 = 88200s).  The completion line follows
+    with the ``collapsed {n} snapshot(s)`` wording."""
     core, vm = _make_commit_core(
-        make_vm_config, make_global_config, mock_factory, mock_state, mock_shell
+        make_vm_config,
+        make_global_config,
+        mock_factory,
+        mock_state,
+        mock_shell,
+        blockcommit_timeout=1800,
+        lifecycle_mode="virsh",
     )
-    snap1 = _bc_snapshot("snap1", datetime(2025, 7, 13, 8, 0))
-    mock_state.record_snapshot("testvm", snap1)
-    _script_shutoff_domblklist(mock_shell, tip_path=f"{_SNAP_DIR_BC}/other.qcow2")
+    snaps = [
+        _bc_snapshot(f"snap{i}", datetime(2025, 7, 13, 8, 0) + timedelta(hours=i))
+        for i in range(1, 50)
+    ]
+    for sn in snaps:
+        mock_state.record_snapshot("testvm", sn)
+    _script_running_virsh_domblklist(mock_shell, active_path=f"{_SNAP_DIR_BC}/active.qcow2")
 
-    with caplog.at_level(logging.INFO):
-        _run_commit_for(core, vm, RetentionResult(keep=[], remove=["snap1"]))
+    manager = mock_factory._lifecycle_manager
+    original_commit = manager.blockcommit
+    records_at_spawn: int | None = None
 
-    intent_lines = [
+    def _record_spawn(*args, **kwargs):
+        nonlocal records_at_spawn
+        records_at_spawn = len(caplog.records)
+        return original_commit(*args, **kwargs)
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch.object(manager, "blockcommit", side_effect=_record_spawn) as bc_spy,
+    ):
+        _run_commit_for(core, vm, RetentionResult(keep=[], remove=[s.name for s in snaps]))
+
+    assert bc_spy.called
+    assert len(bc_spy.call_args.args[1]) == 49, "one manager call with the full 49-item set"
+
+    # Exact intent line (design D9): scaled timeout on the live bulk path.
+    intent_line = (
+        "[blockcommit] testvm/vda: collapsing 49 snapshot(s) into "
+        "/var/lib/libvirt/images/testvm.qcow2 (mode=virsh, timeout=88200s)"
+    )
+    intent_records = [r for r in caplog.records if r.message == intent_line]
+    assert len(intent_records) == 1, f"expected exactly one intent line, got {intent_line!r}"
+
+    # The intent line was emitted BEFORE the virsh blockcommit spawned.
+    assert records_at_spawn is not None
+    assert caplog.records.index(intent_records[0]) < records_at_spawn, (
+        "intent INFO line must precede the manager/blockcommit spawn"
+    )
+
+    # Completion line uses the new D9 wording and lists every merged name.
+    collapsed_lines = [
         r.message
         for r in caplog.records
-        if "[blockcommit]" in r.message and "committing 1 snapshot(s)" in r.message
+        if "[blockcommit]" in r.message and "collapsed 49 snapshot(s)" in r.message
     ]
-    assert len(intent_lines) == 1
-    assert "testvm/vda" in intent_lines[0]
-    assert "mode=qemu-img" in intent_lines[0]
-    assert "timeout=1800s" in intent_lines[0]
-    assert "/var/lib/libvirt/images/testvm.qcow2" in intent_lines[0]
-
-    merged_lines = [
-        r.message for r in caplog.records if "[blockcommit]" in r.message and "merged" in r.message
-    ]
-    assert len(merged_lines) == 1
+    assert len(collapsed_lines) == 1
+    assert "snap1" in collapsed_lines[0] and "snap49" in collapsed_lines[0]
     # The intent line precedes the completion line.
-    assert caplog.records.index(
-        next(r for r in caplog.records if r.message == intent_lines[0])
-    ) < caplog.records.index(next(r for r in caplog.records if r.message == merged_lines[0]))
+    assert caplog.records.index(intent_records[0]) < caplog.records.index(
+        next(r for r in caplog.records if r.message == collapsed_lines[0])
+    )
 
 
 def test_reconciliation_outcomes_logged(

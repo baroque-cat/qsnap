@@ -3853,14 +3853,17 @@ class Core:
                 commit_ts,
             )
             global_cfg = self._config.get_global()
+            timeout = global_cfg.blockcommit_timeout
+            if plan.effective_mode == "virsh":
+                timeout = global_cfg.blockcommit_timeout * len(plan.committable)
             logger.info(
-                "[blockcommit] %s/%s: committing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
+                "[blockcommit] %s/%s: collapsing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
                 vm_config.name,
                 entry.disk,
                 len(plan.committable),
                 disk_cfg.base_image,
                 plan.effective_mode,
-                global_cfg.blockcommit_timeout,
+                timeout,
             )
             result = manager.blockcommit(
                 vm_config,
@@ -3868,7 +3871,7 @@ class Core:
                 disk=entry.disk,
                 base_image=disk_cfg.base_image,
                 deep_verify=vm_config.blockcommit_deep_verify,
-                timeout=global_cfg.blockcommit_timeout,
+                timeout=timeout,
             )
 
             if result.outcome == "unknown":
@@ -4088,12 +4091,14 @@ class Core:
     ) -> None:
         """Add a deferred blockcommit entry unless an equivalent one exists.
 
-        Implements the spec's "add/refresh" semantics for intent recovery:
+        Single deduplicated entry point for ALL deferral paths (intent
+        recovery, pre-commit race guards, post-outcome classification):
         an existing entry covering the same disk and the same snapshot set
         (regardless of its reason) already represents the pending work —
         appending another copy on every run would let the queue grow
         without bound while the blocking condition persists (e.g. a
-        long-lived foreign block job).
+        long-lived foreign block job, a persistent MAC denial, or a
+        disk-full target).
         """
         wanted = sorted(snapshots)
         for op in self._state.get_deferred_operations(vm_name):
@@ -4222,7 +4227,7 @@ class Core:
                     # Partial completion: converge the verified oldest
                     # prefix and rewrite the intent to the remaining
                     # suffix so it is retried next run (design D6).
-                    pending = snapshots[len(verified):]
+                    pending = snapshots[len(verified) :]
                     logger.warning(
                         "VM %s disk %s: commit partially completed after "
                         "previous run timed out — converged: %s; still "
@@ -4472,13 +4477,12 @@ class Core:
         Branches on the VM's resolved ``snapshot_retention_mode``:
 
         - ``"steady"`` — the pre-existing count-based logic (byte-identical
-          decision), then the shared ``max_commits_per_run`` cap.
+          decision), no per-run cap.
         - ``"hysteresis"`` — grow-to-threshold / collapse-to-floor (see
           :meth:`_evaluate_disk_retention_hysteresis`).
 
         Returns ``(keep_names, remove_names)``.  ``remove`` is ordered
-        oldest-first after the oldest-prefix + preserve-min filters and the
-        per-run cap.
+        oldest-first after the oldest-prefix + preserve-min filters.
         """
         if vm_config.snapshot_retention_mode == "hysteresis":
             return self._evaluate_disk_retention_hysteresis(vm_config, disk, snapshots)
@@ -4486,8 +4490,7 @@ class Core:
         # Steady mode — unchanged count-based evaluation.
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         result = engine.evaluate(items, policy, datetime.now())
-        keep, remove = self._postprocess_retention(snapshots, result, policy.preserve_min)
-        return keep, self._apply_commit_cap(remove)
+        return self._postprocess_retention(snapshots, result, policy.preserve_min)
 
     def _postprocess_retention(
         self,
@@ -4535,57 +4538,29 @@ class Core:
 
         return final_keep, final_remove
 
-    def _apply_commit_cap(self, remove: list[str]) -> list[str]:
-        """Truncate *remove* to the OLDEST ``max_commits_per_run`` entries.
-
-        ``max_commits_per_run = 0`` means unlimited.  Applied AFTER the
-        preserve-min floor trim (in both retention modes), so the newest
-        ``preserve_min`` snapshots are never marked — the floor invariant
-        holds regardless of the cap.
-        """
-        cap = self._config.get_global().max_commits_per_run
-        if cap > 0 and len(remove) > cap:
-            return remove[:cap]
-        return remove
-
     def _evaluate_disk_retention_hysteresis(
         self,
         vm_config: VMConfig,
         disk: str,
         snapshots: list[SnapshotInfo],
     ) -> tuple[list[str], list[str]]:
-        """Hysteresis retention for one disk (grow-to-threshold / collapse).
+        """Hysteresis retention for one disk (grow-to-threshold / single-run collapse).
 
         ``snapshot_chain_length`` is the trigger threshold H and
         ``snapshot_preserve_min`` the collapse floor L.  While the chain
-        is below H (and no collapse phase is persisted) nothing is
-        committed; once it crosses H the oldest ``N − L`` snapshots are
-        merged, bounded per run by ``max_commits_per_run``, and the phase
-        persists until ``N ≤ L``.
+        is at or below H nothing is committed (grow phase).  Once N > H the
+        FULL oldest ``N − L`` set is marked for commit within the SAME run
+        as a single bulk blockcommit — no per-run cap and no persisted
+        phase exist.  A deferred/failed collapse re-triggers identically on
+        the next run because ``N > H`` still holds.
         """
         H = vm_config.snapshot_chain_length
         L = vm_config.snapshot_preserve_min or 0
         N = len(snapshots)
-        phase = self._state.get_collapse_in_progress(vm_config.name)
-        phase_active = disk in phase
 
-        # Defensive clear: phase active but reality already at/below the
-        # floor (operator restore / stale-entry healing shrank the chain).
-        if phase_active and N <= L:
-            if not self._dry_run:
-                self._state.clear_collapse_in_progress(vm_config.name, disk)
-            logger.info(
-                "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
-                vm_config.name,
-                disk,
-                N,
-                L,
-            )
-            return [s.name for s in snapshots], []
-
-        # Grow phase: below the trigger threshold with no persisted phase —
-        # no commits; the chain grows until it crosses H.
-        if not phase_active and (H is None or N <= H):
+        # Grow phase: at/below the trigger threshold — no commits; the
+        # chain grows until it crosses H.
+        if H is None or N <= H:
             if self._dry_run:
                 logger.info(
                     "[dry-run] %s/%s: grow phase (N=%d <= threshold %s) — no commits",
@@ -4604,81 +4579,38 @@ class Core:
                 )
             return [s.name for s in snapshots], []
 
-        # Collapse (triggered N > H, or continuing phase_active with N > L):
-        # invoke the SAME pure engine with effective keep-count = L (floor).
+        # Collapse (N > H): invoke the SAME pure engine with effective
+        # keep-count = L (floor), then the oldest-prefix filter and the
+        # preserve-min floor trim.  The result is the FULL oldest N − L set
+        # — no cap truncation.
         policy = RetentionPolicy(chain_length=L, keep_generations=1, preserve_min=L)
         engine = self._factory.create_retention_engine(policy)
         items = [RetentionItem(name=s.name, timestamp=s.timestamp) for s in snapshots]
         result = engine.evaluate(items, policy, datetime.now())
         keep, remove = self._postprocess_retention(snapshots, result, L)
-        remove = self._apply_commit_cap(remove)
 
-        # Defensive clear when the phase is active, the chain is back within
-        # the band (N <= H), and nothing remains removable (all remaining
-        # snapshots are deferred — active layer etc.).  Gives up the phase so
-        # the chain can grow again instead of oscillating mid-band forever.
-        if phase_active and H is not None and N <= H and not remove:
-            if not self._dry_run:
-                self._state.clear_collapse_in_progress(vm_config.name, disk)
+        # Observability (design D9): initiation line naming VM, disk, merge
+        # count, current count, and floor.
+        if self._dry_run:
             logger.info(
-                "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
+                "[dry-run] %s/%s: collapse would trigger "
+                "(N=%d, merging %d, floor=%d) — single bulk blockcommit",
                 vm_config.name,
                 disk,
                 N,
+                len(remove),
                 L,
             )
-            return keep, []
-
-        # Persist the phase BEFORE the commit step (evaluation precedes the
-        # blockcommit — design D2).  Dry-run reads the phase but never
-        # writes or clears it.
-        total_to_merge = N - L
-        if not self._dry_run:
-            if not phase_active:
-                self._state.set_collapse_in_progress(vm_config.name, disk)
-                logger.info(
-                    "[retention] %s/%s: collapse phase started "
-                    "(N=%d, merging %d, floor=%d)",
-                    vm_config.name,
-                    disk,
-                    N,
-                    total_to_merge,
-                    L,
-                )
-            elif remove:
-                logger.info(
-                    "[retention] %s/%s: collapse phase active "
-                    "(N=%d, committing %d of %d, floor=%d)",
-                    vm_config.name,
-                    disk,
-                    N,
-                    len(remove),
-                    total_to_merge,
-                    L,
-                )
-        elif remove:
-            # Dry-run prediction observability (D7): predict, do not write.
-            if not phase_active:
-                logger.info(
-                    "[dry-run] %s/%s: collapse phase would start "
-                    "(N=%d, merging %d, floor=%d)",
-                    vm_config.name,
-                    disk,
-                    N,
-                    total_to_merge,
-                    L,
-                )
-            else:
-                logger.info(
-                    "[dry-run] %s/%s: collapse phase would continue "
-                    "(N=%d, committing %d of %d, floor=%d)",
-                    vm_config.name,
-                    disk,
-                    N,
-                    len(remove),
-                    total_to_merge,
-                    L,
-                )
+        else:
+            logger.info(
+                "[retention] %s/%s: collapse triggered "
+                "(N=%d, merging %d, floor=%d) — single bulk blockcommit",
+                vm_config.name,
+                disk,
+                N,
+                len(remove),
+                L,
+            )
 
         return keep, remove
 
@@ -4710,6 +4642,10 @@ class Core:
             )
 
         scan = scan_backing_chain(self._shell, active_path)
+        # Additive chain-length baseline (design D7): populated from the
+        # scan so Core can reuse it as ``chain_length_before`` instead of a
+        # second full ``qemu-img info --backing-chain`` walk.
+        chain_length = len(scan.paths) if scan.success and scan.paths else None
 
         if not scan.success:
             # scan_backing_chain failed (command or parse error) — try
@@ -4750,9 +4686,16 @@ class Core:
                 error=f"Backing chain broken: {', '.join(scan.broken_files)}",
                 broken_file=broken_file,
                 disk=disk,
+                chain_length=chain_length,
             )
 
-        return ChainVerifyResult(success=True, error=None, broken_file=None, disk=disk)
+        return ChainVerifyResult(
+            success=True,
+            error=None,
+            broken_file=None,
+            disk=disk,
+            chain_length=chain_length,
+        )
 
     def _find_broken_chain_file(self, start_path: Path, max_steps: int = 64) -> Path | None:
         """Walk the backing chain from *start_path* to find the first missing file.
@@ -4976,9 +4919,7 @@ class Core:
             timeout=30,
             check=True,
         )
-        return classify_blockjob_output(
-            result.stdout, stderr=result.stderr, success=result.success
-        )
+        return classify_blockjob_output(result.stdout, stderr=result.stderr, success=result.success)
 
     def _reconcile_commit_outcome(
         self,
@@ -5005,7 +4946,10 @@ class Core:
            ``"late_success"`` (full merge set verified).
         5. ``0 < k < n`` and the chain shrank by exactly ``k`` (or no
            baseline) → ``"late_success"`` (the oldest ``k`` verified — a
-           multi-snapshot commit died between two per-snapshot jobs).
+           per-layer OFFLINE commit died between two ``qemu-img commit``
+           invocations).  The live bulk job is all-or-nothing (single
+           segment command), so this prefix branch can no longer occur on
+           the live path but MUST remain for the offline executor.
         6. ``k == 0`` and the chain unchanged (or no baseline) →
            ``"failure"`` (the job died without effect).
         7. Any disagreement (chain delta inconsistent with ``k``) →
@@ -5221,7 +5165,8 @@ class Core:
             for disk, disk_snapshots in by_disk.items():
                 names = ", ".join(sn.name for sn in disk_snapshots)
                 logger.info(
-                    "[dry-run] Would blockcommit %d snapshot(s) for disk %s of VM %s: %s",
+                    "[dry-run] would collapse %d snapshot(s) in one blockcommit "
+                    "for disk %s of VM %s: %s",
                     len(disk_snapshots),
                     disk,
                     vm_config.name,
@@ -5296,7 +5241,7 @@ class Core:
             committable = plan.committable
             effective_mode = plan.effective_mode
             if plan.deferrable:
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in plan.deferrable],
@@ -5319,6 +5264,7 @@ class Core:
         # the VM pipeline immediately (VM-level isolation): a broken or
         # unverifiable backing chain needs operator intervention — no
         # automatic recovery is attempted.
+        chain_length_before: int | None = None
         if global_cfg.chain_verify_before_commit:
             verify_result = self._verify_backing_chain(vm_config, disk)
             if not verify_result.success:
@@ -5338,6 +5284,7 @@ class Core:
                 logger.critical(msg)
                 # Do NOT defer — broken chain needs operator intervention
                 raise RuntimeError(msg)
+            chain_length_before = verify_result.chain_length
         else:
             logger.info(
                 "chain_verify_before_commit is disabled — "
@@ -5346,8 +5293,11 @@ class Core:
                 disk,
             )
 
-        # Get chain length before commit for post-commit comparison
-        chain_length_before = self._get_chain_length(vm_config, disk)
+        # Baseline dedup (design D7): reuse the pre-commit scan's measured
+        # length; issue a dedicated chain walk only when verification is
+        # disabled or the scan carried no length.
+        if chain_length_before is None:
+            chain_length_before = self._get_chain_length(vm_config, disk)
 
         # Block-job protocol (design D6): before a LIVE commit, probe the
         # disk's block-job state.  Only "none" proceeds; an active job is
@@ -5377,7 +5327,7 @@ class Core:
                 )
                 return
             if probe == "active":
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5391,7 +5341,7 @@ class Core:
                 )
                 return
             if probe == "error":
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5417,7 +5367,7 @@ class Core:
                 check=True,
             )
             if not recheck.success:
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5433,7 +5383,7 @@ class Core:
                 )
                 return
             if "shut off" not in recheck.stdout.strip().lower():
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5468,15 +5418,22 @@ class Core:
                 commit_ts,
             )
 
+        # Scaled timeout budget (design D4): the live bulk job receives
+        # blockcommit_timeout × len(committable); the offline path keeps the
+        # unscaled per-layer budget.
+        timeout = global_cfg.blockcommit_timeout
+        if effective_mode == "virsh":
+            timeout = global_cfg.blockcommit_timeout * len(committable)
+
         # Observability (design D9): INFO intent line before every commit.
         logger.info(
-            "[blockcommit] %s/%s: committing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
+            "[blockcommit] %s/%s: collapsing %d snapshot(s) into %s (mode=%s, timeout=%ds)",
             vm_config.name,
             disk,
             len(committable),
             base_image,
             effective_mode,
-            global_cfg.blockcommit_timeout,
+            timeout,
         )
 
         result = manager.blockcommit(
@@ -5485,7 +5442,7 @@ class Core:
             disk=disk,
             base_image=base_image,
             deep_verify=vm_config.blockcommit_deep_verify,
-            timeout=global_cfg.blockcommit_timeout,
+            timeout=timeout,
         )
 
         # ── Commit outcome dispatch (design D1/D5) ──────────────────────
@@ -5548,7 +5505,7 @@ class Core:
                 else:
                     # Partial completion: converge the verified oldest prefix
                     # and rewrite the intent to the remaining suffix (D6).
-                    pending = committable[len(verified):]
+                    pending = committable[len(verified) :]
                     logger.warning(
                         "VM %s disk %s: blockcommit partially completed after "
                         "client timeout — converged: %s; still pending: %s",
@@ -5580,7 +5537,7 @@ class Core:
                     )
                     return
             elif reconciled == "job_active":
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5603,7 +5560,7 @@ class Core:
                 logger.error(msg)
                 raise RuntimeError(msg)
             else:  # inconclusive
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5624,7 +5581,7 @@ class Core:
             # MAC denial — defer.
             if result.error and ("apparmor" in result.error or "selinux" in result.error):
                 reason = "apparmor" if "apparmor" in result.error else "selinux"
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5640,7 +5597,7 @@ class Core:
 
             # ENOSPC — defer.
             if result.error and is_space_error(result.error):
-                self._state.add_deferred_blockcommit(
+                self._queue_deferred_once(
                     vm_config.name,
                     disk,
                     [s.name for s in committable],
@@ -5663,7 +5620,7 @@ class Core:
         # ── success (or late_success) → converge state ───────────────────
         merged_names = ", ".join(s.name for s in committable)
         logger.info(
-            "[blockcommit] %s/%s: merged %d snapshot(s) — %s",
+            "[blockcommit] %s/%s: collapsed %d snapshot(s) — %s",
             vm_config.name,
             disk,
             len(committable),
@@ -5685,26 +5642,6 @@ class Core:
         # Clear intent LAST — a crash anywhere above still leaves the
         # intent record for the next run to reconcile (design D4).
         self._state.clear_commit_in_progress(vm_config.name, disk)
-
-        # Hysteresis collapse phase convergence: after a successful commit,
-        # re-read the disk's snapshot count and clear the phase once the
-        # floor is reached.  Deferred/failed commits never reach here, so
-        # their phase stays intact for retry by the next run (design D2).
-        if vm_config.snapshot_retention_mode == "hysteresis":
-            remaining = [
-                s for s in self._state.get_snapshots(vm_config.name) if s.disk == disk
-            ]
-            n_after = len(remaining)
-            floor = vm_config.snapshot_preserve_min or 0
-            if n_after <= floor:
-                self._state.clear_collapse_in_progress(vm_config.name, disk)
-                logger.info(
-                    "[retention] %s/%s: collapse phase complete (N=%d, floor=%d)",
-                    vm_config.name,
-                    disk,
-                    n_after,
-                    floor,
-                )
 
         # Offline commits deleted overlay files that the (inactive) domain
         # XML may still reference in <backingStore> chains — refresh the

@@ -842,7 +842,8 @@ def test_blockcommit_timeout_invalid_values_rejected(tmp_path: Path, bad_value) 
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# hysteresis-snapshot-retention: snapshot_retention_mode / max_commits_per_run
+# hysteresis-snapshot-retention: snapshot_retention_mode / removed
+# max_commits_per_run (bulk-collapse-blockcommit design D6)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -956,36 +957,53 @@ def test_hysteresis_zero_floor_rejected(tmp_path: Path) -> None:
         ConfigFacade(config_file)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Removed max_commits_per_run key (bulk-collapse-blockcommit design D6)
+# ──────────────────────────────────────────────────────────────────────────
+
+
 @pytest.mark.unit
-def test_max_commits_per_run_negative_rejected(tmp_path: Path) -> None:
-    """config-model "Negative value rejected": ``max_commits_per_run = -1``
-    fails with a ConfigError naming the option."""
-    config_file = _write_single_disk_toml(
-        tmp_path, global_lines="max_commits_per_run = -1\n"
-    )
-    with pytest.raises(ConfigError, match="max_commits_per_run must be >= 0"):
+def test_max_commits_per_run_legacy_key_rejected(tmp_path: Path) -> None:
+    """A legacy config line setting ``max_commits_per_run`` fails startup.
+
+    config-model scenario "Legacy config line fails startup": any config
+    still carrying the removed per-run commit cap must raise a dedicated
+    ``ConfigError`` that names the option and states the collapse is now a
+    single uncapped bulk blockcommit — NOT the generic "Unknown key"
+    message.  The same rejection applies at the ``[[vm]]`` level, with a
+    ``[global]`` hint appended.
+    """
+    # Global/top-level: the dedicated removed-option message.
+    config_file = _write_single_disk_toml(tmp_path, global_lines="max_commits_per_run = 12\n")
+    with pytest.raises(ConfigError) as exc_info:
         ConfigFacade(config_file)
 
+    message = str(exc_info.value)
+    assert "max_commits_per_run" in message, message
+    assert "single uncapped bulk blockcommit" in message, message
+    assert "Unknown key" not in message, message
+
+    # [[vm]] section: rejected too, with the [global] hint.
+    config_file = _write_single_disk_toml(tmp_path, vm_extra_lines="max_commits_per_run = 12\n")
+    with pytest.raises(ConfigError) as exc_info:
+        ConfigFacade(config_file)
+
+    message = str(exc_info.value)
+    assert "max_commits_per_run" in message, message
+    assert "[global]" in message, message
+    assert "Unknown key" not in message, message
+
 
 @pytest.mark.unit
-def test_max_commits_per_run_zero_accepted(tmp_path: Path) -> None:
-    """``max_commits_per_run = 0`` is accepted (0 = unlimited) — the escape
-    hatch for migration on healthy hosts (test-plan risk: "Default cap slows
-    migration")."""
-    config_file = _write_single_disk_toml(
-        tmp_path, global_lines="max_commits_per_run = 0\n"
-    )
+def test_absent_max_commits_key_loads_normally(tmp_path: Path) -> None:
+    """A config without ``max_commits_per_run`` parses and carries no cap.
+
+    config-model scenario "Absent key loads normally": the GlobalConfig
+    produced by ConfigFacade has no ``max_commits_per_run`` attribute —
+    no cap of any kind applies to snapshot commits.
+    """
+    config_file = _write_single_disk_toml(tmp_path)
     facade = ConfigFacade(config_file)
-    assert facade.get_global().max_commits_per_run == 0
 
-
-@pytest.mark.unit
-def test_max_commits_per_run_non_integer_rejected(tmp_path: Path) -> None:
-    """Non-integer ``max_commits_per_run`` values are rejected with a clear
-    ConfigError naming the option."""
-    for bad_value in ('"abc"', "1.5", "true"):
-        config_file = _write_single_disk_toml(
-            tmp_path, global_lines=f"max_commits_per_run = {bad_value}\n"
-        )
-        with pytest.raises(ConfigError, match="max_commits_per_run must be an integer"):
-            ConfigFacade(config_file)
+    global_cfg = facade.get_global()
+    assert not hasattr(global_cfg, "max_commits_per_run")

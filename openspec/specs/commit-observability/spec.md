@@ -10,17 +10,12 @@ be diagnosed.
 
 ### Requirement: Commit intent log before the manager call
 
-Immediately before invoking the lifecycle manager for a disk, Core SHALL log an INFO line
-naming the VM, disk, number of snapshots in the merge set, the base image, the effective
-executor mode (`virsh` or `qemu-img`), and the configured timeout in seconds, e.g.
-`[blockcommit] {vm}/{disk}: committing {n} snapshot(s) into {base} (mode={mode},
-timeout={timeout}s)`. This line SHALL be emitted for both the main pipeline commit path and
-the deferred-queue drain path.
+Immediately before invoking the lifecycle manager for a disk, Core SHALL log an INFO line naming the VM, disk, number of snapshots in the merge set, the base image, the effective executor mode (`virsh` or `qemu-img`), and the EFFECTIVE timeout in seconds (the scaled budget on the live bulk path), e.g. `[blockcommit] {vm}/{disk}: collapsing {n} snapshot(s) into {base} (mode={mode}, timeout={timeout}s)`. This line SHALL be emitted for both the main pipeline commit path and the deferred-queue drain path.
 
 #### Scenario: Intent line precedes every commit attempt
 
-- **WHEN** Core commits merge set `["s1"]` for `vm1/vda` in mode `virsh` with timeout 1800
-- **THEN** an INFO log line matching `[blockcommit] vm1/vda: committing 1 snapshot(s)` with `mode=virsh` and `timeout=1800s` appears before the `virsh blockcommit` command is spawned
+- **WHEN** Core commits a 49-snapshot merge set for `vm1/vda` in mode `virsh` with `blockcommit_timeout = 1800`
+- **THEN** an INFO log line matching `[blockcommit] vm1/vda: collapsing 49 snapshot(s)` with `mode=virsh` and `timeout=88200s` appears before the `virsh blockcommit` command is spawned
 
 #### Scenario: Drain path also logs intent
 
@@ -29,20 +24,16 @@ the deferred-queue drain path.
 
 ### Requirement: Heartbeat during live commit waits
 
-`BlockCommitManager` SHALL execute `virsh blockcommit --wait` through
-`IShell.run_with_heartbeat` with a heartbeat interval of 60 seconds. On every heartbeat the
-manager SHALL log an INFO line naming the VM, disk, the snapshot being merged, and the
-elapsed seconds, e.g. `[blockcommit] {vm}/{disk}: still merging {snapshot} into base
-({elapsed}s elapsed)`. A live commit therefore produces at most 60 seconds of log silence.
+`BlockCommitManager` SHALL execute the single bulk `virsh blockcommit --wait` through `IShell.run_with_heartbeat` with a heartbeat interval of 60 seconds. On every heartbeat the manager SHALL log an INFO line naming the VM, disk, the number of layers being collapsed, and the elapsed seconds, e.g. `[blockcommit] {vm}/{disk}: still collapsing {n} layer(s) into base ({elapsed}s elapsed)`; the layer noun SHALL be singular (`layer`) when exactly one layer is collapsed and plural (`layers`) otherwise. A live collapse therefore produces at most 60 seconds of log silence. The elapsed counter belongs to the one bulk job; it starts at zero when the job spawns.
 
-#### Scenario: Heartbeat lines appear during a long commit
+#### Scenario: Heartbeat lines appear during a long collapse
 
-- **WHEN** a live blockcommit runs for 150 seconds
-- **THEN** at least two heartbeat INFO lines are logged (at ~60s and ~120s), each naming the VM, disk, and snapshot
+- **WHEN** a live bulk blockcommit runs for 150 seconds
+- **THEN** at least two heartbeat INFO lines are logged (at ~60s and ~120s), each naming the VM, disk, and the layer count of the merge set
 
-#### Scenario: Fast commit produces no heartbeat
+#### Scenario: Fast collapse produces no heartbeat
 
-- **WHEN** a live blockcommit completes in under 60 seconds
+- **WHEN** a live bulk blockcommit completes in under 60 seconds
 - **THEN** no heartbeat line is emitted and the result is logged normally
 
 ### Requirement: Reconciliation and recovery outcomes are logged

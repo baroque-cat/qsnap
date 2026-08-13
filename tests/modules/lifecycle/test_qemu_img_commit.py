@@ -13,6 +13,13 @@ Rewired for design D4 (no ``-d`` flag) — per-snapshot algorithm (oldest first)
   4. ``rm -f <snap>`` (only after successful rebase, or when no child)
 Short-circuit on ANY step failure.  ``deep_verify`` runs ``qemu-img check``
 on the disk's ``base_image`` (not a VM-level base).
+
+Design D8 (bulk-collapse-blockcommit): the OFFLINE path remains per-layer
+but UNCAPPED — ``qemu-img commit`` has no segment mode, so the manager
+keeps its per-snapshot loop, receives the full uncapped merge set from
+Core, and converges the chain within one run.  A mid-batch failure leaves
+a ``0 < k < n`` partial prefix (the first k files deleted, the (k+1)-th
+failed) that Core's reconciliation consumes.
 """
 
 from __future__ import annotations
@@ -105,6 +112,26 @@ def _make_snapshot(
         allocation=allocation,
         disk=disk,
     )
+
+
+def _make_snapshot_set(n: int = 49) -> list[SnapshotInfo]:
+    """Build an oldest-first merge set of *n* snapshots (default 49).
+
+    Names/paths encode the 0-based index (``testvm.20250101T{i:02d}0000``),
+    one minute apart, so assertions can pin the per-snapshot processing
+    order and the exact failing snapshot.
+    """
+    snaps: list[SnapshotInfo] = []
+    for i in range(n):
+        name = f"testvm.20250101T{i:02d}0000"
+        snaps.append(
+            _make_snapshot(
+                name=name,
+                path=f"/snapshots/{name}.qcow2",
+                timestamp=datetime(2025, 1, 1, 0, i, 0),
+            )
+        )
+    return snaps
 
 
 def _cmd_strings(calls: list[list[str]]) -> list[str]:
@@ -1026,3 +1053,106 @@ def test_qemu_img_commit_empty_list_no_op(mock_shell: MockShell, make_vm_config)
 
     # No shell commands should have been executed at all.
     assert len(shell.calls) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# B.1: Offline uncapped batch (design D8) — full merge set, one invocation
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    [None, 10],
+    ids=["all-49-succeed", "fail-at-10"],
+)
+def test_qemu_img_commit_uncapped_batch_processes_all(
+    mock_shell: MockShell,
+    make_vm_config,
+    fail_at: int | None,
+):
+    """The offline path processes the full uncapped merge set (design D8).
+
+    The manager receives the ENTIRE 49-item remove set from Core — no cap
+    truncation exists anywhere on this path — and converges the chain
+    within one invocation:
+
+    - success (``fail_at=None``): 49 ``qemu-img commit`` calls, all
+      processed oldest-first, each followed by child discovery and
+      ``rm -f``; ``committed_snapshot`` is the newest (49th) name.
+    - failure at #10 (``fail_at=10``): the 10th commit fails → snapshots
+      11–49 are NOT processed and the first 9 deletions stand
+      (short-circuit).  This leaves the ``0 < k < n`` partial prefix that
+      Core's reconciliation consumes (design D3) — same partial-prefix
+      contract as the integration partial-prefix test.
+    """
+    vm_config = make_vm_config()
+    snaps = _make_snapshot_set(49)
+    base = vm_config.disks[0].base_image
+
+    # Every qemu-img commit succeeds unless the specific failing one is
+    # scripted below; find returns empty (conftest default) → no rebase;
+    # every successful commit is followed by rm -f.
+    mock_shell.expect("qemu-img commit").returns(_success())
+    mock_shell.expect("rm -f").returns(_success())
+
+    if fail_at is not None:
+        # The fail_at-th (1-based) snapshot's commit fails.  Its path is
+        # unique, so the expect_first pattern matches exactly that commit.
+        failing = snaps[fail_at - 1]
+        mock_shell.expect_first(
+            r"qemu-img commit.*" + str(failing.path).replace("/", r"\/")
+        ).returns(
+            ShellResult(
+                success=False,
+                stdout="",
+                stderr=f"qemu-img: Could not open {failing.path}",
+                returncode=1,
+                error=f"qemu-img: Could not open {failing.path}",
+            )
+        )
+
+    shell = CountingShell(mock_shell)
+    manager = QemuImgCommitManager(shell=shell)
+
+    result = manager.blockcommit(vm_config, snaps, disk="vda", base_image=base)
+
+    commit_runs = _commit_runs(shell)
+    rm_calls = [c for c in shell.calls if c[0] == "rm" and c[1] == "-f"]
+
+    if fail_at is None:
+        # All 49 merged, oldest-first, each into the disk's base.
+        assert result.success is True
+        assert result.committed_snapshot == snaps[-1].name
+        assert result.error is None
+        assert result.outcome == "success"
+
+        assert len(commit_runs) == 49, f"expected 49 qemu-img commit calls, got {len(commit_runs)}"
+        for i, (cmd, timeout, _check) in enumerate(commit_runs):
+            assert str(snaps[i].path) in " ".join(cmd), (
+                f"commit #{i + 1} must target {snaps[i].name} (oldest-first)"
+            )
+            assert "-b" in cmd and str(base) in " ".join(cmd)
+            assert timeout == 1800
+
+        # Every committed file deleted (no child → no rebase in between).
+        assert len(rm_calls) == 49
+    else:
+        # 9 merged + 1 failed attempt; 11–49 untouched; first 9 deletions stand.
+        failing = snaps[fail_at - 1]
+        assert result.success is False
+        assert result.committed_snapshot == failing.name
+        assert result.outcome == "failure"
+        assert f"Could not open {failing.path}" in result.error
+
+        assert len(commit_runs) == fail_at, (
+            f"expected {fail_at} commit attempts, got {len(commit_runs)}"
+        )
+        assert len(rm_calls) == fail_at - 1, (
+            f"expected {fail_at - 1} deletions (first {fail_at - 1} stand), got {len(rm_calls)}"
+        )
+        cmd_strings = _cmd_strings(shell.calls)
+        for i in range(fail_at, 49):
+            assert str(snaps[i].path) not in " ".join(cmd_strings), (
+                f"snapshot {snaps[i].name} (#{i + 1}) was processed after the "
+                f"failure at #{fail_at} — short-circuit violated"
+            )
